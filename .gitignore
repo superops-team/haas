@@ -72,3 +72,10 @@ pnpm-debug.log*
 
 ## 其他本地文件 ##
 *.local
+
+## Beads（本地 issue tracker，不入库，仅本机使用） ##
+.beads/
+CLAUDE.md
+.claude/settings.json
+.codex/
+.agents/skills/beads/
