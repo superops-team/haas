@@ -1,0 +1,10 @@
+repos:
+  - repo: local
+    hooks:
+      - id: haas-secret-scan
+        name: HaaS secret scan
+        description: Blocks commits that contain credentials or other sensitive material.
+        entry: python3 scripts/quality/secret-scan.py
+        language: system
+        pass_filenames: true
+        stages: [pre-commit]

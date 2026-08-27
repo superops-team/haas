@@ -1,0 +1,11 @@
+#!/bin/sh
+# HaaS git pre-commit hook.
+#
+# Committed under .githooks/ so the gate is shareable. Install with:
+#   ./scripts/quality/install-hooks.sh
+#
+# The install copies this file into .git/hooks/pre-commit. When a global
+# core.hooksPath is configured (e.g. the ByteDance security hook), that global
+# hook chains the repo-local .git/hooks/pre-commit, so both run.
+repo_root="$(git rev-parse --show-toplevel)" || exit 1
+exec sh "$repo_root/scripts/quality/pre-commit.sh"

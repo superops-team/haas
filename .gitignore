@@ -1,0 +1,74 @@
+# ============================================================================
+# HaaS gitignore
+# ============================================================================
+
+## 敏感信息 / credential（由 pre-commit 与 make secret-scan 双重拦截） ##
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.token
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+credentials*.json
+service-account*.json
+.secrets/
+secrets/
+
+## 治理：临时产物不得提交（见 AGENTS.md 铁律） ##
+/prd-spec/
+/docs/verification/
+
+## Python ##
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+build/
+dist/
+*.whl
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.dmypy.json
+
+## 工具链 / IDE / OS ##
+.idea/
+.vscode/
+.fleet/
+*.swp
+*.swo
+*.swn
+.DS_Store
+Thumbs.db
+
+## Node（若未来引入前端 / 工具） ##
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+## 运行时本地产物（容器内路径与本地调试） ##
+/tmp/haas/
+/data/haas/
+*.log
+*.sock
+*.pid
+
+## 其他本地文件 ##
+*.local

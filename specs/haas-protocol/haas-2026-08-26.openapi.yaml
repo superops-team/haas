@@ -1,0 +1,883 @@
+openapi: 3.1.0
+info:
+  title: Harness As A Service Protocol (ADK 2.0)
+  version: "2026-08-26"
+  summary: ADK 2.0-compatible protocol surface for HaaS.
+  description: |
+    HaaS exposes the Google ADK 2.0 REST API protocol layer as its northbound contract,
+    plus HaaS-native control-plane extensions and mpa-codex-worker migration shims.
+    Prose in README.md is normative when behavior cannot be expressed in OpenAPI.
+servers:
+  - url: http://127.0.0.1:8092
+    description: Local HaaS sidecar
+security:
+  - bearerAuth: []
+tags:
+  - name: Discovery
+  - name: Execution
+  - name: Sessions
+  - name: HaaS
+  - name: Legacy
+paths:
+  /health:
+    get:
+      tags: [HaaS]
+      operationId: getHealthAlias
+      summary: Container liveness alias for HaaS health
+      security: []
+      responses:
+        "200":
+          description: Health snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /ready:
+    get:
+      tags: [HaaS]
+      operationId: getReadyAlias
+      summary: Container readiness alias for HaaS readiness
+      security: []
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [control, execution, capability]
+            default: execution
+      responses:
+        "200":
+          description: Ready snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /list-apps:
+    get:
+      tags: [Discovery]
+      operationId: listApps
+      summary: List configured harness app names in caller scope
+      responses:
+        "200":
+          description: Array of app names (harness ids)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /run:
+    post:
+      tags: [Execution]
+      operationId: runAgent
+      summary: Run a harness and return all events in one JSON array
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunRequest"
+      responses:
+        "200":
+          description: Array of events after run completion
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Event"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /run_sse:
+    post:
+      tags: [Execution]
+      operationId: runAgentSse
+      summary: Run a harness and stream events over SSE
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/LastEventId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunRequest"
+      responses:
+        "200":
+          description: SSE stream of ADK events
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /apps/{app_name}/users/{user_id}/sessions/{session_id}:
+    parameters:
+      - $ref: "#/components/parameters/AppName"
+      - $ref: "#/components/parameters/UserId"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [Sessions]
+      operationId: getSession
+      summary: Get one session with state and events
+      responses:
+        "200":
+          description: Session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [Sessions]
+      operationId: updateSession
+      summary: Update session state via stateDelta
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stateDelta]
+              properties:
+                stateDelta:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "200":
+          description: Updated session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Sessions]
+      operationId: deleteSession
+      summary: Delete a session and its data
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/health:
+    get:
+      tags: [HaaS]
+      operationId: getHaasHealth
+      summary: HaaS process liveness
+      security: []
+      responses:
+        "200":
+          description: Health snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /v1/haas/ready:
+    get:
+      tags: [HaaS]
+      operationId: getHaasReady
+      summary: HaaS readiness by scope
+      security: []
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [control, execution, capability]
+            default: execution
+      responses:
+        "200":
+          description: Ready snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /v1/haas/status:
+    get:
+      tags: [HaaS]
+      operationId: getHaasStatus
+      summary: HaaS diagnostic status
+      responses:
+        "200":
+          description: Status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /v1/haas/diagnostics:
+    get:
+      tags: [HaaS]
+      operationId: getHaasDiagnostics
+      summary: Redacted HaaS diagnostics
+      responses:
+        "200":
+          description: Diagnostic snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /v1/haas/harnesses:
+    get:
+      tags: [HaaS]
+      operationId: listHaasHarnesses
+      summary: List configured harnesses with details
+      responses:
+        "200":
+          description: Harness list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [harnesses]
+                properties:
+                  harnesses:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Harness"
+    post:
+      tags: [HaaS]
+      operationId: createHarness
+      summary: Create a configured harness
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HarnessCreate"
+      responses:
+        "200":
+          description: Created harness
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Harness"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /v1/haas/harnesses/{harness_id}:
+    parameters:
+      - $ref: "#/components/parameters/HarnessId"
+    get:
+      tags: [HaaS]
+      operationId: getHaasHarness
+      summary: Get one configured harness
+      responses:
+        "200":
+          description: Harness
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Harness"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [HaaS]
+      operationId: updateHarness
+      summary: Update a configured harness
+      description: The fields `id`, `base`, and `createdAt` are immutable.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HarnessCreate"
+      responses:
+        "200":
+          description: Updated harness
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Harness"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [HaaS]
+      operationId: deleteHarness
+      summary: Delete a configured harness
+      description: Deleting a harness does not delete historical sessions.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/models:
+    get:
+      tags: [HaaS]
+      operationId: listModels
+      summary: List models by harness backend
+      responses:
+        "200":
+          description: Model catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelCatalog"
+  /v1/haas/sessions:
+    get:
+      tags: [HaaS]
+      operationId: listHaasSessions
+      summary: List sessions across users (admin view)
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: app
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions]
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Session"
+                  next_cursor:
+                    type: [string, "null"]
+  /v1/haas/sessions/{session_id}/events:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [HaaS]
+      operationId: streamHaasSessionEvents
+      summary: Stream canonical HaaS session events with replay
+      parameters:
+        - $ref: "#/components/parameters/AfterEventId"
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /v1/haas/sessions/{session_id}/invocations/{invocation_id}/events:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/InvocationId"
+    get:
+      tags: [HaaS]
+      operationId: streamHaasInvocationEvents
+      summary: Stream canonical HaaS invocation events with replay
+      parameters:
+        - $ref: "#/components/parameters/AfterEventId"
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /v1/haas/sessions/{session_id}/artifacts:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [HaaS]
+      operationId: listHaasSessionArtifacts
+      summary: List HaaS artifact details for a session
+      responses:
+        "200":
+          description: HaaS artifact list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /v1/codex-worker/health:
+    get:
+      tags: [Legacy]
+      operationId: legacyHealth
+      summary: Legacy health shim
+      deprecated: true
+      security: []
+      responses:
+        "200":
+          description: Legacy health snapshot
+  /v1/codex-worker/ready:
+    get:
+      tags: [Legacy]
+      operationId: legacyReady
+      summary: Legacy readiness shim
+      deprecated: true
+      security: []
+      responses:
+        "200":
+          description: Legacy ready snapshot
+  /v1/codex-worker/status:
+    get:
+      tags: [Legacy]
+      operationId: legacyStatus
+      summary: Legacy status shim
+      deprecated: true
+      responses:
+        "200":
+          description: Legacy status snapshot
+  /v1/codex-worker/sessions:
+    post:
+      tags: [Legacy]
+      operationId: legacyCreateSession
+      summary: Legacy session create shim mapped to POST /run
+      deprecated: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Legacy session/run result
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /v1/codex-worker/sessions/{session_id}/turns:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [Legacy]
+      operationId: legacyCreateTurn
+      summary: Legacy turn shim mapped to POST /run
+      deprecated: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Legacy turn result
+  /v1/codex-worker/sessions/{session_id}/events:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [Legacy]
+      operationId: legacyStreamEvents
+      summary: Legacy event stream shim
+      deprecated: true
+      responses:
+        "200":
+          description: Legacy SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Optional idempotency key. Replaying a key returns the first result without restarting the harness.
+      schema:
+        type: string
+        maxLength: 255
+    LastEventId:
+      name: Last-Event-ID
+      in: header
+      required: false
+      description: HaaS extension. Replay events after this event id, then go live.
+      schema:
+        type: string
+    AfterEventId:
+      name: after_event_id
+      in: query
+      required: false
+      schema:
+        type: string
+    AppName:
+      name: app_name
+      in: path
+      required: true
+      schema:
+        type: string
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: string
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+    InvocationId:
+      name: invocation_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^inv_"
+    HarnessId:
+      name: harness_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^chrn_"
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    Unauthorized:
+      description: Missing or invalid credential
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    NotFound:
+      description: Object not found in caller scope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    Conflict:
+      description: State conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    UnprocessableEntity:
+      description: Semantically invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    RateLimited:
+      description: Rate or quota limit
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+  headers:
+    HaaSVersion:
+      description: The HaaS native protocol version actually used to serve this response.
+      required: true
+      schema:
+        type: string
+        examples: ["2026-08-26"]
+  schemas:
+    RunRequest:
+      type: object
+      required: [appName, userId, newMessage]
+      properties:
+        appName:
+          type: string
+        userId:
+          type: string
+        sessionId:
+          type: string
+        newMessage:
+          type: object
+          required: [role, parts]
+          properties:
+            role:
+              type: string
+              const: user
+            parts:
+              type: array
+              items:
+                $ref: "#/components/schemas/Part"
+        streaming:
+          type: boolean
+          default: false
+        haas:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    Part:
+      type: object
+      properties:
+        text:
+          type: string
+        inlineData:
+          type: object
+          properties:
+            displayName:
+              type: string
+            mimeType:
+              type: string
+            data:
+              type: string
+        fileId:
+          type: string
+        functionCall:
+          type: object
+          additionalProperties: true
+        functionResponse:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    Event:
+      type: object
+      required: [id, invocationId, author, timestamp, content, actions]
+      properties:
+        id:
+          type: string
+        invocationId:
+          type: string
+        author:
+          type: string
+        timestamp:
+          type: number
+        content:
+          type: object
+          required: [role, parts]
+          properties:
+            role:
+              type: string
+              enum: [model, user]
+            parts:
+              type: array
+              items:
+                $ref: "#/components/schemas/Part"
+        actions:
+          type: object
+          properties:
+            stateDelta:
+              type: object
+              additionalProperties: true
+            artifactDelta:
+              type: object
+              additionalProperties: true
+            requestedAuthConfigs:
+              type: object
+              additionalProperties: true
+        longRunningToolIds:
+          type: array
+          items:
+            type: string
+        nodeInfo:
+          type: [object, "null"]
+          additionalProperties: true
+        output:
+          nullable: true
+      additionalProperties: true
+    Session:
+      type: object
+      required: [id, appName, userId, state, events, lastUpdateTime]
+      properties:
+        id:
+          type: string
+        appName:
+          type: string
+        userId:
+          type: string
+        state:
+          type: object
+          additionalProperties: true
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/Event"
+        lastUpdateTime:
+          type: number
+      additionalProperties: true
+    HarnessCreate:
+      type: object
+      required: [base]
+      properties:
+        name:
+          type: string
+        base:
+          type: string
+        default_model:
+          type: string
+        system_prompt:
+          type: string
+        mcp_servers:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        skills:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        disabled_tools:
+          type: array
+          items:
+            type: string
+        provider:
+          type: object
+          additionalProperties: true
+        max_step:
+          type: [integer, "null"]
+        timeout_seconds:
+          type: [integer, "null"]
+      additionalProperties: true
+    Harness:
+      type: object
+      required: [id, object, name, base, createdAt]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: harness
+        name:
+          type: string
+        base:
+          type: string
+        baseLabel:
+          type: string
+        defaultModel:
+          type: string
+        systemPrompt:
+          type: string
+        mcpServers:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        skills:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        disabledTools:
+          type: array
+          items:
+            type: string
+        provider:
+          type: object
+          additionalProperties: true
+        maxStep:
+          type: [integer, "null"]
+        timeoutSeconds:
+          type: [integer, "null"]
+        adapterCapabilities:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: integer
+        updatedAt:
+          type: integer
+      additionalProperties: true
+    ModelCatalog:
+      type: object
+      required: [backends]
+      properties:
+        backends:
+          type: object
+          additionalProperties:
+            type: object
+            required: [default, models]
+            properties:
+              default:
+                type: string
+              models:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+    HaasEnvelope:
+      type: object
+      required: [data, traceId]
+      properties:
+        data:
+          type: object
+          additionalProperties: true
+        traceId:
+          type: string
+      additionalProperties: false
+    ErrorDetail:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+        haas_error:
+          type: object
+          required: [type, code]
+          properties:
+            type:
+              type: string
+            code:
+              type: string
+            param:
+              type: [string, "null"]
+            safeReason:
+              type: string
+            retryable:
+              type: boolean
+            traceId:
+              type: string
+          additionalProperties: true
+      additionalProperties: true
