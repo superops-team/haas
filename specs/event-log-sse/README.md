@@ -102,6 +102,22 @@ def project_legacy(event: StoredEvent) -> LegacySidecarEvent: ...
 时间戳统一：内部 canonical event 用 `observedAtMs`（毫秒 epoch）；ADK `Event.timestamp`
 为 `observedAtMs / 1000.0`（float 秒），由投影层生成。
 
+**`HarnessEvent` → `CanonicalEvent` 映射**：adapter 产出 `HarnessEvent`
+（[harness-adapter](../harness-adapter/README.md) §6.3），由 Session Runtime 调用
+Event Log 归一化后落库：
+
+| HarnessEvent 字段 | CanonicalEvent | 规则 |
+|-------------------|----------------|------|
+| `type` / `nativeType` | 不落库 | 仅归一化时用于判定 part 类型与 terminal |
+| `invocationId` / `sessionId` / `turnId` | 同名保留 | 必须与执行上下文一致 |
+| `author` | `author` | 保留 |
+| `content` / `actions` / `usage` | 同名字段 | 经 `redact()` 后保留 |
+| `safe` | 不落库 | 由 `redactionApplied` 替代 |
+| — | `eventId` / `sequenceNumber` / `observedAtMs` / `harnessId` / `adapterId` | Event Log 生成 |
+
+`sequenceNumber` 从 0 起、invocation 内无空洞；`observedAtMs` 为 append 时刻毫秒
+epoch；未经 `redact()` 的 raw event 不得落库（fail closed）。
+
 ### 6.2 ADK Projection（公共）
 
 ```json
@@ -188,7 +204,7 @@ Logs：
 | 场景 | 行为 |
 |------|------|
 | client disconnect | 不取消 invocation；event log 继续写 |
-| Last-Event-ID 已过期 | 返回 `410 offset_expired` 或从最早 retained event 开始并记录 gap |
+| Last-Event-ID 已过期 | 返回 `410 haas_offset_expired` 或从最早 retained event 开始并记录 gap |
 | event queue 满 | 优先丢弃非关键 delta；terminal state 必须持久化并可 read-back |
 | append 持久化失败 | 当前 invocation 不得宣称 completed；Session Runtime 生成 terminal failure evidence |
 | proxy buffering | response 设置 `Cache-Control: no-cache`；测试验证 progressive flush |

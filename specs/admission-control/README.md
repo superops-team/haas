@@ -58,7 +58,7 @@ async def snapshot_queues(ctx: RequestContext) -> QueueSnapshot: ...
 
 ```json
 {
-  "principalHash": "p_abc",
+  "principalHash": "sha256:abc",
   "tenantId": "tenant_1",
   "workspaceId": "workspace_1",
   "appName": "chrn_codex_default",

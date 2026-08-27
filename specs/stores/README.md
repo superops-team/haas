@@ -34,7 +34,7 @@ Stores 是 HaaS 的持久化事实源。它统一定义 registry、session、eve
 负责：
 
 - 定义统一 `Store` 接口与分域 store 接口。
-- 定义每个持久化对象的 schema 与 `schema_version`。
+- 定义每个持久化对象的 schema 与 `schemaVersion`。
 - 定义只向前（forward-only）的 schema migration。
 - 定义 retention：event 保留期、session TTL、idempotency 键过期。
 - 定义事务与 lease 语义（active-turn 互斥的分布式前提）。
@@ -92,9 +92,9 @@ class AdmissionStore(Protocol):
 
 ```json
 {
-  "schema_version": 1,
-  "created_at_ms": 1786400000000,
-  "updated_at_ms": 1786400000000
+  "schemaVersion": 1,
+  "createdAtMs": 1786400000000,
+  "updatedAtMs": 1786400000000
 }
 ```
 
@@ -120,7 +120,7 @@ write path:
   -> notify subscribers (event log only)
 
 migration:
-  store opens -> check schema_version -> apply forward migrations -> ready
+  store opens -> check schemaVersion -> apply forward migrations -> ready
 ```
 
 `acquire_lease` 是 active-turn 互斥的基础：同一 `SessionKey` 只允许一个 holder 持 lease；lease 过期可被接管，接管者必须能 explain 前 holder 的 final state（fail closed）。

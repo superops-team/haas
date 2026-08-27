@@ -91,7 +91,7 @@ HaaS 自有控制面，只做 U 未覆盖能力，不改写 ADK 字段语义：
 | GET | `/v1/haas/diagnostics` | 脱敏诊断摘要 |
 | GET | `/v1/haas/harnesses` | configured harness 完整列表（与 `/list-apps` 的 id 数组等价但含详情） |
 | POST | `/v1/haas/harnesses` | 创建 configured harness（`Idempotency-Key` 支持） |
-| PUT | `/v1/haas/harnesses/{harness_id}` | 更新 harness，`id`/`base`/`createdAt` 不变 |
+| PUT | `/v1/haas/harnesses/{harness_id}` | 更新 harness，`id`/`base`/`createdAtMs` 不变 |
 | DELETE | `/v1/haas/harnesses/{harness_id}` | 删除 harness，不删历史 session |
 | GET | `/v1/haas/models` | 全局 model catalog（按 base 分组） |
 | GET | `/v1/haas/sessions` | 跨 user 分页列出 session（管理视角） |
@@ -99,6 +99,13 @@ HaaS 自有控制面，只做 U 未覆盖能力，不改写 ADK 字段语义：
 | GET | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/events` | invocation 级 canonical SSE replay/live |
 | POST | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel` | 取消运行中 invocation，幂等（`Idempotency-Key` 支持） |
 | GET | `/v1/haas/sessions/{session_id}/artifacts` | HaaS artifact listing |
+| GET | `/v1/haas/sessions/{session_id}/artifacts/archive` | 下载 session artifact 归档（zip） |
+| POST | `/v1/haas/files` | 上传 input file（multipart），返回 `File` 对象 |
+| GET | `/v1/haas/files/{file_id}/content` | 下载 artifact 原始 bytes（`nosniff`） |
+| GET | `/v1/haas/files/{file_id}/pdf` | 可选 PDF preview；未实现返回 `501 haas_preview_unavailable` |
+
+artifact 端点详情见 [Artifact Store](../artifact-store/README.md) 第 5 节；文件模型统一
+`File` schema。
 
 ### 5.3 Legacy Sidecar Shim
 
@@ -133,10 +140,10 @@ HaaS 自有控制面，只做 U 未覆盖能力，不改写 ADK 字段语义：
   "haas": {
     "model": "gpt-5.6-terra",
     "instructions": "Use the repository AGENTS.md.",
-    "metadata": { "haas_trace_id": "tr_abc" },
-    "max_output_tokens": 4096,
-    "max_step": 40,
-    "timeout_seconds": 900
+    "metadata": { "haasTraceId": "tr_abc" },
+    "maxOutputTokens": 4096,
+    "maxStep": 40,
+    "timeoutSeconds": 900
   }
 }
 ```
@@ -182,7 +189,7 @@ HaaS 自有控制面，只做 U 未覆盖能力，不改写 ADK 字段语义：
   "id": "s_123",
   "appName": "chrn_codex_default",
   "userId": "u_123",
-  "state": { "visit_count": 5 },
+  "state": { "visitCount": 5 },
   "events": [],
   "lastUpdateTime": 1743711430.022186
 }
@@ -190,12 +197,12 @@ HaaS 自有控制面，只做 U 未覆盖能力，不改写 ADK 字段语义：
 
 ### 6.4 HaaS Error
 
-ADK 兼容路径返回带 `detail` 的错误（FastAPI 惯例），并附加结构化 `haas_error` 扩展：
+ADK 兼容路径返回带 `detail` 的错误（FastAPI 惯例），并附加结构化 `haasError` 扩展：
 
 ```json
 {
   "detail": "The session is busy.",
-  "haas_error": {
+  "haasError": {
     "type": "invalid_request_error",
     "code": "session_busy",
     "param": "sessionId",
@@ -206,8 +213,8 @@ ADK 兼容路径返回带 `detail` 的错误（FastAPI 惯例），并附加结�
 }
 ```
 
-`code` 使用 HaaS 稳定错误码，`haas_error` 为 HaaS 扩展，ADK 客户端只读 `detail`。
-错误码唯一目录见 [ERROR-CODES](ERROR-CODES.md)，OpenAPI 的 `haas_error.code`
+`code` 使用 HaaS 稳定错误码，`haasError` 为 HaaS 扩展，ADK 客户端只读 `detail`。
+错误码唯一目录见 [ERROR-CODES](ERROR-CODES.md)，OpenAPI 的 `haasError.code`
 与之对齐；新增错误码必须先更新目录。
 
 ## 7. 运行模型与状态机
@@ -218,6 +225,7 @@ request received
   -> appName resolved (harness id/name)
   -> schema validated
   -> Idempotency-Key reservation (when present)
+  -> Last-Event-ID present? -> resolve invocation by event id + scope -> replay then live（不新建 turn）
   -> admission decision (quota/rate/queue)
   -> session resolved or created
   -> invocation created
@@ -254,7 +262,7 @@ heartbeat 使用 SSE comment `: keep-alive`，不产生事件。invocation 完�
 - `Authorization: Bearer <caller token>` 对非 health/ready 路径必填。
 - `userId`/`sessionId` 上均做 principal scope：跨 user/session 访问返回 `404`，不用 `403` 暴露存在性。
 - ADK 兼容路径不在顶层接收 caller 提供的上游 URL/密钥；HaaS 扩展字段必须通过 registry allowlist 校验。
-- Error `detail`/`haas_error` 不得含 secret、内部 host、绝对路径、stack trace。
+- Error `detail`/`haasError` 不得含 secret、内部 host、绝对路径、stack trace。
 - Legacy shim 复用同一 redaction pipeline。
 
 ## 9. 可观测性
@@ -267,10 +275,10 @@ heartbeat 使用 SSE comment `: keep-alive`，不产生事件。invocation 完�
 
 | 场景 | 行为 |
 |------|------|
-| appName 无法解析 | `404 app_not_found`（`haas_error.code=app_not_found`） |
+| appName 无法解析 | `404 app_not_found`（`haasError.code=app_not_found`） |
 | idempotency store 不可用 | `503 haas_idempotency_store_unavailable`，不得执行任务 |
-| session busy | `409 session_busy`，可带 `retry_after_ms` |
-| `/run_sse` 断线 | 不取消 invocation；client 通过 `GET /apps/.../sessions/{sid}` 读回 events，或用 `Last-Event-ID` 重连 replay |
+| session busy | `409 session_busy`，可带 `retryAfterMs` |
+| `/run_sse` 断线 | 不取消 invocation；client 用 `POST /run_sse` + `Last-Event-ID` 续接（服务端按 event id 定位原 invocation，回放其后事件并续 live，不新建 turn），或通过 `GET /apps/.../sessions/{sid}` 读回 events |
 | adapter crash | invocation 进入 `failed`/`incomplete`，持久化后可读 |
 | cancel retry | 幂等成功，不删除 session（见 `POST /v1/haas/.../invocations/{id}/cancel` 扩展见 session-runtime） |
 | legacy shim 不可映射 | `400 haas_legacy_request_invalid` |

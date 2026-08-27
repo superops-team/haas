@@ -93,15 +93,22 @@ sessionKey 的写队列，合并规则一致（deep-merge，标量后到覆盖�
   cancel 幂等：重复调用返回当前状态
 ```
 
-## 6. `/run_sse` 断线重连（Last-Event-ID）
+## 6. `/run_sse` 续接重连（Last-Event-ID）与 HaaS native replay
 
 ```text
 Client disconnects mid-stream
   -> 服务端不取消 invocation，事件继续 append 到 EventLogStore
-  -> Client 用原 invocationId 重连 GET /v1/haas/sessions/{sid}/invocations/{invId}/events
-       header: Last-Event-ID: evt_...
+
+ADK 面续接（/run_sse + Last-Event-ID）：
+  -> client 重新 POST /run_sse，携带原 appName/userId/sessionId + header Last-Event-ID: evt_...
+  -> 服务端按 event id 定位原 invocation（校验 app/user/session scope）
+       回放 Last-Event-ID 之后的 retained events，再续接 live；不新建 turn、不重复启动 harness
+  -> 若 event id 已过期 -> 410 haas_offset_expired
+
+HaaS native 重连（after_event_id）：
+  -> GET /v1/haas/sessions/{sid}/invocations/{invId}/events?after_event_id=evt_...
   -> EventLogStore.read_invocation(invId, after) 回放 cursor 之后的事件
-  -> 若无 gap -> 续接 live stream；若 cursor 已过期 -> 410 offset_expired 或 reconcile event
+  -> 若无 gap -> 续接 live stream；若 cursor 已过期 -> 410 haas_offset_expired 或 reconcile event
   -> invocation 未终止则继续收尾；已终止则回放 terminal 后关闭
 ```
 
@@ -116,7 +123,7 @@ adapter.start_turn 或 stream_events 抛错
 
 POST /run 非流式：不产 SSE，terminal 后一次性返回事件 JSON 数组
   -> 若失败：返回事件数组（含错误事件）+ 公开面可读的错误；HTTP 200（数组语义）
-  -> 若请求前置失败（auth/schema/admission）：返回结构化 haas_error（4xx/5xx）
+  -> 若请求前置失败（auth/schema/admission）：返回结构化 haasError（4xx/5xx）
 ```
 
 ## ADK 适配范围（关键澄清）

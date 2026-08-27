@@ -68,7 +68,7 @@ def assert_no_secret_surface(surface: object) -> None: ...
   "audience": "model_proxy",
   "sessionId": "hsess_abc",
   "harnessId": "chrn_codex_default",
-  "expiresAt": "2026-08-26T12:05:00+08:00",
+  "expiresAtMs": 1786400000000,
   "fingerprint": "sha256:abc",
   "revoked": false
 }
@@ -81,7 +81,7 @@ def assert_no_secret_surface(surface: object) -> None: ...
   "type": "secret_ref",
   "ref": "secret://tenant/workspace/provider/default",
   "fingerprint": "sha256:abc",
-  "expiresAt": null
+  "expiresAtMs": null
 }
 ```
 

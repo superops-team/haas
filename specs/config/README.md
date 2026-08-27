@@ -52,7 +52,10 @@ class AppConfig:
     observability: ObservabilityConfig
 
 def load_config(path: str | None) -> AppConfig: ...
-def create_app(config: AppConfig) -> FastAPI: ...
+def create_app(config: AppConfig | None = None) -> FastAPI: ...
+
+`create_app()` 被 uvicorn `--factory` 无参调用时，内部执行 `load_config(HAAS_CONFIG)`
+再装配 app；显式传 `config` 的路径（如测试）跳过加载步骤。
 ```
 
 环境变量前缀统一为 `HAAS_`，例如：

@@ -88,7 +88,7 @@ HaaS 对上提供三个层级的 HTTP/SSE surface：
 1. ADK-compatible surface 不得暴露具体 harness 原生字段；HaaS 扩展只放 `haas` 嵌套对象或 `/v1/haas/*`。
 2. HaaS native 只能做加法扩展，不得改变 ADK 字段语义。
 3. Legacy shim 只做迁移兼容，不新增只有旧路径可用的能力。
-4. 所有 public surface 使用 `detail` + 结构化 `haas_error` 错误形状。
+4. 所有 public surface 使用 `detail` + 结构化 `haasError` 错误形状。
 
 ### 3.2 Runtime 边界
 
@@ -116,7 +116,7 @@ HaaS 运行在 OpenSandbox AIO 基础镜像上。AIO 提供 shell、file、brows
 
 ### 3.4 Sandbox 标准化边界
 
-Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harness adapter 的 sandbox 声明，统一投影为 OpenSandbox sandbox/execd 配置。harness 自带 sandbox（如 Codex sandbox）只能在其内运行；provider credential 走 credential vault；网络 egress 由 OpenSandbox egress policy 与 HaaS URL validator 双层约束。详见 [Sandbox Runtime](../sandbox-runtime/README.md)。
+Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harness adapter 的 sandbox 声明，统一投影为 OpenSandbox sandbox/execd 配置。harness 自带 sandbox（如 Codex sandbox）只能在其内运行；provider credential 走 credential vault；网络 egress 由 OpenSandbox egress policy 与 HaaS URL validator 双层约束。详见 [Sandbox Runtime](sandbox-runtime/README.md)。
 
 ## 4. 组件规划
 
@@ -211,12 +211,16 @@ HaaS native endpoints 使用：
 }
 ```
 
+单资源（Harness、File、Invocation 等）、列表与诊断响应统一包裹在 `data` 中；
+仅分页列表额外携带 `nextCursor`。Health/ready/status/diagnostics 同样返回该
+envelope。
+
 错误（所有 public surface 通用）：
 
 ```json
 {
   "detail": "requested operation is not allowed",
-  "haas_error": {
+  "haasError": {
     "type": "invalid_request_error",
     "code": "haas_policy_denied",
     "param": null,
@@ -229,7 +233,7 @@ HaaS native endpoints 使用：
 
 HaaS 稳定错误码使用 `haas_` 前缀或 ADK 语义码（如 `session_busy`、`app_not_found`）。
 错误码唯一目录见 [ERROR-CODES](haas-protocol/ERROR-CODES.md)，OpenAPI 的
-`haas_error.code` 与之一一对应。
+`haasError.code` 与之一一对应。
 
 ### 7.4 时间戳约定
 

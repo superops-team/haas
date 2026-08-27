@@ -109,7 +109,7 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
   "sessionId": "hsess_abc",
   "status": "running",
   "generation": 1,
-  "createdAt": 1786400000
+  "createdAtMs": 1786400000000
 }
 ```
 

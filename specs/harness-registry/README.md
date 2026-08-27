@@ -62,7 +62,7 @@ Harness Registry 维护 HaaS 可运行的 configured harness catalog。它回答
 | GET | `/v1/haas/harnesses` | 列出 caller scope 内 configured harness 详情 |
 | GET | `/v1/haas/harnesses/{harness_id}` | 读取一个 configured harness |
 | POST | `/v1/haas/harnesses` | 创建 configured harness |
-| PUT | `/v1/haas/harnesses/{harness_id}` | 替换 mutable config，`id`、`base`、`createdAt` 不可变 |
+| PUT | `/v1/haas/harnesses/{harness_id}` | 替换 mutable config，`id`、`base`、`createdAtMs` 不可变 |
 | DELETE | `/v1/haas/harnesses/{harness_id}` | 标记删除，不删除历史 session |
 | GET | `/v1/haas/models` | 全局 backend/model catalog |
 | GET | `/v1/haas/harnesses/{harness_id}/skills/{skill_id}/files` | 读取完整 skill folder bundle |
@@ -114,8 +114,8 @@ async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRou
     "skills": true,
     "files": true
   },
-  "createdAt": 1786400000000,
-  "updatedAt": 1786400000000
+  "createdAtMs": 1786400000000,
+  "updatedAtMs": 1786400000000
 }
 ```
 
@@ -200,7 +200,7 @@ Session 使用 `EffectiveHarnessConfig` frozen snapshot，不读取 live harness
 
 - Registry 只保存 credential ref、fingerprint 和 safe metadata，不保存 raw secret。
 - provider URL 与 MCP URL 必须通过 allowlist 和 SSRF 校验后才可进入 active harness。
-- 不同 tenant/workspace 的 harness 不可互读；越权统一返回 `404 harness_not_found`（app 解析也返回 `404 app_not_found`）。
+- 不同 tenant/workspace 的 harness 不可互读；越权统一返回 `404 haas_harness_not_found`（app 解析也返回 `404 app_not_found`）。
 - Skill 文件拒绝 path traversal、绝对路径、控制字符和过大 bundle。
 - `disabledTools` 的 enforcement 必须按 base 如实暴露为 `hard`、`advisory` 或 `unsupported`。
 
@@ -222,9 +222,9 @@ Registry 必须产出以下安全日志/指标：
 
 | 场景 | 行为 |
 |------|------|
-| base 不支持 | `422 unsupported_base` |
+| base 不支持 | `422 haas_unsupported_base` |
 | app 不存在或越权 | `404 app_not_found` |
-| model 不可用 | `422 model_unavailable` 或显式 fallback 并写入 metadata |
+| model 不可用 | `422 haas_model_unavailable` 或显式 fallback 并写入 metadata |
 | provider URL 未通过 allowlist | `haas_provider_source_invalid` |
 | skill bundle 无 `SKILL.md` | config validation failed，拒绝 active |
 | MCP URL 未通过 allowlist | `haas_mcp_source_invalid` |

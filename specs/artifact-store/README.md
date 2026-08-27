@@ -58,7 +58,7 @@ Artifact Store 管理 HaaS 输入文件、session container 文件索引、agent
 | GET | `/v1/haas/sessions/{session_id}/artifacts` | 列出 session 所有 artifacts |
 | GET | `/v1/haas/sessions/{session_id}/artifacts/archive` | 下载 artifacts zip |
 | GET | `/v1/haas/files/{file_id}/content` | 下载 artifact bytes |
-| GET | `/v1/haas/files/{file_id}/pdf` | 可选 PDF preview（未实现返回 `501 preview_unavailable`） |
+| GET | `/v1/haas/files/{file_id}/pdf` | 可选 PDF preview（未实现返回 `501 haas_preview_unavailable`） |
 
 inline 文件通过 ADK `newMessage.parts[].inlineData` 传入，不走上传端点。`fileId` 引用已上传文件是 HaaS 扩展。
 
@@ -89,7 +89,7 @@ async def build_archive(session_id: str, ctx: RequestContext) -> ArchiveStream: 
   "bytes": 2048,
   "mediaType": "text/markdown",
   "sha256": "abc",
-  "created_at": 1786400240
+  "createdAtMs": 1786400240000
 }
 ```
 
@@ -154,13 +154,13 @@ Metrics:
 
 | 场景 | 行为 |
 |------|------|
-| upload too large | `413 file_too_large` |
+| upload too large | `413 haas_file_too_large` |
 | invalid filename/path | `400 invalid_input` |
 | path traversal | reject and log security event |
-| file outside caller scope | `404 file_not_found` |
+| file outside caller scope | `404 haas_file_not_found` |
 | scan exceeds max files | fail closed for publish; response still may complete with artifact summary marked truncated |
 | archive build fails | `500 haas_archive_failed` with safe reason |
-| preview unsupported | `501 preview_unavailable` |
+| preview unsupported | `501 haas_preview_unavailable` |
 
 ## 11. 测试计划与验收
 

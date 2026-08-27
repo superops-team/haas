@@ -104,7 +104,7 @@ async def transform_tools(provider: str, request: object) -> ProviderRequestTran
   "invocationId": "inv_abc",
   "harnessId": "chrn_codex_default",
   "allowedModels": ["gpt-5.6-terra"],
-  "expiresAt": "2026-08-26T12:05:00+08:00"
+  "expiresAtMs": 1786400000000
 }
 ```
 
@@ -112,11 +112,11 @@ async def transform_tools(provider: str, request: object) -> ProviderRequestTran
 
 ```json
 {
-  "input_tokens": 1000,
-  "output_tokens": 200,
-  "total_tokens": 1200,
-  "cache_read_tokens": 100,
-  "cache_write_tokens": 50
+  "inputTokens": 1000,
+  "outputTokens": 200,
+  "totalTokens": 1200,
+  "cacheReadTokens": 100,
+  "cacheWriteTokens": 50
 }
 ```
 
@@ -180,7 +180,7 @@ Log fields must use safe route ids, fingerprints and status codes, never prompt 
 |------|------|
 | runtime token missing/invalid | 401 `invalid_credential` |
 | runtime token expired | 401, adapter may refresh once |
-| provider unreachable | task failed with `provider_error` or request 502 before task accepted |
+| provider unreachable | task failed with `haas_provider_error` or request 502 before task accepted |
 | stream idle timeout | retry according to provider policy; exhaust -> `timeout` |
 | unsupported tool schema | fail with safe `haas_tool_schema_unsupported`, do not drop tool silently |
 | usage missing | return usage `null` and log safe diagnostic |

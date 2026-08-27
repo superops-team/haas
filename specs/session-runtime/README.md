@@ -161,6 +161,16 @@ session `state` 有两个写入源，串行化于同一 sessionKey 写队列，�
 
 约束：不允许删除操作（删除需显式扩展字段）；冲突时标量「后到覆盖」；合并是幂等的纯函数，便于恢复重放。
 
+### 6.5 幂等 replay 语义
+
+`IdempotencyStore.reserve(key_hash, request_hash)` 记录首个 `request_hash`（见
+[Stores](../stores/README.md) §5）。后续同一 key 的请求：
+
+- `request_hash` 一致 -> 返回首次结果，不重复启动 harness（replay）。
+- `request_hash` 不一致 -> fail closed，返回 `409 haas_idempotency_conflict`，不静默返回旧结果，由调用方显式处理。
+
+release 幂等：执行前失败释放 reservation；已进入执行的 reservation 保留，后续重试走 replay。
+
 ## 7. 运行模型与状态机
 
 ### 7.1 Invocation

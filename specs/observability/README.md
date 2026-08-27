@@ -54,6 +54,7 @@ Observability 提供 HaaS 的运行可见性：health、ready、status、结构�
 | GET | `/v1/haas/health` | liveness，进程可响应 |
 | GET | `/v1/haas/ready?scope=control` | 可接控制面请求 |
 | GET | `/v1/haas/ready?scope=execution` | 可开始 harness turn |
+| GET | `/v1/haas/ready?scope=capability` | 可选能力（MCP/skill/browser）warmup 完成 |
 | GET | `/v1/haas/status` | 运行状态摘要 |
 | GET | `/v1/haas/diagnostics` | 脱敏诊断摘要 |
 
@@ -131,6 +132,7 @@ Health/ready states:
 - `healthy` means HaaS HTTP process responds.
 - `control_ready` means config/store/registry/control APIs can run.
 - `execution_ready` means selected adapter and required runtime dependencies can start turns.
+- `capability_ready` means optional MCP/skill/browser capability warmups have completed.
 - `degraded` means non-critical capability is unavailable but core request handling still works.
 
 ## 8. 安全与权限
@@ -168,7 +170,7 @@ Baseline logs:
 | metrics exporter unavailable | fail open; readiness unaffected unless explicitly configured |
 | log sink unavailable | fallback to stderr; record degraded status |
 | trace exporter unavailable | fail open and increment exporter failure metric |
-| diagnostics collection timeout | return partial diagnostics with `haas_diagnostics_partial` |
+| diagnostics collection timeout | return partial diagnostics（HTTP 200 + payload 中 `partial: true`，不属于 `haasError.code`） |
 | redaction failure | fail closed before writing sensitive data |
 | conformance report missing | release readiness blocked for protocol changes |
 

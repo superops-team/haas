@@ -78,7 +78,7 @@ class IdentityProvider(Protocol):
 }
 ```
 
-`userId` 不是 principal 的固定字段，而是 principal scope 下的 sub-scope：`owns(principal, user_id=...)` 判定。默认 `userId` 可由 principal 派生（`default_user_id`），也可由 caller 显式声明并在 `owns` 中校验。
+`userId` 不是 principal 的固定字段，而是 principal scope 下的 sub-scope：`owns(principal, user_id=...)` 判定。默认 `userId` 可由 principal 派生（`defaultUserId`），也可由 caller 显式声明并在 `owns` 中校验。
 
 ## 7. 运行模型与状态机
 

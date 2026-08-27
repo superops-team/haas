@@ -271,17 +271,11 @@ paths:
       summary: List configured harnesses with details
       responses:
         "200":
-          description: Harness list
+          description: Harness list wrapped in the HaaS envelope (`data.harnesses`).
           content:
             application/json:
               schema:
-                type: object
-                required: [harnesses]
-                properties:
-                  harnesses:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Harness"
+                $ref: "#/components/schemas/HarnessListEnvelope"
     post:
       tags: [HaaS]
       operationId: createHarness
@@ -296,11 +290,11 @@ paths:
               $ref: "#/components/schemas/HarnessCreate"
       responses:
         "200":
-          description: Created harness
+          description: Created harness (`data` = Harness)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Harness"
+                $ref: "#/components/schemas/HarnessEnvelope"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
   /v1/haas/harnesses/{harness_id}:
@@ -312,18 +306,18 @@ paths:
       summary: Get one configured harness
       responses:
         "200":
-          description: Harness
+          description: Harness (`data` = Harness)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Harness"
+                $ref: "#/components/schemas/HarnessEnvelope"
         "404":
           $ref: "#/components/responses/NotFound"
     put:
       tags: [HaaS]
       operationId: updateHarness
       summary: Update a configured harness
-      description: The fields `id`, `base`, and `createdAt` are immutable.
+      description: The fields `id`, `base`, and `createdAtMs` are immutable.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
@@ -334,11 +328,11 @@ paths:
               $ref: "#/components/schemas/HarnessCreate"
       responses:
         "200":
-          description: Updated harness
+          description: Updated harness (`data` = Harness)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Harness"
+                $ref: "#/components/schemas/HarnessEnvelope"
         "404":
           $ref: "#/components/responses/NotFound"
     delete:
@@ -363,21 +357,11 @@ paths:
       summary: List files in one configured skill bundle
       responses:
         "200":
-          description: Skill files
+          description: Skill files (`data` = {id, name, files})
           content:
             application/json:
               schema:
-                type: object
-                required: [id, name, files]
-                properties:
-                  id:
-                    type: string
-                  name:
-                    type: string
-                  files:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/SkillFile"
+                $ref: "#/components/schemas/SkillFilesEnvelope"
         "404":
           $ref: "#/components/responses/NotFound"
   /v1/haas/models:
@@ -387,11 +371,11 @@ paths:
       summary: List models by harness backend
       responses:
         "200":
-          description: Model catalog
+          description: Model catalog (`data` = ModelCatalog)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ModelCatalog"
+                $ref: "#/components/schemas/ModelCatalogEnvelope"
   /v1/haas/sessions:
     get:
       tags: [HaaS]
@@ -415,19 +399,11 @@ paths:
             type: string
       responses:
         "200":
-          description: Session page
+          description: Session page (`data` = array of Session, `nextCursor` for pagination)
           content:
             application/json:
               schema:
-                type: object
-                required: [sessions]
-                properties:
-                  sessions:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Session"
-                  next_cursor:
-                    type: [string, "null"]
+                $ref: "#/components/schemas/SessionListEnvelope"
   /v1/haas/sessions/{session_id}/events:
     parameters:
       - $ref: "#/components/parameters/SessionId"
@@ -473,11 +449,11 @@ paths:
         - $ref: "#/components/parameters/IdempotencyKey"
       responses:
         "200":
-          description: Current invocation state
+          description: Current invocation state (`data` = Invocation)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Invocation"
+                $ref: "#/components/schemas/InvocationEnvelope"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -496,6 +472,93 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HaasEnvelope"
+  /v1/haas/files:
+    post:
+      tags: [HaaS]
+      operationId: uploadFile
+      summary: Upload a file for use as task input
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                purpose:
+                  type: string
+                  default: user_data
+      responses:
+        "200":
+          description: Stored file (`data` = File)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileEnvelope"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+  /v1/haas/sessions/{session_id}/artifacts/archive:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [HaaS]
+      operationId: downloadSessionArchive
+      summary: Download all session artifacts as an archive
+      responses:
+        "200":
+          description: Artifact archive
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/files/{file_id}/content:
+    parameters:
+      - $ref: "#/components/parameters/FileId"
+    get:
+      tags: [HaaS]
+      operationId: downloadFile
+      summary: Download one artifact's raw bytes
+      responses:
+        "200":
+          description: File bytes
+          headers:
+            X-Content-Type-Options:
+              required: true
+              schema:
+                type: string
+                const: nosniff
+          content:
+            "*/*":
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/files/{file_id}/pdf:
+    parameters:
+      - $ref: "#/components/parameters/FileId"
+    get:
+      tags: [HaaS]
+      operationId: previewFilePdf
+      summary: Render an artifact as PDF when preview support is enabled
+      responses:
+        "200":
+          description: PDF bytes
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "502":
+          $ref: "#/components/responses/BadGateway"
   /v1/codex-worker/health:
     get:
       tags: [Legacy]
@@ -594,7 +657,11 @@ components:
       name: Last-Event-ID
       in: header
       required: false
-      description: HaaS extension. Replay events after this event id, then go live.
+      description: |
+        Optional resume cursor. When set, HaaS resumes the matching invocation's stream
+        instead of starting a new turn: it resolves this event id to its invocation
+        (must fall within the request's appName/userId/sessionId scope), replays retained
+        events after it, then goes live. No new harness turn is started on resume.
       schema:
         type: string
     AfterEventId:
@@ -641,6 +708,13 @@ components:
       required: true
       schema:
         type: string
+    FileId:
+      name: file_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^file_"
   responses:
     BadRequest:
       description: Invalid request
@@ -674,6 +748,24 @@ components:
             $ref: "#/components/schemas/ErrorDetail"
     RateLimited:
       description: Rate or quota limit
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    PayloadTooLarge:
+      description: Uploaded payload is too large
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    BadGateway:
+      description: Upstream service failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    NotImplemented:
+      description: Capability is not implemented
       content:
         application/json:
           schema:
@@ -816,10 +908,11 @@ components:
         status:
           type: string
           enum: [running, completed, failed, incomplete, cancelled]
-        startedAt:
-          type: number
-        completedAt:
-          type: [number, "null"]
+        startedAtMs:
+          type: integer
+          minimum: 0
+        completedAtMs:
+          type: [integer, "null"]
         model:
           type: string
         error:
@@ -834,8 +927,37 @@ components:
           type: string
         content:
           type: string
-        content_b64:
+        contentB64:
           type: string
+      additionalProperties: true
+    File:
+      type: object
+      required: [id, object, filename, bytes]
+      properties:
+        id:
+          type: string
+          pattern: "^file_"
+        object:
+          type: string
+          const: file
+        sessionId:
+          type: string
+        invocationId:
+          type: string
+        filename:
+          type: string
+        relativePath:
+          type: string
+        bytes:
+          type: integer
+          minimum: 0
+        mediaType:
+          type: string
+        sha256:
+          type: string
+        createdAtMs:
+          type: integer
+          minimum: 0
       additionalProperties: true
     HarnessCreate:
       type: object
@@ -845,11 +967,11 @@ components:
           type: string
         base:
           type: string
-        default_model:
+        defaultModel:
           type: string
-        system_prompt:
+        systemPrompt:
           type: string
-        mcp_servers:
+        mcpServers:
           type: array
           items:
             type: object
@@ -859,21 +981,21 @@ components:
           items:
             type: object
             additionalProperties: true
-        disabled_tools:
+        disabledTools:
           type: array
           items:
             type: string
         provider:
           type: object
           additionalProperties: true
-        max_step:
+        maxStep:
           type: [integer, "null"]
-        timeout_seconds:
+        timeoutSeconds:
           type: [integer, "null"]
       additionalProperties: true
     Harness:
       type: object
-      required: [id, object, name, base, createdAt]
+      required: [id, object, name, base, createdAtMs]
       properties:
         id:
           type: string
@@ -914,10 +1036,12 @@ components:
         adapterCapabilities:
           type: object
           additionalProperties: true
-        createdAt:
+        createdAtMs:
           type: integer
-        updatedAt:
+          minimum: 0
+        updatedAtMs:
           type: integer
+          minimum: 0
       additionalProperties: true
     ModelCatalog:
       type: object
@@ -939,20 +1063,97 @@ components:
     HaasEnvelope:
       type: object
       required: [data, traceId]
+      description: |
+        HaaS native response envelope. `data` carries the resource (object or array).
+        Paginated list responses additionally include `nextCursor` (null when exhausted).
+        Additional optional fields may be added within a protocol version.
       properties:
-        data:
-          type: object
-          additionalProperties: true
+        data: {}
+        nextCursor:
+          type: [string, "null"]
         traceId:
           type: string
-      additionalProperties: false
+    HarnessEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/Harness"
+    HarnessListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [harnesses]
+              properties:
+                harnesses:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Harness"
+    FileEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/File"
+    InvocationEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/Invocation"
+    ModelCatalogEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ModelCatalog"
+    SkillFilesEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [id, name, files]
+              properties:
+                id:
+                  type: string
+                name:
+                  type: string
+                files:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/SkillFile"
+    SessionListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Session"
     ErrorDetail:
       type: object
       required: [detail]
       properties:
         detail:
           type: string
-        haas_error:
+        haasError:
           type: object
           required: [type, code]
           properties:
