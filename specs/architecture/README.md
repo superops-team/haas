@@ -46,11 +46,14 @@ OpenSandbox AIO container runtime
 
 核心分层：
 
-1. 上游只依赖 ADK 2.0 协议层，不依赖任何 harness 原生协议。
+1. 上游只依赖 ADK 2.0 **REST API 协议层**，不依赖任何 harness 原生协议；也不依赖 ADK 执行引擎（`BaseAgent`/WorkflowGraph）、图工作流或 ADK Web UI。
 2. `harness adapter` 是完整 agent runtime，不是 LLM provider。
 3. `configured harness` 是执行能力单位，`appName` 即 configured harness `id`。
 4. `Sandbox Runtime` 把各 harness 的执行 sandbox 统一投影到 OpenSandbox AIO 的 sandbox/execd/credential vault——这是多 harness 标准化的运行时承载体，不是只把 AIO 当 base image。
 5. `Admission Control` 负责服务化的配额、限流、并发与队列准入。
+6. `Stores` 是唯一持久事实源；`Identity` 是鉴权边界；`Config` 是装配契约（三者见各自 spec）。
+
+端到端请求时序见 [WALKTHROUGH](WALKTHROUGH.md)。
 
 ## 2. 来源与依据
 
@@ -123,10 +126,10 @@ OpenSandbox AIO container runtime
 
 ```text
 request received
-  -> protocol/auth/scope validation
+  -> protocol/auth/scope validation (Identity -> Principal)
   -> appName resolution (harness id/name)
   -> admission control (quota/rate/queue)
-  -> session/run admission
+  -> session/run admission (Idempotency + lease)
   -> policy compilation
   -> sandbox projection (workspace/network/tool -> OpenSandbox)
   -> adapter execution
@@ -134,6 +137,10 @@ request received
   -> invocation finalization
   -> artifact publication
 ```
+
+完整对象级时序见 [WALKTHROUGH](WALKTHROUGH.md)。
+
+**部署拓扑**：首期单进程 sidecar（单 worker）。Stores 的持久 store 是事实源、内存态是二级缓存；admission 的「部署内共享」通过 Stores backend 实现；active-turn 互斥通过 `SessionStore` lease 保证。多副本只预留不首期实现。
 
 Readiness model:
 

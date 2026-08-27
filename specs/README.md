@@ -132,6 +132,9 @@ Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harn
 | P0 | Event Log & SSE | `specs/event-log-sse/README.md` | event log、SSE live/replay、ADK Event 投影、legacy projection |
 | P0 | Security Boundary | `specs/security-boundary/README.md` | secretless、object scope、SSRF、artifact path、redaction、audit |
 | P0 | Policy Controller | `specs/policy-controller/README.md` | workspace、network、tool、approval、model policy 编译和准入 |
+| P0 | Stores | `specs/stores/README.md` | 持久化事实源：registry/session/event/idempotency/admission 接口、schema 与迁移 |
+| P0 | Identity | `specs/identity/README.md` | bearer -> principal、tenant/workspace/userId scope、`IdentityProvider` 接口 |
+| P0 | Config | `specs/config/README.md` | env/config 装配、端口表、`load_config`/`create_app` 契约 |
 | P1 | Sandbox Runtime | `specs/sandbox-runtime/README.md` | 统一投影 harness sandbox 到 OpenSandbox sandbox/execd/credential vault |
 | P1 | Model Proxy | `specs/model-proxy/README.md` | provider credential 隔离、OpenAI-compatible relay、usage normalization |
 | P1 | MCP / Tool / Skill Runtime | `specs/mcp-tool-skill-runtime/README.md` | MCP server、MCP proxy、tools、skills materialization、tool restriction |
@@ -225,6 +228,33 @@ HaaS native endpoints 使用：
 ```
 
 HaaS 稳定错误码使用 `haas_` 前缀或 ADK 语义码（如 `session_busy`、`app_not_found`）。
+错误码唯一目录见 [ERROR-CODES](haas-protocol/ERROR-CODES.md)，OpenAPI 的
+`haas_error.code` 与之一一对应。
+
+### 7.4 时间戳约定
+
+| 层面 | 格式 | 说明 |
+|------|------|------|
+| ADK-compatible public 字段 | float 秒 epoch（`1743712220.385936`） | `Event.timestamp`、`Session.lastUpdateTime`，是 ADK 契约，不可改 |
+| HaaS 内部记录 + HaaS native API | 整数毫秒 epoch（`1786400000000`） | `createdAtMs`/`updatedAtMs`/`observedAtMs`/`expiresAtMs`（见 [Stores](stores/README.md)） |
+
+投影层负责 `ms -> float 秒`（`ms / 1000.0`）的转换；任何组件不得在公开面输出
+两种格式混用的时间戳。
+
+### 7.5 ID 约定
+
+| 对象 | 前缀 | 生成方 |
+|------|------|--------|
+| harness / ADK app | `chrn_` | Harness Registry |
+| invocation | `inv_` | Session Runtime |
+| turn | `turn_` | Session Runtime |
+| container | `cntr_` | Container Runtime |
+| file | `file_` | Artifact Store |
+| event | `evt_` | Event Log |
+| session | caller-supplied，默认 `hsess_` | 客户端或 Session Runtime |
+
+`invocationId` 与 `turnId` 首期 1:1 但 id 不相等，映射关系持久化在
+`InvocationRecord.turnId`。
 
 ## 8. 全局事件约定
 
@@ -262,8 +292,11 @@ Public 事件是 ADK `Event`。canonical event 必须能无损投影为 ADK `Eve
 
 ```text
 api -> protocol schemas
-api -> registry / session runtime / admission control / event log / observability
+api -> identity / registry / session runtime / admission control / event log / observability
+api -> config (create_app)
+identity -> security-boundary
 session runtime -> harness adapter interface
+session runtime / registry / event log / admission control -> stores
 admission control -> session runtime / registry / observability
 harness adapter -> sandbox runtime / model proxy / mcp-tool-skill runtime / container runtime
 sandbox runtime -> OpenSandbox sandbox/execd/credential vault

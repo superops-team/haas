@@ -231,3 +231,9 @@ Adapter 至少暴露以下状态：
 - Schema：运行 `codex app-server generate-json-schema` 并与 pinned schema fixture 比对。
 - Cancellation：启动长 turn 后调用 cancel，最终 invocation status 为 `cancelled`。
 - Security：Codex env/config/rollout/log/event 不包含真实 provider key、Authorization 或 raw prompt。
+
+### 11.1 Schema fixture 契约
+
+- fixture 路径：`tests/fixtures/codex/schema/codex-cli-<version>.json`（`<version>` 与 `AdapterProbe.runtimeVersion` 一致）。
+- 比对流程：success 时 `generate-json-schema` 输出 `diff fixture == 0`；升级 Codex 版本先重新生成 fixture，再跑比对。
+- 失败语义：diff 非空 → `probe.status=unavailable`，`safeReason=schema_mismatch`，阻塞 release；运行时返回 `haas_adapter_incompatible`。

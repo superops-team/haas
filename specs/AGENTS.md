@@ -7,8 +7,14 @@ semantics, security constraints, and compatibility promises.
 ## Scope
 
 - `README.md`
+- `architecture/README.md`
+- `architecture/WALKTHROUGH.md`
+- `config/README.md`
+- `identity/README.md`
+- `stores/README.md`
 - `haas-protocol/README.md`
 - `haas-protocol/*.openapi.yaml`
+- `haas-protocol/ERROR-CODES.md`
 - `harness-registry/README.md`
 - `harness-adapter/README.md`
 - `codex-app-server-adapter/README.md`
@@ -22,7 +28,6 @@ semantics, security constraints, and compatibility promises.
 - `sandbox-runtime/README.md`
 - `container-runtime/README.md`
 - `observability/README.md`
-- `security-boundary/README.md`
 - `implementation-roadmap/README.md`
 
 ## Contract Rules

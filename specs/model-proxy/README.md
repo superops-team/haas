@@ -24,7 +24,7 @@ Model Proxy 是 HaaS 的模型访问边界。它让 harness 使用 OpenAI-compat
 | 上游 | Harness Adapter | adapter 把 harness model endpoint 指向 loopback proxy |
 | 上游 | Session Runtime | 请求 runtime token 和 usage 汇总 |
 | 上游 | Harness Registry | 提供 provider 路由配置（`harness.provider`） |
-| 下游 | Secret Store / Credential Vault | 解析 provider credential ref |
+| 下游 | Security Boundary / Credential Vault | 解析 provider credential ref（`resolve_secret` 唯一入口） |
 | 下游 | Provider clients | OpenAI Responses、Chat Completions、Anthropic Messages、Azure OpenAI、OpenAI-compatible aggregators |
 | 下游 | Observability | 记录请求状态、时延、usage、安全摘要 |
 
@@ -67,7 +67,7 @@ Model Proxy 是 HaaS 的模型访问边界。它让 harness 使用 OpenAI-compat
 ### 5.2 Internal API
 
 ```python
-async def issue_model_proxy_token(scope: ModelProxyScope) -> RuntimeToken: ...
+async def resolve_model_proxy_token(scope: ModelProxyScope) -> RuntimeToken: ...  # 委托 Security Boundary issue_runtime_token(audience="model_proxy")
 async def resolve_model_route(session_id: str, model: str) -> ModelRoute: ...
 async def proxy_openai_responses(request: ProxyRequest) -> ProxyResponse: ...
 async def proxy_chat_completions(request: ProxyRequest) -> ProxyResponse: ...

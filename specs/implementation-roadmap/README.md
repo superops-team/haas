@@ -84,11 +84,22 @@ S0 specs baseline
 
 Do not start S4 before S3 fake adapter proves that the public protocol and session runtime are independent of Codex.
 
+准入口径澄清：`S3 fake adapter` 是协议/组件的**解耦验证**（离线单元+集成）；`铁律 #9
+「最小端到端」` 指首期 P0 harness（Codex）的最终准出，落在 **S4**。两者不冲突：
+S2-S3 证明协议与 harness 无关，S4 完成真实链路（见 [architecture 3.6](../architecture/README.md)）。
+
 ## 8. 安全与权限
 
 - Security Boundary spec gates every stage.
 - New stages cannot relax secretless rules without updating Security Boundary.
 - Any runtime stage that touches Docker, provider credentials, MCP headers or artifact download must add negative tests before implementation is considered done.
+
+## 8.1 测试隔离开关与覆盖率
+
+- 默认测试必须离线：不访问真实网络、真实 HOME、真实 provider、真实 Codex/OpenSandbox。
+- 真实服务测试用显式开关：`HAAS_E2E=1`（总开关）或 `HAAS_E2E_CODEX=1` / `HAAS_E2E_OPEN_SANDBOX=1`（分项）；未开开关跳过，记为 `not_run`，不得写成通过。
+- 测试框架：pytest + pytest-asyncio + coverage。
+- 覆盖率门禁（AGENTS.md）：核心模块 ≥90%；credential、redaction、policy、proxy token、artifact path、日志脱敏路径 ≥95%。
 
 ## 9. 可观测性
 

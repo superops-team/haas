@@ -29,7 +29,7 @@ HaaS Protocol 是系统对上游暴露的 HTTP/JSON + SSE 合同。Northbound �
 | Codex app-server manual | Codex adapter 内部 JSON-RPC lifecycle，不对上游公开 |
 | OpenSandbox AIO | 容器内基础 service 和 endpoint 约束 |
 
-HaaS 只 follow ADK 的 **协议层**（HTTP 路径、请求/响应 shape、事件 shape、SSE framing），不引入 ADK 的 agent 执行引擎——harness 仍是执行主体。
+HaaS 只 follow ADK 的 **协议层**（HTTP 路径、请求/响应 shape、事件 shape、SSE framing），不引入 ADK 的 agent 执行引擎（`BaseAgent`/WorkflowGraph）、图工作流或 ADK Web UI。compatibility 目标是「任何遵守 ADK 2.0 REST 协议的 HTTP 客户端」，字段命名以 camelCase REST 契约为准，不承诺 Python SDK 的 snake_case server 实现。适配范围详见 [WALKTHROUGH](../architecture/WALKTHROUGH.md)。
 
 ## 3. 上游与下游关系
 
@@ -97,6 +97,7 @@ HaaS 自有控制面，只做 U 未覆盖能力，不改写 ADK 字段语义：
 | GET | `/v1/haas/sessions` | 跨 user 分页列出 session（管理视角） |
 | GET | `/v1/haas/sessions/{session_id}/events` | HaaS canonical SSE replay/live（带 cursor） |
 | GET | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/events` | invocation 级 canonical SSE replay/live |
+| POST | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel` | 取消运行中 invocation，幂等（`Idempotency-Key` 支持） |
 | GET | `/v1/haas/sessions/{session_id}/artifacts` | HaaS artifact listing |
 
 ### 5.3 Legacy Sidecar Shim
@@ -206,6 +207,8 @@ ADK 兼容路径返回带 `detail` 的错误（FastAPI 惯例），并附加结�
 ```
 
 `code` 使用 HaaS 稳定错误码，`haas_error` 为 HaaS 扩展，ADK 客户端只读 `detail`。
+错误码唯一目录见 [ERROR-CODES](ERROR-CODES.md)，OpenAPI 的 `haas_error.code`
+与之对齐；新增错误码必须先更新目录。
 
 ## 7. 运行模型与状态机
 

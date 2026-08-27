@@ -104,10 +104,14 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
     "opaque": "encrypted-or-private-ref",
     "generation": 1
   },
-  "lastUpdateTime": 1786400000,
-  "expiresAt": null
+  "createdAtMs": 1786400000000,
+  "updatedAtMs": 1786400000000,
+  "expiresAtMs": null
 }
 ```
+
+`lastUpdateTime`（ADK 公开字段）= `updatedAtMs / 1000.0`，由投影层生成；内部记录
+只存毫秒 epoch。
 
 ### 6.2 InvocationRecord
 
@@ -117,9 +121,10 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
   "object": "invocation",
   "sessionId": "s_123",
   "appName": "chrn_codex_default",
+  "turnId": "turn_abc",
   "status": "running",
-  "startedAt": 1786400000,
-  "completedAt": null,
+  "startedAtMs": 1786400000000,
+  "completedAtMs": null,
   "model": "gpt-5.6-terra",
   "requestedModel": "gpt-5.6-terra",
   "idempotencyKeyHash": "idem_sha256",
@@ -127,6 +132,10 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
   "error": null
 }
 ```
+
+`turnId` 首期与 invocation 1:1（id 不同，映射持久化在 `InvocationRecord.turnId`）；
+未来 1:N 时 invocation 聚合多个 turn 的事件（按 `turnId` 分组）。内部时间戳统一
+毫秒 epoch（`startedAtMs`/`completedAtMs`），公开面由投影层转为 ADK float 秒。
 
 ### 6.3 TurnRecord
 
@@ -136,12 +145,21 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
   "invocationId": "inv_abc",
   "sessionId": "s_123",
   "status": "running",
-  "startedAt": 1786400000,
-  "completedAt": null
+  "startedAtMs": 1786400000000,
+  "completedAtMs": null
 }
 ```
 
 `SessionRecord` 必须能无损投影为 ADK `Session`（`{id, appName, userId, state, events[], lastUpdateTime}`）；内部字段（tenantId 等）不进入 public 输出。
+
+### 6.4 State 合并语义
+
+session `state` 有两个写入源，串行化于同一 sessionKey 写队列，合并规则一致：
+
+1. **`PATCH stateDelta`（客户端显式）**：deep-merge 到 `session.state`——对象递归合并、标量覆盖。
+2. **事件 `actions.stateDelta`（invocation 运行中）**：与 PATCH 同队列按到达顺序应用，deep-merge。
+
+约束：不允许删除操作（删除需显式扩展字段）；冲突时标量「后到覆盖」；合并是幂等的纯函数，便于恢复重放。
 
 ## 7. 运行模型与状态机
 

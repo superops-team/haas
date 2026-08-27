@@ -35,7 +35,7 @@ MCP / Tool / Skill Runtime 负责把 configured harness 中声明的 MCP servers
 
 - 校验 MCP server URL、transport、headers、auth ref、timeout、enabled flag。
 - 运行 loopback MCP proxy（端口 `18081`）：harness 连 proxy 而不是直连 MCP server。
-- 由 proxy 注入真实 MCP secret（从 secret store/vault 解析），harness 不接触明文。
+- 由 proxy 注入真实 MCP secret（经 Security Boundary 的 `resolve_secret` 解析），harness 不接触明文。
 - 将 enabled MCP servers 转换为 adapter-specific config（指向 loopback proxy）。
 - 保证 disabled MCP server 不被连接。
 - 物化完整 skill folder，而不是只写 `SKILL.md`。

@@ -353,6 +353,33 @@ paths:
           description: Deleted
         "404":
           $ref: "#/components/responses/NotFound"
+  /v1/haas/harnesses/{harness_id}/skills/{skill_id}/files:
+    parameters:
+      - $ref: "#/components/parameters/HarnessId"
+      - $ref: "#/components/parameters/SkillId"
+    get:
+      tags: [HaaS]
+      operationId: listHarnessSkillFiles
+      summary: List files in one configured skill bundle
+      responses:
+        "200":
+          description: Skill files
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, name, files]
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  files:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SkillFile"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /v1/haas/models:
     get:
       tags: [HaaS]
@@ -434,6 +461,27 @@ paths:
             text/event-stream:
               schema:
                 type: string
+  /v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/InvocationId"
+    post:
+      tags: [HaaS]
+      operationId: cancelInvocation
+      summary: Cancel a running invocation (idempotent)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Current invocation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invocation"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /v1/haas/sessions/{session_id}/artifacts:
     parameters:
       - $ref: "#/components/parameters/SessionId"
@@ -587,6 +635,12 @@ components:
       schema:
         type: string
         pattern: "^chrn_"
+    SkillId:
+      name: skill_id
+      in: path
+      required: true
+      schema:
+        type: string
   responses:
     BadRequest:
       description: Invalid request
@@ -747,6 +801,41 @@ components:
             $ref: "#/components/schemas/Event"
         lastUpdateTime:
           type: number
+      additionalProperties: true
+    Invocation:
+      type: object
+      required: [id, sessionId, appName, status]
+      properties:
+        id:
+          type: string
+          pattern: "^inv_"
+        sessionId:
+          type: string
+        appName:
+          type: string
+        status:
+          type: string
+          enum: [running, completed, failed, incomplete, cancelled]
+        startedAt:
+          type: number
+        completedAt:
+          type: [number, "null"]
+        model:
+          type: string
+        error:
+          type: [object, "null"]
+          additionalProperties: true
+      additionalProperties: true
+    SkillFile:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+        content_b64:
+          type: string
       additionalProperties: true
     HarnessCreate:
       type: object

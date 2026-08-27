@@ -1,0 +1,130 @@
+# Config 组件规格
+
+Status: Draft
+Last reviewed: 2026-08-26
+Related specs: [Container Runtime](../container-runtime/README.md), [Stores](../stores/README.md), [Identity](../identity/README.md), [HaaS Protocol](../haas-protocol/README.md)
+
+## 1. 组件定位
+
+Config 定义 HaaS 的配置与装配契约：环境变量、配置文件、端口表、服务发现和 app factory 签名。它消除「每个组件各自发明环境变量和 create_app 参数」的歧义。
+
+## 2. 来源与依据
+
+| 来源 | 采用内容 |
+|------|----------|
+| Container Runtime | 端口约定（8080/8092/18080/18081）、`create_app --factory` |
+| Architecture | Python + FastAPI、sidecar-first 单进程 |
+| Security Boundary | secret 只走引用，不落明文配置 |
+
+## 3. 上游与下游关系
+
+| 方向 | 对象 | 关系 |
+|------|------|------|
+| 上游 | Deployment / container entrypoint | 注入 env 与配置文件路径 |
+| 下游 | 所有组件 | 提供 `AppConfig` 作为唯一配置来源 |
+| 下游 | Observability | 记录生效配置摘要（脱敏） |
+
+## 4. 职责边界
+
+负责：
+
+- 定义 env 前缀、config 文件格式与三层优先级。
+- 定义 `AppConfig` 数据模型与 `load_config()` / `create_app(config)` 契约。
+- 定义端口表与服务发现（loopback 地址）。
+- 定义 secret 类配置只能引用（`credentialRef`），不接受明文。
+
+不负责：
+
+- 不解析 secret 明文。
+- 不做运行时热更新（首期静态；热更新为后续预留）。
+
+## 5. 核心接口
+
+```python
+@dataclass
+class AppConfig:
+    server: ServerConfig
+    store: StoreConfig
+    identity: IdentityConfig
+    model_proxy: ModelProxyConfig
+    mcp_proxy: McpProxyConfig
+    adapters: AdaptersConfig
+    observability: ObservabilityConfig
+
+def load_config(path: str | None) -> AppConfig: ...
+def create_app(config: AppConfig) -> FastAPI: ...
+```
+
+环境变量前缀统一为 `HAAS_`，例如：
+
+| 变量 | 含义 |
+|------|------|
+| `HAAS_CONFIG` | 配置文件路径 |
+| `HAAS_SIDECAR_PORT` | sidecar 端口（默认 `8092`） |
+| `HAAS_STORE_BACKEND` | 生产默认 `sqlite`；`memory` 仅测试；`postgres` 多副本预留 |
+| `HAAS_IDENTITY_PROVIDER` | `static` / `external_jwt` |
+
+配置文件默认 `haas.yaml`，优先级：默认值 < 配置文件 < 环境变量。
+
+## 6. 数据模型
+
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 8092
+store:
+  backend: sqlite           # 生产默认；memory 仅测试；postgres 多副本预留
+  dsn: null
+  event_retention_seconds: 2592000
+identity:
+  provider: static
+model_proxy:
+  listen: "127.0.0.1:18080"
+mcp_proxy:
+  listen: "127.0.0.1:18081"
+adapters:
+  codex:
+    transport: unix_websocket
+    socket_path: /tmp/haas/codex.sock
+```
+
+端口与服务发现固定为：
+
+| 端口 | 服务 | 地址 |
+|------|------|------|
+| 8080 | OpenSandbox AIO | 容器内 |
+| 8092 | HaaS sidecar | sidecar 对外 |
+| 18080 | model proxy | 仅 `127.0.0.1` |
+| 18081 | MCP/tool proxy | 仅 `127.0.0.1` |
+
+## 7. 运行模型与状态机
+
+```text
+startup -> load_config(HAAS_CONFIG) -> validate -> build AppConfig -> create_app(config) -> serve
+```
+
+## 8. 安全与权限
+
+- provider key / MCP token 不接受明文 env 或 yaml；只能 `credentialRef`。
+- 配置 dump/诊断输出必须脱敏，不包含 dsn、key、passphrase。
+- loopback 服务（18080/18081）只绑定 `127.0.0.1`。
+
+## 9. 可观测性
+
+- `haas.config.loaded`
+- `haas.config.validation_failed`
+- 生效配置摘要（脱敏）写入启动日志。
+
+## 10. 失败与恢复
+
+| 场景 | 行为 |
+|------|------|
+| 配置缺失/非法 | startup fail fast，输出 safe reason |
+| 配置含明文 secret | 拒绝启动，`haas_config_secret_invalid` |
+| 端口冲突 | startup fail，输出诊断 |
+
+## 11. 测试计划与验收
+
+- Unit：三层优先级、非法配置 fail fast、secret 拒绝。
+- Integration：`create_app(config)` 用 memory store + static identity 启动并过 `/v1/haas/health`。
+- Security：config 文件与 dump 不出现明文 secret。

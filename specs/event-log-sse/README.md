@@ -94,10 +94,13 @@ def project_legacy(event: StoredEvent) -> LegacySidecarEvent: ...
     "stateDelta": {},
     "artifactDelta": {}
   },
-  "observedAt": "2026-08-26T12:00:00+08:00",
+  "observedAtMs": 1786400000000,
   "redactionApplied": true
 }
 ```
+
+时间戳统一：内部 canonical event 用 `observedAtMs`（毫秒 epoch）；ADK `Event.timestamp`
+为 `observedAtMs / 1000.0`（float 秒），由投影层生成。
 
 ### 6.2 ADK Projection（公共）
 

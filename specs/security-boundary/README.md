@@ -114,11 +114,25 @@ Credential lifecycle:
 
 ```text
 secret_ref configured
-  -> runtime token issued for session
+  -> runtime token issued for session（唯一签发方：Security Boundary）
   -> adapter receives token/ref only
   -> model/MCP proxy resolves real secret per request
   -> token expires or revoked
 ```
+
+**统一签发原则**：runtime token 的唯一签发方是 Security Boundary 的
+`issue_runtime_token(scope, audience)`。Model Proxy、MCP proxy 只消费带
+`audience=model_proxy|mcp_proxy|adapter` 的 token，不得各自实现 token 体系。
+
+**secret 概念分层**：
+
+| 概念 | 定位 | 存储内容 |
+|------|------|----------|
+| secret store | 长期 credential 引用的持久层 | 只存 `credentialRef` + fingerprint，不存明文 |
+| credential vault（OpenSandbox） | 运行时把真实 secret 解析进 sandbox 会话、签发短 token 的运行时面 | 真实 secret，session 级 TTL |
+
+两者不同层，归属都在 Security Boundary 定义的边界内；`resolve_secret(ref)`
+是唯一取真实 secret 的入口。
 
 ## 8. 安全与权限
 
@@ -156,6 +170,25 @@ secret_ref configured
 - 下载必须限定在 container root。
 - 响应必须带 `X-Content-Type-Options: nosniff`。
 - HTML/JS/SVG 等主动内容应使用独立 origin 或 attachment。
+
+### 8.5 Redaction Taxonomy
+
+`redact(value, context)` 按以下分类统一处理；识别方式为「字段级规则 + 正则
+table」。正则 table 与提交门禁 `scripts/quality/secret-scan.py` 共用同一份
+pattern 清单（单一事实源，代码侧由同一 fixture 驱动）。
+
+| 分类 | 识别方式 | 默认动作 |
+|------|----------|----------|
+| `credential` | 字段名（key/token/password 等）+ secret pattern（AKIA/sk-/ghp_/AIza/JWT…） | 替换为 `[REDACTED]` |
+| `authorization` | `Authorization`/`Bearer`/`Basic`/`Cookie` 头值 | 替换为 `[REDACTED]` |
+| `presigned-url` | `X-Amz-Signature`/`Signature=` query | 整 URL 替换为 `[REDACTED_URL]` |
+| `raw-prompt` | `trace_content=false`（默认）下的输入 prompt | 不入日志/事件 |
+| `tool-payload` | 完整 tool args/result | 默认摘要，full payload 需已批准 debug 设计 |
+| `host-path` | 内部 host、绝对路径 | `[REDACTED_PATH]` |
+| `stack-trace` | 异常栈 | 不出公开面，内部只记 safe reason |
+
+识别失败或上下文不足时 **fail closed**：宁可不写，不写未脱敏内容。`redact()`
+是唯一入口，各组件不得实现私有脱敏逻辑。
 
 ## 9. 可观测性
 
