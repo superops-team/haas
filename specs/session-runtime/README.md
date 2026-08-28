@@ -86,7 +86,7 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
 
 ```json
 {
-  "id": "s_123",
+  "id": "hsess_abc",
   "object": "session",
   "appName": "chrn_codex_default",
   "userId": "u_123",
@@ -119,7 +119,7 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
 {
   "id": "inv_abc",
   "object": "invocation",
-  "sessionId": "s_123",
+  "sessionId": "hsess_abc",
   "appName": "chrn_codex_default",
   "turnId": "turn_abc",
   "status": "running",
@@ -143,7 +143,7 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
 {
   "id": "turn_abc",
   "invocationId": "inv_abc",
-  "sessionId": "s_123",
+  "sessionId": "hsess_abc",
   "status": "running",
   "startedAtMs": 1786400000000,
   "completedAtMs": null

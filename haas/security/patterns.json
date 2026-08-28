@@ -1,0 +1,62 @@
+{
+  "token_patterns": [
+    {
+      "name": "private_key",
+      "pattern": "-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY(?: BLOCK)?-----"
+    },
+    {
+      "name": "aws_access_key",
+      "pattern": "\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b"
+    },
+    {
+      "name": "github_token",
+      "pattern": "\\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\\b"
+    },
+    {
+      "name": "openai_style_key",
+      "pattern": "\\bsk-(?:proj-|ant-|svcacct-)?[A-Za-z0-9_-]{20,}\\b"
+    },
+    {
+      "name": "stripe_live_key",
+      "pattern": "\\b(?:sk|pk|rk)_live_[0-9A-Za-z]{10,}\\b"
+    },
+    {
+      "name": "google_api_key",
+      "pattern": "\\bAIza[0-9A-Za-z_\\-]{20,}\\b"
+    },
+    {
+      "name": "slack_token",
+      "pattern": "\\bxox[baprs]-[0-9A-Za-z-]{10,}\\b"
+    },
+    {
+      "name": "jwt",
+      "pattern": "\\beyJ[A-Za-z0-9_\\-]{8,}(?:\\.[A-Za-z0-9_\\-]{8,}){2}\\b"
+    },
+    {
+      "name": "bearer_token",
+      "pattern": "(?i)\\bBearer\\s+[A-Za-z0-9][A-Za-z0-9._=+\\/\\-]{15,}\\b"
+    },
+    {
+      "name": "basic_auth",
+      "pattern": "(?i)\\bBasic\\s+[A-Za-z0-9+/]{16,}=*"
+    },
+    {
+      "name": "presigned_url",
+      "pattern": "(?:X-Amz-Signature|X-Amz-Credential)=[A-Za-z0-9\\/%]{8,}|\\bSignature=[A-Fa-f0-9]{32,}"
+    }
+  ],
+  "generic_key": "(?i)(?:^|[^A-Za-z0-9])(password|passwd|pwd|client[_-]?secret|api[_-]?key|apikey|access[_-]?(?:token|key)|secret[_-]?key|private[_-]?key|auth[_-]?token|session[_-]?token|refresh[_-]?token)\\b\\s*[:=]",
+  "sensitive_filenames": [
+    "\\.env(\\..*)?$",
+    "\\.pem$",
+    "\\.p12$",
+    "\\.pfx$",
+    "\\.key$",
+    "\\.jks$",
+    "\\.keystore$",
+    "(^|/)(id_rsa|id_ed25519|id_ecdsa|id_dsa)(\\.pub)?$",
+    "(credentials|service-?account)[^/]*\\.json$",
+    "\\.token$",
+    "(^|/)secrets?/"
+  ]
+}

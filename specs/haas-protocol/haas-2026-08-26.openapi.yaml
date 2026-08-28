@@ -1160,6 +1160,51 @@ components:
             type:
               type: string
             code:
+              enum:
+                - missing_credential
+                - invalid_credential
+                - app_not_found
+                - haas_harness_not_found
+                - session_not_found
+                - haas_invocation_not_found
+                - haas_file_not_found
+                - invalid_input
+                - haas_legacy_request_invalid
+                - haas_unsupported_base
+                - haas_tool_schema_unsupported
+                - session_busy
+                - session_expired
+                - haas_offset_expired
+                - haas_cancel_unsupported
+                - haas_policy_denied
+                - haas_policy_invalid
+                - haas_policy_unsupported
+                - haas_url_not_allowed
+                - haas_secret_input_invalid
+                - haas_provider_source_invalid
+                - haas_mcp_source_invalid
+                - haas_adapter_unavailable
+                - haas_adapter_incompatible
+                - haas_adapter_overloaded
+                - haas_adapter_error
+                - haas_model_unavailable
+                - haas_provider_error
+                - haas_provider_timeout
+                - haas_mcp_unavailable
+                - haas_sandbox_widening_rejected
+                - haas_vault_unavailable
+                - haas_request_timeout
+                - haas_rate_limited
+                - haas_quota_exceeded
+                - haas_queue_full
+                - haas_queue_timeout
+                - haas_store_unavailable
+                - haas_idempotency_store_unavailable
+                - haas_idempotency_conflict
+                - haas_identity_unavailable
+                - haas_file_too_large
+                - haas_preview_unavailable
+                - haas_archive_failed
               type: string
             param:
               type: [string, "null"]

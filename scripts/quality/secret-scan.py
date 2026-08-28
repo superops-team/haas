@@ -4,6 +4,10 @@
 Scans for credentials and other sensitive material and exits non-zero when any
 is found, so the commit is blocked. Stdlib only; no third-party dependencies.
 
+The regex table is the single source of truth shared with the runtime redaction
+pipeline (``haas/security/patterns.json``). Keep both consumers in sync by
+editing that file, not this one.
+
 Usage:
   secret-scan.py                 # scan staged added lines (git hook default)
   secret-scan.py <path>...       # scan specific files of the working tree
@@ -14,13 +18,18 @@ A line can be whitelisted for approved test fixtures with the inline marker
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 SELF = os.path.normpath("scripts/quality/secret-scan.py")
 IGNORE_MARKER = "haas-secret-ignore"
+PATTERNS_FILE = (
+    Path(__file__).resolve().parents[2] / "haas" / "security" / "patterns.json"
+)
 
 # Value hints that are clearly placeholders, not real secrets.
 PLACEHOLDER_RE = re.compile(
@@ -29,51 +38,25 @@ PLACEHOLDER_RE = re.compile(
     re.IGNORECASE,
 )
 
-# (name, compiled regex) — each matches a sensitive token on a single line.
-PATTERNS = [
-    ("private_key", re.compile(
-        r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY(?: BLOCK)?-----")),
-    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("github_token", re.compile(
-        r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")),
-    ("openai_style_key", re.compile(
-        r"\bsk-(?:proj-|ant-|svcacct-)?[A-Za-z0-9_-]{20,}\b")),
-    ("stripe_live_key", re.compile(r"\b(?:sk|pk|rk)_live_[0-9A-Za-z]{10,}\b")),
-    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b")),
-    ("slack_token", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b")),
-    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]{8,}){2}\b")),
-    ("bearer_token", re.compile(
-        r"(?i)\bBearer\s+[A-Za-z0-9][A-Za-z0-9._=+\/\-]{15,}\b")),
-    ("basic_auth", re.compile(
-        r"(?i)\bBasic\s+[A-Za-z0-9+/]{16,}=*")),
-    ("presigned_url", re.compile(
-        r"(?:X-Amz-Signature|X-Amz-Credential)=[A-Za-z0-9\/%]{8,}|\bSignature=[A-Fa-f0-9]{32,}")),
-]
 
-# Generic `key = "literal"` assignment for well-known secret-bearing field names.
-# Keys may be prefixed (e.g. `server_password`, `db-password`, `access_token`),
-# but not part of a longer identifier (`mypassword` is intentionally skipped).
-GENERIC_KEY = re.compile(
-    r"(?i)(?:^|[^A-Za-z0-9])"
-    r"(password|passwd|pwd|client[_-]?secret|api[_-]?key|apikey|"
-    r"access[_-]?(?:token|key)|secret[_-]?key|private[_-]?key|"
-    r"auth[_-]?token|session[_-]?token|refresh[_-]?token)\b"
-    r"\s*[:=]")
+def load_patterns() -> tuple[
+    list[tuple[str, re.Pattern[str]]], re.Pattern[str], list[re.Pattern[str]]
+]:
+    with open(PATTERNS_FILE, encoding="utf-8") as fh:
+        data = json.load(fh)
 
-# Sensitive file names to flag even if the content scanner misses them.
-SENSITIVE_FILENAME = [
-    re.compile(r"\.env(\..*)?$"),
-    re.compile(r"\.pem$"),
-    re.compile(r"\.p12$"),
-    re.compile(r"\.pfx$"),
-    re.compile(r"\.key$"),
-    re.compile(r"\.jks$"),
-    re.compile(r"\.keystore$"),
-    re.compile(r"(^|/)(id_rsa|id_ed25519|id_ecdsa|id_dsa)(\.pub)?$"),
-    re.compile(r"(credentials|service-?account)[^/]*\.json$"),
-    re.compile(r"\.token$"),
-    re.compile(r"(^|/)secrets?/"),
-]
+    token_patterns = [
+        (item["name"], re.compile(item["pattern"]))
+        for item in data["token_patterns"]
+    ]
+    generic_key = re.compile(data["generic_key"])
+    sensitive_filenames = [
+        re.compile(pattern) for pattern in data["sensitive_filenames"]
+    ]
+    return token_patterns, generic_key, sensitive_filenames
+
+
+PATTERNS, GENERIC_KEY, SENSITIVE_FILENAME = load_patterns()
 
 
 def run_git(*args: str) -> str:
@@ -120,7 +103,7 @@ def checked_path_records(files: list[str]):
         if path == SELF:
             continue
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 data = fh.read()
         except OSError:
             continue  # binary or missing; not a secret risk here

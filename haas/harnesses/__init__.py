@@ -1,0 +1,42 @@
+"""Harness adapter interface and concrete adapters (specs/harness-adapter/)."""
+from haas.harnesses.base import (
+    AdapterProbe,
+    AdapterTurnResult,
+    CancelResult,
+    CancelTurnRequest,
+    CleanupResult,
+    CleanupSessionRequest,
+    HarnessAdapter,
+    HarnessEvent,
+    HarnessSandboxDecl,
+    InspectSessionRequest,
+    ListArtifactsRequest,
+    PreparedSession,
+    PrepareSessionRequest,
+    ResumeSessionRequest,
+    SessionInspection,
+    StartTurnRequest,
+    TurnHandle,
+)
+from haas.harnesses.fake import FakeAdapter
+
+__all__ = [
+    "AdapterProbe",
+    "AdapterTurnResult",
+    "CancelResult",
+    "CancelTurnRequest",
+    "CleanupResult",
+    "CleanupSessionRequest",
+    "FakeAdapter",
+    "HarnessAdapter",
+    "HarnessEvent",
+    "HarnessSandboxDecl",
+    "InspectSessionRequest",
+    "ListArtifactsRequest",
+    "PrepareSessionRequest",
+    "PreparedSession",
+    "ResumeSessionRequest",
+    "SessionInspection",
+    "StartTurnRequest",
+    "TurnHandle",
+]

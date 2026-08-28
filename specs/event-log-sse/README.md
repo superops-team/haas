@@ -80,7 +80,7 @@ def project_legacy(event: StoredEvent) -> LegacySidecarEvent: ...
 {
   "eventId": "evt_0000000001042",
   "invocationId": "inv_abc",
-  "sessionId": "s_123",
+  "sessionId": "hsess_abc",
   "turnId": "turn_abc",
   "harnessId": "chrn_codex_default",
   "adapterId": "codex-app-server",
