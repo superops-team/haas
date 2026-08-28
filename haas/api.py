@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from haas.admission import AdmissionControl, AdmissionInput
 from haas.config import AppConfig
-from haas.events import EventLog
+from haas.events import HEARTBEAT_FRAME, EventLog
 from haas.harnesses import FakeAdapter, HarnessAdapter
 from haas.identity import (
     IdentityProvider,
@@ -22,6 +22,7 @@ from haas.identity import (
 )
 from haas.registry import AppNotFoundError, HarnessRegistry, seed_codex
 from haas.sessions import (
+    InvocationNotFoundError,
     RunRequest,
     SessionBusyError,
     SessionNotFoundError,
@@ -196,6 +197,54 @@ def build_app(
         except SessionNotFoundError as exc:
             raise HaasError(404, "invalid_request_error", "session_not_found") from exc
         return JSONResponse(status_code=204, content=None)
+
+    @app.post("/v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel")
+    async def cancel_invocation(
+        session_id: str, invocation_id: str, request: Request
+    ) -> dict[str, Any]:
+        await _authenticate(runtime.identity, request)
+        try:
+            invocation = await runtime.sessions.cancel_invocation(session_id, invocation_id)
+        except InvocationNotFoundError as exc:
+            raise HaasError(
+                404, "invalid_request_error", "haas_invocation_not_found"
+            ) from exc
+        return {
+            "data": {
+                "sessionId": session_id,
+                "invocationId": invocation_id,
+                "status": invocation.status,
+            },
+            "traceId": f"tr_{_hash(invocation_id)[:16]}",
+        }
+
+    @app.get("/v1/haas/sessions/{session_id}/events")
+    async def session_events(
+        session_id: str, request: Request, after_event_id: str | None = None
+    ) -> StreamingResponse:
+        await _authenticate(runtime.identity, request)
+        events = runtime.event_log.read_session(session_id, after_event_id)
+
+        async def frames() -> Any:
+            for event in events:
+                yield runtime.event_log.haas_frame(event)
+            yield HEARTBEAT_FRAME
+
+        return StreamingResponse(frames(), media_type="text/event-stream")
+
+    @app.get("/v1/haas/sessions/{session_id}/invocations/{invocation_id}/events")
+    async def invocation_events(
+        session_id: str, invocation_id: str, request: Request
+    ) -> StreamingResponse:
+        await _authenticate(runtime.identity, request)
+        events = runtime.event_log.read_invocation(invocation_id)
+
+        async def frames() -> Any:
+            for event in events:
+                yield runtime.event_log.haas_frame(event)
+            yield HEARTBEAT_FRAME
+
+        return StreamingResponse(frames(), media_type="text/event-stream")
 
     return app
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from haas.stores import CanonicalEventRecord, MemoryStore
@@ -67,3 +67,7 @@ class EventLog:
 
     def sse_frame(self, event: CanonicalEventRecord) -> str:
         return f"data: {json.dumps(self.project_adk(event), separators=(',', ':'))}\n\n"
+
+    def haas_frame(self, event: CanonicalEventRecord) -> str:
+        payload = asdict(event)
+        return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"

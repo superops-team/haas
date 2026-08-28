@@ -1,6 +1,7 @@
 """Fake harness adapter for protocol decoupling tests (roadmap S3)."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 from haas.harnesses.base import (
@@ -103,3 +104,93 @@ class FakeAdapter:
 
     def sandbox_declaration(self) -> HarnessSandboxDecl:
         return HarnessSandboxDecl()
+
+
+class SlowFakeAdapter(FakeAdapter):
+    """Cancel-able fake adapter: yields events with a delay and honors cancel."""
+
+    base = "fake-slow"
+    adapter_id = "fake-slow"
+
+    def __init__(self, delay: float = 0.02) -> None:
+        self.delay = delay
+        self._cancelled: set[str] = set()
+
+    async def stream_events(self, handle: TurnHandle) -> AsyncIterator[HarnessEvent]:
+        for index, text in enumerate(("hello", "world")):
+            if handle.turnId in self._cancelled:
+                return
+            yield HarnessEvent(
+                type="harness.text.delta",
+                nativeType="fake/text",
+                invocationId=handle.invocationId,
+                sessionId=handle.sessionId,
+                turnId=handle.turnId,
+                author=self.base,
+                content={"role": "model", "parts": [{"text": text}]},
+                actions={"stateDelta": {"last_text": text, "seq": index}},
+            )
+            await asyncio.sleep(self.delay)
+
+    async def cancel_turn(self, request: CancelTurnRequest) -> CancelResult:
+        self._cancelled.add(request.turnId)
+        return CancelResult(status="cancelled")
+
+    async def finalize_turn(self, handle: TurnHandle) -> AdapterTurnResult:
+        if handle.turnId in self._cancelled:
+            terminal = HarnessEvent(
+                type="harness.turn.cancelled",
+                invocationId=handle.invocationId,
+                sessionId=handle.sessionId,
+                turnId=handle.turnId,
+                author=self.base,
+                content={"role": "model", "parts": []},
+                actions={"stateDelta": {"status": "cancelled"}},
+            )
+            return AdapterTurnResult(status="cancelled", terminalEvent=terminal)
+        return await super().finalize_turn(handle)
+
+
+class BlockingFakeAdapter(SlowFakeAdapter):
+    """Yields the first event, then blocks until cancel_turn is called."""
+
+    base = "fake-blocking"
+    adapter_id = "fake-blocking"
+
+    def __init__(self) -> None:
+        super().__init__(delay=0.0)
+        self._barriers: dict[str, asyncio.Event] = {}
+
+    async def stream_events(self, handle: TurnHandle) -> AsyncIterator[HarnessEvent]:
+        yield HarnessEvent(
+            type="harness.text.delta",
+            nativeType="fake/text",
+            invocationId=handle.invocationId,
+            sessionId=handle.sessionId,
+            turnId=handle.turnId,
+            author=self.base,
+            content={"role": "model", "parts": [{"text": "hello"}]},
+            actions={"stateDelta": {"last_text": "hello", "seq": 0}},
+        )
+        barrier = asyncio.Event()
+        self._barriers[handle.turnId] = barrier
+        await barrier.wait()
+
+    async def cancel_turn(self, request: CancelTurnRequest) -> CancelResult:
+        self._cancelled.add(request.turnId)
+        self._barriers.setdefault(request.turnId, asyncio.Event()).set()
+        return CancelResult(status="cancelled")
+
+    async def finalize_turn(self, handle: TurnHandle) -> AdapterTurnResult:
+        if handle.turnId in self._cancelled:
+            terminal = HarnessEvent(
+                type="harness.turn.cancelled",
+                invocationId=handle.invocationId,
+                sessionId=handle.sessionId,
+                turnId=handle.turnId,
+                author=self.base,
+                content={"role": "model", "parts": []},
+                actions={"stateDelta": {"status": "cancelled"}},
+            )
+            return AdapterTurnResult(status="cancelled", terminalEvent=terminal)
+        return await super().finalize_turn(handle)

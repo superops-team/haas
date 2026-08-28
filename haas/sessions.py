@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from haas.events import EventLog
 from haas.harnesses import (
+    CancelTurnRequest,
     HarnessAdapter,
     HarnessEvent,
     PrepareSessionRequest,
@@ -31,6 +32,10 @@ class SessionNotFoundError(Exception):
 
 class SessionBusyError(Exception):
     """concurrent run on the same session -> 409 session_busy."""
+
+
+class InvocationNotFoundError(Exception):
+    """invocation id not found -> 404 haas_invocation_not_found."""
 
 
 def _deep_merge(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
@@ -59,11 +64,18 @@ class RunResult:
 
 
 @dataclass
+class _ActiveTurn:
+    turn_id: str
+    session_id: str
+
+
+@dataclass
 class SessionRuntime:
     store: MemoryStore
     registry: HarnessRegistry
     adapter: HarnessAdapter
     event_log: EventLog
+    _active: dict[str, _ActiveTurn] = field(default_factory=dict)
 
     def _key(self, app_name: str, user_id: str, session_id: str) -> tuple[str, str, str]:
         return (app_name, user_id, session_id)
@@ -144,6 +156,7 @@ class SessionRuntime:
                     input=[req.message],
                 )
             )
+            self._active[invocation.id] = _ActiveTurn(turn_id=turn.id, session_id=session_id)
 
             async for harness_event in self.adapter.stream_events(handle):
                 event = self._append_harness_event(harness_event, app, invocation, turn)
@@ -163,6 +176,7 @@ class SessionRuntime:
             turn.status = result.status
             turn.completedAtMs = event.observedAtMs
         finally:
+            self._active.pop(invocation.id, None)
             if invocation.status == "running":
                 invocation.status = "failed"
                 turn.status = "failed"
@@ -210,6 +224,28 @@ class SessionRuntime:
             session.state = _deep_merge(session.state, delta)
             session = self.store.put_session(session)
         return session
+
+    async def cancel_invocation(
+        self, session_id: str, invocation_id: str
+    ) -> InvocationRecord:
+        """Cancel a running invocation; idempotent for terminal invocations."""
+        active = self._active.get(invocation_id)
+        if active is None:
+            invocation = self.store.get_invocation(invocation_id)
+            if invocation is None:
+                raise InvocationNotFoundError(invocation_id)
+            return invocation
+        await self.adapter.cancel_turn(
+            CancelTurnRequest(
+                turnId=active.turn_id,
+                sessionId=session_id,
+                invocationId=invocation_id,
+            )
+        )
+        invocation = self.store.get_invocation(invocation_id)
+        if invocation is None:
+            raise InvocationNotFoundError(invocation_id)
+        return invocation
 
     def _read_invocation(self, invocation_id: str) -> InvocationRecord:
         invocation = self.store.get_invocation(invocation_id)
