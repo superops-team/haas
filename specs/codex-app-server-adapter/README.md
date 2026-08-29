@@ -60,7 +60,7 @@ Codex app-server 是内部实现细节。上游不得直接连接 Codex WebSocke
 
 1. `unix://PATH`：生产默认。Unix socket 上使用标准 WebSocket HTTP Upgrade。
 2. `ws://127.0.0.1:PORT`：本地调试和容器内 loopback。
-3. `stdio://`：测试 fallback 和最小本机 smoke。
+3. `stdio://`：测试 fallback 和最小本机 smoke。子进程 stdin/stdout NDJSON（每行一个 JSON-RPC 消息）。
 
 非 loopback WebSocket 必须开启 `--ws-auth` 且置于 TLS 或可信隧道后。HaaS 不把 Codex app-server listener 直接暴露到公网。
 
@@ -234,6 +234,8 @@ Adapter 至少暴露以下状态：
 
 ### 11.1 Schema fixture 契约
 
-- fixture 路径：`tests/fixtures/codex/schema/codex-cli-<version>.json`（`<version>` 与 `AdapterProbe.runtimeVersion` 一致）。
-- 比对流程：success 时 `generate-json-schema` 输出 `diff fixture == 0`；升级 Codex 版本先重新生成 fixture，再跑比对。
-- 失败语义：diff 非空 → `probe.status=unavailable`，`safeReason=schema_mismatch`，阻塞 release；运行时返回 `haas_adapter_incompatible`。
+- fixture 路径：`tests/fixtures/codex/schema/codex-cli-<version>.json`。
+  `<version>` 是 `codex --version` 输出的**语义版本号**（如 `0.150.1`）；`AdapterProbe.runtimeVersion` 保留完整字符串（如 `codex-cli 0.150.1`）。
+- fixture 内容：单 JSON 对象 `{"codexCliVersion": "<version>", "files": {相对路径: JSON 内容}}`。`files` 覆盖 `generate-json-schema` 输出目录内的全部 `.json`（含根 bundle 与 `v1/`、`v2/` 子目录）。
+- 比对流程：probe 时重新运行 `codex app-server generate-json-schema`，对 `files` 做结构化 deep-equal（不依赖 JSON 序列化顺序）；success 时 `schema_drift(fixture, current) == []`。升级 Codex 版本先重新生成 fixture，再跑比对。
+- 失败语义：drift 非空 → `probe.status=unavailable`，`safeReason=schema_mismatch`，阻塞 release；运行时返回 `haas_adapter_incompatible`。

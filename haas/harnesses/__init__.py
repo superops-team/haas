@@ -18,6 +18,7 @@ from haas.harnesses.base import (
     StartTurnRequest,
     TurnHandle,
 )
+from haas.harnesses.codex_app_server import CodexAdapter
 from haas.harnesses.fake import FakeAdapter
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "CancelResult",
     "CancelTurnRequest",
     "CleanupResult",
+    "CodexAdapter",
     "CleanupSessionRequest",
     "FakeAdapter",
     "HarnessAdapter",
