@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, cast
 
+from haas.security import redact
 from haas.stores import CanonicalEventRecord, MemoryStore
 
 HEARTBEAT_FRAME = ": keep-alive\n\n"
@@ -38,8 +39,8 @@ class EventLog:
             adapterId=adapter_id,
             author=author,
             sequenceNumber=sequence,
-            content=content,
-            actions=actions,
+            content=cast(dict[str, Any], redact(content)),
+            actions=cast(dict[str, Any], redact(actions)),
             redactionApplied=True,
         )
         self._event_seq += 1

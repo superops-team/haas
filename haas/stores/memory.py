@@ -107,6 +107,10 @@ class IdempotencyConflictError(Exception):
     """Same idempotency key, different request hash: fail closed (409)."""
 
 
+class CursorNotFoundError(Exception):
+    """SSE replay cursor is unknown -> 410 haas_offset_expired."""
+
+
 @dataclass
 class Lease:
     holder: str
@@ -198,7 +202,7 @@ class MemoryStore:
         self._events_by_session.setdefault(event.sessionId, []).append(event)
 
     def read_invocation(
-        self, invocation_id: str, after: int = 0
+        self, invocation_id: str, after: int = -1
     ) -> list[CanonicalEventRecord]:
         events = self._events_by_invocation.get(invocation_id, [])
         return [
@@ -215,7 +219,7 @@ class MemoryStore:
             return list(events)
         index = next((i for i, e in enumerate(events) if e.eventId == after_cursor), None)
         if index is None:
-            return []
+            raise CursorNotFoundError(after_cursor)
         return events[index + 1 :]
 
     # --- AdmissionStore -------------------------------------------------
@@ -263,6 +267,11 @@ class MemoryStore:
         if record is None or record.released:
             return None
         return record.result
+
+    def is_pending(self, key_hash: str) -> bool:
+        """True while a reservation is in-flight (not completed, not released)."""
+        record = self._idempotency.get(key_hash)
+        return record is not None and not record.released and record.result is None
 
     def release(self, key_hash: str) -> None:
         record = self._idempotency.get(key_hash)

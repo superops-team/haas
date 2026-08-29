@@ -38,6 +38,14 @@ class InvocationNotFoundError(Exception):
     """invocation id not found -> 404 haas_invocation_not_found."""
 
 
+class AdapterTurnError(Exception):
+    """Harness adapter raised during a turn -> 502 haas_adapter_error."""
+
+    def __init__(self, invocation_id: str) -> None:
+        super().__init__(invocation_id)
+        self.invocation_id = invocation_id
+
+
 def _deep_merge(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
     for key, value in delta.items():
@@ -175,6 +183,16 @@ class SessionRuntime:
             invocation.completedAtMs = event.observedAtMs
             turn.status = result.status
             turn.completedAtMs = event.observedAtMs
+        except Exception as exc:
+            terminal = self._terminal_event("failed", app, invocation, turn)
+            event = self._append_harness_event(terminal, app, invocation, turn)
+            session = self._merge_actions(session, event)
+            invocation.status = "failed"
+            invocation.completedAtMs = event.observedAtMs
+            turn.status = "failed"
+            turn.completedAtMs = event.observedAtMs
+            yield event
+            raise AdapterTurnError(invocation.id) from exc
         finally:
             self._active.pop(invocation.id, None)
             if invocation.status == "running":

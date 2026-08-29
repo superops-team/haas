@@ -41,3 +41,17 @@ def test_sse_frame_and_heartbeat() -> None:
     assert frame.endswith("\n\n")
     assert HEARTBEAT_FRAME == ": keep-alive\n\n"
     assert "sequenceNumber" not in frame
+
+
+def test_append_redacts_secret_material_before_persist() -> None:
+    log = EventLog(store=MemoryStore())
+    secret_text = "token sk-ant-abcdefghijklmnopqrstuvwxyz123456"  # haas-secret-ignore
+    event = log.append(
+        invocation_id="inv_1", session_id="hsess_1", turn_id="turn_1",
+        harness_id="chrn_1", adapter_id="fake", author="codex",
+        content={"role": "model", "parts": [{"text": secret_text}]},
+        actions={"stateDelta": {"authorization": "Bearer abc"}},
+    )
+    assert event.redactionApplied is True
+    assert "sk-ant-" not in event.content["parts"][0]["text"]
+    assert event.actions["stateDelta"]["authorization"] == "[REDACTED]"

@@ -140,12 +140,12 @@ def test_c8_error_envelope() -> None:
     assert conflict.json()["haasError"]["code"] == "haas_idempotency_conflict"
 
 
-def test_c9_admission_quota_429() -> None:
+def test_c9_run_quota_released_after_completion() -> None:
     client = make_client(run_quota=1)
     body = {"appName": "chrn_codex_default", "userId": "u_1",
             "newMessage": {"role": "user", "parts": []}}
-    first = client.post("/run", json={**body, "sessionId": "hsess_a"}, headers=HEADERS)
-    assert first.status_code == 200
-    second = client.post("/run", json={**body, "sessionId": "hsess_b"}, headers=HEADERS)
-    assert second.status_code == 429
-    assert second.json()["haasError"]["code"] == "haas_quota_exceeded"
+    for index in range(3):
+        resp = client.post(
+            "/run", json={**body, "sessionId": f"hsess_q{index}"}, headers=HEADERS
+        )
+        assert resp.status_code == 200, f"run {index} should not leak admission quota"

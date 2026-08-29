@@ -5,6 +5,7 @@ domain interfaces and are introduced in later stages.
 """
 from haas.stores.memory import (
     CanonicalEventRecord,
+    CursorNotFoundError,
     HarnessRecord,
     IdempotencyConflictError,
     IdempotencyReservation,
@@ -18,6 +19,7 @@ from haas.stores.memory import (
 
 __all__ = [
     "CanonicalEventRecord",
+    "CursorNotFoundError",
     "HarnessRecord",
     "IdempotencyConflictError",
     "IdempotencyReservation",

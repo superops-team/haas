@@ -1,8 +1,11 @@
 """HaaS HTTP/SSE API: ADK-compatible surface + HaaS native health/ready."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -22,13 +25,14 @@ from haas.identity import (
 )
 from haas.registry import AppNotFoundError, HarnessRegistry, seed_codex
 from haas.sessions import (
+    AdapterTurnError,
     InvocationNotFoundError,
     RunRequest,
     SessionBusyError,
     SessionNotFoundError,
     SessionRuntime,
 )
-from haas.stores import IdempotencyConflictError, MemoryStore
+from haas.stores import CursorNotFoundError, IdempotencyConflictError, MemoryStore
 
 DEFAULT_TOKEN = "dev-token"
 
@@ -112,7 +116,7 @@ def build_app(
                     "param": None,
                     "safeReason": exc.safe_reason,
                     "retryable": exc.retryable,
-                    "traceId": f"tr_{_hash(exc.code)[:16]}",
+                    "traceId": f"tr_{uuid.uuid4().hex[:16]}",
                 },
             },
         )
@@ -178,7 +182,11 @@ def build_app(
         principal = await _authenticate(runtime.identity, request)
         _ensure_owns(runtime.identity, principal, user_id)
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HaasError(400, "invalid_request_error", "invalid_input")
         delta = body.get("stateDelta", {})
+        if not isinstance(delta, dict):
+            raise HaasError(400, "invalid_request_error", "invalid_input")
         try:
             session = runtime.sessions.apply_state_delta(app_name, user_id, session_id, delta)
         except SessionNotFoundError as exc:
@@ -223,7 +231,12 @@ def build_app(
         session_id: str, request: Request, after_event_id: str | None = None
     ) -> StreamingResponse:
         await _authenticate(runtime.identity, request)
-        events = runtime.event_log.read_session(session_id, after_event_id)
+        try:
+            events = runtime.event_log.read_session(session_id, after_event_id)
+        except CursorNotFoundError as exc:
+            raise HaasError(
+                410, "invalid_request_error", "haas_offset_expired"
+            ) from exc
 
         async def frames() -> Any:
             for event in events:
@@ -267,11 +280,20 @@ def _ensure_owns(identity: IdentityProvider, principal: Principal, user_id: str)
 async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
     principal = await _authenticate(runtime.identity, request)
     body = await request.json()
+    if not isinstance(body, dict):
+        raise HaasError(400, "invalid_request_error", "invalid_input")
     app_name = body.get("appName")
     user_id = body.get("userId")
     session_id = body.get("sessionId")
     new_message = body.get("newMessage", {})
-    if not app_name or not user_id:
+    if (
+        not isinstance(app_name, str)
+        or not isinstance(user_id, str)
+        or not app_name
+        or not user_id
+        or (session_id is not None and not isinstance(session_id, str))
+        or not isinstance(new_message, dict)
+    ):
         raise HaasError(400, "invalid_request_error", "invalid_input")
 
     _ensure_owns(runtime.identity, principal, user_id)
@@ -281,11 +303,43 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
     except AppNotFoundError as exc:
         raise HaasError(404, "invalid_request_error", "app_not_found") from exc
 
+    # Idempotency-Key reservation happens before admission (spec: haas-protocol §7).
+    idempotency_key = request.headers.get("Idempotency-Key")
+    key_hash: str | None = None
+    if idempotency_key:
+        key_hash = _hash(idempotency_key)
+        request_hash = _hash(json.dumps(body, sort_keys=True, default=str))
+        try:
+            reservation = runtime.store.reserve(key_hash, request_hash)
+        except IdempotencyConflictError as exc:
+            raise HaasError(
+                409, "invalid_request_error", "haas_idempotency_conflict"
+            ) from exc
+        attempts = 0
+        while reservation.replay:
+            result = reservation.result
+            if result is None:
+                result = await _wait_for_idempotency(runtime.store, key_hash)
+            if result is not None:
+                return _render_cached(result, streaming=streaming)
+            # Previous holder released without completing -> take ownership.
+            attempts += 1
+            if attempts >= 8:
+                raise HaasError(409, "invalid_request_error", "session_busy", retryable=True)
+            try:
+                reservation = runtime.store.reserve(key_hash, request_hash)
+            except IdempotencyConflictError as exc:
+                raise HaasError(
+                    409, "invalid_request_error", "haas_idempotency_conflict"
+                ) from exc
+
     admission = runtime.admission.admit_run(
         AdmissionInput(principalHash=principal.principalId, appName=app.id,
                        tenantId=principal.tenantId, workspaceId=principal.workspaceId)
     )
     if not admission.allowed:
+        if key_hash:
+            runtime.store.release(key_hash)
         code = admission.code or "haas_rate_limited"
         retryable = code in {"haas_rate_limited", "haas_quota_exceeded", "haas_queue_full"}
         raise HaasError(
@@ -293,43 +347,63 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             "invalid_request_error", code, admission.safeReason, retryable,
         )
 
-    idempotency_key = request.headers.get("Idempotency-Key")
-    cached = None
-    if idempotency_key:
-        key_hash = _hash(idempotency_key)
-        request_hash = _hash(json.dumps(body, sort_keys=True, default=str))
+    lease_id = admission.leaseId
+    req = RunRequest(
+        app=app, user_id=user_id, session_id=session_id, message=new_message
+    )
+    try:
         try:
-            reservation = runtime.store.reserve(key_hash, request_hash)
-            if reservation.replay:
-                cached = runtime.store.replay(key_hash)
-        except IdempotencyConflictError as exc:
+            result = await runtime.sessions.run(req)
+        except SessionBusyError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
             raise HaasError(
-                409, "invalid_request_error", "haas_idempotency_conflict"
+                409, "invalid_request_error", "session_busy", retryable=True
+            ) from exc
+        except AdapterTurnError as exc:
+            if key_hash:
+                events = [
+                    runtime.event_log.project_adk(e)
+                    for e in runtime.event_log.read_invocation(exc.invocation_id)
+                ]
+                runtime.store.complete(key_hash, {"events": events})
+            raise HaasError(
+                502, "invalid_request_error", "haas_adapter_error", retryable=True
             ) from exc
 
-    if cached is not None:
-        return _render_cached(cached, streaming=streaming)
+        adk_events = [runtime.event_log.project_adk(e) for e in result.events]
+        if key_hash:
+            runtime.store.complete(key_hash, {"events": adk_events})
 
-    req = RunRequest(app=app, user_id=user_id, session_id=session_id, message=new_message)
-    try:
-        result = await runtime.sessions.run(req)
-    except SessionBusyError as exc:
-        raise HaasError(409, "invalid_request_error", "session_busy", retryable=True) from exc
+        if not streaming:
+            return adk_events
 
-    adk_events = [runtime.event_log.project_adk(e) for e in result.events]
+        async def frames() -> Any:
+            for event in adk_events:
+                yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+            yield ": keep-alive\n\n"
 
-    if idempotency_key:
-        runtime.store.complete(_hash(idempotency_key), {"events": adk_events})
+        return StreamingResponse(frames(), media_type="text/event-stream")
+    finally:
+        if lease_id:
+            runtime.admission.release_run(lease_id)
 
-    if not streaming:
-        return adk_events
 
-    async def frames() -> Any:
-        for event in adk_events:
-            yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
-        yield ": keep-alive\n\n"
+async def _wait_for_idempotency(
+    store: MemoryStore, key_hash: str, timeout_s: float = 30.0
+) -> Any | None:
+    """Wait for an in-flight idempotency reservation to reach a result.
 
-    return StreamingResponse(frames(), media_type="text/event-stream")
+    Returns the first request's result once available; returns None if the
+    holder released the reservation without completing (pre-execution failure),
+    so the caller can take ownership and execute.
+    """
+    deadline = time.monotonic() + timeout_s
+    while store.is_pending(key_hash):
+        if time.monotonic() > deadline:
+            raise HaasError(409, "invalid_request_error", "session_busy", retryable=True)
+        await asyncio.sleep(0.01)
+    return store.replay(key_hash)
 
 
 def _render_cached(cached: Any, *, streaming: bool) -> Any:

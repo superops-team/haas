@@ -1,6 +1,7 @@
 """Contract tests for the in-memory Stores backend (specs/stores/README.md)."""
 from haas.stores.memory import (
     CanonicalEventRecord,
+    CursorNotFoundError,
     HarnessRecord,
     IdempotencyConflictError,
     InvocationRecord,
@@ -82,6 +83,33 @@ def test_idempotency_reserve_replay_conflict_release() -> None:
 
     store.release("khash")
     assert store.replay("khash") is None
+
+
+def test_idempotency_in_flight_pending_tracking() -> None:
+    store = MemoryStore()
+    store.reserve("khash", "rhash")
+    assert store.is_pending("khash") is True
+    assert store.replay("khash") is None  # in-flight: no result yet
+
+    store.complete("khash", {"events": []})
+    assert store.is_pending("khash") is False
+    assert store.replay("khash") == {"events": []}
+
+    store.release("khash")
+    assert store.is_pending("khash") is False
+    assert store.replay("khash") is None
+    # after release, a fresh reservation owns the key again
+    assert store.reserve("khash", "rhash").replay is False
+
+
+def test_session_read_unknown_cursor_raises() -> None:
+    store = MemoryStore()
+    store.append(_event(eventId="evt_0", sequenceNumber=0))
+    try:
+        store.read_session("hsess_1", after_cursor="evt_missing")
+        raise AssertionError("expected CursorNotFoundError")
+    except CursorNotFoundError:
+        pass
 
 
 def test_lease_acquire_and_conflict() -> None:
