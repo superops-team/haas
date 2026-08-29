@@ -3,7 +3,7 @@ UV := uv
 
 # HaaS 开发与提交门禁。运行时阶段的 lint/type/test 目标随 S1 骨架补齐；
 # integration/e2e 在 S2/S3 具备运行链路后再提供。
-.PHONY: help setup install-hooks pre-commit secret-scan fmt lint type test-fast test-affected
+.PHONY: help setup install-hooks pre-commit secret-scan fmt lint type test-fast test-affected docker-check
 
 help:
 	@echo "HaaS 开发与提交门禁："
@@ -16,6 +16,7 @@ help:
 	@echo "  make type           mypy haas"
 	@echo "  make test-fast      pytest 快速离线测试（默认跳过 integration/e2e）"
 	@echo "  make test-affected  按 diff 影响面跑最小测试（S1 暂等价 test-fast）"
+	@echo "  make docker-check  Dockerfile/AIO/health/ready 静态检查（不含实际 build）"
 
 setup:
 	$(UV) venv
@@ -44,3 +45,6 @@ test-fast:
 
 test-affected:
 	$(UV) run pytest -q -m "not integration and not e2e"
+
+docker-check:
+	./scripts/quality/docker-check.sh

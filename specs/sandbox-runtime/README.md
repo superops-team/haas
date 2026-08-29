@@ -93,6 +93,7 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 {
   "base": "codex",
   "cwd": "/workspace",
+  "writableRoots": ["/workspace"],
   "approvalMode": "never",
   "nativeSandbox": {
     "supported": true,
@@ -100,6 +101,8 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
   }
 }
 ```
+
+`compile_sandbox_spec` 首期只消费 `cwd`、`writableRoots`、`approvalMode`；`base` 与 `nativeSandbox` 是 adapter 能力声明，供后续 OpenSandbox 投影（S5.3）使用。
 
 ### 6.3 SandboxHandle
 
@@ -187,5 +190,6 @@ Metrics：
 
 ## 12. 下一步验证
 
-- 确认 OpenSandbox sandbox API 与 execd 的本机可用版本和精确 endpoint（`Unknown`，待实现阶段用 pin commit 验证）。
+- 确认 OpenSandbox sandbox API 与 execd 的本机可用版本和精确 endpoint（`Unknown`，待实现阶段用 pin commit 验证）。首期 `OpenSandboxClient` 假设 REST endpoint 为 `POST/GET/DELETE /sandboxes[/{id}]`、`POST /sandboxes/{id}/exec`、`POST /vault/secrets`，并作为类常量暴露以便探测后修正。
 - 确认 Codex app-server 进程能稳定在 OpenSandbox sandbox 内以非 root 运行并点对点联通 loopback model/MCP proxy。
+- 真实 OpenSandbox 探测用显式开关 `HAAS_E2E_OPEN_SANDBOX=1`；未开开关时 OpenSandbox client 测试为 offline mock（`httpx.MockTransport`）。

@@ -125,12 +125,38 @@ def build_app(
     async def health() -> dict[str, Any]:
         return {"data": {"status": "ok"}, "traceId": "tr_local"}
 
+    probe_cache: dict[str, Any] = {"result": None, "at": 0.0}
+
+    async def _execution_ready() -> tuple[str, str | None]:
+        now = time.monotonic()
+        if probe_cache["result"] is None or now - probe_cache["at"] > 30.0:
+            try:
+                probe_cache["result"] = await adapter.probe()
+            except Exception as exc:  # noqa: BLE001 - readiness must not raise
+                probe_cache["result"] = None
+                return "not_ready", str(exc)
+            probe_cache["at"] = now
+        probe = probe_cache["result"]
+        if probe is not None and getattr(probe, "status", "") == "ready":
+            return "ready", None
+        reason = None
+        if probe is not None:
+            details = getattr(probe, "safeDetails", {}) or {}
+            reason = details.get("safeReason") or "adapter_not_ready"
+        return "not_ready", reason
+
     @app.get("/v1/haas/ready")
     async def ready(scope: str = "control") -> dict[str, Any]:
         if scope == "control":
             return {"data": {"status": "ready", "scope": scope}, "traceId": "tr_local"}
+        if scope == "execution":
+            status, reason = await _execution_ready()
+            payload: dict[str, Any] = {"status": status, "scope": scope}
+            if reason is not None:
+                payload["reason"] = reason
+            return {"data": payload, "traceId": "tr_local"}
         return {
-            "data": {"status": "not_ready", "scope": scope, "reason": "not_implemented"},
+            "data": {"status": "not_ready", "scope": scope, "reason": "unknown_scope"},
             "traceId": "tr_local",
         }
 

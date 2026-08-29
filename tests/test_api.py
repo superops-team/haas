@@ -25,7 +25,8 @@ def test_c1_health_ready() -> None:
     client = make_client()
     assert client.get("/v1/haas/health").json()["data"]["status"] == "ok"
     assert client.get("/v1/haas/ready?scope=control").json()["data"]["status"] == "ready"
-    assert client.get("/v1/haas/ready?scope=execution").json()["data"]["status"] == "not_ready"
+    # execution readiness now reflects adapter.probe(); FakeAdapter is always ready
+    assert client.get("/v1/haas/ready?scope=execution").json()["data"]["status"] == "ready"
 
 
 def test_c2_list_apps_requires_auth() -> None:

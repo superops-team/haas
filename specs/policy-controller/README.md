@@ -92,7 +92,31 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
 }
 ```
 
+### 6.1.1 PolicyCompileInput 与 PolicyLayer
+
+```json
+{
+  "scope": {"tenantId": "tenant_1", "workspaceId": "workspace_1", "harnessId": "chrn_codex_default", "sessionId": "hsess_abc"},
+  "layers": [
+    {
+      "name": "tenant",
+      "workspace": {"mode": "workspace-write", "root": "/workspace", "writableRoots": ["/workspace"]},
+      "network": {"defaultAction": "deny", "allow": ["https://api.openai.com"]},
+      "tools": {"disabled": ["web_search"], "approvalMode": "never"},
+      "model": {"allowedModels": ["gpt-5.6-terra"], "fallbackModel": "gpt-5.6-terra"},
+      "delegation": false
+    }
+  ]
+}
+```
+
+- `layers` 从宽到窄排列（platform/tenant → workspace → harness → session → turn）。
+- 每层的字段 `null` 表示该层不覆盖该维度，合并时跳过。
+- `delegation: true` 表示该层显式授予其下所有层放宽该层约束的权利；未授予时，下层任何放宽都 fail closed（`PolicyWideningRejected`）。
+- 合并规则：workspace mode 只能向更严格方向（`danger-full-access` → `workspace-write` → `read-only`）；writableRoots / network.allow / model.allowedModels 只能收窄；tools.disabled 只能增加；approvalMode 只能向更严格方向（`always` → `on-request` → `never`）。
+
 ### 6.2 PolicyDecision
+
 
 ```json
 {

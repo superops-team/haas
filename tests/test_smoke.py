@@ -29,7 +29,8 @@ def test_ready_distinguishes_health_from_ready() -> None:
 
     execution = client.get("/v1/haas/ready?scope=execution")
     assert execution.status_code == 200
-    assert execution.json()["data"]["status"] == "not_ready"
+    # FakeAdapter probes ready; a real adapter would report its own readiness.
+    assert execution.json()["data"]["status"] == "ready"
 
 
 def test_adk_health_ready_aliases() -> None:
