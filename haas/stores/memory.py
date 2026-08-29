@@ -21,6 +21,18 @@ def _now_ms() -> int:
 
 
 @dataclass
+class ProviderConfig:
+    """Model provider route configuration (specs/harness-registry §6.1)."""
+
+    name: str = "openai-compatible"
+    baseUrl: str = ""
+    wireApi: str = "responses"
+    credentialRef: str = ""
+    credentialFingerprint: str = ""
+    allowlistRuleId: str = ""
+
+
+@dataclass
 class HarnessRecord:
     id: str
     name: str
@@ -28,6 +40,7 @@ class HarnessRecord:
     status: str = "active"
     defaultModel: str | None = None
     systemPrompt: str = ""
+    provider: ProviderConfig | None = None
     schemaVersion: int = 1
     createdAtMs: int = field(default_factory=_now_ms)
     updatedAtMs: int = field(default_factory=_now_ms)

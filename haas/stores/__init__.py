@@ -13,6 +13,7 @@ from haas.stores.memory import (
     Lease,
     LeaseConflictError,
     MemoryStore,
+    ProviderConfig,
     SessionRecord,
     TurnRecord,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "Lease",
     "LeaseConflictError",
     "MemoryStore",
+    "ProviderConfig",
     "SessionRecord",
     "TurnRecord",
 ]
