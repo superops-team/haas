@@ -178,6 +178,10 @@ class MemoryStore:
     def delete_session(self, key: SessionKey) -> None:
         self._sessions.pop(key, None)
 
+    def count_sessions(self) -> int:
+        """Low-cardinality aggregate for observability status only."""
+        return len(self._sessions)
+
     def put_invocation(self, invocation: InvocationRecord) -> InvocationRecord:
         self._invocations[invocation.id] = invocation
         return invocation

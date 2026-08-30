@@ -3,16 +3,24 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, File, Request, UploadFile
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from haas.admission import AdmissionControl, AdmissionInput
+from haas.artifacts import (
+    ArtifactNotFoundError,
+    ArtifactPathRejected,
+    ArtifactPolicy,
+    ArtifactStore,
+)
 from haas.config import AppConfig
 from haas.events import HEARTBEAT_FRAME, EventLog
 from haas.harnesses import FakeAdapter, HarnessAdapter
@@ -23,6 +31,7 @@ from haas.identity import (
     Principal,
     StaticTokenIdentityProvider,
 )
+from haas.observability import Metrics, StatusSnapshot, StructuredLogger
 from haas.registry import AppNotFoundError, HarnessRegistry, seed_codex
 from haas.sessions import (
     AdapterTurnError,
@@ -67,6 +76,9 @@ class _Runtime:
     identity: IdentityProvider
     sessions: SessionRuntime
     adapter: HarnessAdapter
+    artifacts: ArtifactStore
+    metrics: Metrics
+    logger: StructuredLogger
 
 
 def build_app(
@@ -76,6 +88,7 @@ def build_app(
     identity_tokens: dict[str, Principal] | None = None,
     run_quota: int = 20,
     rate_limit: int = 100,
+    max_file_bytes: int | None = None,
 ) -> FastAPI:
     config = config if config is not None else AppConfig()
     store = MemoryStore()
@@ -90,6 +103,9 @@ def build_app(
     sessions = SessionRuntime(
         store=store, registry=registry, adapter=adapter, event_log=event_log
     )
+    artifact_policy = ArtifactPolicy()
+    if max_file_bytes is not None:
+        artifact_policy.maxFileBytes = max_file_bytes
     runtime = _Runtime(
         store=store,
         registry=registry,
@@ -98,6 +114,9 @@ def build_app(
         identity=identity,
         sessions=sessions,
         adapter=adapter,
+        artifacts=ArtifactStore(artifact_policy),
+        metrics=Metrics(),
+        logger=StructuredLogger(),
     )
 
     app = FastAPI(title="Harness As A Service", version="2026-08-26")
@@ -284,6 +303,167 @@ def build_app(
             yield HEARTBEAT_FRAME
 
         return StreamingResponse(frames(), media_type="text/event-stream")
+
+    # --- Observability: status / diagnostics (specs/observability §5.1) ----
+
+    started_at = time.monotonic()
+
+    @app.get("/v1/haas/status")
+    async def status(request: Request) -> dict[str, Any]:
+        await _authenticate(runtime.identity, request)
+        exec_status, exec_reason = await _execution_ready()
+        snapshot = StatusSnapshot(
+            status="ok" if exec_status == "ready" else "degraded",
+            adapterStatus={runtime.adapter.adapter_id: exec_status},
+            activeSessions=runtime.store.count_sessions(),
+            checks={"control": "passed", "execution": exec_status},
+        )
+        data = snapshot.to_dict()
+        data["uptimeSeconds"] = int(time.monotonic() - started_at)
+        data["protocol"] = {
+            "haasVersion": "2026-08-26",
+            "adkProtocol": "2.0",
+            "capability": "run/run_sse/sessions",
+        }
+        data["adapters"] = [
+            {"adapterId": runtime.adapter.adapter_id,
+             "base": runtime.adapter.base,
+             "status": exec_status}
+        ]
+        data["lastErrorSafeReason"] = exec_reason
+        return {"data": data, "traceId": f"tr_{uuid.uuid4().hex[:16]}"}
+
+    @app.get("/v1/haas/diagnostics")
+    async def diagnostics(request: Request) -> dict[str, Any]:
+        await _authenticate(runtime.identity, request)
+        # Diagnostics are routed through the structured logger so the shared
+        # redaction table applies before anything leaves the process.
+        payload = runtime.logger.event(
+            "haas.diagnostics",
+            {
+                "adapterBase": runtime.adapter.base,
+                "adapterId": runtime.adapter.adapter_id,
+                "storeBackend": config.store.backend,
+                "identityProvider": config.identity.provider,
+                "metrics": runtime.metrics.snapshot(),
+                "sessionCount": runtime.store.count_sessions(),
+                "harnessCount": len(runtime.store.list_harnesses()),
+            },
+        )
+        payload["partial"] = False
+        return {"data": payload, "traceId": f"tr_{uuid.uuid4().hex[:16]}"}
+
+    # --- Artifact Store (specs/artifact-store §5.1) -----------------------
+
+    @app.post("/v1/haas/files")
+    async def upload_file(
+        request: Request,
+        file: Annotated[UploadFile, File()],
+        purpose: str = "user_data",
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        content = await file.read()
+        policy = runtime.artifacts.policy
+        if len(content) > policy.maxFileBytes:
+            raise HaasError(413, "invalid_request_error", "haas_file_too_large")
+        filename = file.filename or ""
+        try:
+            record = runtime.artifacts.register(
+                session_id="",
+                relative_path=filename,
+                content=content,
+                owner_principal_id=principal.principalId,
+            )
+        except ArtifactPathRejected as exc:
+            if "too_large" in str(exc):
+                raise HaasError(
+                    413, "invalid_request_error", "haas_file_too_large"
+                ) from exc
+            raise HaasError(400, "invalid_request_error", "invalid_input") from exc
+        runtime.metrics.incr("haas_file_upload_total")
+        record.mediaType = file.content_type or record.mediaType
+        return {"data": record.to_dict(), "traceId": f"tr_{uuid.uuid4().hex[:16]}"}
+
+    @app.get("/v1/haas/files/{file_id}/content")
+    async def download_file(file_id: str, request: Request) -> Response:
+        principal = await _authenticate(runtime.identity, request)
+        try:
+            record = runtime.artifacts.get(
+                file_id, owner_principal_id=principal.principalId
+            )
+            content = runtime.artifacts.read_content(
+                file_id, owner_principal_id=principal.principalId
+            )
+        except ArtifactNotFoundError as exc:
+            raise HaasError(404, "invalid_request_error", "haas_file_not_found") from exc
+        runtime.metrics.incr("haas_artifact_download_total")
+        return Response(
+            content=content,
+            media_type=record.mediaType,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                # Active content (HTML/JS/SVG) must never render inline
+                # from this origin (specs/security-boundary §8.4).
+                "Content-Disposition": f'attachment; filename="{record.filename}"',
+            },
+        )
+
+    @app.get("/v1/haas/files/{file_id}/pdf")
+    async def preview_file_pdf(file_id: str, request: Request) -> Response:
+        principal = await _authenticate(runtime.identity, request)
+        try:
+            runtime.artifacts.get(file_id, owner_principal_id=principal.principalId)
+        except ArtifactNotFoundError as exc:
+            raise HaasError(404, "invalid_request_error", "haas_file_not_found") from exc
+        raise HaasError(501, "invalid_request_error", "haas_preview_unavailable")
+
+    @app.get("/v1/haas/sessions/{session_id}/artifacts")
+    async def list_session_artifacts(
+        session_id: str, request: Request
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        records = runtime.artifacts.list(
+            session_id, owner_principal_id=principal.principalId
+        )
+        return {
+            "data": {"artifacts": [r.to_dict() for r in records]},
+            "traceId": f"tr_{uuid.uuid4().hex[:16]}",
+        }
+
+    @app.get("/v1/haas/sessions/{session_id}/artifacts/archive")
+    async def download_session_archive(session_id: str, request: Request) -> Response:
+        principal = await _authenticate(runtime.identity, request)
+        records = runtime.artifacts.list(
+            session_id, owner_principal_id=principal.principalId
+        )
+        if not records:
+            raise HaasError(404, "invalid_request_error", "haas_file_not_found")
+        buffer = io.BytesIO()
+        try:
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                for record in records:
+                    try:
+                        content = runtime.artifacts.read_content(
+                            record.id, owner_principal_id=principal.principalId
+                        )
+                    except ArtifactNotFoundError:
+                        # Container-only record: skip rather than fail the
+                        # whole archive (specs/artifact-store §6.1.1).
+                        continue
+                    archive.writestr(record.relativePath, content)
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise HaasError(
+                500, "invalid_request_error", "haas_archive_failed", retryable=True
+            ) from exc
+        runtime.metrics.incr("haas_artifact_archive_built_total")
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/zip",
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": f'attachment; filename="{session_id}-artifacts.zip"',
+            },
+        )
 
     return app
 

@@ -1,7 +1,7 @@
 # Artifact Store 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Container Runtime](../container-runtime/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. 组件定位
@@ -93,6 +93,31 @@ async def build_archive(session_id: str, ctx: RequestContext) -> ArchiveStream: 
 }
 ```
 
+`object` 恒为字面量 `"file"`（OpenAPI `File` schema required + const）。序列化层
+必须显式输出该字段；内部 dataclass 不把它作为可变状态。
+
+### 6.1.1 内容存储边界（S6）
+
+`FileRecord` 是 metadata。原始 bytes 的存放位置按来源区分：
+
+| 来源 | 内容位置 | 读取方式 |
+|------|----------|----------|
+| `POST /v1/haas/files` 上传 | Artifact Store 自持 content store（S6 为进程内，后续可换 Drive/OSS 后端） | 直接按 `file_id` 读回 |
+| harness 产出（scan/register） | session container workspace | 经 Container Runtime 按 `relativePath` 读取 |
+
+S6 只实现上传态内容的回读与归档；container 内容读取在 S5 sandbox 投影可用后
+接入。`GET /v1/haas/files/{id}/content` 命中无内容可回读的 record 时返回
+`404 haas_file_not_found`，不得返回空 body 伪装成功。
+
+### 6.1.2 Principal Scope（S6）
+
+`FileRecord` 必须携带归属 principal（`ownerPrincipalId`），与 Security Boundary
+§8.3 一致：
+
+- 上传时记录调用方 principal。
+- `list` / `get` / `content` / `archive` 必须按 principal 过滤。
+- 跨 principal 访问返回 `404 haas_file_not_found`，不返回 403，避免存在性泄漏。
+
 ### 6.2 ArtifactPolicy
 
 ```json
@@ -161,6 +186,8 @@ Metrics:
 | scan exceeds max files | fail closed for publish; response still may complete with artifact summary marked truncated |
 | archive build fails | `500 haas_archive_failed` with safe reason |
 | preview unsupported | `501 haas_preview_unavailable` |
+| content not readable back (container-only record) | `404 haas_file_not_found` |
+| cross-principal access | `404 haas_file_not_found`（不返回 403） |
 
 ## 11. 测试计划与验收
 

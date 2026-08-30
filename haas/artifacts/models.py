@@ -15,6 +15,22 @@ class FileRecord:
     sha256: str = ""
     invocationId: str = ""
     createdAtMs: int = 0
+    ownerPrincipalId: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize to the OpenAPI `File` shape (object is a required const)."""
+        return {
+            "id": self.id,
+            "object": "file",
+            "sessionId": self.sessionId,
+            "invocationId": self.invocationId,
+            "filename": self.filename,
+            "relativePath": self.relativePath,
+            "bytes": self.bytes,
+            "mediaType": self.mediaType,
+            "sha256": self.sha256,
+            "createdAtMs": self.createdAtMs,
+        }
 
 
 @dataclass

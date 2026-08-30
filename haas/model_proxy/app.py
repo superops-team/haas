@@ -12,7 +12,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from haas.model_proxy.proxy import ModelProxy, ModelProxyError
-from haas.model_proxy.route import resolve_model_route
+from haas.model_proxy.route import ModelRouteError, resolve_model_route
+from haas.model_proxy.secret import SecretResolutionError
 from haas.policy import EffectivePolicy
 from haas.registry import HarnessRegistry
 from haas.stores import HarnessRecord
@@ -68,6 +69,17 @@ class ProxyApp:
             return data
         except ModelProxyError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
+        except ModelRouteError:
+            # No usable provider route: fail closed with a safe reason rather
+            # than leaking a traceback as a bare 500 (spec §10).
+            return JSONResponse(
+                status_code=502, content={"error": "haas_provider_error"}
+            )
+        except SecretResolutionError:
+            # Never echo the credential ref back to the harness.
+            return JSONResponse(
+                status_code=502, content={"error": "haas_provider_error"}
+            )
 
     async def _handle_chat(self, request: Request, body: dict[str, Any]) -> Any:
         # Chat Completions shape is normalized through the same relay in a
