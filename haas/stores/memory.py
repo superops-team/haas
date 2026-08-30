@@ -203,6 +203,22 @@ class MemoryStore:
         """Low-cardinality aggregate for observability status only."""
         return len(self._sessions)
 
+    def list_sessions(
+        self, *, app_name: str | None = None, user_ids: frozenset[str] | None = None
+    ) -> list[SessionRecord]:
+        """List sessions, newest first, optionally filtered by app and users.
+
+        Ordering is stable (createdAtMs then id) so cursor pagination cannot
+        skip or repeat entries between pages.
+        """
+        records = list(self._sessions.values())
+        if app_name is not None:
+            records = [r for r in records if r.appName == app_name]
+        if user_ids is not None:
+            records = [r for r in records if r.userId in user_ids]
+        records.sort(key=lambda r: (r.createdAtMs, r.id), reverse=True)
+        return records
+
     def put_invocation(self, invocation: InvocationRecord) -> InvocationRecord:
         self._invocations[invocation.id] = invocation
         return invocation

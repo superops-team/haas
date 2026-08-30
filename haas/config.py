@@ -49,6 +49,9 @@ class CodexAdapterConfig:
 
 @dataclass
 class AdaptersConfig:
+    # Which harness base the production entrypoint assembles. `fake` is for
+    # local development and tests only (specs/config 5.1).
+    default_base: str = "codex"
     codex: CodexAdapterConfig = field(default_factory=CodexAdapterConfig)
 
 
@@ -89,6 +92,8 @@ def load_config(path: str | None = None) -> AppConfig:
         cfg.store.backend = os.environ["HAAS_STORE_BACKEND"]
     if os.environ.get("HAAS_IDENTITY_PROVIDER"):
         cfg.identity.provider = os.environ["HAAS_IDENTITY_PROVIDER"]
+    if os.environ.get("HAAS_ADAPTER_BASE"):
+        cfg.adapters.default_base = os.environ["HAAS_ADAPTER_BASE"]
 
     return cfg
 
@@ -126,6 +131,8 @@ def _overlay_file(cfg: AppConfig, path: str) -> None:
         cfg.mcp_proxy.listen = str(mcp_proxy["listen"])
 
     adapters = data.get("adapters") or {}
+    if isinstance(adapters, dict) and "default_base" in adapters:
+        cfg.adapters.default_base = str(adapters["default_base"])
     codex = (adapters or {}).get("codex") or {}
     if isinstance(codex, dict):
         if "transport" in codex:
@@ -150,4 +157,34 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     from haas.api import build_app
 
     config = config if config is not None else load_config()
-    return build_app(config)
+    return build_app(config, adapter=build_adapter(config))
+
+
+def build_adapter(config: AppConfig) -> Any:
+    """Assemble the harness adapter named by `adapters.default_base`.
+
+    Assembly only builds connection configuration; it never dials the harness,
+    so the process still starts when Codex is down. Execution readiness is
+    reported honestly by /v1/haas/ready?scope=execution (specs/config 5.1).
+    """
+    base = config.adapters.default_base
+    if base == "fake":
+        from haas.harnesses import FakeAdapter
+
+        return FakeAdapter()
+    if base == "codex":
+        from haas.harnesses.codex_app_server import CodexAdapter
+        from haas.harnesses.codex_app_server.transport import CodexEndpoint
+
+        codex = config.adapters.codex
+        transport = codex.transport
+        if transport in {"unix_websocket", "unix"}:
+            listen_url = f"unix://{codex.socket_path}"
+        elif transport == "stdio":
+            listen_url = "stdio://"
+        else:
+            listen_url = codex.socket_path
+        return CodexAdapter(
+            CodexEndpoint(transport=transport, listen_url=listen_url)
+        )
+    raise ValueError(f"unsupported adapters.default_base: {base}")

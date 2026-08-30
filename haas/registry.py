@@ -43,6 +43,58 @@ class ImmutableFieldError(Exception):
     """PUT tried to change an immutable field (400 invalid_input)."""
 
 
+class SkillBundleInvalidError(Exception):
+    """Skill bundle failed validation (422 haas_skill_source_invalid)."""
+
+
+def validate_skills(skills: list[Any]) -> list[dict[str, Any]]:
+    """Validate skill bundles (specs/mcp-tool-skill-runtime §8/§10).
+
+    Rules: paths stay inside the skill root, no absolute paths, no `..`
+    segments, no control characters, and an enabled bundle must ship SKILL.md.
+    """
+    validated: list[dict[str, Any]] = []
+    for bundle in skills:
+        if not isinstance(bundle, dict):
+            raise SkillBundleInvalidError("skill bundle must be an object")
+        files = bundle.get("files")
+        if not isinstance(files, list):
+            raise SkillBundleInvalidError("skill bundle requires files[]")
+
+        paths: list[str] = []
+        for entry in files:
+            if not isinstance(entry, dict):
+                raise SkillBundleInvalidError("skill file must be an object")
+            path = entry.get("path")
+            if not isinstance(path, str) or not path:
+                raise SkillBundleInvalidError("skill file requires a path")
+            _validate_skill_path(path)
+            paths.append(path)
+
+        # `enabled` defaults to True: an unspecified bundle is still usable.
+        if bundle.get("enabled", True) and "SKILL.md" not in paths:
+            raise SkillBundleInvalidError("enabled skill bundle requires SKILL.md")
+        validated.append(dict(bundle))
+    return validated
+
+
+def _validate_skill_path(path: str) -> None:
+    import posixpath
+
+    if path.startswith("/") or (len(path) > 1 and path[1] == ":"):
+        raise SkillBundleInvalidError("absolute skill path")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+        raise SkillBundleInvalidError("control character in skill path")
+    if "\\" in path:
+        raise SkillBundleInvalidError("backslash in skill path")
+    # normpath collapses `a/../b`; anything still escaping is rejected.
+    normalized = posixpath.normpath(path)
+    if normalized.startswith("../") or normalized in {"..", "."}:
+        raise SkillBundleInvalidError("skill path escapes bundle root")
+    if any(segment == ".." for segment in path.split("/")):
+        raise SkillBundleInvalidError("skill path contains a parent segment")
+
+
 def account_of(principal: Principal) -> AccountKey:
     return (principal.tenantId, principal.workspaceId)
 
@@ -180,11 +232,14 @@ def _mutable_fields(body: dict[str, Any]) -> dict[str, Any]:
     for name in ("mcpServers", "skills"):
         if name in body:
             value = body[name]
-            fields[name] = (
+            items = (
                 [dict(item) for item in value if isinstance(item, dict)]
                 if isinstance(value, list)
                 else []
             )
+            # Skill bundles are validated before they can reach a stored
+            # harness (specs/mcp-tool-skill-runtime §8/§10).
+            fields[name] = validate_skills(items) if name == "skills" else items
     if "disabledTools" in body:
         value = body["disabledTools"]
         fields["disabledTools"] = (

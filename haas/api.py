@@ -37,6 +37,7 @@ from haas.registry import (
     HarnessNotFoundError,
     HarnessRegistry,
     ImmutableFieldError,
+    SkillBundleInvalidError,
     UnsupportedBaseError,
     harness_to_dict,
     seed_codex,
@@ -550,6 +551,12 @@ def build_app(
             raise HaasError(
                 422, "invalid_request_error", "haas_unsupported_base"
             ) from exc
+        except SkillBundleInvalidError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                422, "invalid_request_error", "haas_skill_source_invalid"
+            ) from exc
         except (ValueError, TypeError) as exc:
             if key_hash:
                 runtime.store.release(key_hash)
@@ -591,6 +598,10 @@ def build_app(
             raise HaasError(
                 422, "invalid_request_error", "haas_unsupported_base"
             ) from exc
+        except SkillBundleInvalidError as exc:
+            raise HaasError(
+                422, "invalid_request_error", "haas_skill_source_invalid"
+            ) from exc
         except (ValueError, TypeError) as exc:
             raise HaasError(400, "invalid_request_error", "invalid_input") from exc
         runtime.logger.event("haas.harness.updated", {"id": record.id})
@@ -623,6 +634,89 @@ def build_app(
                 entry["default"] = model
         return {
             "data": {"backends": backends},
+            "traceId": f"tr_{uuid.uuid4().hex[:16]}",
+        }
+
+    @app.get("/v1/haas/harnesses/{harness_id}/skills/{skill_id}/files")
+    async def list_skill_files(
+        harness_id: str, skill_id: str, request: Request
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        try:
+            record = runtime.registry.get_scoped(principal, harness_id)
+        except HarnessNotFoundError as exc:
+            raise HaasError(
+                404, "invalid_request_error", "haas_harness_not_found"
+            ) from exc
+        for bundle in record.skills:
+            if str(bundle.get("id", "")) == skill_id:
+                return {
+                    "data": {
+                        "id": skill_id,
+                        "name": str(bundle.get("name") or skill_id),
+                        "files": list(bundle.get("files") or []),
+                    },
+                    "traceId": f"tr_{uuid.uuid4().hex[:16]}",
+                }
+        raise HaasError(404, "invalid_request_error", "haas_harness_not_found")
+
+    @app.get("/v1/haas/sessions")
+    async def list_sessions(
+        request: Request,
+        limit: int = 20,
+        cursor: str | None = None,
+        app: str | None = None,
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        if limit < 1 or limit > 100:
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+
+        # Scope: only sessions whose harness and user belong to the caller.
+        visible_apps = {h.id for h in runtime.registry.list_active(principal)}
+        if app is not None and app not in visible_apps:
+            return {
+                "data": [],
+                "nextCursor": None,
+                "traceId": f"tr_{uuid.uuid4().hex[:16]}",
+            }
+        records = [
+            r
+            for r in runtime.store.list_sessions(
+                app_name=app, user_ids=principal.userIds
+            )
+            if r.appName in visible_apps
+        ]
+
+        start = 0
+        if cursor:
+            for index, record in enumerate(records):
+                if record.id == cursor:
+                    start = index + 1
+                    break
+            else:
+                # An unknown cursor must fail loudly rather than silently
+                # restarting from page one and duplicating results.
+                raise HaasError(400, "invalid_request_error", "invalid_input")
+
+        page = records[start : start + limit]
+        exhausted = start + limit >= len(records)
+        next_cursor = None if exhausted or not page else page[-1].id
+        return {
+            "data": [
+                {
+                    "id": r.id,
+                    "appName": r.appName,
+                    "userId": r.userId,
+                    "state": r.state,
+                    "events": [
+                        runtime.event_log.project_adk(e)
+                        for e in runtime.event_log.read_session(r.id)
+                    ],
+                    "lastUpdateTime": r.updatedAtMs / 1000.0,
+                }
+                for r in page
+            ],
+            "nextCursor": next_cursor,
             "traceId": f"tr_{uuid.uuid4().hex[:16]}",
         }
 

@@ -21,12 +21,19 @@ RUN pip install uv \
     && uv sync --frozen --no-dev --no-install-project
 
 # --- HaaS source (after dependency layers) ---
+# README.md is required: pyproject declares `readme = "README.md"`, so the
+# project install fails without it.
+COPY README.md ./
 COPY haas ./haas
 RUN uv sync --frozen --no-dev
 
 # --- Runtime layout + entrypoint ---
 # Preserve AIO /opt/gem/run.sh; HaaS entrypoint wraps and delegates to it.
-ENV HAAS_SIDECAR_PORT=8092 \
+# AIO's node22 REPL defaults to 8092, which AGENTS.md reserves for the HaaS
+# sidecar. Move the REPL to 8093 via AIO's own documented override rather than
+# patching the base image.
+ENV NODEJS_REPL_PORT_22=8093 \
+    HAAS_SIDECAR_PORT=8092 \
     HAAS_RUNTIME_ROOT=/tmp/haas \
     HAAS_DATA_ROOT=/data/haas \
     CODEX_HOME=/data/haas/harnesses/codex/home

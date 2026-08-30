@@ -196,6 +196,14 @@ class CodexAdapter:
         except Exception as exc:  # noqa: BLE001
             safe_details["safeReason"] = f"schema_probe_failed: {exc}"
 
+        # The binary being installed does not mean a turn can start: for a
+        # socket transport the app-server endpoint must actually be reachable,
+        # otherwise /ready would claim we can accept sessions that would fail
+        # (specs/container-runtime: /health is liveness, /ready is capacity).
+        endpoint_reason = self._endpoint_unavailable_reason()
+        if endpoint_reason and "safeReason" not in safe_details:
+            safe_details["safeReason"] = endpoint_reason
+
         status = "unavailable" if "safeReason" in safe_details else "ready"
         return AdapterProbe(
             adapterId=self.adapter_id,
@@ -206,6 +214,23 @@ class CodexAdapter:
             capabilities=self._capabilities(),
             safeDetails=safe_details,
         )
+
+    def _endpoint_unavailable_reason(self) -> str | None:
+        """Return a safe reason when the configured transport cannot be used.
+
+        Only the socket path is checked: stdio spawns its own process, and a
+        loopback WebSocket is dialled lazily per turn.
+        """
+        transport = self._endpoint.transport
+        if transport not in {"unix_websocket", "unix"}:
+            return None
+        listen_url = self._endpoint.listen_url or ""
+        path = listen_url[len("unix://"):] if listen_url.startswith("unix://") else ""
+        if not path:
+            return "codex_socket_not_configured"
+        import os
+
+        return None if os.path.exists(path) else "codex_socket_unavailable"
 
     def _capabilities(self) -> dict[str, Any]:
         return {

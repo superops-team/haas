@@ -27,7 +27,11 @@ _MODE_RANK = {
     "workspace-write": 1,
     "danger-full-access": 2,
 }
-_APPROVAL_RANK = {"never": 0, "on-request": 1, "always": 2}
+# Rank = permissiveness, so a LOWER rank is stricter and may always be applied;
+# raising the rank widens the policy and needs delegation. `always` (every tool
+# call needs human approval) is therefore the strictest value, matching
+# _MODE_RANK where the strictest `read-only` is 0.
+_APPROVAL_RANK = {"always": 0, "on-request": 1, "never": 2}
 
 
 class PolicyError(Exception):

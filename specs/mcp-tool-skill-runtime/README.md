@@ -1,7 +1,7 @@
 # MCP / Tool / Skill Runtime 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 Related specs: [Harness Registry](../harness-registry/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. 组件定位
@@ -150,7 +150,13 @@ MCP requiredness:
 
 Skill requiredness:
 
-- Enabled skill missing `SKILL.md` fails config validation.
+- Enabled skill missing `SKILL.md` fails config validation with
+  `422 haas_skill_source_invalid`；skill path 越界（`..`、绝对路径、控制字符）
+  同样返回 `422 haas_skill_source_invalid`，整个 harness 创建/更新不生效。
+- Skill file 内容支持 `content`（文本）或 `contentB64`（二进制），二进制必须
+  byte-for-byte round-trip；读取端点为
+  `GET /v1/haas/harnesses/{harness_id}/skills/{skill_id}/files`，越权与不存在
+  统一返回 404。
 - Runtime materialization failure fails session preparation unless adapter declares skills as advisory-only and the harness config accepts that degradation.
 
 ## 8. 安全与权限

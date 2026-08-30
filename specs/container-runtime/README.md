@@ -1,7 +1,7 @@
 # Container Runtime 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 Related specs: [Security Boundary](../security-boundary/README.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.md), [Observability](../observability/README.md)
 
 ## 1. 组件定位
@@ -39,6 +39,12 @@ Container Runtime 定义 HaaS 镜像、进程拓扑、端口、volume、health/r
 - 保证 AIO 的 sandbox/execd/credential vault 服务可用，供 Sandbox Runtime 使用。
 - 启动 HaaS sidecar、Codex app-server、model proxy、MCP proxy 以及必要 watchdog。
 - 定义 `8080`、`8092`、`18080`、`18081` 端口归属。
+- AIO 基础镜像的 node22 REPL 默认占用 `8092`，与 HaaS sidecar 冲突。必须通过
+  AIO 自身的 `NODEJS_REPL_PORT_22` 覆盖为 `8093`（在 Dockerfile 中设置），
+  不得 fork 或私改 AIO 启动脚本。新增容器内服务前必须先确认端口未被 AIO 占用。
+- Sidecar 是容器存在的理由：entrypoint 必须监控其存活，sidecar 退出时容器以
+  非零码退出，禁止出现「容器 Up 但 API 不可用」的静默失败。AIO/Codex 退出只
+  记录告警，由 `/ready` 如实反映能力降级。
 - 定义 runtime root、workspace root、artifact root、state root 和 socket root。
 - 定义 health/ready/status 的容器语义。
 - 定义 SIGTERM drain：停止接新任务、flush event log、标记 ready=false、取消或落盘 active turn。

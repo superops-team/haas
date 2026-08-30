@@ -52,6 +52,7 @@ Last reviewed: 2026-08-26
 | `haas_secret_input_invalid` | 400 | no | secret_input_invalid | security-boundary |
 | `haas_provider_source_invalid` | 422 | no | provider_source_invalid | harness-registry / security-boundary |
 | `haas_mcp_source_invalid` | 422 | no | mcp_source_invalid | mcp-tool-skill-runtime |
+| `haas_skill_source_invalid` | 422 | no | skill_source_invalid | mcp-tool-skill-runtime（skill path 越界、缺 `SKILL.md`、bundle 非法） |
 
 ## 5. Harness / Adapter
 

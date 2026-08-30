@@ -22,14 +22,18 @@ def test_health_returns_envelope() -> None:
 
 
 def test_ready_distinguishes_health_from_ready() -> None:
-    client = TestClient(create_app(AppConfig()))
+    # create_app now assembles the real Codex adapter by default, so pin the
+    # fake base here to assert the health/ready split itself.
+    config = AppConfig()
+    config.adapters.default_base = "fake"
+    client = TestClient(create_app(config))
     control = client.get("/v1/haas/ready?scope=control")
     assert control.status_code == 200
     assert control.json()["data"]["status"] == "ready"
 
     execution = client.get("/v1/haas/ready?scope=execution")
     assert execution.status_code == 200
-    # FakeAdapter probes ready; a real adapter would report its own readiness.
+    # FakeAdapter probes ready; a real adapter reports its own readiness.
     assert execution.json()["data"]["status"] == "ready"
 
 

@@ -1,7 +1,7 @@
 # Config 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 Related specs: [Container Runtime](../container-runtime/README.md), [Stores](../stores/README.md), [Identity](../identity/README.md), [HaaS Protocol](../haas-protocol/README.md)
 
 ## 1. 组件定位
@@ -58,6 +58,27 @@ def create_app(config: AppConfig | None = None) -> FastAPI: ...
 再装配 app；显式传 `config` 的路径（如测试）跳过加载步骤。
 ```
 
+### 5.1 Adapter 装配契约（S6）
+
+`create_app()` 必须按配置装配真实 harness adapter，不得让生产入口静默落到
+测试用 `FakeAdapter`：
+
+| `adapters.default_base` | 装配结果 |
+|-------------------------|----------|
+| `codex`（默认） | `CodexAdapter`，transport/socket 取自 `adapters.codex` |
+| `fake` | `FakeAdapter`，仅供本地开发与测试 |
+
+环境变量 `HAAS_ADAPTER_BASE` 可覆盖 `default_base`。
+
+装配只建立连接配置，不在启动时强制连通 harness：Codex 未就绪时进程仍需启动，
+由 `/v1/haas/ready?scope=execution` 与 `/v1/haas/status` 如实反映
+`not_ready`（`/health` 仍为 ok）。这样容器可先起来再等 harness 就绪，符合
+[Container Runtime](../container-runtime/README.md) 的 health/ready 分离约定。
+
+| 变量 | 含义 |
+|------|------|
+| `HAAS_ADAPTER_BASE` | 默认 harness base（`codex` / `fake`） |
+
 环境变量前缀统一为 `HAAS_`，例如：
 
 | 变量 | 含义 |
@@ -86,6 +107,7 @@ model_proxy:
 mcp_proxy:
   listen: "127.0.0.1:18081"
 adapters:
+  default_base: codex
   codex:
     transport: unix_websocket
     socket_path: /tmp/haas/codex.sock

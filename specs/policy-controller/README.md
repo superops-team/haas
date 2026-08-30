@@ -1,7 +1,7 @@
 # Policy Controller 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 Related specs: [Security Boundary](../security-boundary/README.md), [Harness Registry](../harness-registry/README.md), [Session Runtime](../session-runtime/README.md)
 
 ## 1. 组件定位
@@ -113,7 +113,7 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
 - `layers` 从宽到窄排列（platform/tenant → workspace → harness → session → turn）。
 - 每层的字段 `null` 表示该层不覆盖该维度，合并时跳过。
 - `delegation: true` 表示该层显式授予其下所有层放宽该层约束的权利；未授予时，下层任何放宽都 fail closed（`PolicyWideningRejected`）。
-- 合并规则：workspace mode 只能向更严格方向（`danger-full-access` → `workspace-write` → `read-only`）；writableRoots / network.allow / model.allowedModels 只能收窄；tools.disabled 只能增加；approvalMode 只能向更严格方向（`always` → `on-request` → `never`）。
+- 合并规则：workspace mode 只能向更严格方向（`danger-full-access` → `workspace-write` → `read-only`）；writableRoots / network.allow / model.allowedModels 只能收窄；tools.disabled 只能增加；approvalMode 只能向更严格方向（`never` → `on-request` → `always`，`always` 表示每次工具调用都需人工批准，最严格）。
 
 ### 6.2 PolicyDecision
 

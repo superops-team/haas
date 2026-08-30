@@ -57,5 +57,18 @@ pids="${pids} ${CODEX_PID}"
 
 echo "==> haas: started (sidecar=${SIDECAR_PID}, codex=${CODEX_PID}, aio=${AIO_PID:-none})"
 
-# Wait for any child to exit; on SIGTERM the trap drains everything.
-wait -n 2>/dev/null || wait
+# The sidecar is the reason this container exists: if it dies (port conflict,
+# crash, bad config) the container must fail loudly instead of staying "Up"
+# with no API. AIO/Codex exits are reported but do not tear the container down.
+while true; do
+  if ! kill -0 "${SIDECAR_PID}" 2>/dev/null; then
+    wait "${SIDECAR_PID}" 2>/dev/null || true
+    echo "==> haas: FATAL sidecar exited; stopping container" >&2
+    exit 1
+  fi
+  if [ -n "${CODEX_PID:-}" ] && ! kill -0 "${CODEX_PID}" 2>/dev/null; then
+    echo "==> haas: warning: codex app-server exited; execution readiness will fail" >&2
+    CODEX_PID=""
+  fi
+  sleep 2
+done
