@@ -24,7 +24,7 @@ help:
 	@echo "  make test-e2e         本机 E2E；需 HAAS_E2E=1 或分项开关，否则相关用例 skip"
 	@echo "  make adk-compat       ADK 2.0 协议兼容性套件（adk 标记）"
 	@echo "  make coverage         覆盖率报告（门禁：核心 >=90%，安全路径 >=95%）"
-	@echo "  make docker-check     Dockerfile/AIO/health/ready 静态检查（不含实际 build）"
+	@echo "  make docker-check     Dockerfile/AIO/health/ready 检查；HAAS_DOCKER_BUILD=1 追加真实 build + 容器 smoke"
 	@echo "  make full-check       完整本机准出：lint + type + 全量测试 + 覆盖率 + docker + secret"
 
 setup:

@@ -15,6 +15,7 @@ from haas.model_proxy.route import normalize_usage
 from haas.model_proxy.secret import SecretResolver
 from haas.model_proxy.token import RuntimeTokenError, RuntimeTokenManager
 from haas.policy import EffectivePolicy, PolicyController, PolicyDecision
+from haas.security.redact import redact
 
 
 class ModelProxyError(Exception):
@@ -64,7 +65,12 @@ class ModelProxy:
             f"{route.baseUrl.rstrip('/')}/responses", json=body, headers=headers
         )
         if resp.status_code >= 400:
-            raise ModelProxyError(f"provider HTTP {resp.status_code}: {resp.text[:200]}")
+            # The provider body may echo our injected Authorization header
+            # or other credentials, and this message reaches callers and
+            # logs, so it is a secret surface (AGENTS.md 铁律 7).
+            raise ModelProxyError(
+                f"provider HTTP {resp.status_code}: {_safe_body(resp.text)}"
+            )
         try:
             data = resp.json()
         except ValueError as exc:
@@ -91,3 +97,17 @@ class ModelProxy:
         decision: PolicyDecision = self._policy.authorize_network(policy, url)
         if not decision.allowed:
             raise ModelProxyError(f"provider_url_not_allowed: {decision.safeReason}")
+
+_MAX_PROVIDER_BODY = 512
+
+
+def _safe_body(text: str) -> str:
+    """Redact and truncate a provider response body for error messages."""
+    if not text:
+        return "<empty>"
+    safe = redact(text)
+    if not isinstance(safe, str):  # pragma: no cover
+        safe = str(safe)
+    if len(safe) > _MAX_PROVIDER_BODY:
+        return safe[:_MAX_PROVIDER_BODY] + "...<truncated>"
+    return safe

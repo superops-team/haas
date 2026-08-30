@@ -1,7 +1,7 @@
 # Security Boundary 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Model Proxy](../model-proxy/README.md), [MCP / Tool / Skill Runtime](../mcp-tool-skill-runtime/README.md), [Container Runtime](../container-runtime/README.md)
 
 ## 1. 组件定位
@@ -189,6 +189,11 @@ pattern 清单（单一事实源，代码侧由同一 fixture 驱动）。
 
 识别失败或上下文不足时 **fail closed**：宁可不写，不写未脱敏内容。`redact()`
 是唯一入口，各组件不得实现私有脱敏逻辑。
+
+**上游响应体同样是不可信来源**：provider / harness / MCP 返回的 body 可能回显
+我们注入的 `Authorization` 或其他凭据，因此在拼进 error message、日志或事件前
+必须经 `redact()` 并截断长度（model proxy 上限 512 字符）。错误信息仍须保留
+状态码等可诊断信息，不得为脱敏而丢失可操作性。
 
 ## 9. 可观测性
 

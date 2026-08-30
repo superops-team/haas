@@ -196,8 +196,12 @@ Logs must go to stdout/stderr or configured log files with redaction.
 ## 11. 测试计划与验收
 
 - Dockerfile lint/static check for base image pin in release mode.
-- Build smoke from current checkout.
-- Container run smoke verifies AIO port `8080` and HaaS port `8092`.
+- Build smoke from current checkout（`HAAS_DOCKER_BUILD=1 make docker-check`）。
+  静态检查不得作为容器变更的唯一证据：曾出现静态全绿但镜像根本无法构建
+  （`pyproject` 声明的 `README.md` 未 COPY）。容器相关变更必须跑 build 层。
+- Container run smoke verifies AIO port `8080` and HaaS port `8092`，并断言
+  `/v1/haas/status` 中装配的是真实 harness adapter（非测试替身），以及
+  sidecar 被杀后容器以非零码退出。AIO 启动慢于 sidecar，就绪判定需轮询。
 - Health/ready tests verify `/health` is not gated by optional warmups.
 - Shutdown test sends SIGTERM and asserts drain events/status.
 - Secret scan verifies build args, env, logs and image metadata do not contain provider credentials.
