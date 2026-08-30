@@ -41,6 +41,10 @@ class StaticTokenIdentityProvider:
     def __init__(self, tokens: dict[str, Principal] | None = None) -> None:
         self._tokens = dict(tokens or {})
 
+    def principals(self) -> list[Principal]:
+        """Configured principals, used to materialize per-scope seed data."""
+        return list(self._tokens.values())
+
     async def authenticate(self, authorization: str | None) -> Principal:
         if not authorization:
             raise MissingCredentialError("missing credential")

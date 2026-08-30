@@ -32,7 +32,15 @@ from haas.identity import (
     StaticTokenIdentityProvider,
 )
 from haas.observability import Metrics, StatusSnapshot, StructuredLogger
-from haas.registry import AppNotFoundError, HarnessRegistry, seed_codex
+from haas.registry import (
+    AppNotFoundError,
+    HarnessNotFoundError,
+    HarnessRegistry,
+    ImmutableFieldError,
+    UnsupportedBaseError,
+    harness_to_dict,
+    seed_codex,
+)
 from haas.sessions import (
     AdapterTurnError,
     InvocationNotFoundError,
@@ -44,6 +52,23 @@ from haas.sessions import (
 from haas.stores import CursorNotFoundError, IdempotencyConflictError, MemoryStore
 
 DEFAULT_TOKEN = "dev-token"
+
+
+def _configured_scopes(identity: IdentityProvider) -> list[tuple[str | None, str | None]]:
+    """Distinct (tenantId, workspaceId) pairs across configured principals.
+
+    Order is preserved so the first scope keeps the stable
+    `chrn_codex_default` id.
+    """
+    principals = getattr(identity, "principals", None)
+    if principals is None:
+        return [(None, None)]
+    scopes: list[tuple[str | None, str | None]] = []
+    for principal in principals():
+        key = (principal.tenantId, principal.workspaceId)
+        if key not in scopes:
+            scopes.append(key)
+    return scopes or [(None, None)]
 
 
 class HaasError(Exception):
@@ -92,14 +117,21 @@ def build_app(
 ) -> FastAPI:
     config = config if config is not None else AppConfig()
     store = MemoryStore()
-    registry = HarnessRegistry(store=store)
-    seed_codex(registry)
-    event_log = EventLog(store=store)
     adapter = adapter or FakeAdapter()
-    admission = AdmissionControl(store=store, run_quota=run_quota, rate_limit=rate_limit)
     identity = StaticTokenIdentityProvider(
         identity_tokens or {DEFAULT_TOKEN: Principal(principalId="p_dev")}
     )
+    registry = HarnessRegistry(
+        store=store,
+        # A base is usable when an adapter backs it (specs/harness-registry
+        # §5.1.2); the assembled adapter is always registered.
+        known_bases=frozenset({"codex", "fake", adapter.base}),
+    )
+    # Seed once per configured principal scope so tenant-bound callers see the
+    # P0 catalog instead of an empty one (specs/harness-registry §5.1.3).
+    seed_codex(registry, scopes=_configured_scopes(identity))
+    event_log = EventLog(store=store)
+    admission = AdmissionControl(store=store, run_quota=run_quota, rate_limit=rate_limit)
     sessions = SessionRuntime(
         store=store, registry=registry, adapter=adapter, event_log=event_log
     )
@@ -464,6 +496,135 @@ def build_app(
                 "Content-Disposition": f'attachment; filename="{session_id}-artifacts.zip"',
             },
         )
+
+    # --- Harness Registry CRUD (specs/harness-registry §5.1) --------------
+
+    def _harness_envelope(record: Any) -> dict[str, Any]:
+        return {
+            "data": harness_to_dict(record),
+            "traceId": f"tr_{uuid.uuid4().hex[:16]}",
+        }
+
+    async def _harness_body(request: Request) -> dict[str, Any]:
+        try:
+            body = await request.json()
+        except (ValueError, TypeError) as exc:
+            raise HaasError(400, "invalid_request_error", "invalid_input") from exc
+        if not isinstance(body, dict):
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+        return body
+
+    @app.get("/v1/haas/harnesses")
+    async def list_harnesses(request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        records = runtime.registry.list_active(principal)
+        return {
+            "data": {"harnesses": [harness_to_dict(r) for r in records]},
+            "traceId": f"tr_{uuid.uuid4().hex[:16]}",
+        }
+
+    @app.post("/v1/haas/harnesses")
+    async def create_harness(request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        body = await _harness_body(request)
+
+        idempotency_key = request.headers.get("Idempotency-Key")
+        key_hash: str | None = None
+        if idempotency_key:
+            key_hash = _hash(idempotency_key)
+            request_hash = _hash(json.dumps(body, sort_keys=True, default=str))
+            try:
+                reservation = runtime.store.reserve(key_hash, request_hash)
+            except IdempotencyConflictError as exc:
+                raise HaasError(
+                    409, "invalid_request_error", "haas_idempotency_conflict"
+                ) from exc
+            if reservation.replay and reservation.result is not None:
+                return dict(reservation.result)
+
+        try:
+            record = runtime.registry.create(principal, body)
+        except UnsupportedBaseError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                422, "invalid_request_error", "haas_unsupported_base"
+            ) from exc
+        except (ValueError, TypeError) as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(400, "invalid_request_error", "invalid_input") from exc
+
+        runtime.logger.event("haas.harness.created", {"id": record.id, "base": record.base})
+        runtime.metrics.incr("haas_harness_created_total")
+        envelope = _harness_envelope(record)
+        if key_hash:
+            runtime.store.complete(key_hash, envelope)
+        return envelope
+
+    @app.get("/v1/haas/harnesses/{harness_id}")
+    async def get_harness(harness_id: str, request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        try:
+            record = runtime.registry.get_scoped(principal, harness_id)
+        except HarnessNotFoundError as exc:
+            raise HaasError(
+                404, "invalid_request_error", "haas_harness_not_found"
+            ) from exc
+        return _harness_envelope(record)
+
+    @app.put("/v1/haas/harnesses/{harness_id}")
+    async def update_harness(harness_id: str, request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        body = await _harness_body(request)
+        try:
+            record = runtime.registry.update(principal, harness_id, body)
+        except HarnessNotFoundError as exc:
+            raise HaasError(
+                404, "invalid_request_error", "haas_harness_not_found"
+            ) from exc
+        except ImmutableFieldError as exc:
+            # Immutable-field conflict is a body validation failure; no new
+            # error code is introduced (specs/harness-registry §5.1.1).
+            raise HaasError(400, "invalid_request_error", "invalid_input") from exc
+        except UnsupportedBaseError as exc:
+            raise HaasError(
+                422, "invalid_request_error", "haas_unsupported_base"
+            ) from exc
+        except (ValueError, TypeError) as exc:
+            raise HaasError(400, "invalid_request_error", "invalid_input") from exc
+        runtime.logger.event("haas.harness.updated", {"id": record.id})
+        return _harness_envelope(record)
+
+    @app.delete("/v1/haas/harnesses/{harness_id}")
+    async def delete_harness(harness_id: str, request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        try:
+            runtime.registry.delete(principal, harness_id)
+        except HarnessNotFoundError as exc:
+            raise HaasError(
+                404, "invalid_request_error", "haas_harness_not_found"
+            ) from exc
+        runtime.logger.event("haas.harness.deleted", {"id": harness_id})
+        return {"data": {"deleted": True}, "traceId": f"tr_{uuid.uuid4().hex[:16]}"}
+
+    @app.get("/v1/haas/models")
+    async def list_models(request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        backends: dict[str, Any] = {}
+        for record in runtime.registry.list_active(principal):
+            entry = backends.setdefault(
+                record.base, {"default": record.defaultModel or "", "models": []}
+            )
+            model = record.defaultModel or ""
+            if model and all(m.get("id") != model for m in entry["models"]):
+                entry["models"].append({"id": model, "object": "model"})
+            if not entry["default"] and model:
+                entry["default"] = model
+        return {
+            "data": {"backends": backends},
+            "traceId": f"tr_{uuid.uuid4().hex[:16]}",
+        }
 
     return app
 

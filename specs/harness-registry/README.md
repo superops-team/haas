@@ -1,7 +1,7 @@
 # Harness Registry 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. 组件定位
@@ -66,6 +66,42 @@ Harness Registry 维护 HaaS 可运行的 configured harness catalog。它回答
 | DELETE | `/v1/haas/harnesses/{harness_id}` | 标记删除，不删除历史 session |
 | GET | `/v1/haas/models` | 全局 backend/model catalog |
 | GET | `/v1/haas/harnesses/{harness_id}/skills/{skill_id}/files` | 读取完整 skill folder bundle |
+
+### 5.1.1 PUT 不变字段语义（S6）
+
+`PUT` body 使用 `HarnessCreate` schema，其中不含 `id`/`createdAtMs`，但 schema 为
+`additionalProperties: true`，调用方仍可能带上这些字段。处理规则：
+
+| 情况 | 行为 |
+|------|------|
+| body 未带 `id`/`base`/`createdAtMs` | 正常更新 mutable field |
+| body 带的值与现存记录**一致** | 幂等接受，不报错（便于 read-modify-write 回写） |
+| body 带的值与现存记录**冲突** | `400 invalid_input`，不做部分更新 |
+
+不为此新增专用错误码：不变字段冲突属于请求体校验失败，复用既有
+`invalid_input`（见 [ERROR-CODES](../haas-protocol/ERROR-CODES.md) §2）。
+`updatedAtMs` 由服务端重写，调用方传入值一律忽略。
+
+### 5.1.2 Base 可用性校验依据（S6）
+
+`base` 是开放字符串，但创建/更新时必须校验其**已注册**，否则返回
+`422 haas_unsupported_base`。S6 的判定来源是本进程已装配的 adapter 集合
+（当前为 `codex` 与测试用 `fake`），不是硬编码白名单：新增 adapter 即自动
+可用。`base` 已注册但 adapter 探测未 ready 时，创建仍可成功，readiness 由
+`/v1/haas/ready?scope=execution` 与 `/v1/haas/status` 反映——registry 不把
+运行时可用性混入配置校验。
+
+### 5.1.3 Harness Scope（S6）
+
+`HarnessRecord` 携带 `tenantId` / `workspaceId`，与 Security Boundary §8.3
+一致：
+
+- 创建时记录调用方 principal 的 tenant/workspace。
+- `list` / `get` / `update` / `delete` 与 `appName` 解析只命中 caller scope 内记录。
+- 跨 scope 访问 `/v1/haas/harnesses/{id}` 返回 `404 haas_harness_not_found`；
+  跨 scope 的 `appName` 解析返回 `404 app_not_found`。
+- scope 字段为 `None` 的记录视为未绑定租户，仅对同样未绑定的 principal 可见，
+  便于单节点部署与既有 seed 记录继续工作。
 
 ### 5.2 Internal API
 
@@ -223,6 +259,8 @@ Registry 必须产出以下安全日志/指标：
 | 场景 | 行为 |
 |------|------|
 | base 不支持 | `422 haas_unsupported_base` |
+| PUT 试图改 `id`/`base`/`createdAtMs` | `400 invalid_input`，不做部分更新 |
+| harness 不存在或越权 | `404 haas_harness_not_found` |
 | app 不存在或越权 | `404 app_not_found` |
 | model 不可用 | `422 haas_model_unavailable` 或显式 fallback 并写入 metadata |
 | provider URL 未通过 allowlist | `haas_provider_source_invalid` |

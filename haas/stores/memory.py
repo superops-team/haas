@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 SessionKey = tuple[str, str, str]  # (appName, userId, sessionId)
+AccountKey = tuple[str | None, str | None]  # (tenantId, workspaceId)
 
 
 def _now_ms() -> int:
@@ -41,9 +42,21 @@ class HarnessRecord:
     defaultModel: str | None = None
     systemPrompt: str = ""
     provider: ProviderConfig | None = None
+    # Scope binding (specs/harness-registry §5.1.3). None means "unbound",
+    # visible only to equally unbound principals.
+    tenantId: str | None = None
+    workspaceId: str | None = None
+    mcpServers: list[dict[str, Any]] = field(default_factory=list)
+    skills: list[dict[str, Any]] = field(default_factory=list)
+    disabledTools: list[str] = field(default_factory=list)
+    maxStep: int | None = None
+    timeoutSeconds: int | None = None
     schemaVersion: int = 1
     createdAtMs: int = field(default_factory=_now_ms)
     updatedAtMs: int = field(default_factory=_now_ms)
+
+    def account_key(self) -> AccountKey:
+        return (self.tenantId, self.workspaceId)
 
 
 @dataclass
@@ -159,8 +172,16 @@ class MemoryStore:
     def get_harness(self, harness_id: str) -> HarnessRecord | None:
         return self._harnesses.get(harness_id)
 
-    def list_harnesses(self) -> list[HarnessRecord]:
-        return list(self._harnesses.values())
+    def list_harnesses(self, account: AccountKey | None = None) -> list[HarnessRecord]:
+        """List harnesses, optionally filtered to one account scope.
+
+        Store-level equality filtering only; authorization semantics live in
+        Harness Registry (specs/harness-registry §5.1.3).
+        """
+        records = list(self._harnesses.values())
+        if account is None:
+            return records
+        return [r for r in records if r.account_key() == account]
 
     def delete_harness(self, harness_id: str) -> None:
         self._harnesses.pop(harness_id, None)

@@ -19,19 +19,25 @@ def principal() -> Principal:
 def test_list_apps_and_resolve_by_id_and_name(
     registry: HarnessRegistry, principal: Principal
 ) -> None:
-    seed_codex(registry)
+    seed_codex(registry, principal=principal)
     assert registry.list_apps(principal) == ["chrn_codex_default"]
     assert registry.resolve_app(principal, "chrn_codex_default").name == "codex-default"
     assert registry.resolve_app(principal, "codex-default").id == "chrn_codex_default"
 
 
 def test_resolve_unknown_or_ambiguous(registry: HarnessRegistry, principal: Principal) -> None:
-    seed_codex(registry)
+    seed_codex(registry, principal=principal)
     registry.save(
-        HarnessRecord(id="chrn_dup_1", name="dup", base="codex", status="active")
+        HarnessRecord(
+            id="chrn_dup_1", name="dup", base="codex", status="active",
+            tenantId=principal.tenantId,
+        )
     )
     registry.save(
-        HarnessRecord(id="chrn_dup_2", name="dup", base="codex", status="active")
+        HarnessRecord(
+            id="chrn_dup_2", name="dup", base="codex", status="active",
+            tenantId=principal.tenantId,
+        )
     )
     with pytest.raises(AppNotFoundError):
         registry.resolve_app(principal, "missing")
@@ -42,5 +48,5 @@ def test_resolve_unknown_or_ambiguous(registry: HarnessRegistry, principal: Prin
 def test_default_app(registry: HarnessRegistry, principal: Principal) -> None:
     with pytest.raises(AppNotFoundError):
         registry.resolve_default_app(principal)
-    seed_codex(registry)
+    seed_codex(registry, principal=principal)
     assert registry.resolve_default_app(principal).id == "chrn_codex_default"
