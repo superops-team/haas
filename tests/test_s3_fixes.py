@@ -2,6 +2,7 @@
 import asyncio
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from haas.api import build_app
@@ -9,6 +10,9 @@ from haas.harnesses import FakeAdapter
 from haas.harnesses.base import StartTurnRequest, TurnHandle
 from haas.harnesses.fake import BlockingFakeAdapter
 from haas.identity import Principal
+
+# Error envelopes, cursor expiry and idempotency are protocol-surface contracts.
+pytestmark = pytest.mark.adk
 
 TOKEN = "fix-token"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}

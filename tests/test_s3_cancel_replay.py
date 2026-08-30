@@ -11,6 +11,9 @@ from haas.registry import HarnessRegistry, seed_codex
 from haas.sessions import InvocationNotFoundError, RunRequest, SessionRuntime
 from haas.stores import MemoryStore
 
+# Cancel + SSE replay are part of the ADK/HaaS protocol contract.
+pytestmark = pytest.mark.adk
+
 TOKEN = "s3-token"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 

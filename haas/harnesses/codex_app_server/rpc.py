@@ -175,9 +175,12 @@ class CodexJsonRpc:
         try:
             await self._transport.send(message)
         except (OSError, ConnectionError, WebSocketException, EOFError) as exc:
+            # The future is dropped before anyone awaits it, so do not set an
+            # exception on it: that would only surface as a spurious
+            # "Future exception was never retrieved" warning. The caller gets
+            # the failure from the raise below.
             self._pending_requests.pop(req_id, None)
-            if not future.done():
-                future.set_exception(CodexConnectionError(str(exc)))
+            future.cancel()
             self._connected = False
             raise CodexConnectionError(f"send failed: {exc}") from exc
 

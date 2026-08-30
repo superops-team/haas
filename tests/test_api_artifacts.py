@@ -9,10 +9,14 @@ from __future__ import annotations
 import io
 import zipfile
 
+import pytest
 from fastapi.testclient import TestClient
 
 from haas.api import DEFAULT_TOKEN, build_app
 from haas.identity import Principal
+
+# /v1/haas/* control-plane surface is part of the published protocol contract.
+pytestmark = pytest.mark.adk
 
 AUTH = {"Authorization": f"Bearer {DEFAULT_TOKEN}"}
 OTHER_TOKEN = "other-token"

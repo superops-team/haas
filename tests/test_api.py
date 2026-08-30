@@ -1,11 +1,15 @@
 """S2 ADK API integration tests (functional verification cases C1-C10)."""
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from haas.api import build_app
 from haas.harnesses import FakeAdapter
 from haas.identity import Principal
+
+# ADK 2.0 northbound protocol surface: also run under `make adk-compat`.
+pytestmark = pytest.mark.adk
 
 TOKEN = "test-token"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}

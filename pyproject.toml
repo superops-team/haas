@@ -39,6 +39,7 @@ testpaths = ["tests"]
 markers = [
   "integration: requires a running HaaS + harness (off by default)",
   "e2e: requires HAAS_E2E=1 explicit environment switches (off by default)",
+  "adk: ADK 2.0 protocol-surface compatibility checks (make adk-compat)",
 ]
 
 [tool.ruff]
