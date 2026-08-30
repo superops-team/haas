@@ -1,7 +1,7 @@
 # Session Runtime 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Registry](../harness-registry/README.md), [Harness Adapter](../harness-adapter/README.md), [Event Log & SSE](../event-log-sse/README.md), [Admission Control](../admission-control/README.md)
 
 ## 1. 组件定位
@@ -25,7 +25,6 @@ ADK 的 session 由 `(appName, userId, sessionId)` 三元组唯一标识；`invo
 |------|------|------|
 | 上游 | HaaS Protocol | 接收 `/run`、`/run_sse`、session GET/PATCH/DELETE |
 | 上游 | Admission Control | 执行前准入放行 |
-| 上游 | Legacy Shim | 映射旧 session/turn API |
 | 下游 | Harness Registry | 解析 appName、冻结 effective harness config |
 | 下游 | Harness Adapter | 执行 turn、取消、恢复、inspect |
 | 下游 | Event Log & SSE | append lifecycle/progress/terminal event |

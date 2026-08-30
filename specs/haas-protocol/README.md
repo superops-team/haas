@@ -1,11 +1,11 @@
 # HaaS Protocol 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 
 ## 1. 组件定位
 
-HaaS Protocol 是系统对上游暴露的 HTTP/JSON + SSE 合同。Northbound 主协议遵循 Google [Agent Development Kit (ADK) 2.0](https://adk.dev/2.0/) 的 REST API 协议层，HaaS 在此之上提供 `/v1/haas/*` 控制面扩展和旧 `mpa-codex-worker` 迁移 shim。
+HaaS Protocol 是系统对上游暴露的 HTTP/JSON + SSE 合同。Northbound 主协议遵循 Google [Agent Development Kit (ADK) 2.0](https://adk.dev/2.0/) 的 REST API 协议层，HaaS 在此之上提供 `/v1/haas/*` 控制面扩展。（旧 `mpa-codex-worker` 迁移 shim 不在本项目范围，见 §5.3。）
 
 协议目标是让上游用 ADK 2.0 标准客户端即可运行任意 harness。Codex app-server、Pi、OpenCode、AMP 等具体 runtime 只存在于 adapter 内部，不成为上游协议的必需知识。
 
@@ -25,7 +25,7 @@ HaaS Protocol 是系统对上游暴露的 HTTP/JSON + SSE 合同。Northbound �
 |------|----------|
 | ADK 2.0 docs（`/runtime/api-server/`，2026-08-26 抓取） | `/list-apps`、`/run`、`/run_sse`、`/apps/{app}/users/{user}/sessions/{sid}`、camelCase、`newMessage{role,parts}`、`streaming:true` token 级增量、SSE `data:` 帧 |
 | ADK 2.0 release notes | Event 新增 `nodeInfo`、`output`、`routes`、`requestedInput`、`isolationScope` 字段 |
-| `mpa-codex-worker` Sidecar API | health/ready/status、legacy `/v1/codex-worker/*` 迁移语义 |
+| `mpa-codex-worker` Sidecar API | health/ready/status 的**设计参考**；其 legacy `/v1/codex-worker/*` 语义不在本项目实现范围（§5.3） |
 | Codex app-server manual | Codex adapter 内部 JSON-RPC lifecycle，不对上游公开 |
 | OpenSandbox AIO | 容器内基础 service 和 endpoint 约束 |
 
@@ -42,7 +42,7 @@ HaaS 只 follow ADK 的 **协议层**（HTTP 路径、请求/响应 shape、事�
 | 上游 | Harness Adapter | 执行具体 harness |
 | 上游 | Observability | 提供 health/ready/status、trace、metrics |
 
-本组件内部负责「Protocol Mapper」：将 ADK 请求映射为内部对象、把内部 canonical event 投影为 ADK `Event`、把 legacy shim 请求翻译为内部对象。Protocol Mapper 不再作为独立组件存在，而是本 spec 的职责。
+本组件内部负责「Protocol Mapper」：将 ADK 请求映射为内部对象、把内部 canonical event 投影为 ADK `Event`。Protocol Mapper 不再作为独立组件存在，而是本 spec 的职责。
 
 ## 4. 职责边界
 
@@ -51,7 +51,6 @@ HaaS 只 follow ADK 的 **协议层**（HTTP 路径、请求/响应 shape、事�
 - 定义 public ADK API 的 path、method、headers、request/response schema。
 - 维护 ADK-compatible 主协议与 HaaS native 扩展的分层。
 - 统一错误 detail、`Idempotency-Key` 规则、SSE framing 和事件投影。
-- 定义 legacy `/v1/codex-worker/*` 到 HaaS/ADK 的迁移映射。
 - 明确哪些字段是公共兼容承诺，哪些是 HaaS 扩展。
 
 不负责：
@@ -107,9 +106,14 @@ HaaS 自有控制面，只做 U 未覆盖能力，不改写 ADK 字段语义：
 artifact 端点详情见 [Artifact Store](../artifact-store/README.md) 第 5 节；文件模型统一
 `File` schema。
 
-### 5.3 Legacy Sidecar Shim
+### 5.3 Legacy Sidecar Shim（不在本项目范围）
 
-`/v1/codex-worker/*` 只用于迁移旧调用方：
+**决策（2026-08-30）**：`/v1/codex-worker/*` shim **不实现**。HaaS 与
+`mpa-codex-worker` 只是架构同构，不承担其迁移职责；如确需迁移旧上游，单独
+立项。详见 [specs/README §3.1.1](../README.md#311-范围决策不实现-mpa-codex-worker-迁移-shim)。
+
+下表仅作为**历史设计记录**保留，供将来立项时参考，**不是待办项**；实现代码
+不得据此新增 `/v1/codex-worker/*` 路由。
 
 | Legacy path | HaaS target | 规则 |
 |-------------|-------------|------|
@@ -263,7 +267,6 @@ heartbeat 使用 SSE comment `: keep-alive`，不产生事件。invocation 完�
 - `userId`/`sessionId` 上均做 principal scope：跨 user/session 访问返回 `404`，不用 `403` 暴露存在性。
 - ADK 兼容路径不在顶层接收 caller 提供的上游 URL/密钥；HaaS 扩展字段必须通过 registry allowlist 校验。
 - Error `detail`/`haasError` 不得含 secret、内部 host、绝对路径、stack trace。
-- Legacy shim 复用同一 redaction pipeline。
 
 ## 9. 可观测性
 
@@ -281,14 +284,13 @@ heartbeat 使用 SSE comment `: keep-alive`，不产生事件。invocation 完�
 | `/run_sse` 断线 | 不取消 invocation；client 用 `POST /run_sse` + `Last-Event-ID` 续接（服务端按 event id 定位原 invocation，回放其后事件并续 live，不新建 turn），或通过 `GET /apps/.../sessions/{sid}` 读回 events |
 | adapter crash | invocation 进入 `failed`/`incomplete`，持久化后可读 |
 | cancel retry | 幂等成功，不删除 session（见 `POST /v1/haas/.../invocations/{id}/cancel` 扩展见 session-runtime） |
-| legacy shim 不可映射 | `400 haas_legacy_request_invalid` |
 
 ## 11. 测试计划与验收
 
 文档阶段：
 
 - `git diff --check`
-- 所有 public path 在本文件和组件 spec 中一致；OpenAPI 覆盖 ADK + HaaS native + legacy shim 三面。
+- 所有 public path 在本文件和组件 spec 中一致；OpenAPI 覆盖 ADK 与 HaaS native 两面（legacy 条目保留但不实现，见 §5.3）。
 
 实现阶段：
 
@@ -298,4 +300,3 @@ heartbeat 使用 SSE comment `: keep-alive`，不产生事件。invocation 完�
 - Event：`content.role`/`parts`/`actions`/`invocationId` 字段完整；ADK 2.0 字段 `nodeInfo` 按需出现。
 - Auth/scope：两 principal 交叉访问 session/user 全部 404。
 - Idempotency-Key：重复 `POST /run` 不重复启动 harness。
-- Legacy shim：旧 path 映射 Codex harness 并输出 deprecation metadata。

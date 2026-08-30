@@ -1,12 +1,12 @@
 # Event Log & SSE 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. 组件定位
 
-Event Log & SSE 是 HaaS 的事件事实源和实时订阅层。它持久化 canonical events，投影为 ADK `Event`，提供 session/invocation 级 replay-then-live stream，并支持 legacy sidecar projection。
+Event Log & SSE 是 HaaS 的事件事实源和实时订阅层。它持久化 canonical events，投影为 ADK `Event`，提供 session/invocation 级 replay-then-live stream。（legacy sidecar projection 不在本项目范围，见 [specs/README §3.1.1](../README.md#311-范围决策不实现-mpa-codex-worker-迁移-shim)。）
 
 SSE 是 delivery channel，不是唯一事实源。断线、客户端超时或代理重连不得导致任务停止或结果丢失。
 
@@ -35,7 +35,7 @@ SSE 是 delivery channel，不是唯一事实源。断线、客户端超时或�
 - 持久化 canonical event。
 - 为每个 invocation 维护从 0 开始的 gapless `sequenceNumber`（内部字段）。
 - 为 HaaS native stream 维护 session-scoped `eventId`。
-- 将 canonical event 投影为 ADK `Event`、HaaS event 或 legacy sidecar event。
+- 将 canonical event 投影为 ADK `Event` 或 HaaS event。
 - 支持 replay missed events 后进入 live stream（`Last-Event-ID` / `after_event_id`）。
 - 发送 heartbeat 且不产生事件、不推进 cursor。
 - 对慢客户端执行 bounded queue、delta drop 或断开；terminal state 通过 read-back 保证可得。
@@ -58,7 +58,7 @@ SSE 是 delivery channel，不是唯一事实源。断线、客户端超时或�
 | `GET /apps/{app}/users/{user}/sessions/{sid}` | JSON | ADK 原生 replay 通道，返回全部 `events[]` |
 | `GET /v1/haas/sessions/{session_id}/events` | HaaS SSE | session canonical event replay/live，带 `after_event_id` |
 | `GET /v1/haas/sessions/{session_id}/invocations/{invocation_id}/events` | HaaS SSE | invocation canonical event replay/live |
-| `GET /v1/codex-worker/sessions/{session_id}/events` | Legacy SSE | 旧 sidecar event projection |
+| ~~`GET /v1/codex-worker/sessions/{session_id}/events`~~ | ~~Legacy SSE~~ | **不实现**（见 [specs/README §3.1.1](../README.md#311-范围决策不实现-mpa-codex-worker-迁移-shim)） |
 
 ### 5.2 Internal API
 
@@ -69,7 +69,7 @@ async def read_invocation_events(invocation_id: str) -> list[StoredEvent]: ...
 async def stream_invocation(invocation_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
 async def stream_session(session_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
 def project_adk(event: StoredEvent) -> AdkEvent: ...
-def project_legacy(event: StoredEvent) -> LegacySidecarEvent: ...
+# project_legacy(): 不实现，legacy shim 不在本项目范围（specs/README §3.1.1）
 ```
 
 ## 6. 数据模型

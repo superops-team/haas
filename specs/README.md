@@ -81,14 +81,29 @@ HaaS 对上提供三个层级的 HTTP/SSE surface：
 |---------|------|----------|------|
 | ADK-compatible | `/list-apps`、`/run`、`/run_sse`、`/apps/{app}/users/{user}/sessions/{sid}` | Public API | 长期主协议，drop-in 兼容 ADK 2.0 client |
 | HaaS native | `/v1/haas/*` | Public extension | health/ready/status、diagnostics、harness CRUD、session/event 管理、artifact 等 ADK 未覆盖能力 |
-| Legacy sidecar shim | `/v1/codex-worker/*` | Migration API | 兼容 `mpa-codex-worker` 旧上游，内部转换到 HaaS 对象 |
+| ~~Legacy sidecar shim~~ | ~~`/v1/codex-worker/*`~~ | **本项目不实现** | 见 §3.1.1 |
 
 规则：
 
 1. ADK-compatible surface 不得暴露具体 harness 原生字段；HaaS 扩展只放 `haas` 嵌套对象或 `/v1/haas/*`。
 2. HaaS native 只能做加法扩展，不得改变 ADK 字段语义。
-3. Legacy shim 只做迁移兼容，不新增只有旧路径可用的能力。
-4. 所有 public surface 使用 `detail` + 结构化 `haasError` 错误形状。
+3. 所有 public surface 使用 `detail` + 结构化 `haasError` 错误形状。
+
+### 3.1.1 范围决策：不实现 `mpa-codex-worker` 迁移 shim
+
+**决策（2026-08-30）**：HaaS 与 `mpa-codex-worker` 只是架构同构，不承担其迁移
+职责。`/v1/codex-worker/*` shim **不属于本项目范围**，不实现、不测试、不在
+准出门禁中要求。若将来确需迁移旧上游，**单独立项**处理。
+
+影响与处理方式：
+
+- 各组件 spec 中残留的 legacy/shim 描述视为**历史背景与未来可选项**，不是待办；
+  实现时不得据此新增 `/v1/codex-worker/*` 路由。
+- `mpa-codex-worker` 仍可作为**设计参考来源**（它已验证过 sidecar API、event log、
+  SSE replay、model proxy、secretless 边界等），这与「不实现 shim」并不冲突。
+- 错误码 `haas_legacy_request_invalid` 与 OpenAPI 中的 legacy 条目予以保留，
+  避免改动已发布的兼容面；它们在本项目中处于**未使用**状态。
+- 新能力一律定义在 ADK 面或 HaaS native 面。
 
 ### 3.2 Runtime 边界
 
@@ -123,13 +138,13 @@ Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harn
 | 优先级 | 组件 | 路径 | 主要职责 |
 |--------|------|------|----------|
 | P0 | Architecture | `specs/architecture/README.md` | 系统级分层、事实归属、依赖方向和首期落地顺序 |
-| P0 | HaaS Protocol | `specs/haas-protocol/README.md` | ADK-compatible API、HaaS native API、legacy shim、错误和版本策略 |
+| P0 | HaaS Protocol | `specs/haas-protocol/README.md` | ADK-compatible API、HaaS native API、错误和版本策略 |
 | P0 | Harness Registry | `specs/harness-registry/README.md` | configured harness catalog、appName 解析、base/capability/model/provider discovery |
 | P0 | Harness Adapter | `specs/harness-adapter/README.md` | 多 harness adapter 抽象、能力矩阵、ADK 事件规范化 |
 | P0 | Codex App-Server Adapter | `specs/codex-app-server-adapter/README.md` | 首期 Codex app-server 连接、thread/turn、JSON-RPC、cancel、schema pin |
 | P0 | Session Runtime | `specs/session-runtime/README.md` | session/invocation/turn/container lifecycle、idempotency、lease、continuation |
 | P0 | Admission Control | `specs/admission-control/README.md` | 配额、限流、并发、队列准入 |
-| P0 | Event Log & SSE | `specs/event-log-sse/README.md` | event log、SSE live/replay、ADK Event 投影、legacy projection |
+| P0 | Event Log & SSE | `specs/event-log-sse/README.md` | event log、SSE live/replay、ADK Event 投影 |
 | P0 | Security Boundary | `specs/security-boundary/README.md` | secretless、object scope、SSRF、artifact path、redaction、audit |
 | P0 | Policy Controller | `specs/policy-controller/README.md` | workspace、network、tool、approval、model policy 编译和准入 |
 | P0 | Stores | `specs/stores/README.md` | 持久化事实源：registry/session/event/idempotency/admission 接口、schema 与迁移 |
@@ -290,7 +305,6 @@ Public 事件是 ADK `Event`。canonical event 必须能无损投影为 ADK `Eve
 2. HaaS native responses 必须返回 `HaaS-Version: 2026-08-26`。
 3. 同版本内只能新增 optional field、事件 part 类型或 `haas_` 前缀错误码。
 4. 删除、改名、改义、增加必填字段或收紧约束必须发布新版本。
-5. Legacy shim 的退休必须先统计消费者、提供迁移映射、保留至少两个发布周期，并在 status 中暴露 deprecation notice。
 
 ## 10. 组件间依赖方向
 

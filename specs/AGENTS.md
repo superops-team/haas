@@ -39,7 +39,7 @@ Always:
   `specs/haas-protocol/`.
 - Prefer additive changes for public API and persisted schemas.
 - Update the OpenAPI skeleton when HTTP contract fields, routes, headers, or errors change.
-- Record compatibility impact for ADK-compatible API, HaaS native API and legacy `/v1/codex-worker/*` shims.
+- Record compatibility impact for the ADK-compatible API and the HaaS native API. The legacy `/v1/codex-worker/*` shim is out of scope for this project (see specs/README 3.1.1).
 - Keep adapter-specific details inside the relevant adapter spec.
 - Keep all examples secret-free.
 
@@ -47,7 +47,6 @@ Ask first:
 
 - Breaking or renaming public fields, paths, event types, status values or error codes.
 - Changing the selected northbound protocol away from ADK 2.0 compatibility.
-- Removing legacy shim support before consumer inventory is complete.
 - Changing Docker base image family away from OpenSandbox AIO.
 
 Never:

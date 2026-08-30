@@ -1,7 +1,7 @@
 # Architecture 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-08-30
 
 ## 1. 组件定位
 
@@ -83,7 +83,7 @@ OpenSandbox AIO container runtime
 负责：
 
 - 定义系统级组件边界和依赖方向。
-- 定义 ADK 主协议、HaaS native extension、legacy shim 的关系。
+- 定义 ADK 主协议与 HaaS native extension 的关系。（legacy shim 不在本项目范围，见 [specs/README §3.1.1](../README.md#311-范围决策不实现-mpa-codex-worker-迁移-shim)。）
 - 定义 P0/P1/P2 首期落地顺序。
 - 明确每个事实的 authority owner。
 - 明确负路径、恢复策略和验证门禁。
@@ -102,7 +102,7 @@ OpenSandbox AIO container runtime
 |---------|------|-------|
 | ADK-compatible API | `/list-apps`、`/run`、`/run_sse`、`/apps/{app}/users/{user}/sessions/{sid}` | HaaS Protocol |
 | HaaS native API | `/v1/haas/*` | HaaS Protocol |
-| Legacy sidecar shim | `/v1/codex-worker/*` | HaaS Protocol |
+| ~~Legacy sidecar shim~~ | ~~`/v1/codex-worker/*`~~ | **不实现**（specs/README §3.1.1） |
 | Adapter interface | internal Python async interface | Harness Adapter |
 | Sandbox projection | internal SandboxRuntime API | Sandbox Runtime |
 | Container entrypoint | `/opt/haas/run.sh` | Container Runtime |
@@ -185,7 +185,7 @@ System status must be able to answer:
 ## 11. 测试计划与验收
 
 - Architecture review confirms every component has one owner and no reverse dependency.
-- Protocol tests cover ADK-compatible API before HaaS native/legacy expansion.
+- Protocol tests cover ADK-compatible API before HaaS native expansion.
 - Adapter contract tests run against fake adapter and Codex app-server adapter.
 - Sandbox tests verify OpenSandbox sandbox/execd/credential vault projection for each harness.
 - Admission tests verify quota/rate/queue boundaries.

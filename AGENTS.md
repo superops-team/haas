@@ -37,7 +37,8 @@ Client / Manager
    `ghcr.io/agent-infra/sandbox:<tag-or-digest>`。生产镜像必须 pin digest，
    `latest` 只允许本地实验。
 6. Harness 纳管协议以 Google ADK 2.0 REST API 协议层为首个兼容目标，同时保留
-   HaaS 自有 control-plane 扩展和旧 `mpa-codex-worker` 迁移 shim。
+   HaaS 自有 control-plane 扩展。旧 `mpa-codex-worker` 迁移 shim 不在本项目
+   范围（见「协议与接口规范」第 3 条）。
 
 ## AI 开发铁律
 
@@ -170,7 +171,7 @@ Client / Manager
 haas/
 ├── haas/                         # HaaS sidecar/control-plane 源码
 │   ├── api/                       # HTTP/SSE route、schema、middleware
-│   ├── protocol/                  # HaaS/ADK/legacy sidecar 协议模型
+│   ├── protocol/                  # HaaS/ADK 协议模型
 │   ├── harnesses/                 # Harness adapter interface 与各 runtime adapter
 │   │   ├── codex_app_server/
 │   │   ├── pi/
@@ -211,8 +212,9 @@ haas/
 2. HaaS 自有控制面使用 `/v1/haas/*`，只承载 runtime、diagnostics、profile、
    harness CRUD、session/event 管理、artifact 和内部运维能力；不得重新定义
    ADK 已有字段语义。
-3. 旧 `mpa-codex-worker` 兼容入口使用 `/v1/codex-worker/*` shim。shim 只做
-   协议转换，不承载新的业务语义；新增能力必须先定义在 ADK/HaaS 面。
+3. **`/v1/codex-worker/*` 迁移 shim 不在本项目范围（决策 2026-08-30）。**
+   HaaS 与 `mpa-codex-worker` 只是架构同构，不承担其迁移职责；如确需迁移旧
+   上游，单独立项。不得实现该 shim，新增能力一律定义在 ADK 面或 HaaS 面。
 4. 所有 mutating API 必须支持 `Idempotency-Key`（可选传入，服务端去重）。重复
    key 必须返回第一次请求的结果，不得重复启动 harness。
 5. `POST /run_sse` 返回 `text/event-stream`，事件为 `data:` 帧；`streaming:true`
@@ -311,7 +313,7 @@ lint/type/test 目标在 S1 运行时骨架初始化后补齐。文档初始化�
 最终交付说明必须列出：
 
 - 组件 spec 更新列表
-- 兼容面影响，包括 ADK、HaaS native、legacy sidecar
+- 兼容面影响，包括 ADK 与 HaaS native（legacy sidecar 不在范围内）
 - 测试命令与结果
 - 未执行验证、原因和残余风险
 - 安全/脱敏/容器/事件流相关结论
