@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from haas.security.redact import safe_upstream_body
 from haas.runtime.models import (
     ExecResult,
     SandboxHandle,
@@ -129,7 +130,12 @@ class OpenSandboxClient:
 
     def _checked(self, resp: httpx.Response) -> dict[str, Any]:
         if resp.status_code >= 400:
-            raise OpenSandboxError(f"opensandbox HTTP {resp.status_code}: {resp.text[:200]}")
+            # Upstream bodies are an untrusted secret surface: redact and
+            # truncate before they reach errors or logs.
+            raise OpenSandboxError(
+                f"opensandbox HTTP {resp.status_code}: "
+                f"{safe_upstream_body(resp.text)}"
+            )
         if resp.status_code == 204 or not resp.content:
             return {}
         try:

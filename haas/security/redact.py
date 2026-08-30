@@ -186,3 +186,22 @@ def assert_no_secret_surface(surface: object) -> None:
                 walk(item)
 
     walk(surface)
+
+MAX_UPSTREAM_BODY = 512
+
+
+def safe_upstream_body(text: str, limit: int = MAX_UPSTREAM_BODY) -> str:
+    """Redact and truncate an upstream response body for errors/logs.
+
+    Provider / harness / sandbox responses may echo an injected
+    Authorization header or other credentials, so any body that reaches an
+    error message, log or event must pass through here first.
+    """
+    if not text:
+        return "<empty>"
+    safe = redact(text)
+    if not isinstance(safe, str):  # pragma: no cover - redact keeps str
+        safe = str(safe)
+    if len(safe) > limit:
+        return safe[:limit] + "...<truncated>"
+    return safe

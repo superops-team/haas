@@ -192,8 +192,9 @@ pattern 清单（单一事实源，代码侧由同一 fixture 驱动）。
 
 **上游响应体同样是不可信来源**：provider / harness / MCP 返回的 body 可能回显
 我们注入的 `Authorization` 或其他凭据，因此在拼进 error message、日志或事件前
-必须经 `redact()` 并截断长度（model proxy 上限 512 字符）。错误信息仍须保留
-状态码等可诊断信息，不得为脱敏而丢失可操作性。
+必须经 `safe_upstream_body()` 脱敏并截断（默认 512 字符）。错误信息仍须保留
+状态码等可诊断信息，不得为脱敏而丢失可操作性。该函数是唯一实现，
+model proxy 与 OpenSandbox client 共用，禁止各自复制一份。
 
 ## 9. 可观测性
 

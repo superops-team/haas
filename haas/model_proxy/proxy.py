@@ -15,7 +15,7 @@ from haas.model_proxy.route import normalize_usage
 from haas.model_proxy.secret import SecretResolver
 from haas.model_proxy.token import RuntimeTokenError, RuntimeTokenManager
 from haas.policy import EffectivePolicy, PolicyController, PolicyDecision
-from haas.security.redact import redact
+from haas.security.redact import safe_upstream_body
 
 
 class ModelProxyError(Exception):
@@ -69,7 +69,7 @@ class ModelProxy:
             # or other credentials, and this message reaches callers and
             # logs, so it is a secret surface (AGENTS.md 铁律 7).
             raise ModelProxyError(
-                f"provider HTTP {resp.status_code}: {_safe_body(resp.text)}"
+                f"provider HTTP {resp.status_code}: {safe_upstream_body(resp.text)}"
             )
         try:
             data = resp.json()
@@ -79,8 +79,12 @@ class ModelProxy:
         return data, usage
 
     async def close(self) -> None:
-        if self._owns_client and self._client is not None:
-            await self._client.aclose()
+        """Release the lazily created client; an injected one is the caller's."""
+        # _client is the injected instance (never ours to close); the
+        # lazily created one lives in _active_client.
+        if self._active_client is not None:
+            await self._active_client.aclose()
+            self._active_client = None
 
     async def _client_ctx(self) -> httpx.AsyncClient:
         if self._client is not None:
@@ -97,17 +101,3 @@ class ModelProxy:
         decision: PolicyDecision = self._policy.authorize_network(policy, url)
         if not decision.allowed:
             raise ModelProxyError(f"provider_url_not_allowed: {decision.safeReason}")
-
-_MAX_PROVIDER_BODY = 512
-
-
-def _safe_body(text: str) -> str:
-    """Redact and truncate a provider response body for error messages."""
-    if not text:
-        return "<empty>"
-    safe = redact(text)
-    if not isinstance(safe, str):  # pragma: no cover
-        safe = str(safe)
-    if len(safe) > _MAX_PROVIDER_BODY:
-        return safe[:_MAX_PROVIDER_BODY] + "...<truncated>"
-    return safe

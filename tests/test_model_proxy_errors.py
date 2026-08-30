@@ -166,3 +166,33 @@ async def test_empty_provider_body_is_reported() -> None:
     proxy, tokens = _proxy(lambda _r: httpx.Response(502, text=""))
     with pytest.raises(ModelProxyError, match="<empty>"):
         await _call(proxy, tokens)
+
+async def test_close_releases_the_lazily_created_client() -> None:
+    """Regression: close() checked _client, but the owned client lives in
+    _active_client, so a self-created client was never closed (socket leak)."""
+    proxy = ModelProxy(
+        InMemorySecretResolver({"secret://tenant/provider": SECRET}),
+        RuntimeTokenManager(),
+        PolicyController(),
+    )
+    owned = await proxy._client_ctx()
+    await proxy.close()
+    assert owned.is_closed is True
+    # close() must stay idempotent.
+    await proxy.close()
+
+
+async def test_revoked_runtime_token_is_rejected() -> None:
+    proxy, tokens = _proxy(lambda _r: httpx.Response(200, json={}))
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1"))
+    tokens.revoke(token)
+    with pytest.raises(ModelProxyError):
+        await proxy.proxy_responses(
+            _route(), {"input": "hi"},
+            authorization=f"Bearer {token}", policy=_policy(),
+        )
+
+
+async def test_revoking_an_unknown_token_is_a_noop() -> None:
+    tokens = RuntimeTokenManager()
+    tokens.revoke("never-issued")
