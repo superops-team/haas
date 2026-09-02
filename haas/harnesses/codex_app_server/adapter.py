@@ -204,12 +204,53 @@ class CodexAdapter:
         if endpoint_reason and "safeReason" not in safe_details:
             safe_details["safeReason"] = endpoint_reason
 
+        if "safeReason" not in safe_details:
+            readiness_rpc = CodexJsonRpc(
+                self._endpoint,
+                codex_bin=self._codex_bin,
+                request_timeout=self._rpc.request_timeout,
+            )
+            try:
+                await readiness_rpc.connect()
+            except Exception:
+                safe_details["safeReason"] = "codex_readiness_probe_failed"
+            finally:
+                await readiness_rpc.close()
+
         status = "unavailable" if "safeReason" in safe_details else "ready"
         return AdapterProbe(
             adapterId=self.adapter_id,
             base=self.base,
             status=status,
             runtimeVersion=f"codex-cli {version}",
+            transport=self._endpoint.transport,
+            capabilities=self._capabilities(),
+            safeDetails=safe_details,
+        )
+
+    async def probe_readiness(self) -> AdapterProbe:
+        """Run only the bounded Codex handshake required for service readiness."""
+        safe_details: dict[str, Any] = {}
+        endpoint_reason = self._endpoint_unavailable_reason()
+        if endpoint_reason is not None:
+            safe_details["safeReason"] = endpoint_reason
+        if not safe_details:
+            readiness_rpc = CodexJsonRpc(
+                self._endpoint,
+                codex_bin=self._codex_bin,
+                request_timeout=self._rpc.request_timeout,
+            )
+            try:
+                await readiness_rpc.connect()
+            except Exception:
+                safe_details["safeReason"] = "codex_readiness_probe_failed"
+            finally:
+                await readiness_rpc.close()
+        return AdapterProbe(
+            adapterId=self.adapter_id,
+            base=self.base,
+            status="ready" if not safe_details else "unavailable",
+            runtimeVersion="unknown",
             transport=self._endpoint.transport,
             capabilities=self._capabilities(),
             safeDetails=safe_details,

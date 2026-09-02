@@ -1,12 +1,14 @@
 # Container Runtime 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-30
-Related specs: [Security Boundary](../security-boundary/README.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.md), [Observability](../observability/README.md)
+Last reviewed: 2026-08-31
+Related specs: [Startup](../startup/README.md), [Security Boundary](../security-boundary/README.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.md), [Observability](../observability/README.md)
 
 ## 1. 组件定位
 
 Container Runtime 定义 HaaS 镜像、进程拓扑、端口、volume、health/ready 和 shutdown 语义。HaaS runtime image 必须基于开源 OpenSandbox AIO 镜像构建，继承 AIO 的 shell、file、browser 和 sandbox service 能力。
+
+启动编排、nginx 总入口和 Codex readiness 的详细合同由 [Startup](../startup/README.md) 定义；本组件只保留容器、进程和端口边界。
 
 ## 2. 来源与依据
 
@@ -47,6 +49,7 @@ Container Runtime 定义 HaaS 镜像、进程拓扑、端口、volume、health/r
   记录告警，由 `/ready` 如实反映能力降级。
 - 定义 runtime root、workspace root、artifact root、state root 和 socket root。
 - 定义 health/ready/status 的容器语义。
+- 将 nginx 作为容器对外总入口，并把 HaaS sidecar readiness 作为对外 ready 的事实来源；具体启动 DAG 见 Startup spec。
 - 定义 SIGTERM drain：停止接新任务、flush event log、标记 ready=false、取消或落盘 active turn。
 - 定义 base image digest pin 和升级验证。
 
@@ -63,7 +66,8 @@ Container Runtime 定义 HaaS 镜像、进程拓扑、端口、volume、health/r
 ### 5.1 Dockerfile Contract
 
 ```dockerfile
-FROM ghcr.io/agent-infra/sandbox@sha256:<pinned-digest>
+ARG HAAS_BASE_IMAGE=ghcr.io/agent-infra/sandbox@sha256:<production-pinned-digest>
+FROM ${HAAS_BASE_IMAGE}
 
 # install HaaS runtime dependencies after base AIO layers
 # install/pin Codex CLI and optional future harness CLIs
@@ -74,8 +78,9 @@ FROM ghcr.io/agent-infra/sandbox@sha256:<pinned-digest>
 Rules:
 
 - Local experiments may use `ghcr.io/agent-infra/sandbox:latest`.
-- Production and release builds must pin digest.
-- Dependency install layers must precede source code copy.
+- The Dockerfile default must remain the production-pinned digest. A local or CI build may set `HAAS_BASE_IMAGE` to a trusted digest-pinned mirror/cache reference; release builds may not use a mutable tag.
+- Dependency install layers must precede source code copy. npm and uv downloads use BuildKit cache mounts and remain governed by `uv.lock` and package pins.
+- `make docker-build` is the standard local build entrypoint; the override does not change the production default or AIO service contract.
 - Runtime env must be placed near the final runtime layer so it does not bust dependency cache.
 - The Dockerfile must not embed provider keys, MCP tokens, cookies or user auth files.
 
@@ -153,8 +158,8 @@ image built
 Startup rules:
 
 - `/health` must become available before optional capability warmup completes.
-- `/ready?scope=control` must not wait on Codex app-server socket, model provider, MCP discovery or browser startup.
-- `/ready?scope=execution` may be false until selected harness adapter is ready.
+- `/ready?scope=control` and the default `/ready` are overall service readiness signals; they remain false until Codex app-server readiness probe completes.
+- `/ready?scope=execution` may use the same Codex gate for the P0 adapter; model provider, MCP discovery or browser startup remain outside the default gate unless declared a Codex execution-safety dependency.
 - AIO readiness and HaaS readiness are reported separately.
 
 ## 8. 安全与权限

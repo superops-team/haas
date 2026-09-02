@@ -77,8 +77,10 @@ def test_create_app_does_not_require_live_harness() -> None:
     # /health is process liveness only and must stay ok.
     assert client.get("/v1/haas/health").json()["data"]["status"] == "ok"
     # execution readiness must honestly report not_ready.
-    body = client.get("/v1/haas/ready?scope=execution").json()
-    assert body["data"]["status"] == "not_ready"
+    response = client.get("/v1/haas/ready?scope=execution")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["haasError"]["code"] == "haas_adapter_unavailable"
 
 
 def test_adapter_base_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

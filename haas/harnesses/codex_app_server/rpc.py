@@ -114,6 +114,10 @@ class CodexJsonRpc:
     def initialized(self) -> bool:
         return self._initialized
 
+    @property
+    def request_timeout(self) -> float:
+        return self._request_timeout
+
     async def connect(self) -> None:
         """Connect and run the initialize/initialized handshake."""
         if self._connected and self._initialized:

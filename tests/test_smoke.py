@@ -2,6 +2,7 @@
 from fastapi.testclient import TestClient
 
 from haas.config import AppConfig, create_app, load_config
+from haas.harnesses.base import AdapterProbe
 
 
 def test_package_import_and_default_config() -> None:
@@ -37,7 +38,33 @@ def test_ready_distinguishes_health_from_ready() -> None:
     assert execution.json()["data"]["status"] == "ready"
 
 
+def test_ready_is_not_published_when_adapter_is_unavailable() -> None:
+    config = AppConfig()
+    config.adapters.default_base = "fake"
+    app = create_app(config)
+    runtime = app.state.runtime
+
+    async def unavailable_probe() -> AdapterProbe:
+        return AdapterProbe(
+            adapterId="fake",
+            base="fake",
+            status="unavailable",
+            runtimeVersion="test",
+            transport="fake",
+            safeDetails={"safeReason": "codex_readiness_probe_failed"},
+        )
+
+    runtime.adapter.probe = unavailable_probe  # type: ignore[method-assign]
+    client = TestClient(app)
+    response = client.get("/v1/haas/ready")
+
+    assert response.status_code == 503
+    assert response.json()["haasError"]["code"] == "haas_adapter_unavailable"
+
+
 def test_adk_health_ready_aliases() -> None:
-    client = TestClient(create_app(AppConfig()))
+    config = AppConfig()
+    config.adapters.default_base = "fake"
+    client = TestClient(create_app(config))
     assert client.get("/health").json()["data"]["status"] == "ok"
     assert client.get("/ready").json()["data"]["status"] == "ready"

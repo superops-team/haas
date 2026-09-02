@@ -18,6 +18,45 @@ mkdir -p \
 # Track child PIDs so SIGTERM reaches the whole process group.
 pids=""
 
+configure_nginx_health_route() {
+  conf="/opt/gem/nginx/nginx.python_srv.conf"
+  if [ ! -f "${conf}" ] || ! grep -Eq '^location = /health[ /{]' "${conf}"; then
+    return 0
+  fi
+  if awk '
+    BEGIN { depth = 0; skip = 0 }
+    !skip && index($0, "location = /health") == 1 { skip = 1 }
+    skip {
+      for (i = 1; i <= length($0); i++) {
+        c = substr($0, i, 1)
+        if (c == "{") depth++
+        else if (c == "}") { depth--; if (depth == 0) { skip = 0; break } }
+      }
+      if (skip) next
+      next
+    }
+    { print }
+    END { if (skip) exit 2 }
+  ' "${conf}" > "${conf}.haas.tmp"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 2 ]; then
+    echo "==> haas: FATAL incomplete AIO /health nginx block" >&2
+    rm -f "${conf}.haas.tmp"
+    exit 1
+  fi
+  if grep -Eq '^location = /health[ /{]' "${conf}.haas.tmp"; then
+    echo "==> haas: FATAL failed to replace AIO /health nginx block" >&2
+    rm -f "${conf}.haas.tmp"
+    exit 1
+  fi
+  mv -f "${conf}.haas.tmp" "${conf}"
+}
+
+configure_nginx_health_route
+
 forward_signal() {
   trap - TERM INT
   echo "==> haas: draining (SIGTERM)"
@@ -46,7 +85,7 @@ fi
 # 2. Start HaaS sidecar on 8092.
 #    Use the uvicorn --factory app. Health is NOT gated on AIO/Codex here.
 /app/haas/.venv/bin/uvicorn haas.config:create_app --factory \
-  --host 0.0.0.0 --port "${HAAS_SIDECAR_PORT:-8092}" &
+  --host 127.0.0.1 --port "${HAAS_SIDECAR_PORT:-8092}" &
 SIDECAR_PID=$!
 pids="${pids} ${SIDECAR_PID}"
 

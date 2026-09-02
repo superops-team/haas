@@ -1,7 +1,7 @@
 # HaaS 组件规格总览
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-02
 Change ID: haas-platform-foundation
 
 `specs/` 是 HaaS 的长期技术规格入口。它把 Harness As A Service 的协议、组件边界、状态机、安全与容器运行时定义成可实现、可测试、可审查的工程合同。
@@ -155,6 +155,7 @@ Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harn
 | P1 | MCP / Tool / Skill Runtime | `specs/mcp-tool-skill-runtime/README.md` | MCP server、MCP proxy、tools、skills materialization、tool restriction |
 | P1 | Artifact Store | `specs/artifact-store/README.md` | 输入文件、session 产物、下载、归档和路径安全 |
 | P1 | Container Runtime | `specs/container-runtime/README.md` | OpenSandbox AIO Dockerfile、entrypoint、ports、health/ready、shutdown |
+| P1 | Startup | `specs/startup/README.md` | nginx 总入口、sidecar ready、Codex Unix socket 握手探测、启动 DAG、异步 warmup 和时延预算 |
 | P1 | Observability | `specs/observability/README.md` | logs、metrics、trace、diagnostics、conformance evidence |
 | P1 | Implementation Roadmap | `specs/implementation-roadmap/README.md` | 后续实现阶段、依赖、出口证据和风险收敛 |
 

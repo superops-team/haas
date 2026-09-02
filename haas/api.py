@@ -183,7 +183,10 @@ def build_app(
         now = time.monotonic()
         if probe_cache["result"] is None or now - probe_cache["at"] > 30.0:
             try:
-                probe_cache["result"] = await adapter.probe()
+                readiness_probe = getattr(adapter, "probe_readiness", None)
+                probe_cache["result"] = await (
+                    readiness_probe() if readiness_probe is not None else adapter.probe()
+                )
             except Exception as exc:  # noqa: BLE001 - readiness must not raise
                 probe_cache["result"] = None
                 return "not_ready", str(exc)
@@ -199,13 +202,17 @@ def build_app(
 
     @app.get("/v1/haas/ready")
     async def ready(scope: str = "control") -> dict[str, Any]:
-        if scope == "control":
-            return {"data": {"status": "ready", "scope": scope}, "traceId": "tr_local"}
-        if scope == "execution":
+        if scope in {"control", "execution"}:
             status, reason = await _execution_ready()
+            if status != "ready":
+                raise HaasError(
+                    503,
+                    "service_unavailable",
+                    "haas_adapter_unavailable",
+                    safe_reason=reason or "adapter_not_ready",
+                    retryable=True,
+                )
             payload: dict[str, Any] = {"status": status, "scope": scope}
-            if reason is not None:
-                payload["reason"] = reason
             return {"data": payload, "traceId": "tr_local"}
         return {
             "data": {"status": "not_ready", "scope": scope, "reason": "unknown_scope"},

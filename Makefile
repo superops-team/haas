@@ -7,7 +7,7 @@ UVRUN := uv run --extra dev
 # HaaS 开发与提交门禁。
 .PHONY: help setup install-hooks pre-commit secret-scan fmt lint type \
         test-fast test-affected test-integration test-e2e adk-compat \
-        coverage docker-check full-check
+        coverage docker-build docker-check full-check
 
 help:
 	@echo "HaaS 开发与提交门禁："
@@ -25,6 +25,7 @@ help:
 	@echo "  make adk-compat       ADK 2.0 协议兼容性套件（adk 标记）"
 	@echo "  make coverage         覆盖率报告（门禁：核心 >=90%，安全路径 >=95%）"
 	@echo "  make docker-check     Dockerfile/AIO/health/ready 检查；HAAS_DOCKER_BUILD=1 追加真实 build + 容器 smoke"
+	@echo "  make docker-build     使用可选 HAAS_BASE_IMAGE 构建；默认生产 digest，BuildKit 复用依赖缓存"
 	@echo "  make full-check       完整本机准出：lint + type + 全量测试 + 覆盖率 + docker + secret"
 
 setup:
@@ -71,6 +72,11 @@ adk-compat:
 coverage:
 	$(UVRUN) coverage run -m pytest -q
 	$(UVRUN) coverage report
+
+docker-build:
+	@base_image="$(if $(HAAS_BASE_IMAGE),$(HAAS_BASE_IMAGE),ghcr.io/agent-infra/sandbox@sha256:5ca2cd5619ee1e18c5479301e740c1e35307ce85d4142a145aec65d459655eee)"; \
+	if ! printf "%s\n" "$$base_image" | grep -Eq "@sha256:[0-9a-f]{64}$$"; then echo "docker-build: HAAS_BASE_IMAGE must be digest-pinned" >&2; exit 1; fi; \
+	docker build --build-arg HAAS_BASE_IMAGE="$$base_image" -t "$(if $(HAAS_IMAGE),$(HAAS_IMAGE),haas:local)" .
 
 docker-check:
 	./scripts/quality/docker-check.sh

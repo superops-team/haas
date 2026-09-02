@@ -18,14 +18,22 @@ fail=0
 # --- static tier ------------------------------------------------------------
 
 echo "==> docker-check: base image digest pin"
-if grep -qE '^FROM .*@sha256:[0-9a-f]{64}' Dockerfile; then
-  echo "  ok: base image digest is pinned"
+base_arg="$(sed -n 's/^ARG HAAS_BASE_IMAGE=//p' Dockerfile | head -1)"
+if printf '%s\n' "$base_arg" | grep -qE '^ghcr.io/agent-infra/sandbox@sha256:[0-9a-f]{64}$'; then
+  echo "  ok: default base image digest is pinned"
 else
-  echo "  FAIL: Dockerfile FROM must pin a digest (sha256:<64 hex>)"
+  echo "  FAIL: Dockerfile default HAAS_BASE_IMAGE must pin a digest (sha256:<64 hex>)"
   fail=1
 fi
 
 echo "==> docker-check: entrypoint syntax"
+echo "==> docker-check: dependency cache mounts"
+if grep -qE -- '--mount=type=cache,target=/root/\.npm' Dockerfile && grep -qE -- '--mount=type=cache,target=/root/\.cache/uv' Dockerfile; then
+  echo "  ok: npm and uv BuildKit cache mounts are present"
+else
+  echo "  FAIL: Dockerfile must cache npm and uv dependency downloads"
+  fail=1
+fi
 if sh -n docker/run.sh; then
   echo "  ok: docker/run.sh is valid sh"
 else
@@ -74,6 +82,16 @@ else
   fail=1
 fi
 
+echo "==> docker-check: nginx HaaS entrypoint fragment"
+if grep -q "proxy_pass http://127.0.0.1:8092" docker/nginx.haas.conf \
+  && grep -q "location = /ready" docker/nginx.haas.conf \
+  && ! grep -q "codex-worker" docker/nginx.haas.conf; then
+  echo "  ok: standard HaaS nginx fragment is loopback-only and shim-free"
+else
+  echo "  FAIL: nginx fragment must proxy standard HaaS routes without legacy shim"
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "docker-check: FAILED (static)"
   exit 1
@@ -103,19 +121,24 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "==> docker-check: building image from current checkout"
-if ! docker build -q -t "$image" . >/dev/null; then
+base_image="${HAAS_BASE_IMAGE:-$base_arg}"
+if ! printf '%s\n' "$base_image" | grep -qE '@sha256:[0-9a-f]{64}$'; then
+  echo "docker-check: FAILED - HAAS_BASE_IMAGE must be digest-pinned"
+  exit 1
+fi
+if ! docker build -q --build-arg "HAAS_BASE_IMAGE=$base_image" -t "$image" . >/dev/null; then
   echo "docker-check: FAILED - image build failed"
   exit 1
 fi
 echo "  ok: image built"
 
 echo "==> docker-check: container run smoke"
-docker run -d --name "$name" -p "${port}:8092" "$image" >/dev/null
+docker run -d --name "$name" -p "${port}:8080" "$image" >/dev/null
 
 ready=0
 i=0
 while [ "$i" -lt 60 ]; do
-  if curl -fsS --max-time 3 "http://127.0.0.1:${port}/v1/haas/health" >/dev/null 2>&1; then
+  if curl -fsS --max-time 3 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -130,11 +153,11 @@ while [ "$i" -lt 60 ]; do
 done
 
 if [ "$ready" -ne 1 ]; then
-  echo "  FAIL: HaaS sidecar did not answer /v1/haas/health on 8092"
+  echo "  FAIL: nginx did not proxy HaaS /health on public port 8080"
   docker logs "$name" 2>&1 | tail -20
   exit 1
 fi
-echo "  ok: HaaS sidecar answers on 8092"
+echo "  ok: nginx proxies HaaS health on 8080"
 
 # AIO must survive alongside the sidecar (no port cannibalisation). AIO boots
 # slower than the sidecar, so poll instead of sampling once.
@@ -158,9 +181,8 @@ else
 fi
 
 # The production entrypoint must reach the real harness, not a test double.
-bases="$(docker exec "$name" sh -c \
-  "curl -fsS --max-time 10 -H 'Authorization: Bearer dev-token' \
-   http://127.0.0.1:8092/v1/haas/status" 2>/dev/null \
+bases="$(curl -fsS --max-time 10 -H 'Authorization: Bearer dev-token' \
+  "http://127.0.0.1:${port}/v1/haas/status" 2>/dev/null \
   | tr ',' '\n' | grep -c '"base": *"codex"' || true)"
 if [ "${bases:-0}" -ge 1 ]; then
   echo "  ok: codex adapter is assembled in the image"

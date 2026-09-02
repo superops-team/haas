@@ -117,8 +117,8 @@ adapters:
 
 | 端口 | 服务 | 地址 |
 |------|------|------|
-| 8080 | OpenSandbox AIO | 容器内 |
-| 8092 | HaaS sidecar | sidecar 对外 |
+| 8080 | nginx + OpenSandbox AIO | HaaS 容器对外总入口；保留 AIO 内部路由 |
+| 8092 | HaaS sidecar | nginx upstream，仅 `127.0.0.1` |
 | 18080 | model proxy | 仅 `127.0.0.1` |
 | 18081 | MCP/tool proxy | 仅 `127.0.0.1` |
 
