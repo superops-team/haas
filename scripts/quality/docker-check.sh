@@ -92,6 +92,18 @@ else
   fail=1
 fi
 
+# linux/amd64 is a hard delivery contract (AGENTS.md). The build path must pin
+# the platform so amd64 images are produced on any host (e.g. Apple Silicon).
+echo "==> docker-check: linux/amd64 platform is pinned in the build path"
+if grep -qE '^HAAS_PLATFORM[[:space:]]*:?=[[:space:]]*linux/amd64' Makefile \
+  && grep -qE -- '--platform=?[[:space:]"]*\$\(HAAS_PLATFORM\)' Makefile; then
+  echo "  ok: make docker-build pins --platform=linux/amd64"
+else
+  echo "  FAIL: Makefile must set HAAS_PLATFORM := linux/amd64 and build with"
+  echo "        --platform=\$(HAAS_PLATFORM)"
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "docker-check: FAILED (static)"
   exit 1
@@ -113,6 +125,9 @@ fi
 image="haas:docker-check"
 name="haas-docker-check-$$"
 port="${HAAS_DOCKER_CHECK_PORT:-18099}"
+# linux/amd64 is the project's hard platform contract (AGENTS.md). Build and run
+# the smoke image on amd64 even on Apple Silicon hosts.
+platform="${HAAS_PLATFORM:-linux/amd64}"
 
 cleanup() {
   docker rm -f "$name" >/dev/null 2>&1 || true
@@ -120,20 +135,20 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "==> docker-check: building image from current checkout"
+echo "==> docker-check: building image from current checkout (platform=$platform)"
 base_image="${HAAS_BASE_IMAGE:-$base_arg}"
 if ! printf '%s\n' "$base_image" | grep -qE '@sha256:[0-9a-f]{64}$'; then
   echo "docker-check: FAILED - HAAS_BASE_IMAGE must be digest-pinned"
   exit 1
 fi
-if ! docker build -q --build-arg "HAAS_BASE_IMAGE=$base_image" -t "$image" . >/dev/null; then
+if ! docker build -q --platform "$platform" --build-arg "HAAS_BASE_IMAGE=$base_image" -t "$image" . >/dev/null; then
   echo "docker-check: FAILED - image build failed"
   exit 1
 fi
 echo "  ok: image built"
 
 echo "==> docker-check: container run smoke"
-docker run -d --name "$name" -p "${port}:8080" "$image" >/dev/null
+docker run -d --platform "$platform" --name "$name" -p "${port}:8080" "$image" >/dev/null
 
 ready=0
 i=0

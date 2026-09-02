@@ -79,6 +79,7 @@ Rules:
 
 - Local experiments may use `ghcr.io/agent-infra/sandbox:latest`.
 - The Dockerfile default must remain the production-pinned digest. A local or CI build may set `HAAS_BASE_IMAGE` to a trusted digest-pinned mirror/cache reference; release builds may not use a mutable tag.
+- All HaaS images MUST be built and run for `linux/amd64`. This is a hard delivery contract: `make docker-build` and `make docker-check` pin `--platform=linux/amd64` (via `HAAS_PLATFORM`), and non-amd64 hosts (e.g. Apple Silicon) must cross-build amd64 through buildx/QEMU. Native-arch images must never be shipped as deliverables.
 - Dependency install layers must precede source code copy. npm and uv downloads use BuildKit cache mounts and remain governed by `uv.lock` and package pins.
 - `make docker-build` is the standard local build entrypoint; the override does not change the production default or AIO service contract.
 - Runtime env must be placed near the final runtime layer so it does not bust dependency cache.

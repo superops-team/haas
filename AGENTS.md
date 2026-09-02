@@ -35,7 +35,8 @@ Client / Manager
    诊断或显式 fallback，不得成为生产主路径。
 5. Docker runtime 必须基于开源 OpenSandbox AIO 镜像构建，默认参考
    `ghcr.io/agent-infra/sandbox:<tag-or-digest>`。生产镜像必须 pin digest，
-   `latest` 只允许本地实验。
+   `latest` 只允许本地实验。所有镜像按 `linux/amd64` 架构构建与启动是硬性
+   约定（详见「Docker 与 OpenSandbox AIO」第 2 条）。
 6. Harness 纳管协议以 Google ADK 2.0 REST API 协议层为首个兼容目标，同时保留
    HaaS 自有 control-plane 扩展。旧 `mpa-codex-worker` 迁移 shim 不在本项目
    范围（见「协议与接口规范」第 3 条）。
@@ -255,16 +256,24 @@ haas/
 1. Dockerfile 必须基于开源 OpenSandbox AIO 镜像构建。当前调研参考镜像为
    `ghcr.io/agent-infra/sandbox:latest`；生产必须改为 digest pin，例如
    `ghcr.io/agent-infra/sandbox@sha256:<digest>`。
-2. HaaS 镜像只在 AIO 基础上叠加 sidecar、harness adapter、首期 Codex CLI/
+2. **`linux/amd64` 是硬性平台约定**：本项目所有镜像必须按 `linux/amd64`
+   架构构建并启动，不接受其他架构作为交付目标。构建命令必须显式指定
+   `--platform=linux/amd64`（如 `docker build --platform=linux/amd64`、
+   `docker buildx build --platform=linux/amd64`），Dockerfile 的 `FROM` 与
+   多阶段基础镜像必须以 `linux/amd64` 解析。在非 amd64 主机（如 Apple
+   Silicon）上必须通过跨架构构建（buildx/QEMU）产出 amd64 镜像，本机
+   smoke/E2E 启动镜像时也必须以 `--platform=linux/amd64` 运行；不得用主机原生
+   架构镜像冒充交付产物。镜像推送和发布同样只交付 amd64 产物。
+3. HaaS 镜像只在 AIO 基础上叠加 sidecar、harness adapter、首期 Codex CLI/
    app-server 依赖和启动脚本，不 fork 或私改 AIO 基础能力。
-3. 必须保留 AIO `/opt/gem/run.sh` 能力或等价启动链路。若 HaaS 自定义 entrypoint，
+4. 必须保留 AIO `/opt/gem/run.sh` 能力或等价启动链路。若 HaaS 自定义 entrypoint，
    必须明确如何启动 AIO 服务、HaaS sidecar、Codex app-server 和健康检查。
-4. 默认端口约定：
+5. 默认端口约定：
    - `8080`：AIO sandbox 服务或被 AIO 保留的入口
    - `8092`：HaaS sidecar HTTP/SSE API
    - `18080`：HaaS model proxy loopback
    - `18081`：HaaS MCP/tool proxy loopback
-5. `/health` 只表示进程存活；`/ready` 表示是否可接新 session 或执行 turn。
+6. `/health` 只表示进程存活；`/ready` 表示是否可接新 session 或执行 turn。
    二者不得混用。
 
 ## 开发命令
