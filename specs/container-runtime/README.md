@@ -1,8 +1,8 @@
 # Container Runtime 组件规格
 
 Status: Draft
-Last reviewed: 2026-08-31
-Related specs: [Startup](../startup/README.md), [Security Boundary](../security-boundary/README.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.md), [Observability](../observability/README.md)
+Last reviewed: 2026-09-03
+Related specs: [Startup](../startup/README.md), [Runtime Trim](../runtime-trim/README.md), [Security Boundary](../security-boundary/README.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.md), [Observability](../observability/README.md)
 
 ## 1. 组件定位
 
@@ -52,6 +52,8 @@ Container Runtime 定义 HaaS 镜像、进程拓扑、端口、volume、health/r
 - 将 nginx 作为容器对外总入口，并把 HaaS sidecar readiness 作为对外 ready 的事实来源；具体启动 DAG 见 Startup spec。
 - 定义 SIGTERM drain：停止接新任务、flush event log、标记 ready=false、取消或落盘 active turn。
 - 定义 base image digest pin 和升级验证。
+- 在 runtime ENV 层落地 [Runtime Trim](../runtime-trim/README.md) 定义的 AIO 服务裁剪变量，
+  保证 CUA/BUA、sandbox 与 Codex readiness 不受影响。
 
 不负责：
 
@@ -84,6 +86,17 @@ Rules:
 - `make docker-build` is the standard local build entrypoint; the override does not change the production default or AIO service contract.
 - Runtime env must be placed near the final runtime layer so it does not bust dependency cache.
 - The Dockerfile must not embed provider keys, MCP tokens, cookies or user auth files.
+
+### 5.1.1 AIO Service Trim
+
+HaaS 只消费 AIO 的 shell/file/browser/sandbox/execd/credential vault 能力，不使用 AIO 自带的
+IDE、notebook 和多版本 REPL 服务。这些服务通过 AIO **官方支持的 `DISABLE_*` / `NODE_VERSION`
+环境变量**在 runtime ENV 层关闭（默认：`DISABLE_CODE_SERVER`、`DISABLE_JUPYTER`、
+`DISABLE_NODEJS_REPL`、`NODE_VERSION=node22`），不 fork 或私改 AIO 启动脚本。
+
+裁剪的完整合同——关闭清单、必须保留的能力、机制规则、gost/`18080` 前提、以及“运行时禁用只
+降资源占用、不减镜像层体积”的边界——由 [Runtime Trim](../runtime-trim/README.md) 权威定义。
+本组件只在 runtime ENV 层落地这些变量，并保证 CUA/BUA、sandbox 与 Codex readiness 不受影响。
 
 ### 5.2 Entrypoint Contract
 
@@ -211,3 +224,6 @@ Logs must go to stdout/stderr or configured log files with redaction.
 - Health/ready tests verify `/health` is not gated by optional warmups.
 - Shutdown test sends SIGTERM and asserts drain events/status.
 - Secret scan verifies build args, env, logs and image metadata do not contain provider credentials.
+- Service-trim check (§5.1.1 / [Runtime Trim](../runtime-trim/README.md))：静态断言 Dockerfile
+  设置 `DISABLE_CODE_SERVER`、`DISABLE_JUPYTER`、`DISABLE_NODEJS_REPL`；build/smoke 断言
+  code-server/jupyter 未监听而 browser/VNC/sandbox 与 Codex readiness 仍正常。

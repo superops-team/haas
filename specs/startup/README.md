@@ -166,6 +166,10 @@ prepare runtime dirs
 
 AIO、nginx、sidecar 和 Codex app-server 应并行启动；只有 nginx 配置校验、sidecar 可响应、Codex readiness probe 三者形成整体 ready 依赖。不得把 AIO 全量 ready 作为 sidecar ready 的前置条件。
 
+AIO 通过官方 `DISABLE_CODE_SERVER` / `DISABLE_JUPYTER` / `DISABLE_NODEJS_REPL` 关闭的服务
+（见 [Runtime Trim](../runtime-trim/README.md)）不在关键路径上，也不参与整体 ready 判定；它们的
+缺席不得改变 nginx、sidecar 或 Codex readiness 行为。browser/VNC 仍按可选能力异步 warmup。
+
 启动实现必须：
 
 - 为每个 phase 记录 monotonic start/end、duration、status 和 safe reason。

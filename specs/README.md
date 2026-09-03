@@ -155,6 +155,7 @@ Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harn
 | P1 | MCP / Tool / Skill Runtime | `specs/mcp-tool-skill-runtime/README.md` | MCP server、MCP proxy、tools、skills materialization、tool restriction |
 | P1 | Artifact Store | `specs/artifact-store/README.md` | 输入文件、session 产物、下载、归档和路径安全 |
 | P1 | Container Runtime | `specs/container-runtime/README.md` | OpenSandbox AIO Dockerfile、entrypoint、ports、health/ready、shutdown |
+| P1 | Runtime Trim | `specs/runtime-trim/README.md` | 用 AIO 官方 `DISABLE_*`/`NODE_VERSION` 关闭 HaaS 用不到的 AIO 服务，降低运行时占用 |
 | P1 | Startup | `specs/startup/README.md` | nginx 总入口、sidecar ready、Codex Unix socket 握手探测、启动 DAG、异步 warmup 和时延预算 |
 | P1 | Observability | `specs/observability/README.md` | logs、metrics、trace、diagnostics、conformance evidence |
 | P1 | Implementation Roadmap | `specs/implementation-roadmap/README.md` | 后续实现阶段、依赖、出口证据和风险收敛 |
@@ -345,6 +346,7 @@ security-boundary <- all public and adapter boundaries
 - Codex app-server：真实 handshake、thread/start、turn/start、cancel、schema generation/probe。
 - Sandbox：OpenSandbox sandbox/execd/credential vault 投影验证。
 - Container：OpenSandbox AIO build、ports、health/ready、SIGTERM drain。
+- Runtime trim：`DISABLE_*` 使 code-server/jupyter 不启动，而 browser/VNC/sandbox 与 Codex readiness 不回归（container smoke）。
 - Security：secret scan、redaction inverse assertions、SSRF allowlist、artifact traversal probes。
 
 ## 12. 维护规则

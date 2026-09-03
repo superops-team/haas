@@ -59,6 +59,19 @@ else
   fail=1
 fi
 
+# HaaS does not use AIO's IDE/notebook/REPL services; they are disabled via
+# AIO's own env knobs (specs/runtime-trim/README.md) to cut runtime footprint.
+echo "==> docker-check: AIO service trim knobs"
+if grep -qE 'DISABLE_CODE_SERVER=true' Dockerfile \
+  && grep -qE 'DISABLE_JUPYTER=true' Dockerfile \
+  && grep -qE 'DISABLE_NODEJS_REPL=true' Dockerfile; then
+  echo "  ok: code-server / jupyter / node REPL disabled via AIO env vars"
+else
+  echo "  FAIL: Dockerfile must disable unused AIO services via DISABLE_CODE_SERVER,"
+  echo "        DISABLE_JUPYTER and DISABLE_NODEJS_REPL (specs/runtime-trim/README.md)"
+  fail=1
+fi
+
 # pyproject-declared files must exist in the build context, or `uv sync` fails
 # at image build time while every static check still passes.
 echo "==> docker-check: pyproject readme is copied into the image"
@@ -192,6 +205,19 @@ if [ "$aio" -eq 1 ]; then
 else
   echo "  FAIL: AIO port 8080 not serving; HaaS must not displace AIO services"
   docker logs "$name" 2>&1 | tail -20
+  exit 1
+fi
+
+# Trimmed AIO services must NOT be running (specs/runtime-trim/README.md),
+# while the CUA/BUA + sandbox base is preserved.
+echo "==> docker-check: trimmed AIO services are disabled"
+trimmed_up="$(docker exec "$name" sh -c \
+  "ps -eo args 2>/dev/null | grep -E 'code-server|jupyter-lab|jupyter lab' | grep -v grep" 2>/dev/null || true)"
+if [ -z "$trimmed_up" ]; then
+  echo "  ok: code-server / jupyter are not running"
+else
+  echo "  FAIL: a trimmed service is still running:"
+  printf '%s\n' "$trimmed_up" | head -3
   exit 1
 fi
 
