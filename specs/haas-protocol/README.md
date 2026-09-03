@@ -1,132 +1,135 @@
-# HaaS Protocol 组件规格
+# HaaS Protocol Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-30
 
-## 1. 组件定位
+## 1. Component Role
 
-HaaS Protocol 是系统对上游暴露的 HTTP/JSON + SSE 合同。Northbound 主协议遵循 Google [Agent Development Kit (ADK) 2.0](https://adk.dev/2.0/) 的 REST API 协议层，HaaS 在此之上提供 `/v1/haas/*` 控制面扩展。（旧 `mpa-codex-worker` 迁移 shim 不在本项目范围，见 §5.3。）
+HaaS Protocol is the HTTP/JSON + SSE contract exposed by the system to upstream clients. The primary northbound protocol follows the REST API protocol layer of Google [Agent Development Kit (ADK) 2.0](https://adk.dev/2.0/), with HaaS providing `/v1/haas/*` control-plane extensions on top. (The legacy `mpa-codex-worker` migration shim is out of scope; see §5.3.)
 
-协议目标是让上游用 ADK 2.0 标准客户端即可运行任意 harness。Codex app-server、Pi、OpenCode、AMP 等具体 runtime 只存在于 adapter 内部，不成为上游协议的必需知识。
+The protocol enables upstream systems to run any harness using a standard ADK 2.0 client. Concrete runtimes such as Codex app-server, Pi, OpenCode, and AMP exist only inside their adapters and are not required knowledge for the upstream protocol.
 
-约定映射：
+Contract mapping:
 
-| 概念 | ADK 2.0 术语 | HaaS 内部术语 |
+| Concept | ADK 2.0 term | HaaS internal term |
 |------|---------------|---------------|
-| 可执行的 agent app | `appName` | configured harness `id`（`chrn_...`，`name` 可作别名） |
-| 调用方身份 | `userId` | caller principal 下的 sub-user scope |
-| 会话 | `sessionId` | HaaS Session（`(appName, userId, sessionId)` 三元组唯一） |
-| 一次运行 | `/run`、`/run_sse` | HaaS Run/Invocation（内部 `inv_...`）+ 内部 Turn |
-| 事件 | ADK `Event` | canonical event 的 ADK 投影 |
+| Executable agent app | `appName` | configured harness `id` (`chrn_...`; `name` MAY be used as an alias) |
+| Caller identity | `userId` | Sub-user scope under the caller principal |
+| Session | `sessionId` | HaaS Session, uniquely identified by `(appName, userId, sessionId)` |
+| One execution | `/run`, `/run_sse` | HaaS Run/Invocation (internal `inv_...`) + internal Turn |
+| Event | ADK `Event` | ADK projection of a canonical event |
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
+| Source | Adopted content |
 |------|----------|
-| ADK 2.0 docs（`/runtime/api-server/`，2026-08-26 抓取） | `/list-apps`、`/run`、`/run_sse`、`/apps/{app}/users/{user}/sessions/{sid}`、camelCase、`newMessage{role,parts}`、`streaming:true` token 级增量、SSE `data:` 帧 |
-| ADK 2.0 release notes | Event 新增 `nodeInfo`、`output`、`routes`、`requestedInput`、`isolationScope` 字段 |
-| `mpa-codex-worker` Sidecar API | health/ready/status 的**设计参考**；其 legacy `/v1/codex-worker/*` 语义不在本项目实现范围（§5.3） |
-| Codex app-server manual | Codex adapter 内部 JSON-RPC lifecycle，不对上游公开 |
-| OpenSandbox AIO | 容器内基础 service 和 endpoint 约束 |
+| ADK 2.0 docs (`/runtime/api-server/`, retrieved 2026-08-26) | `/list-apps`, `/run`, `/run_sse`, `/apps/{app}/users/{user}/sessions/{sid}`, camelCase, `newMessage{role,parts}`, token-level deltas with `streaming:true`, and SSE `data:` frames |
+| ADK 2.0 release notes | New Event fields: `nodeInfo`, `output`, `routes`, `requestedInput`, and `isolationScope` |
+| `mpa-codex-worker` Sidecar API | **Design reference** for health/ready/status; its legacy `/v1/codex-worker/*` semantics are outside this project's implementation scope (§5.3) |
+| Codex app-server manual | Internal JSON-RPC lifecycle for the Codex adapter, not exposed upstream |
+| OpenSandbox AIO | Constraints for base services and endpoints inside the container |
 
-HaaS 只 follow ADK 的 **协议层**（HTTP 路径、请求/响应 shape、事件 shape、SSE framing），不引入 ADK 的 agent 执行引擎（`BaseAgent`/WorkflowGraph）、图工作流或 ADK Web UI。compatibility 目标是「任何遵守 ADK 2.0 REST 协议的 HTTP 客户端」，字段命名以 camelCase REST 契约为准，不承诺 Python SDK 的 snake_case server 实现。适配范围详见 [WALKTHROUGH](../architecture/WALKTHROUGH.md)。
+HaaS follows only the ADK **protocol layer**: HTTP paths, request/response shapes, event shapes, and SSE framing. It does not incorporate the ADK agent execution engine (`BaseAgent`/WorkflowGraph), graph workflows, or ADK Web UI. The compatibility target is any HTTP client that conforms to the ADK 2.0 REST protocol. Field naming follows the camelCase REST contract; compatibility with the Python SDK's snake_case server implementation is not guaranteed. See [WALKTHROUGH](../architecture/WALKTHROUGH.md) for the adaptation scope.
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
+| Direction | Component | Relationship |
 |------|------|------|
-| 上游 | Manager / SDK / CLI / product backend / ADK web UI | 通过 ADK HTTP/SSE 调用 HaaS |
-| 上游 | Harness Registry | 解析 appName -> configured harness、model availability、capability |
-| 上游 | Session Runtime | 创建 run/invocation、session/turn、幂等和并发 |
-| 上游 | Event Log & SSE | 读取和推送事件 |
-| 上游 | Harness Adapter | 执行具体 harness |
-| 上游 | Observability | 提供 health/ready/status、trace、metrics |
+| Upstream | Manager / SDK / CLI / product backend / ADK web UI | Calls HaaS through ADK HTTP/SSE |
+| Upstream | Harness Registry | Resolves appName -> configured harness, model availability, and capabilities |
+| Upstream | Session Runtime | Creates run/invocation and session/turn objects; manages idempotency and concurrency |
+| Upstream | Event Log & SSE | Reads and publishes events |
+| Upstream | Harness Adapter | Executes the concrete harness |
+| Upstream | Observability | Provides health/ready/status, traces, and metrics |
 
-本组件内部负责「Protocol Mapper」：将 ADK 请求映射为内部对象、把内部 canonical event 投影为 ADK `Event`。Protocol Mapper 不再作为独立组件存在，而是本 spec 的职责。
+This component owns the Protocol Mapper: it maps ADK requests to internal objects and projects internal canonical events as ADK `Event` objects. Protocol Mapper is not a separate component; it is a responsibility of this specification.
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 定义 public ADK API 的 path、method、headers、request/response schema。
-- 维护 ADK-compatible 主协议与 HaaS native 扩展的分层。
-- 统一错误 detail、`Idempotency-Key` 规则、SSE framing 和事件投影。
-- 明确哪些字段是公共兼容承诺，哪些是 HaaS 扩展。
+- Define paths, methods, headers, and request/response schemas for the public ADK API.
+- Maintain the layering between the primary ADK-compatible protocol and HaaS native extensions.
+- Standardize error detail, `Idempotency-Key` rules, SSE framing, and event projection.
+- Identify which fields are public compatibility commitments and which are HaaS extensions.
 
-不负责：
+Non-responsibilities:
 
-- 不直接启动或管理 harness 进程。
-- 不保存 session、event、artifact 或 credential。
-- 不执行模型请求、MCP 请求或 tool 调用。
-- 不暴露 Codex thread/turn id、Pi session file、OpenCode config path 等原生 runtime 细节。
+- Does not directly start or manage harness processes.
+- Does not store sessions, events, artifacts, or credentials.
+- Does not execute model requests, MCP requests, or tool calls.
+- MUST NOT expose native runtime details such as Codex thread/turn IDs, Pi session files, or OpenCode configuration paths.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
-### 5.1 ADK-Compatible Public API（主协议）
+### 5.1 ADK-Compatible Public API (Primary Protocol)
 
-ADK 2.0 根路径，drop-in 兼容：
+ADK 2.0 root paths, with drop-in compatibility:
 
-| Method | Path | 说明 |
+| Method | Path | Description |
 |--------|------|------|
-| GET | `/list-apps` | 列出 caller scope 内的 configured harness app 名（返回 id 字符串数组） |
-| POST | `/run` | 运行 harness，收集全部事件后在单个 JSON 数组返回 |
-| POST | `/run_sse` | 运行 harness，以 SSE 流式返回事件；`streaming:true` 开 token 级增量 |
-| GET | `/apps/{app_name}/users/{user_id}/sessions/{session_id}` | 读取 session（`state` + `events[]`，ADK 原生 replay 通道） |
-| PATCH | `/apps/{app_name}/users/{user_id}/sessions/{session_id}` | 用 `stateDelta` 更新 session state（`Idempotency-Key` 支持） |
-| DELETE | `/apps/{app_name}/users/{user_id}/sessions/{session_id}` | 删除 session 及其数据 |
+| GET | `/list-apps` | Lists configured harness app names within the caller scope (returns an array of ID strings) |
+| POST | `/run` | Runs a harness, collects all events, and returns them in a single JSON array |
+| POST | `/run_sse` | Runs a harness and streams events over SSE; `streaming:true` enables token-level deltas |
+| GET | `/apps/{app_name}/users/{user_id}/sessions/{session_id}` | Reads a session (`state` + `events[]`; the native ADK replay channel) |
+| PATCH | `/apps/{app_name}/users/{user_id}/sessions/{session_id}` | Updates session state using `stateDelta` (supports `Idempotency-Key`) |
+| DELETE | `/apps/{app_name}/users/{user_id}/sessions/{session_id}` | Deletes a session and its data |
 
-`appName` 解析顺序：先按 harness `id`（`chrn_...`）精确匹配，再按 `name` 匹配；多命中或未命中返回 `404 app_not_found`。`userId`/`sessionId` 是 caller-supplied opaque 字符串，受 `Authorization` 主体 scope 约束。
+`appName` resolution order is an exact match on harness `id` (`chrn_...`), followed by a match on `name`. Multiple matches or no match return `404 app_not_found`. `userId` and `sessionId` are caller-supplied opaque strings constrained by the scope of the `Authorization` principal.
 
 ### 5.2 HaaS Native Extension API
 
-HaaS 自有控制面，只做 U 未覆盖能力，不改写 ADK 字段语义：
+The HaaS native control plane provides only capabilities not covered by U and MUST NOT redefine ADK field semantics:
 
-| Method | Path | 说明 |
+| Method | Path | Description |
 |--------|------|------|
-| GET | `/health` / `/ready` | liveness/readiness alias，等同 `/v1/haas/health`、`/v1/haas/ready` |
+| GET | `/health` / `/ready` | Liveness/readiness aliases equivalent to `/v1/haas/health` and `/v1/haas/ready` |
 | GET | `/v1/haas/health` | sidecar liveness |
-| GET | `/v1/haas/ready?scope=control\|execution\|capability` | readiness |
-| GET | `/v1/haas/status` | runtime、adapter、queue、proxy、AIO、store 状态摘要 |
-| GET | `/v1/haas/diagnostics` | 脱敏诊断摘要 |
-| GET | `/v1/haas/harnesses` | configured harness 完整列表（与 `/list-apps` 的 id 数组等价但含详情） |
-| POST | `/v1/haas/harnesses` | 创建 configured harness（`Idempotency-Key` 支持） |
-| PUT | `/v1/haas/harnesses/{harness_id}` | 更新 harness，`id`/`base`/`createdAtMs` 不变 |
-| DELETE | `/v1/haas/harnesses/{harness_id}` | 删除 harness，不删历史 session |
-| GET | `/v1/haas/models` | 全局 model catalog（按 base 分组） |
-| GET | `/v1/haas/sessions` | 跨 user 分页列出 session（管理视角） |
-| GET | `/v1/haas/sessions/{session_id}/events` | HaaS canonical SSE replay/live（带 cursor） |
-| GET | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/events` | invocation 级 canonical SSE replay/live |
-| POST | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel` | 取消运行中 invocation，幂等（`Idempotency-Key` 支持） |
-| GET | `/v1/haas/sessions/{session_id}/artifacts` | HaaS artifact listing |
-| GET | `/v1/haas/sessions/{session_id}/artifacts/archive` | 下载 session artifact 归档（zip） |
-| POST | `/v1/haas/files` | 上传 input file（multipart），返回 `File` 对象 |
-| GET | `/v1/haas/files/{file_id}/content` | 下载 artifact 原始 bytes（`nosniff`） |
-| GET | `/v1/haas/files/{file_id}/pdf` | 可选 PDF preview；未实现返回 `501 haas_preview_unavailable` |
+| GET | `/v1/haas/ready?scope=control\|execution\|capability` | Readiness |
+| GET | `/v1/haas/status` | Status summary for runtime, adapter, queue, proxy, AIO, and store |
+| GET | `/v1/haas/diagnostics` | Redacted diagnostic summary |
+| GET | `/v1/haas/harnesses` | Complete configured harness list (equivalent to the ID array from `/list-apps`, but with details) |
+| POST | `/v1/haas/harnesses` | Creates a configured harness (supports `Idempotency-Key`) |
+| PUT | `/v1/haas/harnesses/{harness_id}` | Updates a harness; `id`, `base`, and `createdAtMs` remain unchanged |
+| DELETE | `/v1/haas/harnesses/{harness_id}` | Deletes a harness without deleting historical sessions |
+| GET | `/v1/haas/models` | Global model catalog, grouped by base |
+| GET | `/v1/haas/sessions` | Lists sessions across users with pagination (administrative view) |
+| GET | `/v1/haas/sessions/{session_id}/events` | HaaS canonical SSE replay/live stream with cursor |
+| GET | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/events` | Invocation-level canonical SSE replay/live stream |
+| POST | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel` | Idempotently cancels a running invocation (supports `Idempotency-Key`) |
+| GET | `/v1/haas/sessions/{session_id}/artifacts` | Lists HaaS artifacts |
+| GET | `/v1/haas/sessions/{session_id}/artifacts/archive` | Downloads a session artifact archive (zip) |
+| POST | `/v1/haas/files` | Uploads an input file (multipart) and returns a `File` object |
+| GET | `/v1/haas/files/{file_id}/content` | Downloads raw artifact bytes (`nosniff`) |
+| GET | `/v1/haas/files/{file_id}/pdf` | Optional PDF preview; returns `501 haas_preview_unavailable` if not implemented |
 
-artifact 端点详情见 [Artifact Store](../artifact-store/README.md) 第 5 节；文件模型统一
-`File` schema。
+See §5 of [Artifact Store](../artifact-store/README.md) for artifact endpoint details. The file model uses a single `File` schema.
 
-### 5.3 Legacy Sidecar Shim（不在本项目范围）
+### 5.3 Legacy Sidecar Shim (Out of Scope)
 
-**决策（2026-08-30）**：`/v1/codex-worker/*` shim **不实现**。HaaS 与
-`mpa-codex-worker` 只是架构同构，不承担其迁移职责；如确需迁移旧上游，单独
-立项。详见 [specs/README §3.1.1](../README.md#311-范围决策不实现-mpa-codex-worker-迁移-shim)。
+**Decision (2026-08-30):** The `/v1/codex-worker/*` shim **MUST NOT be implemented**.
+HaaS and `mpa-codex-worker` are only architecturally isomorphic; HaaS does not assume
+migration responsibility. Migration of legacy upstream systems requires a separate
+project. See [specs/README §3.1.1](../README.md#311-scope-decision-do-not-implement-the-mpa-codex-worker-migration-shim).
 
-下表仅作为**历史设计记录**保留，供将来立项时参考，**不是待办项**；实现代码
-不得据此新增 `/v1/codex-worker/*` 路由。
+The following table is retained only as a **historical design record** for reference in
+a future project. It is **not a task list**, and implementations MUST NOT add
+`/v1/codex-worker/*` routes based on it.
 
-| Legacy path | HaaS target | 规则 |
+| Legacy path | HaaS target | Rule |
 |-------------|-------------|------|
-| `/v1/codex-worker/health` | `/v1/haas/health` | 响应字段保持旧兼容 |
-| `/v1/codex-worker/ready` | `/v1/haas/ready` | `scope` 语义保留 |
-| `/v1/codex-worker/status` | `/v1/haas/status` | 增加 deprecation notice |
-| `/v1/codex-worker/sessions` | `POST /run` | 映射为 configured harness base=`codex`，`userId` 按旧 actor |
-| `/v1/codex-worker/sessions/{id}/turns` | `POST /run` | `sessionId=id`，续写语义映射为 ADK session continuation |
-| `/v1/codex-worker/sessions/{id}/events` | `/v1/haas/sessions/{id}/events` | 支持旧 event name projection |
+| `/v1/codex-worker/health` | `/v1/haas/health` | Preserve compatibility of response fields |
+| `/v1/codex-worker/ready` | `/v1/haas/ready` | Preserve `scope` semantics |
+| `/v1/codex-worker/status` | `/v1/haas/status` | Add a deprecation notice |
+| `/v1/codex-worker/sessions` | `POST /run` | Map to configured harness base=`codex`; derive `userId` from the legacy actor |
+| `/v1/codex-worker/sessions/{id}/turns` | `POST /run` | Set `sessionId=id`; map continuation semantics to ADK session continuation |
+| `/v1/codex-worker/sessions/{id}/events` | `/v1/haas/sessions/{id}/events` | Support legacy event-name projection |
 
-## 6. 数据模型
+## 6. Data Models
 
-### 6.1 RunRequest（`/run`、`/run_sse` 请求体）
+### 6.1 RunRequest (`/run` and `/run_sse` Request Body)
 
 ```json
 {
@@ -152,14 +155,14 @@ artifact 端点详情见 [Artifact Store](../artifact-store/README.md) 第 5 节
 }
 ```
 
-规则：
+Rules:
 
-- `appName` 必填；`userId` 必填（可由 `Authorization` 派生但显式传入优先）；`sessionId` 可选，缺省生成 `hsess_<rand>`。
-- `newMessage.parts[]` 支持 `text`、`inlineData`；HaaS 额外接受 `fileId`（引用已上传 file）作为扩展。
-- `streaming` 仅 `/run_sse` 生效，默认 `false`。
-- 顶层未知字段在 ADK-compatible path 上忽略。HaaS 扩展只能放入 `haas` 嵌套对象，不得污染 ADK 顶层字段。
+- `appName` is required. `userId` is required; it MAY be derived from `Authorization`, but an explicitly supplied value takes precedence. `sessionId` is optional; if omitted, HaaS generates `hsess_<rand>`.
+- `newMessage.parts[]` supports `text` and `inlineData`. As an extension, HaaS also accepts `fileId`, which references an uploaded file.
+- `streaming` applies only to `/run_sse` and is `false` by default.
+- Unknown top-level fields are ignored on ADK-compatible paths. HaaS extensions MUST be placed only in the nested `haas` object and MUST NOT pollute ADK top-level fields.
 
-### 6.2 ADK `Event`（公共事件投影）
+### 6.2 ADK `Event` (Public Event Projection)
 
 ```json
 {
@@ -184,7 +187,7 @@ artifact 端点详情见 [Artifact Store](../artifact-store/README.md) 第 5 节
 }
 ```
 
-`author` 填 harness `id` 或 base（`codex`）；`content.role` 为 `model` 或 `user`；`parts[]` 元素类型为 `text`、`inlineData`、`functionCall`、`functionResponse`。`nodeInfo`/`output` 只在 adapter 产出对应信息时出现。`actions.stateDelta`/`artifactDelta` 由 Session Runtime 汇总 harness 状态/产物写入。
+`author` contains the harness `id` or base (`codex`). `content.role` is `model` or `user`. Elements of `parts[]` have type `text`, `inlineData`, `functionCall`, or `functionResponse`. `nodeInfo` and `output` appear only when the adapter produces the corresponding information. Session Runtime writes `actions.stateDelta` and `artifactDelta` by aggregating harness state and artifacts.
 
 ### 6.3 ADK `Session`
 
@@ -201,7 +204,7 @@ artifact 端点详情见 [Artifact Store](../artifact-store/README.md) 第 5 节
 
 ### 6.4 HaaS Error
 
-ADK 兼容路径返回带 `detail` 的错误（FastAPI 惯例），并附加结构化 `haasError` 扩展：
+ADK-compatible paths return errors with `detail`, following the FastAPI convention, plus a structured `haasError` extension:
 
 ```json
 {
@@ -217,11 +220,9 @@ ADK 兼容路径返回带 `detail` 的错误（FastAPI 惯例），并附加结�
 }
 ```
 
-`code` 使用 HaaS 稳定错误码，`haasError` 为 HaaS 扩展，ADK 客户端只读 `detail`。
-错误码唯一目录见 [ERROR-CODES](ERROR-CODES.md)，OpenAPI 的 `haasError.code`
-与之对齐；新增错误码必须先更新目录。
+`code` uses a stable HaaS error code. `haasError` is a HaaS extension; ADK clients read only `detail`. See [ERROR-CODES](ERROR-CODES.md) for the sole error-code catalog. OpenAPI `haasError.code` values MUST align with that catalog, and the catalog MUST be updated before adding an error code.
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 request received
@@ -229,7 +230,7 @@ request received
   -> appName resolved (harness id/name)
   -> schema validated
   -> Idempotency-Key reservation (when present)
-  -> Last-Event-ID present? -> resolve invocation by event id + scope -> replay then live（不新建 turn）
+  -> Last-Event-ID present? -> resolve invocation by event id + scope -> replay then live (do not create a new turn)
   -> admission decision (quota/rate/queue)
   -> session resolved or created
   -> invocation created
@@ -240,63 +241,63 @@ request received
   -> session state and artifacts committed
 ```
 
-Invocation（内部 Run）状态：
+Invocation (internal Run) states:
 
-| Status | Terminal | 语义 |
+| Status | Terminal | Semantics |
 |--------|----------|------|
-| `running` | no | 已接受并执行中 |
-| `completed` | yes | harness 正常完成，stream 关闭 |
-| `failed` | yes | harness 或服务失败，错误可读 |
-| `incomplete` | yes | 预算/超时截断，保留部分输出 |
-| `cancelled` | yes | caller 取消，保留已提交事件 |
+| `running` | no | Accepted and executing |
+| `completed` | yes | Harness completed normally; stream closes |
+| `failed` | yes | Harness or service failed; error is readable |
+| `incomplete` | yes | Truncated by budget/timeout; partial output is retained |
+| `cancelled` | yes | Cancelled by caller; committed events are retained |
 
-同一个 session 同一时刻只允许一个 running invocation；第二个 `/run` 返回 `409 session_busy`。
+Only one running invocation is allowed per session at a time. A second `/run` returns `409 session_busy`.
 
-SSE framing（`/run_sse`）：
+SSE framing (`/run_sse`):
 
 ```text
 data: {"id":"evt_...","invocationId":"inv_abc",...}
 
 ```
-heartbeat 使用 SSE comment `: keep-alive`，不产生事件。invocation 完成即关闭 stream；`/run` 则收集后一次性返回 JSON 数组。
+Heartbeats use the SSE comment `: keep-alive` and do not produce events. The stream closes when the invocation completes. `/run` instead collects the events and returns them once as a JSON array.
 
-## 8. 安全与权限
+## 8. Security and Authorization
 
-- `GET /list-apps` 需鉴权，只返回 caller scope 内 harness。
-- `Authorization: Bearer <caller token>` 对非 health/ready 路径必填。
-- `userId`/`sessionId` 上均做 principal scope：跨 user/session 访问返回 `404`，不用 `403` 暴露存在性。
-- ADK 兼容路径不在顶层接收 caller 提供的上游 URL/密钥；HaaS 扩展字段必须通过 registry allowlist 校验。
-- Error `detail`/`haasError` 不得含 secret、内部 host、绝对路径、stack trace。
+- `GET /list-apps` requires authentication and returns only harnesses within the caller scope.
+- `Authorization: Bearer <caller token>` is required for every path except health/ready.
+- Principal scope is enforced for both `userId` and `sessionId`. Cross-user/session access returns `404`, not `403`, to avoid revealing existence.
+- ADK-compatible paths MUST NOT accept caller-supplied upstream URLs or keys at the top level. HaaS extension fields MUST pass registry allowlist validation.
+- Error `detail` and `haasError` MUST NOT contain secrets, internal hosts, absolute paths, or stack traces.
 
-## 9. 可观测性
+## 9. Observability
 
-每个请求关联：`traceId`、`requestId`、`principalHash`、`appName`(harnessId)、`userId` hash、`sessionId`、`invocationId`、`adapterBase`、`status`。
+Each request is associated with `traceId`, `requestId`, `principalHash`, `appName` (harnessId), `userId` hash, `sessionId`, `invocationId`, `adapterBase`, and `status`.
 
-不得记录：raw prompt、provider API key、Authorization/Cookie、MCP runtime header value、artifact 文件内容、未脱敏 stack trace。
+The following MUST NOT be logged: raw prompts, provider API keys, Authorization/Cookie values, MCP runtime header values, artifact file contents, or unredacted stack traces.
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
+| Scenario | Behavior |
 |------|------|
-| appName 无法解析 | `404 app_not_found`（`haasError.code=app_not_found`） |
-| idempotency store 不可用 | `503 haas_idempotency_store_unavailable`，不得执行任务 |
-| session busy | `409 session_busy`，可带 `retryAfterMs` |
-| `/run_sse` 断线 | 不取消 invocation；client 用 `POST /run_sse` + `Last-Event-ID` 续接（服务端按 event id 定位原 invocation，回放其后事件并续 live，不新建 turn），或通过 `GET /apps/.../sessions/{sid}` 读回 events |
-| adapter crash | invocation 进入 `failed`/`incomplete`，持久化后可读 |
-| cancel retry | 幂等成功，不删除 session（见 `POST /v1/haas/.../invocations/{id}/cancel` 扩展见 session-runtime） |
+| appName cannot be resolved | `404 app_not_found` (`haasError.code=app_not_found`) |
+| Idempotency store unavailable | `503 haas_idempotency_store_unavailable`; the task MUST NOT execute |
+| Session busy | `409 session_busy`, optionally with `retryAfterMs` |
+| `/run_sse` disconnects | The invocation is not cancelled. The client reconnects with `POST /run_sse` + `Last-Event-ID`; the server locates the original invocation by event ID, replays subsequent events, and continues live without creating a new turn. Alternatively, the client reads events through `GET /apps/.../sessions/{sid}`. |
+| Adapter crashes | The invocation enters `failed`/`incomplete` and remains readable after persistence |
+| Cancellation retried | Succeeds idempotently and does not delete the session (see the `POST /v1/haas/.../invocations/{id}/cancel` extension in session-runtime) |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-文档阶段：
+Documentation stage:
 
 - `git diff --check`
-- 所有 public path 在本文件和组件 spec 中一致；OpenAPI 覆盖 ADK 与 HaaS native 两面（legacy 条目保留但不实现，见 §5.3）。
+- All public paths are consistent between this file and component specifications. OpenAPI covers both the ADK and HaaS native surfaces; legacy entries are retained but not implemented (see §5.3).
 
-实现阶段：
+Implementation stage:
 
-- ADK API server 兼容：用 ADK 官方 client / curl `list-apps`、`run`、`run_sse` 对比真实 ADK 行为。
-- SSE：progressive flush、stream 关闭语义、heartbeat 不产生事件。
-- `/run` 非流式输出与 `/run_sse` 流式聚合输出一致（parity）。
-- Event：`content.role`/`parts`/`actions`/`invocationId` 字段完整；ADK 2.0 字段 `nodeInfo` 按需出现。
-- Auth/scope：两 principal 交叉访问 session/user 全部 404。
-- Idempotency-Key：重复 `POST /run` 不重复启动 harness。
+- ADK API server compatibility: use the official ADK client / curl to compare `list-apps`, `run`, and `run_sse` against actual ADK behavior.
+- SSE: progressive flush, stream-close semantics, and heartbeats that do not produce events.
+- Non-streaming output from `/run` matches the aggregated streaming output from `/run_sse` (parity).
+- Event: `content.role`, `parts`, `actions`, and `invocationId` fields are complete; the ADK 2.0 field `nodeInfo` appears when applicable.
+- Auth/scope: cross-access by two principals to each other's sessions/users returns 404 in all cases.
+- Idempotency-Key: repeated `POST /run` requests do not start the harness more than once.

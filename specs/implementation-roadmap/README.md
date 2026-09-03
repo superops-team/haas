@@ -1,59 +1,61 @@
-# Implementation Roadmap 组件规格
+# Implementation Roadmap Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-26
 
-## 1. 组件定位
+## 1. Component Role
 
-Implementation Roadmap 定义 HaaS 从文档基线进入首期实现的分层任务顺序。它不是临时项目计划，而是为了保证后续代码改动可以从 specs 追溯到协议、组件和测试合同。
+The Implementation Roadmap defines the staged task sequence for taking HaaS from the documentation baseline into its initial implementation. It is not a temporary project plan; it ensures that subsequent code changes are traceable from the specs to protocol, component, and test contracts.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
+| Source | Adopted content |
 |------|----------|
-| Architecture spec | HaaS sidecar-first 架构和首期 Codex app-server 目标 |
-| HaaS Protocol spec | ADK 2.0-compatible API 和 HaaS native extension |
-| Harness Adapter spec | adapter seam 与多 harness 扩展规则 |
-| Sandbox Runtime spec | OpenSandbox sandbox/execd/credential vault 统一投影 |
-| Container Runtime spec | OpenSandbox AIO base image 与 health/ready 约束 |
+| Architecture spec | HaaS sidecar-first architecture and initial Codex app-server target |
+| HaaS Protocol spec | ADK 2.0-compatible API and HaaS native extension |
+| Harness Adapter spec | Adapter seam and multi-harness extension rules |
+| Sandbox Runtime spec | Unified projection to OpenSandbox sandbox/execd/credential vault |
+| Container Runtime spec | OpenSandbox AIO base image and health/ready constraints |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
+| Direction | Object | Relationship |
 |------|------|------|
-| 上游 | 开发者 / AI agent | 按本路线选择下一步实现范围 |
-| 下游 | 所有 specs | 每个任务引用对应组件合同 |
-| 下游 | 代码、测试、Dockerfile | 后续实现交付物 |
+| Upstream | Developer / AI agent | Selects the next implementation scope according to this roadmap |
+| Downstream | All specs | Each task references the applicable component contracts |
+| Downstream | Code, tests, Dockerfile | Subsequent implementation deliverables |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 定义首期实现顺序。
-- 定义每个阶段的输入、输出和进入/退出标准。
-- 限制 scope creep，保证先跑通 ADK 2.0 协议 + Codex app-server 最小链路，再补 Sandbox Runtime 标准化。
+- Define the initial implementation sequence.
+- Define the inputs, outputs, and entry/exit criteria for each stage.
+- Limit scope creep and ensure that the minimum ADK 2.0 protocol + Codex app-server path works before adding Sandbox Runtime standardization.
 
-不负责：
+Non-responsibilities:
 
-- 不替代具体组件 spec。
-- 不保存临时验证日志。
-- 不承诺具体排期日期。
+- Does not replace individual component specs.
+- Does not retain temporary verification logs.
+- Does not commit to specific delivery dates.
 
-## 5. 核心接口
+## 5. Core Interface
 
-本组件不提供运行时 API。任务接口是文档化的阶段边界：
+This component provides no runtime API. Its task interface consists of documented stage boundaries:
 
 | Stage | Entry criteria | Exit criteria |
 |-------|----------------|---------------|
-| S0 specs baseline | 当前文档已创建 | specs lint/link/schema 检查通过 |
-| S1 project skeleton | S0 complete | Python package、FastAPI app、Makefile、tests skeleton 可运行 |
-| S2 protocol core | S1 complete | ADK `/list-apps`、`/run`、`/run_sse`、session 路径 + 错误 + schema 测试通过 |
-| S3 fake adapter | S2 complete | fake harness 完成 streaming/non-stream/cancel/session replay 测试 |
-| S4 Codex adapter | S3 complete | Codex app-server handshake、thread/turn、cancel E2E 通过 |
-| S5 sandbox + AIO container | S4 complete | Sandbox Runtime 投影 + OpenSandbox AIO-derived image smoke 通过 |
-| S6 extended features | S5 complete | files/artifacts/MCP/skills/model proxy/admission control 按 specs 逐项通过 |
+| S0 specs baseline | Current documents have been created | Specs lint/link/schema checks pass |
+| S1 project skeleton | S0 complete | Python package, FastAPI app, Makefile, and test skeleton are runnable |
+| S2 protocol core | S1 complete | Tests pass for ADK `/list-apps`, `/run`, `/run_sse`, session paths, errors, and schemas |
+| S3 fake adapter | S2 complete | Fake harness passes streaming/non-stream/cancel/session replay tests |
+| S4 Codex adapter | S3 complete | Codex app-server handshake, thread/turn, and cancel E2E pass |
+| S5 sandbox + AIO container | S4 complete | Sandbox Runtime projection and OpenSandbox AIO-derived image smoke pass |
+| S6 extended features | S5 complete | Files/artifacts/MCP/skills/model proxy/admission control pass their respective specs |
 
-## 6. 数据模型
+## 6. Data Model
 
 ```json
 {
@@ -69,7 +71,7 @@ Implementation Roadmap 定义 HaaS 从文档基线进入首期实现的分层任
 }
 ```
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 S0 specs baseline
@@ -84,24 +86,22 @@ S0 specs baseline
 
 Do not start S4 before S3 fake adapter proves that the public protocol and session runtime are independent of Codex.
 
-准入口径澄清：`S3 fake adapter` 是协议/组件的**解耦验证**（离线单元+集成）；`铁律 #9
-「最小端到端」` 指首期 P0 harness（Codex）的最终准出，落在 **S4**。两者不冲突：
-S2-S3 证明协议与 harness 无关，S4 完成真实链路（见 [architecture](../architecture/README.md)）。
+Exit-criteria clarification: `S3 fake adapter` is a **decoupling verification** for the protocol/components (offline unit + integration). The minimum end-to-end requirement in Iron Rule #9 refers to the final release gate for the initial P0 harness (Codex), which occurs in **S4**. These requirements do not conflict: S2-S3 prove that the protocol is harness-independent, and S4 completes the real execution path (see [architecture](../architecture/README.md)).
 
-## 8. 安全与权限
+## 8. Security and Permissions
 
 - Security Boundary spec gates every stage.
 - New stages cannot relax secretless rules without updating Security Boundary.
 - Any runtime stage that touches Docker, provider credentials, MCP headers or artifact download must add negative tests before implementation is considered done.
 
-## 8.1 测试隔离开关与覆盖率
+## 8.1 Test Isolation Flags and Coverage
 
-- 默认测试必须离线：不访问真实网络、真实 HOME、真实 provider、真实 Codex/OpenSandbox。
-- 真实服务测试用显式开关：`HAAS_E2E=1`（总开关）或 `HAAS_E2E_CODEX=1` / `HAAS_E2E_OPEN_SANDBOX=1`（分项）；未开开关跳过，记为 `not_run`，不得写成通过。
-- 测试框架：pytest + pytest-asyncio + coverage。
-- 覆盖率门禁（AGENTS.md）：核心模块 ≥90%；credential、redaction、policy、proxy token、artifact path、日志脱敏路径 ≥95%。
+- Tests MUST be offline by default: they MUST NOT access the real network, real HOME, real providers, or real Codex/OpenSandbox.
+- Real-service tests use explicit flags: `HAAS_E2E=1` (master flag) or `HAAS_E2E_CODEX=1` / `HAAS_E2E_OPEN_SANDBOX=1` (individual flags). If a flag is not enabled, the test is skipped and recorded as `not_run`; it MUST NOT be reported as passed.
+- Test framework: pytest + pytest-asyncio + coverage.
+- Coverage gates (AGENTS.md): core modules ≥90%; credential, redaction, policy, proxy token, artifact path, and log-redaction paths ≥95%.
 
-## 9. 可观测性
+## 9. Observability
 
 Each implementation stage must report:
 
@@ -111,23 +111,23 @@ Each implementation stage must report:
 - known risks and owner;
 - next-stage readiness.
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
+| Scenario | Behavior |
 |------|------|
 | Stage exit evidence missing | Do not start dependent stage |
 | Spec conflict discovered | Update affected specs before code |
 | ADK compatibility fails | Fix protocol implementation or downgrade advertised capability |
 | Codex E2E fails | Keep adapter unavailable; do not mark `codex` base ready |
-| Sandbox Runtime smoke fails | Do not claim harness sandbox 标准化；block S6 |
+| Sandbox Runtime smoke fails | Do not claim harness sandbox standardization; block S6 |
 | Docker smoke fails | Do not publish runtime image |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance
 
 - S0: docs-only checks and OpenAPI parse/ref validation.
 - S1: package import, app factory startup, Makefile commands exist.
-- S2: ADK schema、route 和 error 测试；`/run` vs `/run_sse` parity。
+- S2: ADK schema, route, and error tests; `/run` vs `/run_sse` parity.
 - S3: fake adapter contract tests.
 - S4: real Codex app-server E2E.
-- S5: Sandbox Runtime 投影验证 + Docker build/run smoke on OpenSandbox AIO-derived image.
+- S5: Sandbox Runtime projection verification + Docker build/run smoke on an OpenSandbox AIO-derived image.
 - S6/S7: feature-specific integration, security and ADK compatibility expansion.

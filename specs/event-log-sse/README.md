@@ -1,64 +1,66 @@
-# Event Log & SSE 组件规格
+# Event Log & SSE Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-30
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Event Log & SSE 是 HaaS 的事件事实源和实时订阅层。它持久化 canonical events，投影为 ADK `Event`，提供 session/invocation 级 replay-then-live stream。（legacy sidecar projection 不在本项目范围，见 [specs/README §3.1.1](../README.md#311-范围决策不实现-mpa-codex-worker-迁移-shim)。）
+Event Log & SSE is HaaS's event source of truth and real-time subscription layer. It persists canonical events, projects them into ADK `Event` objects, and provides session- and invocation-level replay-then-live streams. Legacy sidecar projection is out of scope; see [specs/README §3.1.1](../README.md#311-scope-decision-do-not-implement-the-mpa-codex-worker-migration-shim).
 
-SSE 是 delivery channel，不是唯一事实源。断线、客户端超时或代理重连不得导致任务停止或结果丢失。
+SSE is a delivery channel, not the sole source of truth. Disconnects, client timeouts, or proxy reconnections MUST NOT stop a task or lose its result.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| ADK 2.0 | `Event` shape、`/run_sse` SSE `data:` 帧、stream 关闭语义、`GET session` 返回 `events[]` 作为 replay 通道 |
-| `mpa-codex-worker` Event Log & SSE Replay | `after_event_id`、`Last-Event-ID`、heartbeat 不推进 cursor、projection |
-| 本组件总览 | HaaS event log 和 SSE 要求 |
+| Source | Adopted concepts |
+|--------|------------------|
+| ADK 2.0 | `Event` shape, `/run_sse` SSE `data:` frames, stream-close semantics, and `events[]` returned by `GET session` as a replay channel |
+| `mpa-codex-worker` Event Log & SSE Replay | `after_event_id`, `Last-Event-ID`, heartbeats that do not advance the cursor, and projection |
+| Component overview | HaaS event-log and SSE requirements |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | Session Runtime | append lifecycle、output、terminal events |
-| 上游 | Harness Adapter | 提供 adapter-native event，由 Session Runtime 转成 canonical event 后 append |
-| 上游 | HaaS Protocol | 读取 event log 并输出 ADK SSE |
-| 下游 | Persistence Store | 保存 event records |
-| 下游 | Observability | 记录 stream client、lag、drop、replay metrics |
+| Direction | Component | Relationship |
+|-----------|-----------|--------------|
+| Upstream | Session Runtime | Appends lifecycle, output, and terminal events |
+| Upstream | Harness Adapter | Supplies adapter-native events, which Session Runtime converts to canonical events before appending |
+| Upstream | HaaS Protocol | Reads the event log and emits ADK SSE |
+| Downstream | Persistence Store | Stores event records |
+| Downstream | Observability | Records stream-client, lag, drop, and replay metrics |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 持久化 canonical event。
-- 为每个 invocation 维护从 0 开始的 gapless `sequenceNumber`（内部字段）。
-- 为 HaaS native stream 维护 session-scoped `eventId`。
-- 将 canonical event 投影为 ADK `Event` 或 HaaS event。
-- 支持 replay missed events 后进入 live stream（`Last-Event-ID` / `after_event_id`）。
-- 发送 heartbeat 且不产生事件、不推进 cursor。
-- 对慢客户端执行 bounded queue、delta drop 或断开；terminal state 通过 read-back 保证可得。
-- 禁止未脱敏 raw event 进入持久 event log。
+- Persist canonical events.
+- Maintain a gapless, zero-based `sequenceNumber` for each invocation as an internal field.
+- Maintain a session-scoped `eventId` for HaaS native streams.
+- Project canonical events into ADK `Event` or HaaS events.
+- Replay missed events before entering a live stream using `Last-Event-ID` / `after_event_id`.
+- Send heartbeats without producing events or advancing the cursor.
+- Apply a bounded queue, delta dropping, or disconnect to slow clients; terminal state remains available through read-back.
+- Prevent unredacted raw events from entering the persistent event log.
 
-不负责：
+Non-responsibilities:
 
-- 不执行 harness。
-- 不修改 session/invocation terminal state。
-- 不保存 raw prompt、完整 tool args/result 或 provider payload。
-- 不保证跨 session 全局严格有序；只保证 invocation 内顺序。
+- Does not execute a harness.
+- Does not modify session/invocation terminal state.
+- Does not store raw prompts, complete tool arguments/results, or provider payloads.
+- Does not guarantee strict global ordering across sessions; it guarantees ordering only within an invocation.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ### 5.1 Public Streams
 
-| Endpoint | 协议 | 语义 |
-|----------|------|------|
-| `POST /run_sse` | ADK SSE | invocation 的 ADK Event stream，完成即关闭 |
-| `GET /apps/{app}/users/{user}/sessions/{sid}` | JSON | ADK 原生 replay 通道，返回全部 `events[]` |
-| `GET /v1/haas/sessions/{session_id}/events` | HaaS SSE | session canonical event replay/live，带 `after_event_id` |
-| `GET /v1/haas/sessions/{session_id}/invocations/{invocation_id}/events` | HaaS SSE | invocation canonical event replay/live |
-| ~~`GET /v1/codex-worker/sessions/{session_id}/events`~~ | ~~Legacy SSE~~ | **不实现**（见 [specs/README §3.1.1](../README.md#311-范围决策不实现-mpa-codex-worker-迁移-shim)） |
+| Endpoint | Protocol | Semantics |
+|----------|----------|-----------|
+| `POST /run_sse` | ADK SSE | ADK Event stream for an invocation; closes on completion |
+| `GET /apps/{app}/users/{user}/sessions/{sid}` | JSON | Native ADK replay channel returning all `events[]` |
+| `GET /v1/haas/sessions/{session_id}/events` | HaaS SSE | Session canonical-event replay/live stream with `after_event_id` |
+| `GET /v1/haas/sessions/{session_id}/invocations/{invocation_id}/events` | HaaS SSE | Invocation canonical-event replay/live stream |
+| ~~`GET /v1/codex-worker/sessions/{session_id}/events`~~ | ~~Legacy SSE~~ | **Not implemented**; see [specs/README §3.1.1](../README.md#311-scope-decision-do-not-implement-the-mpa-codex-worker-migration-shim) |
 
 ### 5.2 Internal API
 
@@ -69,12 +71,12 @@ async def read_invocation_events(invocation_id: str) -> list[StoredEvent]: ...
 async def stream_invocation(invocation_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
 async def stream_session(session_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
 def project_adk(event: StoredEvent) -> AdkEvent: ...
-# project_legacy(): 不实现，legacy shim 不在本项目范围（specs/README §3.1.1）
+# project_legacy(): not implemented; the legacy shim is out of scope (specs/README §3.1.1)
 ```
 
-## 6. 数据模型
+## 6. Data Model
 
-### 6.1 CanonicalEvent（内部）
+### 6.1 CanonicalEvent (Internal)
 
 ```json
 {
@@ -99,26 +101,22 @@ def project_adk(event: StoredEvent) -> AdkEvent: ...
 }
 ```
 
-时间戳统一：内部 canonical event 用 `observedAtMs`（毫秒 epoch）；ADK `Event.timestamp`
-为 `observedAtMs / 1000.0`（float 秒），由投影层生成。
+Timestamp convention: internal canonical events use `observedAtMs`, in epoch milliseconds. ADK `Event.timestamp` is generated by the projection layer as `observedAtMs / 1000.0`, in float seconds.
 
-**`HarnessEvent` → `CanonicalEvent` 映射**：adapter 产出 `HarnessEvent`
-（[harness-adapter](../harness-adapter/README.md) §6.3），由 Session Runtime 调用
-Event Log 归一化后落库：
+**`HarnessEvent` -> `CanonicalEvent` mapping**: the adapter emits `HarnessEvent`; see [harness-adapter](../harness-adapter/README.md) §6.3. Session Runtime invokes Event Log to normalize and persist it:
 
-| HarnessEvent 字段 | CanonicalEvent | 规则 |
-|-------------------|----------------|------|
-| `type` / `nativeType` | 不落库 | 仅归一化时用于判定 part 类型与 terminal |
-| `invocationId` / `sessionId` / `turnId` | 同名保留 | 必须与执行上下文一致 |
-| `author` | `author` | 保留 |
-| `content` / `actions` / `usage` | 同名字段 | 经 `redact()` 后保留 |
-| `safe` | 不落库 | 由 `redactionApplied` 替代 |
-| — | `eventId` / `sequenceNumber` / `observedAtMs` / `harnessId` / `adapterId` | Event Log 生成 |
+| HarnessEvent field | CanonicalEvent | Rule |
+|--------------------|----------------|------|
+| `type` / `nativeType` | Not persisted | Used only during normalization to determine part type and terminal state |
+| `invocationId` / `sessionId` / `turnId` | Preserved under the same names | MUST match the execution context |
+| `author` | `author` | Preserved |
+| `content` / `actions` / `usage` | Same-name fields | Preserved after `redact()` |
+| `safe` | Not persisted | Replaced by `redactionApplied` |
+| — | `eventId` / `sequenceNumber` / `observedAtMs` / `harnessId` / `adapterId` | Generated by Event Log |
 
-`sequenceNumber` 从 0 起、invocation 内无空洞；`observedAtMs` 为 append 时刻毫秒
-epoch；未经 `redact()` 的 raw event 不得落库（fail closed）。
+`sequenceNumber` starts at 0 and is gapless within an invocation. `observedAtMs` is the epoch-millisecond append time. A raw event that has not passed through `redact()` MUST NOT be persisted; the operation fails closed.
 
-### 6.2 ADK Projection（公共）
+### 6.2 ADK Projection (Public)
 
 ```json
 {
@@ -132,7 +130,7 @@ epoch；未经 `redact()` 的 raw event 不得落库（fail closed）。
 }
 ```
 
-内部 `sequenceNumber`/`sessionId`/`adapterId` 等字段不进入 ADK 投影；HaaS native stream 可额外输出 `haas` 元数据。
+Internal fields such as `sequenceNumber`, `sessionId`, and `adapterId` MUST NOT enter the ADK projection. A HaaS native stream MAY emit additional `haas` metadata.
 
 ### 6.3 SSE Frame
 
@@ -141,14 +139,14 @@ data: {"id":"evt_...","invocationId":"inv_abc","author":"codex","timestamp":1743
 
 ```
 
-Heartbeat（SSE comment，不产生事件）：
+Heartbeat, as an SSE comment that produces no event:
 
 ```text
 : keep-alive
 
 ```
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 append canonical event
@@ -167,21 +165,21 @@ client reconnect
 
 Ordering invariants:
 
-- invocation 内事件按产生顺序、无空洞输出。
-- 同一 item 的事件顺序稳定。
-- 非流式 `/run` 返回的事件数组必须等于 `/run_sse` 流式聚合结果（parity）。
-- stream 关闭本身即 invocation 完成信号。
+- Events within an invocation are emitted in production order without gaps.
+- Event ordering for the same item is stable.
+- The event array returned by non-streaming `/run` MUST equal the aggregate result from streaming `/run_sse` (parity).
+- Stream closure itself signals invocation completion.
 
-## 8. 安全与权限
+## 8. Security and Authorization
 
-- 读取事件需要 session/invocation ownership；跨 scope 返回 404 或 auth error。
-- Raw adapter event 必须 redact 后才能 append。
-- `include_debug=true` 需要显式 debug/admin scope，仍不能包含 credentials。
-- Tool input/output payloads 默认摘要；full payload 需要单独的已批准 debug 设计。
+- Reading events requires session/invocation ownership; cross-scope access returns 404 or an auth error.
+- Raw adapter events MUST be redacted before append.
+- `include_debug=true` requires explicit debug/admin scope and still MUST NOT include credentials.
+- Tool input/output payloads are summarized by default; full payloads require a separately approved debug design.
 
-## 9. 可观测性
+## 9. Observability
 
-Metrics：
+Metrics:
 
 - `haas_sse_clients{scope}`
 - `haas_sse_event_total{adapterBase}`
@@ -191,7 +189,7 @@ Metrics：
 - `haas_event_log_append_duration_ms`
 - `haas_event_log_lag_ms`
 
-Logs：
+Logs:
 
 - `haas.event.appended`
 - `haas.event.replay_started`
@@ -199,21 +197,21 @@ Logs：
 - `haas.sse.client_connected`
 - `haas.sse.client_disconnected`
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
-|------|------|
-| client disconnect | 不取消 invocation；event log 继续写 |
-| Last-Event-ID 已过期 | 返回 `410 haas_offset_expired` 或从最早 retained event 开始并记录 gap |
-| event queue 满 | 优先丢弃非关键 delta；terminal state 必须持久化并可 read-back |
-| append 持久化失败 | 当前 invocation 不得宣称 completed；Session Runtime 生成 terminal failure evidence |
-| proxy buffering | response 设置 `Cache-Control: no-cache`；测试验证 progressive flush |
-| adapter 重复 terminal | 保留第一条 terminal，后续写 diagnostic warning |
+| Scenario | Behavior |
+|----------|----------|
+| Client disconnects | Do not cancel the invocation; continue writing the event log |
+| `Last-Event-ID` has expired | Return `410 haas_offset_expired`, or begin with the earliest retained event and record a gap |
+| Event queue is full | Prefer dropping non-critical deltas; terminal state MUST be persisted and available through read-back |
+| Append persistence fails | The current invocation MUST NOT claim `completed`; Session Runtime generates terminal failure evidence |
+| Proxy buffering | Set `Cache-Control: no-cache` on the response; tests verify progressive flushing |
+| Adapter emits duplicate terminal events | Retain the first terminal event and write a diagnostic warning for subsequent ones |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：sequence 分配、terminal 唯一、heartbeat 不推进 cursor、ADK 投影映射。
-- Integration：`/run` vs `/run_sse` parity、断线后 `GET session` read-back、reconnect replay。
-- Backpressure：慢客户端不阻塞 adapter terminal 写入。
-- Security：raw prompt、Authorization、cookie、完整 tool args/result 不进入 event log。
-- Compatibility：ADK client 对 `/run_sse` 输出逐条解析成功，stream 关闭语义正确。
+- Unit: sequence allocation, terminal uniqueness, heartbeat without cursor advancement, and ADK projection mapping.
+- Integration: `/run` versus `/run_sse` parity, `GET session` read-back after disconnect, and reconnect replay.
+- Backpressure: a slow client does not block adapter terminal-event persistence.
+- Security: raw prompts, Authorization, cookies, and complete tool arguments/results do not enter the event log.
+- Compatibility: an ADK client successfully parses each `/run_sse` event, with correct stream-close semantics.

@@ -1,107 +1,98 @@
-# Harness Registry 组件规格
+# Harness Registry Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-30
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Harness Registry 维护 HaaS 可运行的 configured harness catalog。它回答“这个租户/工作区当前可以选择哪些 harness（ADK app）、每个 harness 能用哪些模型、工具、MCP 和 skill，以及这些能力是否真的可用”。
+The Harness Registry maintains the catalog of configured harnesses that HaaS can run. It answers which harnesses (ADK apps) a tenant or workspace may currently select, which models, tools, MCP servers, and skills each harness may use, and whether those capabilities are actually available.
 
-`appName`（ADK 术语）就是 configured harness 的 `id`（`chrn_...`），`name` 作为可读别名可被 `/run` 解析。`base` 是开放字符串：首期 `codex`，后续注册 `pi`、`opencode`、`amp` 或其他 harness，不需要修改 public task API。
+In ADK terminology, `appName` is the configured harness `id` (`chrn_...`); `/run` MAY also resolve the human-readable `name` as an alias. `base` is an open string: the initial release uses `codex`, and future registration of `pi`, `opencode`, `amp`, or another harness requires no change to the public task API.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| ADK 2.0 | `appName` = harness `id`，`/list-apps` 列出 app 名 |
-| `mpa-codex-worker` profile controller | profile draft/active、session 冻结、runtime policy |
-| Model Proxy | provider 路由与 model availability |
-| 本组件总览 | configured harness catalog、appName/base/capability/model/provider discovery |
+| Source | Adopted elements |
+|--------|------------------|
+| ADK 2.0 | `appName` = harness `id`; `/list-apps` lists app names |
+| `mpa-codex-worker` profile controller | Profile draft/active lifecycle, session freezing, runtime policy |
+| Model Proxy | Provider routing and model availability |
+| Component overview | Configured harness catalog and appName/base/capability/model/provider discovery |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | HaaS Protocol | 解析 appName -> configured harness；list/read/create/update/delete |
-| 上游 | Session Runtime | 创建 run 时解析 harness |
-| 下游 | Harness Adapter Registry | 查询 base 是否已安装、ready、支持能力 |
-| 下游 | Model Proxy | 查询模型与 provider 可用性；下发 provider 路由 |
-| 下游 | MCP / Tool / Skill Runtime | 校验 MCP、skills 和 disabledTools |
-| 下游 | Security Boundary | scope、secret、SSRF 和 policy 校验 |
+| Direction | Component | Relationship |
+|-----------|-----------|--------------|
+| Upstream | HaaS Protocol | Resolves appName -> configured harness; list/read/create/update/delete |
+| Upstream | Session Runtime | Resolves a harness when creating a run |
+| Downstream | Harness Adapter Registry | Checks whether a base is installed and ready, and which capabilities it supports |
+| Downstream | Model Proxy | Queries model and provider availability; supplies provider routes |
+| Downstream | MCP / Tool / Skill Runtime | Validates MCP, skills, and disabledTools |
+| Downstream | Security Boundary | Validates scope, secrets, SSRF controls, and policy |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 保存 configured harness 的稳定配置。
-- 计算 harness、base、model、provider、MCP、skill 和 tool restriction 的有效视图。
-- 解析 `appName`：先按 `id` 精确匹配，再按 `name` 匹配；多命中或未命中返回 404。
-- 返回 caller scope 内的 harness；跨 scope 访问返回 not found。
-- 冻结 session 创建时的 effective harness config，后续 harness 更新不改变已存在 session。
-- 对 `base` 做 adapter availability 检查。
-- 保存并校验 provider 路由配置（`baseUrl`/`wireApi`/`credentialRef`），URL 必须过 allowlist。
-- 对 `defaultModel` 和 requested `model` 做可用性校验或显式 fallback。
-- 保存 skill folder bundle，保证 round-trip 不丢文件。
+- Store stable configured harness configuration.
+- Compute the effective view of harness, base, model, provider, MCP, skill, and tool restrictions.
+- Resolve `appName`: first by exact `id`, then by `name`; return 404 for multiple matches or no match.
+- Return harnesses within the caller's scope; return not found for cross-scope access.
+- Freeze the effective harness configuration when a session is created; later harness updates MUST NOT change existing sessions.
+- Check adapter availability for `base`.
+- Store and validate provider routing configuration (`baseUrl`/`wireApi`/`credentialRef`); URLs MUST pass the allowlist.
+- Validate availability of `defaultModel` and the requested `model`, or apply an explicit fallback.
+- Store skill folder bundles and preserve every file across a round trip.
 
-不负责：
+Non-responsibilities:
 
-- 不直接执行 harness。
-- 不保存 raw credential；credential 只保存引用或交给 secret store/vault。
-- 不执行 MCP/tool 调用。
-- 不修改已存在 session 的 frozen config。
-- 不把某个 harness 的原生工具名强行标准化成所有 harness 的 hard contract。
+- Does not execute a harness directly.
+- Does not store raw credentials; it stores only references or delegates them to a secret store/vault.
+- Does not execute MCP/tool calls.
+- Does not modify the frozen configuration of an existing session.
+- Does not force a harness's native tool names into a hard contract shared by all harnesses.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ### 5.1 Public API
 
-| Method | Path | 说明 |
+| Method | Path | Description |
 |--------|------|------|
-| GET | `/list-apps` | 列出 caller scope 内 harness 的 app 名（id 字符串数组） |
-| GET | `/v1/haas/harnesses` | 列出 caller scope 内 configured harness 详情 |
-| GET | `/v1/haas/harnesses/{harness_id}` | 读取一个 configured harness |
-| POST | `/v1/haas/harnesses` | 创建 configured harness |
-| PUT | `/v1/haas/harnesses/{harness_id}` | 替换 mutable config，`id`、`base`、`createdAtMs` 不可变 |
-| DELETE | `/v1/haas/harnesses/{harness_id}` | 标记删除，不删除历史 session |
-| GET | `/v1/haas/models` | 全局 backend/model catalog |
-| GET | `/v1/haas/harnesses/{harness_id}/skills/{skill_id}/files` | 读取完整 skill folder bundle |
+| GET | `/list-apps` | Lists harness app names within the caller's scope (an array of id strings) |
+| GET | `/v1/haas/harnesses` | Lists configured harness details within the caller's scope |
+| GET | `/v1/haas/harnesses/{harness_id}` | Reads one configured harness |
+| POST | `/v1/haas/harnesses` | Creates a configured harness |
+| PUT | `/v1/haas/harnesses/{harness_id}` | Replaces mutable configuration; `id`, `base`, and `createdAtMs` are immutable |
+| DELETE | `/v1/haas/harnesses/{harness_id}` | Marks a harness as deleted without deleting historical sessions |
+| GET | `/v1/haas/models` | Returns the global backend/model catalog |
+| GET | `/v1/haas/harnesses/{harness_id}/skills/{skill_id}/files` | Reads the complete skill folder bundle |
 
-### 5.1.1 PUT 不变字段语义（S6）
+### 5.1.1 PUT Immutable-Field Semantics (S6)
 
-`PUT` body 使用 `HarnessCreate` schema，其中不含 `id`/`createdAtMs`，但 schema 为
-`additionalProperties: true`，调用方仍可能带上这些字段。处理规则：
+The `PUT` body uses the `HarnessCreate` schema, which does not contain `id`/`createdAtMs`. However, because the schema specifies `additionalProperties: true`, callers may still include these fields. The handling rules are:
 
-| 情况 | 行为 |
+| Condition | Behavior |
 |------|------|
-| body 未带 `id`/`base`/`createdAtMs` | 正常更新 mutable field |
-| body 带的值与现存记录**一致** | 幂等接受，不报错（便于 read-modify-write 回写） |
-| body 带的值与现存记录**冲突** | `400 invalid_input`，不做部分更新 |
+| Body omits `id`/`base`/`createdAtMs` | Update mutable fields normally |
+| Values in the body **match** the existing record | Accept idempotently without error, enabling read-modify-write round trips |
+| Values in the body **conflict** with the existing record | Return `400 invalid_input`; do not apply a partial update |
 
-不为此新增专用错误码：不变字段冲突属于请求体校验失败，复用既有
-`invalid_input`（见 [ERROR-CODES](../haas-protocol/ERROR-CODES.md) §2）。
-`updatedAtMs` 由服务端重写，调用方传入值一律忽略。
+No dedicated error code is introduced. An immutable-field conflict is a request-body validation failure and reuses the existing `invalid_input` code (see [ERROR-CODES](../haas-protocol/ERROR-CODES.md) §2). The server rewrites `updatedAtMs` and ignores any caller-supplied value.
 
-### 5.1.2 Base 可用性校验依据（S6）
+### 5.1.2 Basis for Base Availability Validation (S6)
 
-`base` 是开放字符串，但创建/更新时必须校验其**已注册**，否则返回
-`422 haas_unsupported_base`。S6 的判定来源是本进程已装配的 adapter 集合
-（当前为 `codex` 与测试用 `fake`），不是硬编码白名单：新增 adapter 即自动
-可用。`base` 已注册但 adapter 探测未 ready 时，创建仍可成功，readiness 由
-`/v1/haas/ready?scope=execution` 与 `/v1/haas/status` 反映——registry 不把
-运行时可用性混入配置校验。
+`base` is an open string, but create/update operations MUST validate that it is **registered** and otherwise return `422 haas_unsupported_base`. In S6, registration is determined by the adapters assembled into the current process (currently `codex` and the test-only `fake`), not by a hard-coded allowlist: adding an adapter makes its base available automatically. If `base` is registered but the adapter probe is not ready, creation may still succeed. `/v1/haas/ready?scope=execution` and `/v1/haas/status` report readiness; the registry does not mix runtime availability into configuration validation.
 
-### 5.1.3 Harness Scope（S6）
+### 5.1.3 Harness Scope (S6)
 
-`HarnessRecord` 携带 `tenantId` / `workspaceId`，与 Security Boundary §8.3
-一致：
+`HarnessRecord` carries `tenantId` / `workspaceId`, consistent with Security Boundary §8.3:
 
-- 创建时记录调用方 principal 的 tenant/workspace。
-- `list` / `get` / `update` / `delete` 与 `appName` 解析只命中 caller scope 内记录。
-- 跨 scope 访问 `/v1/haas/harnesses/{id}` 返回 `404 haas_harness_not_found`；
-  跨 scope 的 `appName` 解析返回 `404 app_not_found`。
-- scope 字段为 `None` 的记录视为未绑定租户，仅对同样未绑定的 principal 可见，
-  便于单节点部署与既有 seed 记录继续工作。
+- On creation, record the calling principal's tenant/workspace.
+- `list` / `get` / `update` / `delete` and `appName` resolution only match records within the caller's scope.
+- Cross-scope access to `/v1/haas/harnesses/{id}` returns `404 haas_harness_not_found`; cross-scope `appName` resolution returns `404 app_not_found`.
+- A record whose scope fields are `None` is considered tenant-unbound and is visible only to an equally unbound principal. This preserves single-node deployments and existing seed records.
 
 ### 5.2 Internal API
 
@@ -115,9 +106,9 @@ async def list_bases(principal) -> list[HarnessBase]: ...
 async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRoute: ...
 ```
 
-## 6. 数据模型
+## 6. Data Model
 
-### 6.1 Harness（ADK app）
+### 6.1 Harness (ADK app)
 
 ```json
 {
@@ -210,9 +201,9 @@ async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRou
 }
 ```
 
-`files[].path` 必须是相对路径，不能包含 `..`、绝对路径或 symlink escape。
+`files[].path` MUST be a relative path and MUST NOT contain `..`, an absolute path, or a symlink escape.
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 draft -> validated -> active -> superseded -> deleted
@@ -222,27 +213,27 @@ draft -> validated -> active -> superseded -> deleted
         rejected
 ```
 
-规则：
+Rules:
 
-- `draft` 可以修改任意 mutable field。
-- `validated` 表示 schema、adapter base、provider URL、MCP URL、skill bundle 和 policy 通过校验。
-- `active` 可被 session 使用；`appName` 解析只命中 active harness。
-- `superseded` 保留历史，不再被新 session 默认选择。
-- `deleted` 不可被新任务选择，但历史 session 仍可审计。
+- Any mutable field may be changed in `draft`.
+- `validated` means that the schema, adapter base, provider URL, MCP URL, skill bundle, and policy have passed validation.
+- An `active` harness may be used by sessions; `appName` resolution matches only active harnesses.
+- `superseded` preserves history and is no longer selected by default for new sessions.
+- `deleted` cannot be selected for a new task, but historical sessions remain auditable.
 
-Session 使用 `EffectiveHarnessConfig` frozen snapshot，不读取 live harness 对象继续执行旧任务。
+Sessions use a frozen `EffectiveHarnessConfig` snapshot and do not read the live harness object while continuing an existing task.
 
-## 8. 安全与权限
+## 8. Security and Authorization
 
-- Registry 只保存 credential ref、fingerprint 和 safe metadata，不保存 raw secret。
-- provider URL 与 MCP URL 必须通过 allowlist 和 SSRF 校验后才可进入 active harness。
-- 不同 tenant/workspace 的 harness 不可互读；越权统一返回 `404 haas_harness_not_found`（app 解析也返回 `404 app_not_found`）。
-- Skill 文件拒绝 path traversal、绝对路径、控制字符和过大 bundle。
-- `disabledTools` 的 enforcement 必须按 base 如实暴露为 `hard`、`advisory` 或 `unsupported`。
+- The registry stores only credential references, fingerprints, and safe metadata; it MUST NOT store raw secrets.
+- Provider and MCP URLs MUST pass allowlist and SSRF validation before they may enter an active harness.
+- Harnesses in different tenants/workspaces MUST NOT be mutually readable. Unauthorized access uniformly returns `404 haas_harness_not_found` (and app resolution returns `404 app_not_found`).
+- Skill files reject path traversal, absolute paths, control characters, and oversized bundles.
+- Enforcement of `disabledTools` MUST be reported accurately per base as `hard`, `advisory`, or `unsupported`.
 
-## 9. 可观测性
+## 9. Observability
 
-Registry 必须产出以下安全日志/指标：
+The registry MUST emit the following safe logs/metrics:
 
 - `haas.harness.created`
 - `haas.harness.updated`
@@ -252,27 +243,27 @@ Registry 必须产出以下安全日志/指标：
 - `haas.harness.provider_route_resolved`
 - `haas.harness.base_unavailable`
 
-日志字段只包含 id、base、model、capability、fingerprint 和 safe reason，不包含 secret 或完整 tool args。
+Log fields contain only id, base, model, capability, fingerprint, and a safe reason; they MUST NOT contain secrets or complete tool arguments.
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
+| Scenario | Behavior |
 |------|------|
-| base 不支持 | `422 haas_unsupported_base` |
-| PUT 试图改 `id`/`base`/`createdAtMs` | `400 invalid_input`，不做部分更新 |
-| harness 不存在或越权 | `404 haas_harness_not_found` |
-| app 不存在或越权 | `404 app_not_found` |
-| model 不可用 | `422 haas_model_unavailable` 或显式 fallback 并写入 metadata |
-| provider URL 未通过 allowlist | `haas_provider_source_invalid` |
-| skill bundle 无 `SKILL.md` | config validation failed，拒绝 active |
-| MCP URL 未通过 allowlist | `haas_mcp_source_invalid` |
-| registry store 不可用 | 创建/更新 fail closed；已冻结 session 继续执行 |
-| harness 被删除 | 新任务失败；历史 session 可读 |
+| Unsupported base | `422 haas_unsupported_base` |
+| PUT attempts to change `id`/`base`/`createdAtMs` | `400 invalid_input`; no partial update |
+| Harness does not exist or access is unauthorized | `404 haas_harness_not_found` |
+| App does not exist or access is unauthorized | `404 app_not_found` |
+| Model unavailable | `422 haas_model_unavailable`, or an explicit fallback recorded in metadata |
+| Provider URL fails the allowlist | `haas_provider_source_invalid` |
+| Skill bundle lacks `SKILL.md` | Configuration validation fails; activation is rejected |
+| MCP URL fails the allowlist | `haas_mcp_source_invalid` |
+| Registry store unavailable | Create/update fails closed; frozen sessions continue executing |
+| Harness deleted | New tasks fail; historical sessions remain readable |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：appName 解析（id 优先 / name fallback / 多命中断言）、scope filtering、model fallback、provider URL allowlist、skill path validation。
-- Integration：`GET /list-apps`、`GET/POST/PUT/DELETE /v1/haas/harnesses`、`GET /v1/haas/models`。
-- Compatibility：ADK client `list-apps` 返回数组；`/run` 用 harness id 和 name 均能解析。
-- Security：两 principal 互相读取 harness 返回 404；secret/credential ref 不在 response 中出现。
-- Regression：更新 harness 名称不能丢 skill files；更新 active harness 不影响既有 session snapshot。
+- Unit: appName resolution (id precedence / name fallback / multiple-match assertion), scope filtering, model fallback, provider URL allowlist, and skill path validation.
+- Integration: `GET /list-apps`, `GET/POST/PUT/DELETE /v1/haas/harnesses`, and `GET /v1/haas/models`.
+- Compatibility: ADK client `list-apps` returns an array; `/run` resolves both harness id and name.
+- Security: two principals receive 404 when reading each other's harnesses; secret/credential references do not appear in responses.
+- Regression: updating a harness name does not lose skill files; updating an active harness does not affect existing session snapshots.

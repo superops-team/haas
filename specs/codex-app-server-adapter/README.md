@@ -1,85 +1,87 @@
-# Codex App-Server Adapter 组件规格
+# Codex App-Server Adapter Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-26
 Related specs: [Harness Adapter](../harness-adapter/README.md), [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Model Proxy](../model-proxy/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Codex App-Server Adapter 是首期 HaaS 的唯一 P0 concrete harness adapter。它负责连接、初始化、驱动和恢复 Codex app-server，并把 Codex 原生 JSON-RPC notification 转换成 canonical HaaS events，最终投影为 ADK `Event`。
+The Codex App-Server Adapter is the only P0 concrete harness adapter in the initial HaaS release. It connects to, initializes, drives, and recovers Codex app-server, and converts native Codex JSON-RPC notifications into canonical HaaS events that are ultimately projected as ADK `Event` objects.
 
-Codex app-server 是内部实现细节。上游不得直接连接 Codex WebSocket、Unix socket 或 stdio，也不得依赖 Codex `threadId`、`turnId`、notification method 或 rollout 文件路径。
+Codex app-server is an internal implementation detail. Upstream systems MUST NOT connect directly to Codex WebSocket, Unix socket, or stdio transports, and MUST NOT depend on Codex `threadId`, `turnId`, notification methods, or rollout file paths.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
+| Source | Adopted elements |
 |------|----------|
-| Codex manual `Codex App Server` | transport、initialize/initialized handshake、thread/turn lifecycle、WebSocket auth |
-| 本机 `codex app-server --help` | `--listen`、`--ws-auth`、schema generation 命令与当前 CLI 版本 |
-| `mpa-codex-worker` Codex adapter spec | WebSocket-over-UDS、secretless auth.command、MCP config、event terminal contract |
-| 本组件总览 | 首期 Codex app-server adapter 要求 |
+| Codex manual `Codex App Server` | Transport, initialize/initialized handshake, thread/turn lifecycle, and WebSocket authentication |
+| Local `codex app-server --help` | `--listen`, `--ws-auth`, schema-generation commands, and the current CLI version |
+| `mpa-codex-worker` Codex adapter spec | WebSocket-over-UDS, secretless auth.command, MCP configuration, and terminal-event contract |
+| Component overview | Requirements for the initial Codex app-server adapter |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
+| Direction | Component | Relationship |
 |------|------|------|
-| 上游 | Harness Adapter interface | adapter 实现统一接口 |
-| 上游 | Session Runtime | 触发 session prepare、turn start、cancel、resume |
-| 下游 | Codex app-server process | JSON-RPC over stdio/WebSocket/Unix socket |
-| 下游 | Model Proxy | Codex model provider 指向 loopback proxy |
-| 下游 | MCP / Tool / Skill Runtime | Codex config、skills root、MCP servers |
-| 下游 | Event Log & SSE | 输出 canonical events |
+| Upstream | Harness Adapter interface | The adapter implements the unified interface |
+| Upstream | Session Runtime | Triggers session preparation, turn start, cancellation, and resume |
+| Downstream | Codex app-server process | JSON-RPC over stdio/WebSocket/Unix socket |
+| Downstream | Model Proxy | Points the Codex model provider to the loopback proxy |
+| Downstream | MCP / Tool / Skill Runtime | Supplies Codex configuration, skills root, and MCP servers |
+| Downstream | Event Log & SSE | Receives canonical events |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 管理 Codex app-server process 或连接到已存在 listener。
-- 完成每个 connection 的 `initialize` request 和 `initialized` notification。
-- 调用 `thread/start`、`thread/resume`、`thread/fork`、`turn/start`、`turn/steer`、`turn/interrupt`。
-- 解析 Codex response、notification 和 server request。
-- 将 Codex `item/*`、`turn/*`、tool、permission、usage 和 error event 转成 canonical event。
-- 维护 app-server generation，供 restart/reconnect 后判断 native session 是否仍可恢复。
-- 基于 pinned Codex version 生成或校验 app-server schema。
-- 确保 Codex config 使用 sidecar model proxy 和 secretless auth path。
+- Manage the Codex app-server process or connect to an existing listener.
+- Complete the `initialize` request and `initialized` notification for every connection.
+- Invoke `thread/start`, `thread/resume`, `thread/fork`, `turn/start`, `turn/steer`, and `turn/interrupt`.
+- Parse Codex responses, notifications, and server requests.
+- Convert Codex `item/*`, `turn/*`, tool, permission, usage, and error events into canonical events.
+- Track the app-server generation to determine whether a native session remains recoverable after restart/reconnect.
+- Generate or validate the app-server schema against the pinned Codex version.
+- Ensure that Codex configuration uses the sidecar model proxy and a secretless authentication path.
 
-不负责：
+Non-responsibilities:
 
-- 不定义 public API。
-- 不保存 HaaS invocation/session/event 事实。
-- 不把 raw Codex JSON-RPC message 暴露给上游。
-- 不直接保存真实 provider key。
-- 不自行决定 workspace、network、tool 或 approval policy。
-- 不绕过 Codex sandbox；Codex sandbox 作为内层，外层由 Sandbox Runtime 统一提供。
+- Does not define public APIs.
+- Does not persist HaaS invocation/session/event facts.
+- Does not expose raw Codex JSON-RPC messages upstream.
+- Does not store real provider keys directly.
+- Does not independently determine workspace, network, tool, or approval policy.
+- Does not bypass the Codex sandbox. The Codex sandbox is the inner layer; Sandbox Runtime uniformly provides the outer layer.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ### 5.1 Transport
 
-首期支持顺序：
+Initial support order:
 
-1. `unix://PATH`：生产默认。Unix socket 上使用标准 WebSocket HTTP Upgrade。
-2. `ws://127.0.0.1:PORT`：本地调试和容器内 loopback。
-3. `stdio://`：测试 fallback 和最小本机 smoke。子进程 stdin/stdout NDJSON（每行一个 JSON-RPC 消息）。
+1. `unix://PATH`: production default. Uses standard WebSocket HTTP Upgrade over a Unix socket.
+2. `ws://127.0.0.1:PORT`: local debugging and in-container loopback.
+3. `stdio://`: test fallback and minimal local smoke testing. The child process uses stdin/stdout NDJSON, with one JSON-RPC message per line.
 
-非 loopback WebSocket 必须开启 `--ws-auth` 且置于 TLS 或可信隧道后。HaaS 不把 Codex app-server listener 直接暴露到公网。
+Non-loopback WebSocket transports MUST enable `--ws-auth` and MUST be placed behind TLS or a trusted tunnel. HaaS MUST NOT expose the Codex app-server listener directly to the public network.
 
 ### 5.2 JSON-RPC Methods
 
-| Method | 方向 | 用途 |
+| Method | Direction | Purpose |
 |--------|------|------|
-| `initialize` | HaaS -> Codex | 连接级初始化 |
-| `initialized` | HaaS -> Codex | 初始化完成 notification |
-| `thread/start` | HaaS -> Codex | 创建新 Codex thread |
-| `thread/resume` | HaaS -> Codex | 恢复已有 thread |
-| `thread/fork` | HaaS -> Codex | 可选，未来支持分支会话 |
-| `turn/start` | HaaS -> Codex | 启动一次 turn |
-| `turn/steer` | HaaS -> Codex | 可选，向运行中 turn 追加输入 |
-| `turn/interrupt` | HaaS -> Codex | 取消运行中 turn |
-| `thread/read` | HaaS -> Codex | 诊断或恢复校验 |
-| `model/list` | HaaS -> Codex | 能力探测 |
-| `mcpServerStatus/list` | HaaS -> Codex | MCP 感知验证 |
-| `skills/list` | HaaS -> Codex | skill 感知验证 |
+| `initialize` | HaaS -> Codex | Connection-level initialization |
+| `initialized` | HaaS -> Codex | Initialization-complete notification |
+| `thread/start` | HaaS -> Codex | Creates a new Codex thread |
+| `thread/resume` | HaaS -> Codex | Resumes an existing thread |
+| `thread/fork` | HaaS -> Codex | Optional; supports branched sessions in the future |
+| `turn/start` | HaaS -> Codex | Starts a turn |
+| `turn/steer` | HaaS -> Codex | Optional; appends input to a running turn |
+| `turn/interrupt` | HaaS -> Codex | Cancels a running turn |
+| `thread/read` | HaaS -> Codex | Diagnostics or recovery validation |
+| `model/list` | HaaS -> Codex | Capability probing |
+| `mcpServerStatus/list` | HaaS -> Codex | MCP-awareness validation |
+| `skills/list` | HaaS -> Codex | Skill-awareness validation |
 
 ### 5.3 Internal Adapter Methods
 
@@ -93,7 +95,7 @@ async def interrupt_turn(conn: CodexConnection, turn_id: str, reason: str) -> No
 async def notifications(conn: CodexConnection) -> AsyncIterator[CodexWireMessage]: ...
 ```
 
-## 6. 数据模型
+## 6. Data Model
 
 ### 6.1 CodexEndpoint
 
@@ -123,7 +125,7 @@ async def notifications(conn: CodexConnection) -> AsyncIterator[CodexWireMessage
 }
 ```
 
-`rolloutRef` 只能是不可反解的安全引用，不得包含本地绝对路径或 rollout 内容。
+`rolloutRef` MUST be a safe, non-reversible reference and MUST NOT contain a local absolute path or rollout content.
 
 ### 6.3 CodexTurnStart
 
@@ -147,7 +149,7 @@ async def notifications(conn: CodexConnection) -> AsyncIterator[CodexWireMessage
 }
 ```
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 not_started
@@ -162,45 +164,45 @@ not_started
   -> connecting_transport
 ```
 
-连接规则：
+Connection rules:
 
-- 每个 connection 只能 initialize 一次。
-- 请求在 initialize 前被 Codex 拒绝时，adapter 必须将其归类为 adapter bug 或 startup race，而不是上游请求错误。
-- app-server 重启后 generation 增加，adapter 重新连接并重新 initialize。
-- 若 native thread 无法恢复，HaaS session 必须进入 `non_resumable` 或创建新的 session，不能静默丢历史。
+- Each connection MUST be initialized only once.
+- If Codex rejects a request made before initialization, the adapter MUST classify it as an adapter bug or startup race, not as an upstream request error.
+- After app-server restarts, the generation increments, and the adapter reconnects and initializes again.
+- If the native thread cannot be recovered, the HaaS session MUST enter `non_resumable` or a new session MUST be created; history MUST NOT be silently lost.
 
-Turn 规则：
+Turn rules:
 
-- `turn/start` 成功返回只表示 native turn accepted，不表示 HaaS response completed。
-- Codex notification 是 streaming source，最终 response 由 Session Runtime 汇总。
-- `turn/completed`、`turn/failed`、`turn/interrupted` 必须映射为唯一 HaaS terminal event。
-- 同一 HaaS session 不并发发起两个 Codex turn。
+- A successful `turn/start` response means only that the native turn was accepted; it does not mean the HaaS response is complete.
+- Codex notifications are the streaming source; Session Runtime aggregates the final response.
+- `turn/completed`, `turn/failed`, and `turn/interrupted` MUST map to exactly one HaaS terminal event.
+- A HaaS session MUST NOT run two Codex turns concurrently.
 
-## 8. 安全与权限
+## 8. Security and Authorization
 
-- `CODEX_HOME` 必须是 session/workspace scoped 或明确隔离的 runtime home。
-- Codex model provider 不得保存真实 API key；优先通过 model proxy 和 `auth.command` 获取短期 bearer。
-- `approvalPolicy=never` 是无人值守默认；需要人工审批必须通过 HaaS approval bridge 扩展后再启用。
-- Codex sandbox policy 来自 Sandbox Runtime 的投影（由 Policy Controller 驱动），不由 adapter 自行推断扩大；adapter 通过 `sandbox_declaration()` 仅声明需求。
-- WebSocket auth token 只能通过文件或 secret handle 提供，不出现在命令行参数、日志或 status。
-- Codex raw event、rollout、command output 在进入 Event Log 前必须脱敏。
+- `CODEX_HOME` MUST be scoped to a session/workspace or be an explicitly isolated runtime home.
+- The Codex model provider MUST NOT store real API keys; it SHOULD obtain a short-lived bearer through the model proxy and `auth.command`.
+- `approvalPolicy=never` is the unattended default. Human approval MUST NOT be enabled until the HaaS approval bridge has been extended to support it.
+- Codex sandbox policy is a projection from Sandbox Runtime, driven by the Policy Controller. The adapter MUST NOT infer or broaden it independently; through `sandbox_declaration()`, the adapter only declares requirements.
+- A WebSocket authentication token may be supplied only through a file or secret handle and MUST NOT appear in command-line arguments, logs, or status.
+- Raw Codex events, rollouts, and command output MUST be redacted before entering Event Log.
 
-## 9. 可观测性
+## 9. Observability
 
-Adapter 至少暴露以下状态：
+The adapter exposes at least the following status fields:
 
-| 字段 | 说明 |
+| Field | Description |
 |------|------|
-| `status` | `ready`、`degraded`、`unavailable` |
-| `runtimeVersion` | `codex --version` 或 pinned package version |
-| `transport` | `unix_websocket`、`loopback_websocket`、`stdio` |
-| `generation` | app-server process generation |
-| `lastConnectedAt` | 最近连接成功时间 |
-| `lastErrorSafeReason` | 最近错误安全原因 |
-| `activeTurns` | 当前运行 turn 数 |
-| `pendingRequests` | JSON-RPC pending request 数 |
+| `status` | `ready`, `degraded`, or `unavailable` |
+| `runtimeVersion` | `codex --version` or pinned package version |
+| `transport` | `unix_websocket`, `loopback_websocket`, or `stdio` |
+| `generation` | App-server process generation |
+| `lastConnectedAt` | Most recent successful connection time |
+| `lastErrorSafeReason` | Safe reason for the most recent error |
+| `activeTurns` | Number of currently running turns |
+| `pendingRequests` | Number of pending JSON-RPC requests |
 
-日志事件：
+Log events:
 
 - `haas.codex.process_started`
 - `haas.codex.connected`
@@ -211,31 +213,31 @@ Adapter 至少暴露以下状态：
 - `haas.codex.reconnect`
 - `haas.codex.schema_mismatch`
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
+| Scenario | Behavior |
 |------|------|
-| socket 未创建 | `ready=false`，execution path bounded wait；超时返回 `haas_adapter_unavailable` |
-| initialize 失败 | adapter `degraded`，新 turn fail closed |
-| WebSocket queue overloaded | 映射为 retryable `haas_adapter_overloaded` 或 `rate_limited` |
-| Codex process exit | generation 增加，尝试重启/重连；active turn terminal failed 或 incomplete |
-| notification 缺 terminal | timeout 后由 Session Runtime 生成 invocation `failed` 或 `incomplete` |
-| cancel 请求 | 调用 `turn/interrupt`；即使 native cancel 慢，HaaS cancel API 需快速返回 accepted/current state |
-| schema drift | probe 失败，阻塞 release；运行时返回 `haas_adapter_incompatible` |
+| Socket not created | `ready=false`; the execution path waits for a bounded interval and returns `haas_adapter_unavailable` on timeout |
+| Initialization fails | Adapter becomes `degraded`; new turns fail closed |
+| WebSocket queue overloaded | Map to retryable `haas_adapter_overloaded` or `rate_limited` |
+| Codex process exits | Increment generation and attempt restart/reconnect; active turn terminates as failed or incomplete |
+| Notification lacks a terminal event | After timeout, Session Runtime marks the invocation `failed` or `incomplete` |
+| Cancellation requested | Invoke `turn/interrupt`; even if native cancellation is slow, the HaaS cancellation API MUST quickly return accepted/current state |
+| Schema drift | Probe fails and blocks release; runtime returns `haas_adapter_incompatible` |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：JSON-RPC request id 匹配、server request 识别、event normalizer、usage normalizer、safe rollout ref。
-- Integration：stdio fake app-server handshake、thread/start、turn/start、terminal event。
-- Local E2E：`codex app-server --listen stdio://` 或 `ws://127.0.0.1:<port>` 完整跑一次 turn。
-- Schema：运行 `codex app-server generate-json-schema` 并与 pinned schema fixture 比对。
-- Cancellation：启动长 turn 后调用 cancel，最终 invocation status 为 `cancelled`。
-- Security：Codex env/config/rollout/log/event 不包含真实 provider key、Authorization 或 raw prompt。
+- Unit: JSON-RPC request-id matching, server-request recognition, event normalizer, usage normalizer, and safe rollout reference.
+- Integration: stdio fake app-server handshake, thread/start, turn/start, and terminal event.
+- Local E2E: run one complete turn through `codex app-server --listen stdio://` or `ws://127.0.0.1:<port>`.
+- Schema: run `codex app-server generate-json-schema` and compare it with the pinned schema fixture.
+- Cancellation: start a long-running turn, invoke cancellation, and verify that the final invocation status is `cancelled`.
+- Security: Codex env/config/rollout/log/event contains no real provider key, Authorization value, or raw prompt.
 
-### 11.1 Schema fixture 契约
+### 11.1 Schema Fixture Contract
 
-- fixture 路径：`tests/fixtures/codex/schema/codex-cli-<version>.json`。
-  `<version>` 是 `codex --version` 输出的**语义版本号**（如 `0.150.1`）；`AdapterProbe.runtimeVersion` 保留完整字符串（如 `codex-cli 0.150.1`）。
-- fixture 内容：单 JSON 对象 `{"codexCliVersion": "<version>", "files": {相对路径: JSON 内容}}`。`files` 覆盖 `generate-json-schema` 输出目录内的全部 `.json`（含根 bundle 与 `v1/`、`v2/` 子目录）。
-- 比对流程：probe 时重新运行 `codex app-server generate-json-schema`，对 `files` 做结构化 deep-equal（不依赖 JSON 序列化顺序）；success 时 `schema_drift(fixture, current) == []`。升级 Codex 版本先重新生成 fixture，再跑比对。
-- 失败语义：drift 非空 → `probe.status=unavailable`，`safeReason=schema_mismatch`，阻塞 release；运行时返回 `haas_adapter_incompatible`。
+- Fixture path: `tests/fixtures/codex/schema/codex-cli-<version>.json`.
+  `<version>` is the **semantic version number** output by `codex --version` (for example, `0.150.1`); `AdapterProbe.runtimeVersion` retains the complete string (for example, `codex-cli 0.150.1`).
+- Fixture content: a single JSON object `{"codexCliVersion": "<version>", "files": {relative path: JSON content}}`. `files` covers every `.json` file in the `generate-json-schema` output directory, including the root bundle and the `v1/` and `v2/` subdirectories.
+- Comparison procedure: during probe, rerun `codex app-server generate-json-schema` and perform a structural deep-equal comparison of `files`, independent of JSON serialization order. On success, `schema_drift(fixture, current) == []`. When upgrading the Codex version, regenerate the fixture before running the comparison.
+- Failure semantics: non-empty drift → `probe.status=unavailable`, `safeReason=schema_mismatch`, and release is blocked; runtime returns `haas_adapter_incompatible`.

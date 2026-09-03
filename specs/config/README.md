@@ -1,44 +1,46 @@
-# Config 组件规格
+# Config Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-30
 Related specs: [Container Runtime](../container-runtime/README.md), [Stores](../stores/README.md), [Identity](../identity/README.md), [HaaS Protocol](../haas-protocol/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Config 定义 HaaS 的配置与装配契约：环境变量、配置文件、端口表、服务发现和 app factory 签名。它消除「每个组件各自发明环境变量和 create_app 参数」的歧义。
+Config defines the configuration and assembly contract for HaaS: environment variables, configuration files, the port table, service discovery, and the app factory signature. It eliminates ambiguity caused by individual components inventing their own environment variables and `create_app` parameters.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
+| Source | Adopted content |
 |------|----------|
-| Container Runtime | 端口约定（8080/8092/18080/18081）、`create_app --factory` |
-| Architecture | Python + FastAPI、sidecar-first 单进程 |
-| Security Boundary | secret 只走引用，不落明文配置 |
+| Container Runtime | Port conventions (8080/8092/18080/18081), `create_app --factory` |
+| Architecture | Python + FastAPI, sidecar-first single process |
+| Security Boundary | Secrets are reference-only and MUST NOT be stored in plaintext configuration |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
+| Direction | Component | Relationship |
 |------|------|------|
-| 上游 | Deployment / container entrypoint | 注入 env 与配置文件路径 |
-| 下游 | 所有组件 | 提供 `AppConfig` 作为唯一配置来源 |
-| 下游 | Observability | 记录生效配置摘要（脱敏） |
+| Upstream | Deployment / container entrypoint | Injects environment variables and the configuration file path |
+| Downstream | All components | Provides `AppConfig` as the sole configuration source |
+| Downstream | Observability | Records a redacted summary of the effective configuration |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 定义 env 前缀、config 文件格式与三层优先级。
-- 定义 `AppConfig` 数据模型与 `load_config()` / `create_app(config)` 契约。
-- 定义端口表与服务发现（loopback 地址）。
-- 定义 secret 类配置只能引用（`credentialRef`），不接受明文。
+- Define the environment-variable prefix, configuration file format, and three-tier precedence.
+- Define the `AppConfig` data model and the `load_config()` / `create_app(config)` contracts.
+- Define the port table and service discovery using loopback addresses.
+- Require secret configuration to use references (`credentialRef`); plaintext values MUST NOT be accepted.
 
-不负责：
+Non-responsibilities:
 
-- 不解析 secret 明文。
-- 不做运行时热更新（首期静态；热更新为后续预留）。
+- Does not parse plaintext secrets.
+- Does not support runtime hot reload in the initial release; configuration is static, with hot reload reserved for a later release.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ```python
 @dataclass
@@ -54,50 +56,53 @@ class AppConfig:
 def load_config(path: str | None) -> AppConfig: ...
 def create_app(config: AppConfig | None = None) -> FastAPI: ...
 
-`create_app()` 被 uvicorn `--factory` 无参调用时，内部执行 `load_config(HAAS_CONFIG)`
-再装配 app；显式传 `config` 的路径（如测试）跳过加载步骤。
+When uvicorn invokes `create_app()` with no arguments via `--factory`, it runs
+`load_config(HAAS_CONFIG)` internally and then assembles the app. A path that passes
+`config` explicitly, such as a test, skips the loading step.
 ```
 
-### 5.1 Adapter 装配契约（S6）
+### 5.1 Adapter Assembly Contract (S6)
 
-`create_app()` 必须按配置装配真实 harness adapter，不得让生产入口静默落到
-测试用 `FakeAdapter`：
+`create_app()` MUST assemble the real harness adapter according to configuration. The
+production entry point MUST NOT silently fall back to the test-only `FakeAdapter`:
 
-| `adapters.default_base` | 装配结果 |
+| `adapters.default_base` | Assembly result |
 |-------------------------|----------|
-| `codex`（默认） | `CodexAdapter`，transport/socket 取自 `adapters.codex` |
-| `fake` | `FakeAdapter`，仅供本地开发与测试 |
+| `codex` (default) | `CodexAdapter`, with transport/socket taken from `adapters.codex` |
+| `fake` | `FakeAdapter`, for local development and testing only |
 
-环境变量 `HAAS_ADAPTER_BASE` 可覆盖 `default_base`。
+The `HAAS_ADAPTER_BASE` environment variable MAY override `default_base`.
 
-装配只建立连接配置，不在启动时强制连通 harness：Codex 未就绪时进程仍需启动，
-由 `/v1/haas/ready?scope=execution` 与 `/v1/haas/status` 如实反映
-`not_ready`（`/health` 仍为 ok）。这样容器可先起来再等 harness 就绪，符合
-[Container Runtime](../container-runtime/README.md) 的 health/ready 分离约定。
+Assembly only establishes connection configuration; it does not require harness
+connectivity at startup. The process MUST still start when Codex is not ready, and
+`/v1/haas/ready?scope=execution` and `/v1/haas/status` MUST accurately report
+`not_ready` while `/health` remains `ok`. This allows the container to start before
+the harness is ready, consistent with the health/ready separation defined by
+[Container Runtime](../container-runtime/README.md).
 
-| 变量 | 含义 |
+| Variable | Meaning |
 |------|------|
-| `HAAS_ADAPTER_BASE` | 默认 harness base（`codex` / `fake`） |
+| `HAAS_ADAPTER_BASE` | Default harness base (`codex` / `fake`) |
 
-环境变量前缀统一为 `HAAS_`，例如：
+The environment-variable prefix is uniformly `HAAS_`. For example:
 
-| 变量 | 含义 |
+| Variable | Meaning |
 |------|------|
-| `HAAS_CONFIG` | 配置文件路径 |
-| `HAAS_SIDECAR_PORT` | sidecar 端口（默认 `8092`） |
-| `HAAS_STORE_BACKEND` | 生产默认 `sqlite`；`memory` 仅测试；`postgres` 多副本预留 |
+| `HAAS_CONFIG` | Configuration file path |
+| `HAAS_SIDECAR_PORT` | Sidecar port (default: `8092`) |
+| `HAAS_STORE_BACKEND` | Production default: `sqlite`; `memory` is test-only; `postgres` is reserved for multi-replica deployments |
 | `HAAS_IDENTITY_PROVIDER` | `static` / `external_jwt` |
 
-配置文件默认 `haas.yaml`，优先级：默认值 < 配置文件 < 环境变量。
+The default configuration file is `haas.yaml`. Precedence is: defaults < configuration file < environment variables.
 
-## 6. 数据模型
+## 6. Data Model
 
 ```yaml
 server:
   host: "0.0.0.0"
   port: 8092
 store:
-  backend: sqlite           # 生产默认；memory 仅测试；postgres 多副本预留
+  backend: sqlite           # Production default; memory is test-only; postgres is reserved for multi-replica deployments
   dsn: null
   event_retention_seconds: 2592000
 identity:
@@ -113,43 +118,43 @@ adapters:
     socket_path: /tmp/haas/codex.sock
 ```
 
-端口与服务发现固定为：
+Ports and service discovery are fixed as follows:
 
-| 端口 | 服务 | 地址 |
+| Port | Service | Address |
 |------|------|------|
-| 8080 | nginx + OpenSandbox AIO | HaaS 容器对外总入口；保留 AIO 内部路由 |
-| 8092 | HaaS sidecar | nginx upstream，仅 `127.0.0.1` |
-| 18080 | model proxy | 仅 `127.0.0.1` |
-| 18081 | MCP/tool proxy | 仅 `127.0.0.1` |
+| 8080 | nginx + OpenSandbox AIO | External entry point for the HaaS container; preserves internal AIO routes |
+| 8092 | HaaS sidecar | nginx upstream, `127.0.0.1` only |
+| 18080 | model proxy | `127.0.0.1` only |
+| 18081 | MCP/tool proxy | `127.0.0.1` only |
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 startup -> load_config(HAAS_CONFIG) -> validate -> build AppConfig -> create_app(config) -> serve
 ```
 
-## 8. 安全与权限
+## 8. Security and Authorization
 
-- provider key / MCP token 不接受明文 env 或 yaml；只能 `credentialRef`。
-- 配置 dump/诊断输出必须脱敏，不包含 dsn、key、passphrase。
-- loopback 服务（18080/18081）只绑定 `127.0.0.1`。
+- Provider keys and MCP tokens MUST NOT be accepted as plaintext environment variables or YAML values; only `credentialRef` is allowed.
+- Configuration dumps and diagnostic output MUST be redacted and MUST NOT contain DSNs, keys, or passphrases.
+- Loopback services (18080/18081) MUST bind only to `127.0.0.1`.
 
-## 9. 可观测性
+## 9. Observability
 
 - `haas.config.loaded`
 - `haas.config.validation_failed`
-- 生效配置摘要（脱敏）写入启动日志。
+- A redacted summary of the effective configuration is written to the startup log.
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
+| Scenario | Behavior |
 |------|------|
-| 配置缺失/非法 | startup fail fast，输出 safe reason |
-| 配置含明文 secret | 拒绝启动，`haas_config_secret_invalid` |
-| 端口冲突 | startup fail，输出诊断 |
+| Configuration missing/invalid | Startup fails fast and emits a safe reason |
+| Configuration contains a plaintext secret | Startup is rejected with `haas_config_secret_invalid` |
+| Port conflict | Startup fails and emits diagnostics |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：三层优先级、非法配置 fail fast、secret 拒绝。
-- Integration：`create_app(config)` 用 memory store + static identity 启动并过 `/v1/haas/health`。
-- Security：config 文件与 dump 不出现明文 secret。
+- Unit: three-tier precedence, fail-fast behavior for invalid configuration, and secret rejection.
+- Integration: `create_app(config)` starts with a memory store and static identity and passes `/v1/haas/health`.
+- Security: configuration files and dumps contain no plaintext secrets.

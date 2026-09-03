@@ -1,69 +1,66 @@
-# Container Runtime 组件规格
+# Container Runtime Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-09-03
 Related specs: [Startup](../startup/README.md), [Runtime Trim](../runtime-trim/README.md), [Security Boundary](../security-boundary/README.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.md), [Observability](../observability/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Container Runtime 定义 HaaS 镜像、进程拓扑、端口、volume、health/ready 和 shutdown 语义。HaaS runtime image 必须基于开源 OpenSandbox AIO 镜像构建，继承 AIO 的 shell、file、browser 和 sandbox service 能力。
+Container Runtime defines HaaS image, process topology, port, volume, health/ready, and shutdown semantics. The HaaS runtime image MUST be built on the open-source OpenSandbox AIO image and inherit AIO shell, file, browser, and sandbox service capabilities.
 
-启动编排、nginx 总入口和 Codex readiness 的详细合同由 [Startup](../startup/README.md) 定义；本组件只保留容器、进程和端口边界。
+The detailed contracts for startup orchestration, the nginx unified entrypoint, and Codex readiness are defined by [Startup](../startup/README.md). This component retains only the container, process, and port boundaries.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| OpenSandbox README | 官方镜像 registry、sandbox lifecycle、credential vault、network policy |
-| OpenSandbox AIO example | `ghcr.io/agent-infra/sandbox:latest`、`/opt/gem/run.sh`、AIO port `8080` |
-| OpenSandbox API docs | lifecycle API、execd API、SSE command execution、file API |
-| `mpa-codex-worker` container runtime spec | `/health`/`/ready` 分离、runtime root、socket、shutdown、容器验证 |
-| 本组件总览 | Dockerfile 切换到 OpenSandbox AIO |
+| Source | Adopted content |
+|--------|-----------------|
+| OpenSandbox README | official image registry, sandbox lifecycle, credential vault, network policy |
+| OpenSandbox AIO example | `ghcr.io/agent-infra/sandbox:latest`, `/opt/gem/run.sh`, AIO port `8080` |
+| OpenSandbox API docs | lifecycle API, execd API, SSE command execution, file API |
+| `mpa-codex-worker` container runtime spec | separation of `/health` and `/ready`, runtime root, socket, shutdown, container validation |
+| Component overview | migration of the Dockerfile to OpenSandbox AIO |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | Deployment system / developer | 构建和运行 HaaS image |
-| 上游 | HaaS sidecar | 读取 runtime dirs、ports、AIO endpoint、process status |
-| 上游 | Sandbox Runtime | 消费 AIO sandbox/execd/credential vault 服务 |
-| 下游 | OpenSandbox AIO | 基础 shell/file/browser/sandbox/execd/vault service |
-| 下游 | Codex app-server | 首期 harness runtime process |
-| 下游 | Model Proxy / MCP Proxy | loopback service |
-| 下游 | Observability | process logs、health、ready、resource metrics |
+| Direction | Component | Relationship |
+|-----------|-----------|--------------|
+| Upstream | Deployment system / developer | Builds and runs the HaaS image |
+| Upstream | HaaS sidecar | Reads runtime directories, ports, AIO endpoint, and process status |
+| Upstream | Sandbox Runtime | Consumes AIO sandbox/execd/credential vault services |
+| Downstream | OpenSandbox AIO | Base shell/file/browser/sandbox/execd/vault services |
+| Downstream | Codex app-server | Initial harness runtime process |
+| Downstream | Model Proxy / MCP Proxy | loopback services |
+| Downstream | Observability | process logs, health, ready, and resource metrics |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 定义 Dockerfile base image、dependency layer、runtime layer 和 entrypoint。
-- 保留或委托 OpenSandbox AIO `/opt/gem/run.sh`。
-- 保证 AIO 的 sandbox/execd/credential vault 服务可用，供 Sandbox Runtime 使用。
-- 启动 HaaS sidecar、Codex app-server、model proxy、MCP proxy 以及必要 watchdog。
-- 定义 `8080`、`8092`、`18080`、`18081` 端口归属。
-- AIO 基础镜像的 node22 REPL 默认占用 `8092`，与 HaaS sidecar 冲突。必须通过
-  AIO 自身的 `NODEJS_REPL_PORT_22` 覆盖为 `8093`（在 Dockerfile 中设置），
-  不得 fork 或私改 AIO 启动脚本。新增容器内服务前必须先确认端口未被 AIO 占用。
-- Sidecar 是容器存在的理由：entrypoint 必须监控其存活，sidecar 退出时容器以
-  非零码退出，禁止出现「容器 Up 但 API 不可用」的静默失败。AIO/Codex 退出只
-  记录告警，由 `/ready` 如实反映能力降级。
-- 定义 runtime root、workspace root、artifact root、state root 和 socket root。
-- 定义 health/ready/status 的容器语义。
-- 将 nginx 作为容器对外总入口，并把 HaaS sidecar readiness 作为对外 ready 的事实来源；具体启动 DAG 见 Startup spec。
-- 定义 SIGTERM drain：停止接新任务、flush event log、标记 ready=false、取消或落盘 active turn。
-- 定义 base image digest pin 和升级验证。
-- 在 runtime ENV 层落地 [Runtime Trim](../runtime-trim/README.md) 定义的 AIO 服务裁剪变量，
-  保证 CUA/BUA、sandbox 与 Codex readiness 不受影响。
+- Define the Dockerfile base image, dependency layer, runtime layer, and entrypoint.
+- Preserve or delegate to OpenSandbox AIO `/opt/gem/run.sh`.
+- Ensure that AIO sandbox/execd/credential vault services are available to Sandbox Runtime.
+- Start the HaaS sidecar, Codex app-server, model proxy, MCP proxy, and any required watchdog.
+- Define ownership of ports `8080`, `8092`, `18080`, and `18081`.
+- The node22 REPL in the AIO base image occupies `8092` by default and conflicts with the HaaS sidecar. It MUST be overridden to `8093` through AIO's own `NODEJS_REPL_PORT_22` setting (set in the Dockerfile); the AIO startup scripts MUST NOT be forked or privately modified. Before adding an in-container service, its port MUST first be confirmed as unused by AIO.
+- The sidecar is the reason for the container's existence: the entrypoint MUST monitor its liveness. When the sidecar exits, the container MUST exit with a nonzero code; a silent failure in which the container is Up but the API is unavailable is prohibited. AIO/Codex exits only generate warnings, while `/ready` accurately reflects degraded capabilities.
+- Define the runtime root, workspace root, artifact root, state root, and socket root.
+- Define container semantics for health/ready/status.
+- Use nginx as the container's unified external entrypoint and the HaaS sidecar's readiness as the source of truth for external readiness; see the Startup spec for the concrete startup DAG.
+- Define SIGTERM draining: stop accepting new work, flush the event log, set ready=false, and cancel or persist active turns.
+- Define base-image digest pinning and upgrade validation.
+- Apply the AIO service-trimming variables defined by [Runtime Trim](../runtime-trim/README.md) in the runtime ENV layer, ensuring that CUA/BUA, sandbox, and Codex readiness are unaffected.
 
-不负责：
+Non-responsibilities:
 
-- 不实现 OpenSandbox lifecycle server。
-- 不替代 HaaS Protocol 的 public API。
-- 不保存 provider secret。
-- 不用 Docker privileged 或 root 身份直接放宽 agent 工具权限。
-- 不在启动 critical path 执行模型请求、MCP 全量探测、skill 远端下载或长时间恢复。
+- It does not implement the OpenSandbox lifecycle server.
+- It does not replace the HaaS Protocol public API.
+- It does not store provider secrets.
+- It does not use Docker privileged mode or root identity to directly expand agent tool permissions.
+- It does not perform model requests, exhaustive MCP probing, remote skill downloads, or long-running recovery on the startup critical path.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ### 5.1 Dockerfile Contract
 
@@ -79,24 +76,19 @@ FROM ${HAAS_BASE_IMAGE}
 
 Rules:
 
-- Local experiments may use `ghcr.io/agent-infra/sandbox:latest`.
-- The Dockerfile default must remain the production-pinned digest. A local or CI build may set `HAAS_BASE_IMAGE` to a trusted digest-pinned mirror/cache reference; release builds may not use a mutable tag.
-- All HaaS images MUST be built and run for `linux/amd64`. This is a hard delivery contract: `make docker-build` and `make docker-check` pin `--platform=linux/amd64` (via `HAAS_PLATFORM`), and non-amd64 hosts (e.g. Apple Silicon) must cross-build amd64 through buildx/QEMU. Native-arch images must never be shipped as deliverables.
-- Dependency install layers must precede source code copy. npm and uv downloads use BuildKit cache mounts and remain governed by `uv.lock` and package pins.
+- Local experiments MAY use `ghcr.io/agent-infra/sandbox:latest`.
+- The Dockerfile default MUST remain the production-pinned digest. A local or CI build MAY set `HAAS_BASE_IMAGE` to a trusted digest-pinned mirror/cache reference; release builds MUST NOT use a mutable tag.
+- All HaaS images MUST be built and run for `linux/amd64`. This is a hard delivery contract: `make docker-build` and `make docker-check` pin `--platform=linux/amd64` (via `HAAS_PLATFORM`), and non-amd64 hosts (e.g. Apple Silicon) MUST cross-build amd64 through buildx/QEMU. Native-architecture images MUST NOT be shipped as deliverables.
+- Dependency installation layers MUST precede source-code copying. npm and uv downloads use BuildKit cache mounts and remain governed by `uv.lock` and package pins.
 - `make docker-build` is the standard local build entrypoint; the override does not change the production default or AIO service contract.
-- Runtime env must be placed near the final runtime layer so it does not bust dependency cache.
-- The Dockerfile must not embed provider keys, MCP tokens, cookies or user auth files.
+- Runtime env MUST be placed near the final runtime layer so it does not invalidate the dependency cache.
+- The Dockerfile MUST NOT embed provider keys, MCP tokens, cookies, or user auth files.
 
 ### 5.1.1 AIO Service Trim
 
-HaaS 只消费 AIO 的 shell/file/browser/sandbox/execd/credential vault 能力，不使用 AIO 自带的
-IDE、notebook 和多版本 REPL 服务。这些服务通过 AIO **官方支持的 `DISABLE_*` / `NODE_VERSION`
-环境变量**在 runtime ENV 层关闭（默认：`DISABLE_CODE_SERVER`、`DISABLE_JUPYTER`、
-`DISABLE_NODEJS_REPL`、`NODE_VERSION=node22`），不 fork 或私改 AIO 启动脚本。
+HaaS consumes only AIO shell/file/browser/sandbox/execd/credential vault capabilities and does not use AIO's built-in IDE, notebook, or multi-version REPL services. These services are disabled in the runtime ENV layer through **officially supported AIO `DISABLE_*` / `NODE_VERSION` environment variables** (by default: `DISABLE_CODE_SERVER`, `DISABLE_JUPYTER`, `DISABLE_NODEJS_REPL`, and `NODE_VERSION=node22`), without forking or privately modifying AIO startup scripts.
 
-裁剪的完整合同——关闭清单、必须保留的能力、机制规则、gost/`18080` 前提、以及“运行时禁用只
-降资源占用、不减镜像层体积”的边界——由 [Runtime Trim](../runtime-trim/README.md) 权威定义。
-本组件只在 runtime ENV 层落地这些变量，并保证 CUA/BUA、sandbox 与 Codex readiness 不受影响。
+The complete trim contract—the disable list, capabilities that MUST be preserved, mechanism rules, the gost/`18080` precondition, and the boundary that “runtime disabling only reduces resource usage and does not reduce image-layer size”—is authoritatively defined by [Runtime Trim](../runtime-trim/README.md). This component only applies these variables in the runtime ENV layer and ensures that CUA/BUA, sandbox, and Codex readiness are unaffected.
 
 ### 5.2 Entrypoint Contract
 
@@ -109,7 +101,7 @@ IDE、notebook 和多版本 REPL 服务。这些服务通过 AIO **官方支持�
   -> forward SIGTERM to all child process groups
 ```
 
-If a process manager is used, it must not make supervisor RUNNING equal HaaS ready. Readiness must be based on actual sidecar and adapter probes.
+If a process manager is used, it MUST NOT treat supervisor RUNNING as equivalent to HaaS ready. Readiness MUST be based on actual sidecar and adapter probes.
 
 ### 5.3 Health / Ready
 
@@ -120,7 +112,7 @@ If a process manager is used, it must not make supervisor RUNNING equal HaaS rea
 | `/ready?scope=execution` | HaaS can start a harness turn |
 | AIO `/v1/shell/sessions` | AIO service readiness probe |
 
-## 6. 数据模型
+## 6. Data Models
 
 ### 6.1 RuntimeLayout
 
@@ -155,7 +147,7 @@ If a process manager is used, it must not make supervisor RUNNING equal HaaS rea
 }
 ```
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 image built
@@ -171,23 +163,23 @@ image built
 
 Startup rules:
 
-- `/health` must become available before optional capability warmup completes.
-- `/ready?scope=control` and the default `/ready` are overall service readiness signals; they remain false until Codex app-server readiness probe completes.
-- `/ready?scope=execution` may use the same Codex gate for the P0 adapter; model provider, MCP discovery or browser startup remain outside the default gate unless declared a Codex execution-safety dependency.
+- `/health` MUST become available before optional capability warmup completes.
+- `/ready?scope=control` and the default `/ready` are overall service readiness signals; they remain false until the Codex app-server readiness probe completes.
+- `/ready?scope=execution` MAY use the same Codex gate for the P0 adapter; model provider, MCP discovery, and browser startup remain outside the default gate unless declared a Codex execution-safety dependency.
 - AIO readiness and HaaS readiness are reported separately.
 
-## 8. 安全与权限
+## 8. Security and Permissions
 
 - Container root or privileged mode is not a substitute for harness sandbox policy.
-- Runtime secret files must be owner-only and excluded from artifacts.
-- AIO service endpoints should be bound to loopback unless intentionally exposed through a controlled proxy.
+- Runtime secret files MUST be owner-only and excluded from artifacts.
+- AIO service endpoints SHOULD be bound to loopback unless intentionally exposed through a controlled proxy.
 - HaaS sidecar bearer auth is required for non-health endpoints.
-- Docker build args and image layers must not contain secrets.
-- Base image digest must be recorded for release builds.
+- Docker build args and image layers MUST NOT contain secrets.
+- The base-image digest MUST be recorded for release builds.
 
-## 9. 可观测性
+## 9. Observability
 
-Container status must include:
+Container status MUST include:
 
 - image reference and digest;
 - AIO process status and port;
@@ -198,32 +190,26 @@ Container status must include:
 - drain state;
 - last safe error reason.
 
-Logs must go to stdout/stderr or configured log files with redaction.
+Logs MUST go to stdout/stderr or configured log files with redaction.
 
-## 10. 失败与恢复
+## 10. Failures and Recovery
 
-| 场景 | 行为 |
-|------|------|
-| AIO service not ready | HaaS control ready may be true; execution ready false with safe reason |
+| Scenario | Behavior |
+|----------|----------|
+| AIO service not ready | HaaS control ready may be true; execution ready is false with a safe reason |
 | HaaS sidecar not listening | container health fails |
-| Codex app-server not ready | execution ready false; session create can be pending only if API contract allows |
-| SIGTERM | enter draining, reject new tasks, flush event log, cancel/settle active turns |
-| base image unavailable | build fails; do not silently switch image |
+| Codex app-server not ready | execution ready is false; session creation can be pending only if the API contract allows it |
+| SIGTERM | enter draining, reject new tasks, flush the event log, and cancel/settle active turns |
+| base image unavailable | build fails; MUST NOT silently switch images |
 | digest mismatch | release blocked |
 | port conflict | startup fails with safe diagnostics |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance
 
-- Dockerfile lint/static check for base image pin in release mode.
-- Build smoke from current checkout（`HAAS_DOCKER_BUILD=1 make docker-check`）。
-  静态检查不得作为容器变更的唯一证据：曾出现静态全绿但镜像根本无法构建
-  （`pyproject` 声明的 `README.md` 未 COPY）。容器相关变更必须跑 build 层。
-- Container run smoke verifies AIO port `8080` and HaaS port `8092`，并断言
-  `/v1/haas/status` 中装配的是真实 harness adapter（非测试替身），以及
-  sidecar 被杀后容器以非零码退出。AIO 启动慢于 sidecar，就绪判定需轮询。
-- Health/ready tests verify `/health` is not gated by optional warmups.
+- Dockerfile lint/static check for base-image pinning in release mode.
+- Build smoke from the current checkout (`HAAS_DOCKER_BUILD=1 make docker-check`). Static checks MUST NOT be the only evidence for container changes: there has been a case where all static checks passed but the image could not be built (`README.md` declared by `pyproject` was not copied). Container-related changes MUST run the build layer.
+- Container run smoke verifies AIO port `8080` and HaaS port `8092`, asserts that `/v1/haas/status` assembles a real harness adapter (not a test double), and asserts that the container exits with a nonzero code after the sidecar is killed. AIO starts more slowly than the sidecar, so readiness checks MUST poll.
+- Health/ready tests verify that `/health` is not gated by optional warmups.
 - Shutdown test sends SIGTERM and asserts drain events/status.
-- Secret scan verifies build args, env, logs and image metadata do not contain provider credentials.
-- Service-trim check (§5.1.1 / [Runtime Trim](../runtime-trim/README.md))：静态断言 Dockerfile
-  设置 `DISABLE_CODE_SERVER`、`DISABLE_JUPYTER`、`DISABLE_NODEJS_REPL`；build/smoke 断言
-  code-server/jupyter 未监听而 browser/VNC/sandbox 与 Codex readiness 仍正常。
+- Secret scan verifies that build args, env, logs, and image metadata do not contain provider credentials.
+- Service-trim check (§5.1.1 / [Runtime Trim](../runtime-trim/README.md)): statically assert that the Dockerfile sets `DISABLE_CODE_SERVER`, `DISABLE_JUPYTER`, and `DISABLE_NODEJS_REPL`; build/smoke asserts that code-server/jupyter are not listening while browser/VNC/sandbox and Codex readiness remain functional.

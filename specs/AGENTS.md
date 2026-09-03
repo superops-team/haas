@@ -1,5 +1,7 @@
 # Specs AGENTS
 
+**English** | [简体中文](AGENTS.zh-CN.md)
+
 You are maintaining HaaS protocol and component contracts. Treat files under
 `specs/` as source-of-truth for public interfaces, component boundaries, event
 semantics, security constraints, and compatibility promises.
@@ -27,6 +29,11 @@ semantics, security constraints, and compatibility promises.
 - `artifact-store/README.md`
 - `sandbox-runtime/README.md`
 - `container-runtime/README.md`
+- `security-boundary/README.md`
+- `runtime-trim/README.md`
+- `startup/README.md`
+- `startup/CASES.md`
+- `startup/OPENSPEC.md`
 - `observability/README.md`
 - `implementation-roadmap/README.md`
 
@@ -34,6 +41,8 @@ semantics, security constraints, and compatibility promises.
 
 Always:
 
+- Maintain every human-authored specification in two synchronized language variants: English at the canonical path and Simplified Chinese at the sibling `*.zh-CN.md` path. The OpenAPI YAML remains a single language-neutral machine contract.
+- Add reciprocal language switches below the H1 in both variants. Keep public interfaces, normative requirements, examples, and compatibility statements semantically identical across languages.
 - Keep `specs/README.md` and child specs aligned when adding, renaming, or removing a component.
 - Keep ADK-compatible endpoints, events, object shapes and error codes aligned with
   `specs/haas-protocol/`.

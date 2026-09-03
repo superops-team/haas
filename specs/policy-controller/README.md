@@ -1,53 +1,55 @@
-# Policy Controller 组件规格
+# Policy Controller Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-30
 Related specs: [Security Boundary](../security-boundary/README.md), [Harness Registry](../harness-registry/README.md), [Session Runtime](../session-runtime/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Policy Controller 负责把 caller、tenant、workspace、configured harness、request override 和部署默认值编译成一次 session/turn 的有效策略。它是 HaaS 运行准入的唯一 policy owner。
+The Policy Controller compiles caller, tenant, workspace, configured harness, request override, and deployment defaults into the effective policy for a session/turn. It is the sole policy owner for HaaS runtime admission.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| `mpa-codex-worker` policy controller | profile/workspace/model/MCP/tool/network/hook 动态策略和 fail-closed 原则 |
-| Security Boundary | tool minimization、budget、object scope、provider URL allowlist |
-| Sandbox Runtime | workspace/network/tool/approval 投影为 OpenSandbox sandbox/egress 配置 |
-| OpenSandbox egress docs | 网络 egress policy 与 credential vault 分层 |
+| Source | Adopted Content |
+|--------|-----------------|
+| `mpa-codex-worker` policy controller | Dynamic policies for profile/workspace/model/MCP/tool/network/hook and the fail-closed principle |
+| Security Boundary | Tool minimization, budget, object scope, and provider URL allowlist |
+| Sandbox Runtime | Projection of workspace/network/tool/approval policies into OpenSandbox sandbox/egress configuration |
+| OpenSandbox egress docs | Separation between network egress policy and credential vault |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | HaaS Protocol | 传入 request metadata、headers、task budgets |
-| 上游 | Harness Registry | 读取 configured harness policy |
-| 上游 | Session Runtime | 请求 session/turn effective policy |
-| 下游 | Harness Adapter | 提供 adapter-specific policy projection |
-| 下游 | Model Proxy | 限制模型和 provider route |
-| 下游 | MCP / Tool / Skill Runtime | 限制 MCP、tools、skills |
-| 下游 | Container Runtime | 限制 workspace、network、mount 和 process |
+| Direction | Component | Relationship |
+|-----------|-----------|--------------|
+| Upstream | HaaS Protocol | Supplies request metadata, headers, and task budgets |
+| Upstream | Harness Registry | Provides configured harness policy |
+| Upstream | Session Runtime | Requests the effective policy for a session/turn |
+| Downstream | Harness Adapter | Receives adapter-specific policy projections |
+| Downstream | Model Proxy | Restricts models and provider routes |
+| Downstream | MCP / Tool / Skill Runtime | Restricts MCP, tools, and skills |
+| Downstream | Container Runtime | Restricts workspace, network, mounts, and processes |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 合并组织级、workspace 级、harness 级、session 级和 turn 级 policy。
-- 校验 policy 只收窄权限；放宽必须有显式授权来源。
-- 输出 `EffectivePolicy` 并冻结到 session/turn。
-- 将通用 policy 投影为 adapter-specific 配置。
-- 拒绝未知或不可安全实现的权限请求。
-- 记录 policy decision 和 safe reason。
+- Merge organization-, workspace-, harness-, session-, and turn-level policies.
+- Validate that policy changes only narrow permissions; widening MUST have an explicit authorization source.
+- Produce an `EffectivePolicy` and freeze it into the session/turn.
+- Project generic policy into adapter-specific configuration.
+- Reject unknown permission requests or requests that cannot be implemented safely.
+- Record policy decisions and safe reasons.
 
-不负责：
+Non-responsibilities:
 
-- 不执行工具或网络请求。
-- 不保存 credential value。
-- 不根据 harness 文本输出动态放权。
-- 不把 adapter 不支持的 hard block 默认为已 enforce。
+- Does not execute tools or network requests.
+- Does not store credential values.
+- Does not dynamically grant permissions based on harness text output.
+- Does not treat hard blocks unsupported by an adapter as enforced by default.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ```python
 async def compile_policy(input: PolicyCompileInput) -> EffectivePolicy: ...
@@ -58,7 +60,7 @@ async def authorize_workspace_path(policy: EffectivePolicy, path: str, access: s
 async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> AdapterPolicyProjection: ...
 ```
 
-## 6. 数据模型
+## 6. Data Model
 
 ### 6.1 EffectivePolicy
 
@@ -92,7 +94,7 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
 }
 ```
 
-### 6.1.1 PolicyCompileInput 与 PolicyLayer
+### 6.1.1 PolicyCompileInput and PolicyLayer
 
 ```json
 {
@@ -110,13 +112,12 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
 }
 ```
 
-- `layers` 从宽到窄排列（platform/tenant → workspace → harness → session → turn）。
-- 每层的字段 `null` 表示该层不覆盖该维度，合并时跳过。
-- `delegation: true` 表示该层显式授予其下所有层放宽该层约束的权利；未授予时，下层任何放宽都 fail closed（`PolicyWideningRejected`）。
-- 合并规则：workspace mode 只能向更严格方向（`danger-full-access` → `workspace-write` → `read-only`）；writableRoots / network.allow / model.allowedModels 只能收窄；tools.disabled 只能增加；approvalMode 只能向更严格方向（`never` → `on-request` → `always`，`always` 表示每次工具调用都需人工批准，最严格）。
+- `layers` are ordered from broadest to narrowest (platform/tenant → workspace → harness → session → turn).
+- A field set to `null` in a layer means that the layer does not override that dimension, and the field is skipped during merging.
+- `delegation: true` means that the layer explicitly authorizes all lower layers to widen its constraints. Without delegation, any widening by a lower layer fails closed (`PolicyWideningRejected`).
+- Merge rules: workspace mode may only become stricter (`danger-full-access` → `workspace-write` → `read-only`); writableRoots / network.allow / model.allowedModels may only narrow; tools.disabled may only grow; approvalMode may only become stricter (`never` → `on-request` → `always`, where `always` means that every tool call requires human approval and is the strictest mode).
 
 ### 6.2 PolicyDecision
-
 
 ```json
 {
@@ -127,7 +128,7 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
 }
 ```
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 inputs collected
@@ -150,16 +151,16 @@ Policy precedence:
 
 Lower levels may only narrow unless a higher level explicitly grants delegation.
 
-## 8. 安全与权限
+## 8. Security and Permissions
 
 - Unknown policy fields fail closed when they would affect security.
-- Network allowlist is evaluated before model/MCP proxy outbound calls.
+- The network allowlist is evaluated before outbound calls from the model/MCP proxy.
 - Workspace paths are canonicalized before comparison.
 - Policy compilation stores secret fingerprints, not values.
-- Approval modes must map truthfully to adapter capabilities.
-- Public error detail uses `safeReason`, not raw denied path/header/URL when sensitive.
+- Approval modes MUST map truthfully to adapter capabilities.
+- Public error details use `safeReason`, not a raw denied path/header/URL when it is sensitive.
 
-## 9. 可观测性
+## 9. Observability
 
 - `haas.policy.compiled`
 - `haas.policy.denied`
@@ -173,21 +174,21 @@ Metrics:
 - `haas_policy_compile_duration_ms`
 - `haas_policy_projection_total{adapterBase,status}`
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
-|------|------|
-| policy store unavailable before execution | fail closed |
-| unknown security-affecting field | reject with `haas_policy_invalid` |
-| adapter cannot enforce hard requirement | reject with `haas_policy_unsupported` |
-| requested wider workspace root | reject unless higher-level delegation allows |
-| network URL fails allowlist | reject before outbound connection |
-| approval required but no approval bridge | reject or mark task blocked; do not auto-approve |
+| Scenario | Behavior |
+|----------|----------|
+| Policy store unavailable before execution | Fail closed |
+| Unknown security-affecting field | Reject with `haas_policy_invalid` |
+| Adapter cannot enforce a hard requirement | Reject with `haas_policy_unsupported` |
+| Requested wider workspace root | Reject unless higher-level delegation allows it |
+| Network URL fails allowlist | Reject before making an outbound connection |
+| Approval required but no approval bridge exists | Reject or mark the task blocked; do not auto-approve |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：policy precedence、widening rejection、path canonicalization、network URL validation。
-- Adapter projection：Codex/Pi/OpenCode fixtures verify hard/advisory/unsupported declarations。
-- Security：SSRF cases、private IP、metadata endpoint、Unix socket and Docker socket denial。
-- Integration：session snapshot freezes policy and later harness update does not alter active session。
-- Review：any policy expansion requires spec review and security-boundary update。
+- Unit: policy precedence, widening rejection, path canonicalization, and network URL validation.
+- Adapter projection: Codex/Pi/OpenCode fixtures verify hard/advisory/unsupported declarations.
+- Security: SSRF cases, private IP, metadata endpoint, and Unix socket and Docker socket denial.
+- Integration: a session snapshot freezes policy, and a later harness update does not alter the active session.
+- Review: any policy expansion requires a spec review and a security-boundary update.

@@ -1,91 +1,93 @@
-# Startup 组件规格
+# Startup Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-09-02
 Change ID: haas-standard-startup
 Related specs: [Architecture](../architecture/README.md), [Container Runtime](../container-runtime/README.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.md), [HaaS Protocol](../haas-protocol/README.md), [Observability](../observability/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Startup 定义 HaaS 容器从进程启动到对外可服务的编排合同。nginx 是容器对外总入口，HaaS sidecar 是 northbound API 的事实 owner，Codex app-server 的真实协议握手决定整体 `ready`。
+Startup defines the orchestration contract for a HaaS container from process startup until it can serve external requests. nginx is the container's single external entry point, the HaaS sidecar is the source of truth for the northbound API, and the actual Codex app-server protocol handshake determines overall `ready` status.
 
-本组件只定义标准化 HaaS 启动行为，不实现或兼容 `mpa-codex-worker` 的 `/v1/codex-worker/*` shim。旧项目仅作为启动顺序、Unix socket 探测、supervisor 和异步 warmup 的参考来源。
+This component defines only standardized HaaS startup behavior. It does not implement or support the `mpa-codex-worker` `/v1/codex-worker/*` shim. The legacy project serves only as a reference for startup ordering, Unix socket probing, supervisor, and asynchronous warmup.
 
-目标是让最小服务入口尽快可用，同时不把非关键能力误判为 ready，也不让可异步初始化的能力阻塞整体服务。
+The goal is to make the minimal service entry point available as quickly as possible without misclassifying non-critical capabilities as ready or allowing asynchronously initialized capabilities to block the overall service.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| HaaS AGENTS.md | nginx/AIO 容器边界、`/health`/`/ready` 语义、Codex app-server 首期约束、secretless 和可恢复性 |
-| Container Runtime | AIO `/opt/gem/run.sh`、端口归属、sidecar critical、进程和 shutdown 合同 |
-| Codex App-Server Adapter | Unix socket transport、`initialize`/`initialized` 握手、generation 和恢复语义 |
-| 本地 `mpa-codex-worker` 配置参考 | nginx upstream 挂载、supervisor priority、sidecar/Codex 分离启动、背景 warmup |
+| Source | Adopted Content |
+|--------|-----------------|
+| HaaS AGENTS.md | nginx/AIO container boundaries, `/health`/`/ready` semantics, initial Codex app-server constraints, secretless operation, and recoverability |
+| Container Runtime | AIO `/opt/gem/run.sh`, port ownership, sidecar criticality, and process and shutdown contracts |
+| Codex App-Server Adapter | Unix socket transport, `initialize`/`initialized` handshake, generation, and recovery semantics |
+| Local `mpa-codex-worker` configuration reference | nginx upstream mounting, supervisor priority, separate sidecar/Codex startup, and background warmup |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | Container runtime / `/opt/gem/run.sh` | 进程启动、信号转发和 AIO 基础服务 |
-| 上游 | Config | 端口、socket、timeout 和启动策略 |
-| 下游 | nginx | 唯一对外 HTTP/SSE 入口，转发到 HaaS sidecar |
-| 下游 | HaaS sidecar | API、Codex readiness 聚合、ready 信号 |
-| 下游 | Codex app-server adapter | Codex 启动/连接和标准握手探测 |
-| 异步下游 | AIO optional services、Model Proxy、MCP、Browser、Skills、Artifact warmup | 默认不阻塞整体 ready |
+| Direction | Object | Relationship |
+|-----------|--------|--------------|
+| Upstream | Container runtime / `/opt/gem/run.sh` | Process startup, signal forwarding, and AIO base services |
+| Upstream | Config | Ports, sockets, timeouts, and startup policy |
+| Downstream | nginx | The sole external HTTP/SSE entry point; forwards to the HaaS sidecar |
+| Downstream | HaaS sidecar | API, aggregated Codex readiness, and ready signal |
+| Downstream | Codex app-server adapter | Codex startup/connection and standard handshake probe |
+| Asynchronous downstream | AIO optional services, Model Proxy, MCP, Browser, Skills, Artifact warmup | MUST NOT block overall ready status by default |
 
-## 4. 职责边界
+## 4. Responsibilities and Boundaries
 
-负责：
+Responsibilities:
 
-- 生成并校验 nginx 配置，把 HaaS northbound API 统一挂载到 sidecar loopback upstream。
-- 规划 nginx、sidecar、Codex adapter 的启动顺序和并行关系。
-- 定义整体 ready 的唯一判定：sidecar 存活且 Codex readiness probe 已完成。
-- 定义 Codex readiness probe 的真实验证步骤、超时、重试和状态投影。
-- 把非关键初始化放入可观测 background task；普通可选任务不得改变已发布的 ready 事实，只有被明确声明为 Codex 执行安全硬依赖的任务失败才可撤销 ready。
-- 定义启动阶段、耗时、失败原因和 graceful shutdown 行为。
+- Generate and validate the nginx configuration, mounting the HaaS northbound API uniformly on the sidecar loopback upstream.
+- Plan the startup order and parallelism of nginx, the sidecar, and the Codex adapter.
+- Define the sole condition for overall readiness: the sidecar is live and the Codex readiness probe has completed.
+- Define the actual validation steps, timeouts, retries, and state projection for the Codex readiness probe.
+- Place non-critical initialization in observable background tasks. Ordinary optional tasks MUST NOT change a published ready state. Only failure of a task explicitly declared as a hard dependency for safe Codex execution MAY revoke readiness.
+- Define startup phases, durations, failure reasons, and graceful shutdown behavior.
 
-不负责：
+Non-responsibilities:
 
-- 不实现 nginx、Codex JSON-RPC 或 OpenSandbox AIO 本身。
-- 不让 nginx 自己判断 Codex readiness；nginx 只代理 sidecar 的结构化状态。
-- 不把模型 provider 成功、MCP 全量发现、browser、skills 下载或 artifact 清理默认加入整体 ready。
-- 不把 Codex 原生 endpoint、thread id、turn id 或 JSON-RPC payload 暴露给上游。
+- Does not implement nginx, Codex JSON-RPC, or OpenSandbox AIO itself.
+- Does not allow nginx to determine Codex readiness itself; nginx only proxies the sidecar's structured state.
+- Does not include successful model provider initialization, full MCP discovery, browser initialization, skills downloads, or artifact cleanup in overall readiness by default.
+- Does not expose native Codex endpoints, thread IDs, turn IDs, or JSON-RPC payloads upstream.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
-### 5.1 对外入口
+### 5.1 External Entry Point
 
-nginx 是容器唯一对外监听者，复用 AIO 保留的 `8080` listener；sidecar、Codex socket、model proxy `18080` 和 MCP proxy `18081` 默认只绑定 loopback 或 Unix socket。AIO 的内部 routes 继续由同一 nginx server 提供。
+nginx is the container's sole external listener and reuses the AIO-reserved `8080` listener. The sidecar, Codex socket, model proxy `18080`, and MCP proxy `18081` bind only to loopback or a Unix socket by default. AIO internal routes continue to be served by the same nginx server.
 
-nginx 必须代理以下 HaaS surface，保持路径和方法不变：
+nginx MUST proxy the following HaaS surfaces without changing paths or methods:
 
-- ADK-compatible：`/list-apps`、`/run`、`/run_sse`、`/apps/{app}/users/{user}/sessions/{session}`。
-- HaaS native：`/v1/haas/*`，至少包含 `/v1/haas/health`、`/v1/haas/ready`、`/v1/haas/status`。
+- ADK-compatible: `/list-apps`, `/run`, `/run_sse`, and `/apps/{app}/users/{user}/sessions/{session}`.
+- HaaS native: `/v1/haas/*`, including at least `/v1/haas/health`, `/v1/haas/ready`, and `/v1/haas/status`.
 
-代理要求：
+Proxy requirements:
 
-- upstream 默认指向 `http://127.0.0.1:8092`；不得指向公网或 Codex socket。
-- SSE 路由使用 HTTP/1.1，关闭 response buffering，设置 `Cache-Control: no-cache`，并允许长 read timeout。
-- streaming request 转发 `Host`、`X-Real-IP`、`X-Forwarded-For`、`X-Forwarded-Proto`；WebSocket 仅用于明确声明的内部/adapter 路由。
-- nginx 配置启动前执行 syntax check；失败时容器非零退出，不能使用半成品配置。
-- nginx 不伪造业务 ready 响应；`/health` 与 `/ready` 均由 sidecar 提供结构化结果并由 nginx 透传。
+- The upstream MUST point to `http://127.0.0.1:8092` by default; it MUST NOT point to a public network or the Codex socket.
+- SSE routes MUST use HTTP/1.1, disable response buffering, set `Cache-Control: no-cache`, and permit a long read timeout.
+- Streaming requests forward `Host`, `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto`; WebSocket is used only for explicitly declared internal/adapter routes.
+- The nginx configuration MUST pass a syntax check before startup. On failure, the container MUST exit nonzero and MUST NOT use a partial configuration.
+- nginx MUST NOT fabricate a service-ready response. `/health` and `/ready` are both supplied as structured results by the sidecar and passed through by nginx.
 
-### 5.2 Sidecar readiness contract
+### 5.2 Sidecar Readiness Contract
 
-sidecar 是 ready 事实 owner。`GET /v1/haas/health` 在 sidecar 可响应时返回存活状态，不要求 Codex ready。
+The sidecar is the source of truth for readiness. `GET /v1/haas/health` returns a liveness status when the sidecar can respond and does not require Codex to be ready.
 
-`GET /v1/haas/ready` 只有同时满足以下条件才返回 `ready=true`：
+`GET /v1/haas/ready` returns `ready=true` only when all of the following conditions hold:
 
-1. sidecar HTTP server 正在监听并能执行 readiness handler；
-2. Codex adapter readiness probe 已完成；
-3. probe 使用的 Codex generation 仍是当前 active generation；
-4. sidecar 未进入 draining 或 stopped。
+1. The sidecar HTTP server is listening and can execute the readiness handler.
+2. The Codex adapter readiness probe has completed.
+3. The Codex generation used by the probe is still the current active generation.
+4. The sidecar has not entered `draining` or `stopped`.
 
-Codex 未 ready 时返回非 2xx 的结构化未就绪响应，建议状态码 `503`，错误码使用已有 `haas_adapter_unavailable`，不得让调用方解析人类文本。
+When Codex is not ready, the endpoint returns a structured non-2xx not-ready response. The recommended status code is `503`, using the existing `haas_adapter_unavailable` error code. Callers MUST NOT be required to parse human-readable text.
 
-### 5.3 Codex readiness probe
+### 5.3 Codex Readiness Probe
 
-标准探测固定为：
+The standard probe is fixed as follows:
 
 ```text
 start or connect to active Codex app-server
@@ -98,18 +100,18 @@ start or connect to active Codex app-server
   -> publish codex_ready for observed generation
 ```
 
-规则：
+Rules:
 
-- Unix socket 存在不是 ready；只有 socket 可连接且 `initialize` 成功、`initialized` 已发送完成才算 ready。
-- readiness connection 设置有限的 connect、initialize 和 total timeout，不能无限等待。
-- probe 连接与实际 session/turn connection 生命周期隔离，不把 probe 连接当作业务 session。
-- `initialize` 失败、超时、协议版本不匹配、socket 被替换或 generation 变化时，ready 回落为 false。
-- probe 完成发布前必须原子校验其 generation 仍是 active generation；旧 generation 的迟到 probe 结果不得覆盖新的 `ready=false` 或发布 `ready=true`。
-- `initialized` 是 notification，没有 JSON-RPC response；其“完成”定义为 notification 已按协议写入 readiness connection 并成功 flush，随后 connection 标记为 handshake-complete。
-- probe 不执行 model request、thread/start、turn/start、MCP 全量探测或用户 prompt。
-- Codex 原生错误进入 adapter/observability 的安全诊断；northbound 只看到结构化 HaaS readiness/error。
+- The existence of a Unix socket does not indicate readiness. Readiness requires the socket to be connectable, `initialize` to succeed, and `initialized` to have been sent successfully.
+- The readiness connection MUST have bounded connect, initialize, and total timeouts and MUST NOT wait indefinitely.
+- The probe connection is isolated from the lifecycle of actual session/turn connections and MUST NOT be treated as a business session.
+- If `initialize` fails or times out, the protocol version does not match, the socket is replaced, or the generation changes, ready MUST fall back to false.
+- Before publishing probe completion, the implementation MUST atomically verify that its generation is still the active generation. A late probe result from an old generation MUST NOT overwrite a newer `ready=false` or publish `ready=true`.
+- `initialized` is a notification and has no JSON-RPC response. It is considered “complete” when the notification has been written to the readiness connection according to the protocol and successfully flushed, after which the connection is marked handshake-complete.
+- The probe MUST NOT execute a model request, `thread/start`, `turn/start`, full MCP discovery, or a user prompt.
+- Native Codex errors go to safe adapter/observability diagnostics. The northbound interface sees only structured HaaS readiness/errors.
 
-## 6. 数据模型与状态机
+## 6. Data Model and State Machine
 
 ### 6.1 StartupState
 
@@ -128,9 +130,9 @@ start or connect to active Codex app-server
 }
 ```
 
-真实绝对 socket 路径、认证 token、原始 JSON-RPC、prompt 和 provider credential 不得出现在对外 status、日志或事件中。
+Actual absolute socket paths, authentication tokens, raw JSON-RPC, prompts, and provider credentials MUST NOT appear in externally visible status, logs, or events.
 
-### 6.2 Startup phase
+### 6.2 Startup Phases
 
 ```text
 process_starting
@@ -146,11 +148,11 @@ process_starting
   -> stopped
 ```
 
-`service_ready` 是唯一允许 `/v1/haas/ready` 返回 `ready=true` 的 phase。`nginx_listening`、`sidecar_listening` 和 `codex_probing` 都不等于整体 ready。
+`service_ready` is the only phase in which `/v1/haas/ready` may return `ready=true`. `nginx_listening`, `sidecar_listening`, and `codex_probing` do not indicate overall readiness.
 
-## 7. 启动编排与时延预算
+## 7. Startup Orchestration and Latency Budget
 
-关键路径只包含本地、可界定时延的操作：
+The critical path contains only local operations with bounded latency:
 
 ```text
 prepare runtime dirs
@@ -164,37 +166,35 @@ prepare runtime dirs
   -> sidecar publishes ready=true
 ```
 
-AIO、nginx、sidecar 和 Codex app-server 应并行启动；只有 nginx 配置校验、sidecar 可响应、Codex readiness probe 三者形成整体 ready 依赖。不得把 AIO 全量 ready 作为 sidecar ready 的前置条件。
+AIO, nginx, the sidecar, and Codex app-server SHOULD start in parallel. Only nginx configuration validation, sidecar responsiveness, and the Codex readiness probe form the overall readiness dependency. Full AIO readiness MUST NOT be a prerequisite for sidecar readiness.
 
-AIO 通过官方 `DISABLE_CODE_SERVER` / `DISABLE_JUPYTER` / `DISABLE_NODEJS_REPL` 关闭的服务
-（见 [Runtime Trim](../runtime-trim/README.md)）不在关键路径上，也不参与整体 ready 判定；它们的
-缺席不得改变 nginx、sidecar 或 Codex readiness 行为。browser/VNC 仍按可选能力异步 warmup。
+Services disabled in AIO through the official `DISABLE_CODE_SERVER` / `DISABLE_JUPYTER` / `DISABLE_NODEJS_REPL` settings (see [Runtime Trim](../runtime-trim/README.md)) are not on the critical path and do not participate in the overall readiness decision. Their absence MUST NOT change nginx, sidecar, or Codex readiness behavior. Browser/VNC continues to warm up asynchronously as an optional capability.
 
-启动实现必须：
+The startup implementation MUST:
 
-- 为每个 phase 记录 monotonic start/end、duration、status 和 safe reason。
-- 使用 bounded timeout 和有限重试；重试期间 `/health` 可成功，`/ready` 保持 false。
-- 不在 critical path 执行网络下载、provider 请求、MCP 远端探测、browser、skill materialization 或全量 workspace 扫描。
-- background task 使用独立任务组和取消边界，不因未完成阻塞 HTTP server 或 ready。
-- background task 失败更新能力状态和安全诊断；普通可选任务不撤销已发布 ready，明确的 Codex 执行安全硬依赖失败才由 sidecar 将 ready 回落为 false。
+- Record monotonic start/end, duration, status, and safe reason for each phase.
+- Use bounded timeouts and finite retries. During retries, `/health` MAY succeed while `/ready` remains false.
+- Exclude network downloads, provider requests, remote MCP probes, browser initialization, skill materialization, and full workspace scans from the critical path.
+- Use an independent task group and cancellation boundary for background tasks. Incomplete background tasks MUST NOT block the HTTP server or readiness.
+- Update capability state and safe diagnostics when a background task fails. Ordinary optional tasks MUST NOT revoke published readiness; only failure of an explicit hard dependency for safe Codex execution causes the sidecar to fall back to ready=false.
 
-`startup_ready_duration_ms` 从容器启动时间点计时，到 sidecar 首次发布 `ready=true` 结束。默认目标为本地无冷缓存异常时 P95 ≤ 5 秒；不得通过跳过 Codex 握手降低目标。
+`startup_ready_duration_ms` is measured from container startup until the sidecar first publishes `ready=true`. The default target is P95 ≤ 5 seconds locally when there are no abnormal cold-cache conditions. The target MUST NOT be achieved by skipping the Codex handshake.
 
-至少观测：`nginx_listen_ms`、`sidecar_listen_ms`、`codex_socket_connect_ms`、`codex_initialize_ms`、`service_ready_ms`。
+At minimum, observe `nginx_listen_ms`, `sidecar_listen_ms`, `codex_socket_connect_ms`, `codex_initialize_ms`, and `service_ready_ms`.
 
-## 8. 安全与权限
+## 8. Security and Permissions
 
-- nginx 只代理允许的 ADK/HaaS 路径，不把 caller URL 变成 proxy target。
-- Codex Unix socket 权限限制到 HaaS runtime 用户/组；探测不得通过公开 TCP listener 绕过隔离。
-- readiness token 只能来自 runtime secret handle 或受限文件，不进入命令行、日志、status 或事件。
-- nginx access log、sidecar log、startup timing 和 status 脱敏；不得记录 raw JSON-RPC、raw prompt、完整 tool 参数或 provider credential。
-- nginx 保留 `X-Content-Type-Options: nosniff` 等安全 header；SSE 不得关闭认证和 scope 检查。
+- nginx proxies only permitted ADK/HaaS paths and MUST NOT turn a caller-supplied URL into a proxy target.
+- Codex Unix socket permissions are restricted to the HaaS runtime user/group. The probe MUST NOT bypass isolation through a public TCP listener.
+- The readiness token may come only from a runtime secret handle or restricted file and MUST NOT enter command lines, logs, status, or events.
+- nginx access logs, sidecar logs, startup timing, and status are redacted. Raw JSON-RPC, raw prompts, complete tool arguments, and provider credentials MUST NOT be recorded.
+- nginx retains security headers such as `X-Content-Type-Options: nosniff`. SSE MUST NOT disable authentication or scope checks.
 
-## 9. 可观测性
+## 9. Observability
 
-事件：`haas.startup.phase_started`、`haas.startup.phase_completed`、`haas.startup.ready_published`、`haas.startup.ready_withheld`、`haas.startup.background_failed`、`haas.startup.draining`。
+Events: `haas.startup.phase_started`, `haas.startup.phase_completed`, `haas.startup.ready_published`, `haas.startup.ready_withheld`, `haas.startup.background_failed`, `haas.startup.draining`.
 
-指标：
+Metrics:
 
 - `haas_startup_phase_duration_ms{phase,status}`
 - `haas_startup_ready_total{status}`
@@ -202,55 +202,55 @@ AIO 通过官方 `DISABLE_CODE_SERVER` / `DISABLE_JUPYTER` / `DISABLE_NODEJS_REP
 - `haas_startup_codex_probe_total{status,reason}`
 - `haas_startup_background_task_total{task,status}`
 
-事件和 metrics 只使用 safe reason、phase、status、generation 和耗时等低敏字段。
+Events and metrics use only low-sensitivity fields such as safe reason, phase, status, generation, and duration.
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
-|------|------|
-| nginx 配置非法 | 启动失败，容器非零退出，不使用旧/半成品配置 |
-| nginx 已启动但 sidecar 未监听 | `/health` 失败或 upstream error，`/ready` 不得为 true |
-| sidecar 已监听但 Codex socket 未创建 | `/health` 成功，`/ready` 返回结构化 503，继续 bounded retry |
-| socket 可连但 initialize 失败 | ready 保持 false，adapter degraded/restarting，按策略重建 generation |
-| initialized 未完成 | ready 保持 false，不把进程存在升级为 ready |
-| Codex generation 改变 | 立即撤销旧 generation 的 ready，重新探测 |
-| 可选 background task 失败 | 记录安全原因并更新能力状态；不阻塞 control API，若影响 Codex 执行安全则 ready 回落 |
-| sidecar 退出 | 容器必须以非零码退出，避免容器显示 Up 但 API 不可用 |
-| SIGTERM | 先发布 ready=false，停止新执行请求，再取消/settle active turn、flush event log、停止 background tasks 和子进程 |
+| Scenario | Behavior |
+|----------|----------|
+| Invalid nginx configuration | Startup fails; the container exits nonzero and does not use an old or partial configuration |
+| nginx started but sidecar not listening | `/health` fails or returns an upstream error; `/ready` MUST NOT be true |
+| Sidecar listening but Codex socket not created | `/health` succeeds; `/ready` returns a structured 503; bounded retries continue |
+| Socket connectable but initialize fails | Ready remains false; the adapter is degraded/restarting and rebuilds the generation according to policy |
+| initialized not completed | Ready remains false; process existence is not promoted to readiness |
+| Codex generation changes | Immediately revoke readiness for the old generation and probe again |
+| Optional background task fails | Record a safe reason and update capability state; do not block the control API; if safe Codex execution is affected, readiness falls back to false |
+| Sidecar exits | The container MUST exit with a nonzero code to avoid showing Up while the API is unavailable |
+| SIGTERM | First publish ready=false and stop accepting new execution requests, then cancel/settle active turns, flush the event log, and stop background tasks and child processes |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-### 11.1 配置与入口
+### 11.1 Configuration and Entry Point
 
-- nginx syntax check 通过；HaaS ADK 与 `/v1/haas/*` 路径、方法、header、SSE streaming 行为与 spec 一致。
-- sidecar、Codex socket、AIO `8080` 和 proxy loopback 不被错误暴露。
-- nginx upstream 不直接指向 Codex socket，且 nginx 不生成伪造 ready。
+- The nginx syntax check passes. HaaS ADK and `/v1/haas/*` paths, methods, headers, and SSE streaming behavior conform to the spec.
+- The sidecar, Codex socket, AIO `8080`, and proxy loopback interfaces are not exposed incorrectly.
+- The nginx upstream does not point directly to the Codex socket, and nginx does not fabricate readiness.
 
-### 11.2 Readiness contract
+### 11.2 Readiness Contract
 
-- sidecar 监听但 socket 不存在：health 通过、ready 失败。
-- socket 存在但不可连接：ready 失败。
-- socket 可连接但 initialize 返回错误：ready 失败。
-- initialize 成功但 initialized 未完成：ready 失败。
-- initialize + initialized 完成：sidecar 发布 ready=true，nginx 对外可读到同一结构化结果。
-- Codex generation 重启或 socket 被替换：ready 先回落，再在新 generation 握手完成后恢复。
+- Sidecar listening but socket absent: health passes and ready fails.
+- Socket present but not connectable: ready fails.
+- Socket connectable but initialize returns an error: ready fails.
+- initialize succeeds but initialized is incomplete: ready fails.
+- initialize + initialized complete: the sidecar publishes ready=true and nginx exposes the same structured result externally.
+- Codex generation restart or socket replacement: ready first falls back, then recovers after the new generation completes the handshake.
 
-### 11.3 Startup latency and async behavior
+### 11.3 Startup Latency and Asynchronous Behavior
 
-- 使用 fake Codex app-server 测量各阶段耗时和首次 ready 时延。
-- 注入慢 AIO、慢 MCP、慢 browser、慢 skills 和失败 background task，证明它们不阻塞 Codex ready。
-- 注入 sidecar/Codex 启动失败、超时、重试和 SIGTERM，验证状态、错误码、非零退出和 drain。
-- 真实 OpenSandbox AIO + Codex app-server 容器 smoke 验证 nginx 总入口、sidecar ready 和 AIO `8080` 并存。
+- Measure each phase and time to first ready using a fake Codex app-server.
+- Inject slow AIO, MCP, browser, and skills behavior and a failing background task to prove that they do not block Codex readiness.
+- Inject sidecar/Codex startup failures, timeouts, retries, and SIGTERM to verify states, error codes, nonzero exit, and drain behavior.
+- Run a real OpenSandbox AIO + Codex app-server container smoke test to verify coexistence of the nginx aggregate entry point, sidecar readiness, and AIO `8080`.
 
-### 11.4 安全
+### 11.4 Security
 
-- secret scan 和日志反向断言验证 token、credential、raw JSON-RPC、prompt 与完整 tool 参数不进入配置、日志、status、事件或 artifact。
+- Secret scanning and negative log assertions verify that tokens, credentials, raw JSON-RPC, prompts, and complete tool arguments do not enter configuration, logs, status, events, or artifacts.
 
-## 12. 任务拆分
+## 12. Task Breakdown
 
-- P0：nginx HaaS upstream、统一 `/health`/`/ready` 代理、配置 syntax gate。
-- P0：sidecar readiness state machine 和结构化 ready response。
-- P0：Codex Unix socket + `initialize`/`initialized` dedicated probe。
-- P0：启动 phase timing、bounded retry、generation invalidation、SIGTERM drain。
-- P1：background task registry、异步能力状态、失败隔离和诊断 status。
-- P1：fake harness startup-latency suite 与真实容器 smoke。
+- P0: nginx HaaS upstream, unified `/health`/`/ready` proxy, and configuration syntax gate.
+- P0: sidecar readiness state machine and structured ready response.
+- P0: dedicated Codex Unix socket + `initialize`/`initialized` probe.
+- P0: startup phase timing, bounded retries, generation invalidation, and SIGTERM drain.
+- P1: background task registry, asynchronous capability state, failure isolation, and diagnostic status.
+- P1: fake harness startup-latency suite and real container smoke test.

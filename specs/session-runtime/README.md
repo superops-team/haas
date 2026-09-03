@@ -1,70 +1,72 @@
-# Session Runtime 组件规格
+# Session Runtime Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-30
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Registry](../harness-registry/README.md), [Harness Adapter](../harness-adapter/README.md), [Event Log & SSE](../event-log-sse/README.md), [Admission Control](../admission-control/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Session Runtime 是 HaaS 的执行事实 owner。它管理 session、invocation（ADK 一次 `/run`）、turn、container、lease、idempotency 和 terminal state，并通过 Harness Adapter 驱动具体 agent。
+Session Runtime is HaaS's source of truth for execution. It manages sessions, invocations—one ADK `/run`—turns, containers, leases, idempotency, and terminal states, and drives concrete agents through Harness Adapter.
 
-ADK 的 session 由 `(appName, userId, sessionId)` 三元组唯一标识；`invocation` 是 public 运行单元，`turn` 是 adapter 内部执行单元。首期两者一一对应，但 Session Runtime 必须保留未来一个 invocation 拆成多个内部 turn 或 replay turn 的空间。
+An ADK session is uniquely identified by the `(appName, userId, sessionId)` tuple. An `invocation` is the public unit of execution, while a `turn` is an adapter-internal unit of execution. They have a one-to-one relationship in the initial release, but Session Runtime MUST preserve room to split one invocation into multiple internal turns or replay turns in the future.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| ADK 2.0 | session 三元组、`/run`、`/run_sse`、stateDelta、invocation 生命周期 |
-| `mpa-codex-worker` session registry | 运行态 session registry、checkpoint、恢复和 terminal 纪律 |
-| Admission Control | 执行前准入（配额/限流/队列） |
-| 总览要求 | adapter contract、event log 与 SSE |
+| Source | Adopted concepts |
+|--------|------------------|
+| ADK 2.0 | Session tuple, `/run`, `/run_sse`, stateDelta, and invocation lifecycle |
+| `mpa-codex-worker` session registry | Runtime session registry, checkpoints, recovery, and terminal-state discipline |
+| Admission Control | Pre-execution admission through quotas, rate limits, and queues |
+| Overview requirements | Adapter contract, event log, and SSE |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | HaaS Protocol | 接收 `/run`、`/run_sse`、session GET/PATCH/DELETE |
-| 上游 | Admission Control | 执行前准入放行 |
-| 下游 | Harness Registry | 解析 appName、冻结 effective harness config |
-| 下游 | Harness Adapter | 执行 turn、取消、恢复、inspect |
-| 下游 | Event Log & SSE | append lifecycle/progress/terminal event |
-| 下游 | Artifact Store | 管理 container/file metadata |
-| 下游 | Observability | 记录状态、队列、时延和失败 |
+| Direction | Component | Relationship |
+|-----------|-----------|--------------|
+| Upstream | HaaS Protocol | Receives `/run`, `/run_sse`, and session GET/PATCH/DELETE |
+| Upstream | Admission Control | Grants pre-execution admission |
+| Downstream | Harness Registry | Resolves appName and freezes the effective harness configuration |
+| Downstream | Harness Adapter | Executes, cancels, resumes, and inspects turns |
+| Downstream | Event Log & SSE | Appends lifecycle, progress, and terminal events |
+| Downstream | Artifact Store | Manages container/file metadata |
+| Downstream | Observability | Records state, queues, latency, and failures |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 创建和读取 `Session`、`Invocation`、`Turn`、`Container` 对象。
-- 解析 `(appName, userId, sessionId)`，校验 principal scope，创建或复用 session。
-- 在 request validation 后、执行前完成 idempotency reservation。
-- 保证同一 session 内一次只运行一个 active invocation/turn（`session_busy`）。
-- 将 session 创建时的 configured harness 冻结为 `EffectiveHarnessConfig`。
-- 将 adapter events 写入 Event Log，并维护 session `state`（ADK `stateDelta`）。
-- 处理 streaming run（`/run_sse`）和 non-streaming run（`/run`）的一致终态。
-- 管理 cancel、timeout、step budget、session expiry、session deletion。
-- 在 sidecar restart 后根据持久状态恢复可恢复 session，或 fail closed 为不可恢复状态。
+- Create and read `Session`, `Invocation`, `Turn`, and `Container` objects.
+- Resolve `(appName, userId, sessionId)`, validate principal scope, and create or reuse a session.
+- Reserve idempotency after request validation and before execution.
+- Ensure that only one active invocation/turn runs in a session at a time, returning `session_busy` otherwise.
+- Freeze the configured harness as `EffectiveHarnessConfig` when the session is created.
+- Write adapter events to Event Log and maintain session `state` from ADK `stateDelta`.
+- Ensure consistent terminal states for streaming `/run_sse` and non-streaming `/run`.
+- Manage cancellation, timeout, step budget, session expiry, and session deletion.
+- After a sidecar restart, recover recoverable sessions from persistent state or fail closed into a non-recoverable state.
 
-不负责：
+Non-responsibilities:
 
-- 不解析 harness 原生事件。
-- 不保存 raw prompt 到默认日志。
-- 不直接访问 provider 或 MCP server。
-- 不决定 tool/network/workspace policy，只消费 Policy Controller 输出。
-- 不做跨请求配额/限流（Admission Control 职责）。
+- Does not parse native harness events.
+- Does not store raw prompts in default logs.
+- Does not directly access providers or MCP servers.
+- Does not decide tool, network, or workspace policy; it consumes Policy Controller output.
+- Does not enforce cross-request quotas or rate limits; that is Admission Control's responsibility.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ### 5.1 Public API Ownership
 
-| Endpoint | Runtime 行为 |
-|----------|--------------|
-| `POST /run` | 创建 invocation，非流式收集事件后一次性返回 |
-| `POST /run_sse` | 创建 invocation，流式 SSE 返回 |
-| `GET /apps/{app}/users/{user}/sessions/{sid}` | 返回 session（state + events） |
-| `PATCH /apps/{app}/users/{user}/sessions/{sid}` | 应用 `stateDelta`，幂等 |
-| `DELETE /apps/{app}/users/{user}/sessions/{sid}` | 删除 session，取消 active work |
-| `POST /v1/haas/sessions/{sid}/invocations/{id}/cancel` | 取消运行中 invocation，幂等（HaaS native） |
+| Endpoint | Runtime behavior |
+|----------|------------------|
+| `POST /run` | Creates an invocation, collects events without streaming, and returns them in one response |
+| `POST /run_sse` | Creates an invocation and returns streaming SSE |
+| `GET /apps/{app}/users/{user}/sessions/{sid}` | Returns the session, including state and events |
+| `PATCH /apps/{app}/users/{user}/sessions/{sid}` | Applies `stateDelta` idempotently |
+| `DELETE /apps/{app}/users/{user}/sessions/{sid}` | Deletes the session and cancels active work |
+| `POST /v1/haas/sessions/{sid}/invocations/{id}/cancel` | Idempotently cancels a running invocation through the HaaS native API |
 
 ### 5.2 Internal API
 
@@ -79,7 +81,7 @@ async def cancel_invocation(session_id: str, invocation_id: str) -> InvocationRe
 async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReservation: ...
 ```
 
-## 6. 数据模型
+## 6. Data Model
 
 ### 6.1 SessionRecord
 
@@ -109,8 +111,7 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
 }
 ```
 
-`lastUpdateTime`（ADK 公开字段）= `updatedAtMs / 1000.0`，由投影层生成；内部记录
-只存毫秒 epoch。
+`lastUpdateTime`, the public ADK field, equals `updatedAtMs / 1000.0` and is generated by the projection layer. Internal records store only epoch milliseconds.
 
 ### 6.2 InvocationRecord
 
@@ -132,9 +133,7 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
 }
 ```
 
-`turnId` 首期与 invocation 1:1（id 不同，映射持久化在 `InvocationRecord.turnId`）；
-未来 1:N 时 invocation 聚合多个 turn 的事件（按 `turnId` 分组）。内部时间戳统一
-毫秒 epoch（`startedAtMs`/`completedAtMs`），公开面由投影层转为 ADK float 秒。
+In the initial release, `turnId` and invocation are one-to-one, with distinct IDs and a persisted mapping in `InvocationRecord.turnId`. In a future one-to-many model, an invocation aggregates events from multiple turns, grouped by `turnId`. Internal timestamps uniformly use epoch milliseconds (`startedAtMs`/`completedAtMs`); the public surface is converted to ADK float seconds by the projection layer.
 
 ### 6.3 TurnRecord
 
@@ -149,28 +148,27 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
 }
 ```
 
-`SessionRecord` 必须能无损投影为 ADK `Session`（`{id, appName, userId, state, events[], lastUpdateTime}`）；内部字段（tenantId 等）不进入 public 输出。
+`SessionRecord` MUST project losslessly to an ADK `Session` (`{id, appName, userId, state, events[], lastUpdateTime}`). Internal fields such as tenantId MUST NOT enter public output.
 
-### 6.4 State 合并语义
+### 6.4 State Merge Semantics
 
-session `state` 有两个写入源，串行化于同一 sessionKey 写队列，合并规则一致：
+Session `state` has two write sources. Both are serialized through the same sessionKey write queue and use the same merge rules:
 
-1. **`PATCH stateDelta`（客户端显式）**：deep-merge 到 `session.state`——对象递归合并、标量覆盖。
-2. **事件 `actions.stateDelta`（invocation 运行中）**：与 PATCH 同队列按到达顺序应用，deep-merge。
+1. **Explicit client `PATCH stateDelta`**: deep-merge into `session.state`; recursively merge objects and overwrite scalars.
+2. **Event `actions.stateDelta` during an invocation**: apply in arrival order through the same queue as PATCH, using deep merge.
 
-约束：不允许删除操作（删除需显式扩展字段）；冲突时标量「后到覆盖」；合并是幂等的纯函数，便于恢复重放。
+Constraints: deletion is not allowed and requires an explicit extension field; on conflict, the last arriving scalar wins; merge is an idempotent pure function to support recovery replay.
 
-### 6.5 幂等 replay 语义
+### 6.5 Idempotency Replay Semantics
 
-`IdempotencyStore.reserve(key_hash, request_hash)` 记录首个 `request_hash`（见
-[Stores](../stores/README.md) §5）。后续同一 key 的请求：
+`IdempotencyStore.reserve(key_hash, request_hash)` records the first `request_hash`; see [Stores](../stores/README.md) §5. Subsequent requests with the same key behave as follows:
 
-- `request_hash` 一致 -> 返回首次结果，不重复启动 harness（replay）。
-- `request_hash` 不一致 -> fail closed，返回 `409 haas_idempotency_conflict`，不静默返回旧结果，由调用方显式处理。
+- Matching `request_hash` -> return the first result without starting the harness again (replay).
+- Different `request_hash` -> fail closed and return `409 haas_idempotency_conflict`; do not silently return the old result, so the caller must handle the conflict explicitly.
 
-release 幂等：执行前失败释放 reservation；已进入执行的 reservation 保留，后续重试走 replay。
+Release is idempotent: failures before execution release the reservation. Once execution begins, the reservation is retained and subsequent retries replay the first result.
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machines
 
 ### 7.1 Invocation
 
@@ -181,7 +179,7 @@ accepted -> running -> failed
 accepted -> running -> cancelling -> cancelled
 ```
 
-Terminal states are immutable。`/run` 在终态后返回事件数组；`/run_sse` 在终态时关闭 stream。
+Terminal states are immutable. `/run` returns the event array after a terminal state; `/run_sse` closes the stream at a terminal state.
 
 ### 7.2 Session
 
@@ -193,25 +191,25 @@ new -> active -> deleted
 new -> active -> non_resumable
 ```
 
-规则：
+Rules:
 
-- 首次 `/run` 缺省 `sessionId` 时创建 `hsess_<rand>`；后续相同 `(appName, userId, sessionId)` 复用。
-- 同一 session 内一次只运行一个 invocation；并发返回 `409 session_busy`。
-- `model` 可在同一 session 内逐 run 变化。
-- Session delete 先取消 active work，再使 history/artifacts 不可达。
+- When the first `/run` omits `sessionId`, create `hsess_<rand>`; subsequent requests reuse the same `(appName, userId, sessionId)`.
+- Only one invocation MAY run in a session at a time; concurrent requests return `409 session_busy`.
+- `model` MAY change from run to run within the same session.
+- Session deletion first cancels active work, then makes history and artifacts unreachable.
 
-## 8. 安全与权限
+## 8. Security and Authorization
 
-- session、invocation、turn、container、file 按 principal scope 隔离；`userId` 必须属于认证 principal。
-- 跨 scope 访问返回 404，不返回 403。
-- Input 可被持久化，但 raw secret 必须先被拒绝或脱敏。
-- `nativeSessionRef` 是内部 opaque 字段，不进入 ADK Session 输出。
-- Idempotency key 只保存 hash，不保存原文。
-- Session workspace 必须限定在 Sandbox Runtime 提供的 session root 下。
+- Sessions, invocations, turns, containers, and files are isolated by principal scope; `userId` MUST belong to the authenticated principal.
+- Cross-scope access returns 404, not 403.
+- Input MAY be persisted, but raw secrets MUST first be rejected or redacted.
+- `nativeSessionRef` is an internal opaque field and MUST NOT enter ADK Session output.
+- Only a hash of the idempotency key is stored, never the original value.
+- The session workspace MUST be confined to the session root supplied by Sandbox Runtime.
 
-## 9. 可观测性
+## 9. Observability
 
-Session Runtime 产生：
+Session Runtime emits:
 
 - `haas.run.accepted`
 - `haas.run.idempotency_replayed`
@@ -223,7 +221,7 @@ Session Runtime 产生：
 - `haas.turn.cancel_requested`
 - `haas.session.recovery_failed`
 
-指标：
+Metrics:
 
 - `haas_sessions_active`
 - `haas_invocations_running`
@@ -232,23 +230,23 @@ Session Runtime 产生：
 - `haas_session_busy_total`
 - `haas_turn_terminal_total{status,adapterBase}`
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
-|------|------|
-| request 在执行前失败 | release idempotency reservation |
-| request 已进入执行 | idempotency reservation 保留，后续重试 replay 首次结果 |
-| sidecar 进程重启 | 从 store 读取 running 状态并调用 adapter inspect/resume；无法确认则 fail closed |
-| adapter 无终态 | timeout 后写 terminal failed/incomplete |
-| cancel 后断线 | cancel intent 持久化；最终状态仍必须可读 |
-| session lease 过期 | 后续 continuation 返回 `session_expired` |
-| event log 写失败 | 不能宣称 run 成功；已接受任务必须生成 terminal failure evidence |
+| Scenario | Behavior |
+|----------|----------|
+| Request fails before execution | Release the idempotency reservation |
+| Request has entered execution | Retain the idempotency reservation; subsequent retries replay the first result |
+| Sidecar process restarts | Read the running state from the store and call adapter inspect/resume; fail closed if the state cannot be confirmed |
+| Adapter produces no terminal state | Write terminal `failed`/`incomplete` after timeout |
+| Disconnect after cancellation | Persist cancellation intent; the final state MUST remain readable |
+| Session lease expires | A subsequent continuation returns `session_expired` |
+| Event log write fails | The run MUST NOT claim success; an accepted task MUST produce terminal failure evidence |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：id 生成、三元组解析、scope、state transition、terminal immutability、request hash、idempotency replay。
-- Integration：`/run` 非流式与 `/run_sse` 流式 parity、read back session、PATCH stateDelta、cancel、DELETE。
-- Concurrency：同 session 并发返回 `session_busy`；不同 session 可并发。
-- Recovery：模拟 sidecar restart、adapter reconnect、missing native ref、expired session。
-- Compatibility：ADK client session GET/PATCH/DELETE 行为对齐。
-- Security：跨 principal 访问全部返回 404；secret-shaped input 不落默认日志。
+- Unit: ID generation, tuple parsing, scope, state transitions, terminal immutability, request hashes, and idempotency replay.
+- Integration: parity between non-streaming `/run` and streaming `/run_sse`, session read-back, PATCH stateDelta, cancellation, and DELETE.
+- Concurrency: concurrent requests in the same session return `session_busy`; different sessions MAY run concurrently.
+- Recovery: simulate sidecar restart, adapter reconnect, missing native reference, and expired session.
+- Compatibility: align ADK client behavior for session GET/PATCH/DELETE.
+- Security: all cross-principal access returns 404; secret-shaped input does not enter default logs.

@@ -1,57 +1,59 @@
-# Harness Adapter 组件规格
+# Harness Adapter Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-26
 Related specs: [Harness Registry](../harness-registry/README.md), [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Sandbox Runtime](../sandbox-runtime/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Harness Adapter 是 HaaS 内部统一执行接口（Python async）。它把不同 agent harness 的原生协议转换为 HaaS canonical session、invocation、event、artifact 和 error，最终投影为 ADK `Event`。
+The Harness Adapter is HaaS's unified internal execution interface (Python async). It converts the native protocols of different agent harnesses into canonical HaaS sessions, invocations, events, artifacts, and errors, which are ultimately projected as ADK `Event` objects.
 
-首期必须实现 `codex-app-server` adapter。Pi、OpenCode、AMP 等后续 adapter 只能通过本接口接入，不能新增平行 public API。
+The initial release MUST implement the `codex-app-server` adapter. Future adapters such as Pi, OpenCode, and AMP MUST integrate through this interface and MUST NOT add parallel public APIs.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
+| Source | Adopted elements |
 |------|----------|
-| ADK 2.0 | Event schema（`content.role/parts`、`actions`、`invocationId`）、author 语义 |
-| `mpa-codex-worker` adapter specs | Codex app-server 内部隔离、secretless、event terminal contract |
-| Sandbox Runtime | adapter 声明 sandbox 需求，由 Sandbox Runtime 统一投影 |
-| 本组件总览 | 统一 adapter contract |
+| ADK 2.0 | Event schema (`content.role/parts`, `actions`, `invocationId`) and author semantics |
+| `mpa-codex-worker` adapter specs | Internal isolation of Codex app-server, secretless operation, and the terminal-event contract |
+| Sandbox Runtime | Adapters declare sandbox requirements, which Sandbox Runtime projects uniformly |
+| Component overview | Unified adapter contract |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
+| Direction | Component | Relationship |
 |------|------|------|
-| 上游 | Session Runtime | 调用 adapter 准备 session、执行 turn、取消、恢复 |
-| 上游 | Harness Registry | 读取 adapter capabilities |
-| 上游 | Sandbox Runtime | 提供 harness sandbox 声明，接收 sandbox 实例 |
-| 下游 | Concrete harness runtime | Codex app-server、Pi CLI、OpenCode CLI、AMP runtime 等 |
-| 下游 | Model Proxy | 获取 model endpoint 与短期 token |
-| 下游 | MCP / Tool / Skill Runtime | 物化 MCP、tools、skills |
-| 下游 | Event Log & SSE | 产出 canonical events（投影为 ADK Event） |
+| Upstream | Session Runtime | Calls the adapter to prepare sessions, execute turns, cancel, and resume |
+| Upstream | Harness Registry | Reads adapter capabilities |
+| Upstream | Sandbox Runtime | Provides the harness sandbox declaration and receives a sandbox instance |
+| Downstream | Concrete harness runtime | Codex app-server, Pi CLI, OpenCode CLI, AMP runtime, and others |
+| Downstream | Model Proxy | Obtains model endpoints and short-lived tokens |
+| Downstream | MCP / Tool / Skill Runtime | Materializes MCP, tools, and skills |
+| Downstream | Event Log & SSE | Produces canonical events (projected as ADK Events) |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 为每个 harness base 提供同一套 typed async interface。
-- 将 HaaS `EffectiveHarnessConfig` 转换为 harness 原生配置。
-- 将输入 item、文件、instructions、model、budget、policy 转换为 harness 可理解格式。
-- 归一化原生 progress、text、reasoning、tool、usage 和 terminal 为 canonical event。
-- 把原生错误映射为 HaaS 错误码和 safe reason。
-- 实现或声明取消、恢复、MCP、skills、artifact、tool restriction 的支持级别。
-- 声明 harness sandbox 需求（cwd、writableRoots、approvalMode），交给 Sandbox Runtime 投影。
+- Provide the same typed async interface for every harness base.
+- Convert HaaS `EffectiveHarnessConfig` into native harness configuration.
+- Convert input items, files, instructions, model, budget, and policy into a format understood by the harness.
+- Normalize native progress, text, reasoning, tool, usage, and terminal data into canonical events.
+- Map native errors to HaaS error codes and safe reasons.
+- Implement or declare the level of support for cancellation, recovery, MCP, skills, artifacts, and tool restrictions.
+- Declare harness sandbox requirements (cwd, writableRoots, approvalMode) for projection by Sandbox Runtime.
 
-不负责：
+Non-responsibilities:
 
-- 不负责 public HTTP path。
-- 不负责配置存储或 session 事实持久化。
-- 不负责长期 provider credential 保存。
-- 不越过 policy controller 放权。
-- 不把原生 event 直接作为 public event。
+- Does not own public HTTP paths.
+- Does not own configuration storage or persistence of session facts.
+- Does not store long-lived provider credentials.
+- Does not bypass the policy controller to broaden permissions.
+- Does not expose native events directly as public events.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ```python
 class HarnessAdapter:
@@ -74,30 +76,30 @@ class HarnessAdapter:
 
 ### 5.1 Capability Matrix
 
-| Capability | Type | 说明 |
+| Capability | Type | Description |
 |------------|------|------|
-| `streaming` | bool | 是否能产出增量事件（对应 ADK `streaming:true`） |
-| `sessionContinuation` | `native` / `emulated` / `unsupported` | session 续写方式 |
-| `cancellation` | `hard` / `best_effort` / `unsupported` | cancel 语义 |
-| `toolRestriction` | `hard` / `advisory` / `unsupported` | disabled tools 执行强度 |
-| `mcp` | `native` / `proxy` / `advisory` / `unsupported` | MCP 接入方式 |
-| `skills` | `native` / `instructions` / `unsupported` | skill 物化方式 |
-| `files` | `native` / `workspace_scan` / `unsupported` | artifact 收集方式 |
-| `usage` | `native` / `estimated` / `unavailable` | token usage 来源 |
+| `streaming` | bool | Whether incremental events can be produced (corresponding to ADK `streaming:true`) |
+| `sessionContinuation` | `native` / `emulated` / `unsupported` | Session continuation mechanism |
+| `cancellation` | `hard` / `best_effort` / `unsupported` | Cancellation semantics |
+| `toolRestriction` | `hard` / `advisory` / `unsupported` | Enforcement strength for disabled tools |
+| `mcp` | `native` / `proxy` / `advisory` / `unsupported` | MCP integration mechanism |
+| `skills` | `native` / `instructions` / `unsupported` | Skill materialization mechanism |
+| `files` | `native` / `workspace_scan` / `unsupported` | Artifact collection mechanism |
+| `usage` | `native` / `estimated` / `unavailable` | Source of token usage |
 
 ### 5.2 Adapter Phases
 
-| Phase | 输入 | 输出 |
+| Phase | Input | Output |
 |-------|------|------|
-| `probe` | runtime binary/config | `AdapterProbe` |
-| `prepare_session` | frozen harness config、workspace、policy、sandbox | native session ref |
-| `start_turn` | invocation id、session id、input、model、budget | `TurnHandle` |
+| `probe` | Runtime binary/config | `AdapterProbe` |
+| `prepare_session` | Frozen harness config, workspace, policy, sandbox | Native session ref |
+| `start_turn` | Invocation id, session id, input, model, budget | `TurnHandle` |
 | `stream_events` | `TurnHandle` | `HarnessEvent` stream |
-| `finalize_turn` | event accumulator、native terminal | `AdapterTurnResult` |
-| `cancel_turn` | invocation/turn/session id | `CancelResult` |
-| `cleanup_session` | retention/delete request | cleanup report |
+| `finalize_turn` | Event accumulator, native terminal | `AdapterTurnResult` |
+| `cancel_turn` | Invocation/turn/session id | `CancelResult` |
+| `cleanup_session` | Retention/delete request | Cleanup report |
 
-## 6. 数据模型
+## 6. Data Model
 
 ### 6.1 AdapterProbe
 
@@ -148,7 +150,7 @@ class HarnessAdapter:
 }
 ```
 
-### 6.3 HarnessEvent（内部 canonical，投影为 ADK Event）
+### 6.3 HarnessEvent (Internal Canonical Form, Projected as an ADK Event)
 
 ```json
 {
@@ -171,9 +173,9 @@ class HarnessAdapter:
 }
 ```
 
-`HarnessEvent` 由 Event Log 投影为 ADK `Event`（去掉内部字段，保留 `id`/`invocationId`/`author`/`timestamp`/`content`/`actions`/`longRunningToolIds`/`nodeInfo`/`output`）。
+Event Log projects `HarnessEvent` as an ADK `Event`, removing internal fields while retaining `id`/`invocationId`/`author`/`timestamp`/`content`/`actions`/`longRunningToolIds`/`nodeInfo`/`output`.
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 adapter unavailable
@@ -186,7 +188,7 @@ adapter unavailable
   -> unavailable
 ```
 
-Turn 状态：
+Turn states:
 
 ```text
 queued -> starting -> running -> completing -> completed
@@ -195,25 +197,25 @@ queued -> starting -> running -> incomplete
 queued -> starting -> running -> failed
 ```
 
-状态机规则：
+State-machine rules:
 
-- adapter `probe` 未通过时，registry 不能把该 base 标为 `ready`。
-- `stream_events` 抛异常时，Session Runtime 必须收敛为 terminal state。
-- adapter 不得在 terminal 后继续发会改变 invocation 状态的事件。
-- 同一 session 同一时刻只能有一个 active turn。
+- If the adapter `probe` does not pass, the registry MUST NOT mark that base as `ready`.
+- If `stream_events` raises an exception, Session Runtime MUST converge on a terminal state.
+- After a terminal event, the adapter MUST NOT emit further events that change invocation state.
+- A session MUST have no more than one active turn at any time.
 
-## 8. 安全与权限
+## 8. Security and Authorization
 
-- Adapter 输入必须已经过 protocol schema validation、admission 和 policy validation。
-- Adapter 只能收到 secret ref 或短 TTL token；不得收到长期 raw provider key。
-- Adapter event payload 必须先脱敏再交给 event log。
-- Harness 原生 config 文件如果必须包含 token，只能使用 ephemeral session dir，且该路径不得进入 artifact/archive。
-- Tool restriction enforcement 必须如实标注，不能把 prompt-only 约束宣传成 hard block。
-- 沙箱由 Sandbox Runtime 统一创建；adapter 只能声明需求，不能自行扩大。
+- Adapter input MUST already have passed protocol schema validation, admission, and policy validation.
+- An adapter may receive only a secret reference or short-TTL token; it MUST NOT receive a long-lived raw provider key.
+- Adapter event payloads MUST be redacted before being passed to Event Log.
+- If a native harness configuration file MUST contain a token, it may use only an ephemeral session directory, and that path MUST NOT be included in an artifact/archive.
+- Tool-restriction enforcement MUST be labeled accurately; prompt-only constraints MUST NOT be represented as hard blocks.
+- Sandbox Runtime creates sandboxes uniformly. An adapter may only declare requirements and MUST NOT broaden them itself.
 
-## 9. 可观测性
+## 9. Observability
 
-每个 adapter 至少报告：
+Each adapter reports at least:
 
 - `haas.adapter.probe`
 - `haas.adapter.session.prepare`
@@ -223,25 +225,25 @@ queued -> starting -> running -> failed
 - `haas.adapter.turn.cancel`
 - `haas.adapter.error`
 
-指标维度必须低基数：`adapterId`、`base`、`status`、`errorCode`、`capability`。不得使用 raw model prompt、file path 或 token 作为 label。
+Metric dimensions MUST have low cardinality: `adapterId`, `base`, `status`, `errorCode`, and `capability`. Raw model prompts, file paths, and tokens MUST NOT be used as labels.
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
+| Scenario | Behavior |
 |------|------|
-| runtime binary 缺失 | adapter `probe.status=unavailable`，harness 不标 ready |
-| native schema 不兼容 | fail closed，返回 `haas_adapter_incompatible` |
-| 原生事件无法解析 | 写 `haas.adapter.event_unparsed` safe event；若无法判断终态则 turn failed |
-| adapter 进程/连接断开 | 尝试重连；无法恢复则 invocation failed 或 incomplete |
-| cancel 不支持 | capability 标 `unsupported`，API 返回 `haas_cancel_unsupported` |
-| session 不可恢复 | `non_resumable` 或 `session_expired` |
+| Runtime binary missing | Adapter sets `probe.status=unavailable`; harness is not marked ready |
+| Native schema incompatible | Fail closed and return `haas_adapter_incompatible` |
+| Native event cannot be parsed | Write a safe `haas.adapter.event_unparsed` event; if the terminal state cannot be determined, the turn fails |
+| Adapter process/connection lost | Attempt reconnection; if recovery is impossible, the invocation is failed or incomplete |
+| Cancellation unsupported | Mark the capability `unsupported`; the API returns `haas_cancel_unsupported` |
+| Session cannot be resumed | `non_resumable` or `session_expired` |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Contract tests：所有 adapter 必须通过同一 fake harness test suite。
-- Golden events：每个 adapter 维护原生 event fixture 到 ADK Event 投影的映射测试。
-- Cancellation：能取消的 adapter 必须证明最终状态是 `cancelled`，不能只返回 200。
-- Recovery：adapter crash/restart 后 session inspect 与 stored state 语义明确。
-- Sandbox：adapter 声明被 Sandbox Runtime 正确投影，widening 被拒绝。
-- Security：adapter env/config/output 反向断言不包含 secret pattern。
-- Codex 首期：真实 app-server handshake 和 turn streaming E2E 作为 P0 准出。
+- Contract tests: every adapter MUST pass the same fake-harness test suite.
+- Golden events: every adapter maintains mapping tests from native event fixtures to ADK Event projections.
+- Cancellation: an adapter that supports cancellation MUST prove that the final state is `cancelled`; returning only 200 is insufficient.
+- Recovery: session inspection and stored-state semantics are explicit after an adapter crash/restart.
+- Sandbox: Sandbox Runtime correctly projects adapter declarations, and widening is rejected.
+- Security: negative assertions verify that adapter env/config/output contains no secret patterns.
+- Initial Codex release: a real app-server handshake and turn-streaming E2E are P0 release gates.

@@ -1,73 +1,75 @@
-# Model Proxy 组件规格
+# Model Proxy Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-26
 Related specs: [Security Boundary](../security-boundary/README.md), [Harness Adapter](../harness-adapter/README.md), [Observability](../observability/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Model Proxy 是 HaaS 的模型访问边界。它让 harness 使用 OpenAI-compatible 或 vendor-native endpoint 时不直接接触真实 provider credential，并在必要时做请求/响应形状兼容、SSE relay、usage normalization 和安全观测。
+The Model Proxy is the HaaS model-access boundary. It allows a harness to use OpenAI-compatible or vendor-native endpoints without directly accessing real provider credentials, and performs request/response shape compatibility, SSE relay, usage normalization, and secure observability where required.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| `mpa-codex-worker` model proxy / secretless runtime | provider key 不进 harness、短期 proxy token、stream idle timeout、usage normalization |
-| Harness Registry | `harness.provider` 配置是 ModelRoute 的来源（baseUrl/wireApi/credentialRef） |
-| Security Boundary / Sandbox Runtime | provider credential 走 credential vault，不放入 agent sandbox；caller URL allowlist |
-| 本组件总览 | Secretless runtime |
+| Source | Adopted Content |
+|--------|-----------------|
+| `mpa-codex-worker` model proxy / secretless runtime | Provider keys do not enter the harness, short-lived proxy tokens, stream idle timeout, and usage normalization |
+| Harness Registry | The `harness.provider` configuration is the source of ModelRoute (baseUrl/wireApi/credentialRef) |
+| Security Boundary / Sandbox Runtime | Provider credentials use the credential vault and are not placed in the agent sandbox; caller URL allowlist |
+| Component overview | Secretless runtime |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | Harness Adapter | adapter 把 harness model endpoint 指向 loopback proxy |
-| 上游 | Session Runtime | 请求 runtime token 和 usage 汇总 |
-| 上游 | Harness Registry | 提供 provider 路由配置（`harness.provider`） |
-| 下游 | Security Boundary / Credential Vault | 解析 provider credential ref（`resolve_secret` 唯一入口） |
-| 下游 | Provider clients | OpenAI Responses、Chat Completions、Anthropic Messages、Azure OpenAI、OpenAI-compatible aggregators |
-| 下游 | Observability | 记录请求状态、时延、usage、安全摘要 |
+| Direction | Component | Relationship |
+|-----------|-----------|--------------|
+| Upstream | Harness Adapter | Points the harness model endpoint to the loopback proxy |
+| Upstream | Session Runtime | Requests runtime tokens and usage aggregation |
+| Upstream | Harness Registry | Provides provider route configuration (`harness.provider`) |
+| Downstream | Security Boundary / Credential Vault | Resolves provider credential refs (`resolve_secret` is the sole entry point) |
+| Downstream | Provider clients | OpenAI Responses, Chat Completions, Anthropic Messages, Azure OpenAI, and OpenAI-compatible aggregators |
+| Downstream | Observability | Records request status, latency, usage, and security summaries |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 接收 harness 发往模型 provider 的请求。
-- 验证短期 runtime token 的 session、audience、expiry 和 revocation。
-- 根据 configured harness 和 request model 解析 provider endpoint。
-- 注入真实 provider credential 到 outbound request。
-- 对 provider URL 做 allowlist 和 SSRF 防护。
-- 转发 streaming response，不缓冲到完成。
-- 对 provider response 和 error 做安全规范化。
-- 汇总 token usage，并统一 fresh input、cache read、cache write、output 语义。
-- 支持 adapter-specific compatibility transform，例如 namespace tool flatten/unflatten。
+- Receive model-provider requests from the harness.
+- Validate the session, audience, expiry, and revocation of a short-lived runtime token.
+- Resolve the provider endpoint from the configured harness and requested model.
+- Inject real provider credentials into outbound requests.
+- Apply allowlist and SSRF protection to provider URLs.
+- Forward streaming responses without buffering them to completion.
+- Safely normalize provider responses and errors.
+- Aggregate token usage and normalize fresh input, cache read, cache write, and output semantics.
+- Support adapter-specific compatibility transforms, such as flattening/unflattening namespaced tools.
 
-不负责：
+Non-responsibilities:
 
-- 不选择 harness。
-- 不决定用户是否有权使用模型；只执行已冻结 policy。
-- 不保存完整 prompt 或 completion。
-- 不把 provider-specific schema 暴露给上游 ADK client。
-- 不在 provider 不支持工具时静默丢工具；必须失败或记录显式降级。
+- Does not select the harness.
+- Does not decide whether a user is authorized to use a model; it only enforces the frozen policy.
+- Does not store full prompts or completions.
+- Does not expose provider-specific schemas to upstream ADK clients.
+- Does not silently drop tools when the provider does not support them; it MUST fail or record an explicit degradation.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ### 5.1 Harness-Facing Endpoints
 
-| Method | Path | 用途 |
-|--------|------|------|
+| Method | Path | Purpose |
+|--------|------|---------|
 | POST | `/v1/responses` | OpenAI-compatible Responses proxy |
-| POST | `/v1/chat/completions` | Chat Completions compatible proxy |
-| GET | `/v1/models` | 当前 token 可用模型摘要 |
-| GET | `/health` | loopback proxy liveness |
-| GET | `/ready` | provider routing 和 secret resolver readiness |
+| POST | `/v1/chat/completions` | Chat Completions-compatible proxy |
+| GET | `/v1/models` | Summary of models available to the current token |
+| GET | `/health` | Loopback proxy liveness |
+| GET | `/ready` | Provider routing and secret resolver readiness |
 
-这些 endpoint 默认只监听 loopback，例如 `127.0.0.1:18080`。
+These endpoints listen only on loopback by default, for example `127.0.0.1:18080`.
 
 ### 5.2 Internal API
 
 ```python
-async def resolve_model_proxy_token(scope: ModelProxyScope) -> RuntimeToken: ...  # 委托 Security Boundary issue_runtime_token(audience="model_proxy")
+async def resolve_model_proxy_token(scope: ModelProxyScope) -> RuntimeToken: ...  # Delegate to Security Boundary issue_runtime_token(audience="model_proxy")
 async def resolve_model_route(session_id: str, model: str) -> ModelRoute: ...
 async def proxy_openai_responses(request: ProxyRequest) -> ProxyResponse: ...
 async def proxy_chat_completions(request: ProxyRequest) -> ProxyResponse: ...
@@ -75,11 +77,11 @@ async def normalize_usage(provider: str, body: object) -> Usage: ...
 async def transform_tools(provider: str, request: object) -> ProviderRequestTransform: ...
 ```
 
-## 6. 数据模型
+## 6. Data Model
 
 ### 6.1 ModelRoute
 
-`ModelRoute` 由 Harness Registry 的 `harness.provider` 配置解析而来（见 [harness-registry](../harness-registry/README.md) 6.1），Model Proxy 不自行持有 provider 配置：
+`ModelRoute` is resolved from the Harness Registry `harness.provider` configuration (see [harness-registry](../harness-registry/README.md) 6.1); the Model Proxy does not maintain provider configuration itself:
 
 ```json
 {
@@ -122,7 +124,7 @@ async def transform_tools(provider: str, request: object) -> ProviderRequestTran
 
 If usage is unknown, return `null`; never fabricate zero.
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 runtime token issued
@@ -140,21 +142,21 @@ Provider compatibility:
 
 | Provider shape | Behavior |
 |----------------|----------|
-| OpenAI Responses | Preserve Responses request/stream where supported |
-| Chat Completions | Transform only when adapter declares compatibility and tests cover it |
-| Anthropic Messages | Use provider-specific bridge only behind proxy |
-| OpenAI-compatible aggregator | Require route config to declare `wireApi`; do not infer solely from host |
+| OpenAI Responses | Preserve the Responses request/stream where supported |
+| Chat Completions | Transform only when the adapter declares compatibility and tests cover it |
+| Anthropic Messages | Use a provider-specific bridge only behind the proxy |
+| OpenAI-compatible aggregator | Require route configuration to declare `wireApi`; do not infer it solely from the host |
 
-## 8. 安全与权限
+## 8. Security and Permissions
 
-- Real provider key is read only by Model Proxy or secret resolver.
-- Harness sees only loopback base URL and short TTL token.
-- Caller-provided provider base URL is accepted only through registry allowlist.
-- Request/response logging redacts Authorization, API keys, cookies, raw messages and tool args.
-- Proxy token must be session scoped, audience restricted and revocable.
-- Proxy must not expose arbitrary URL forwarding.
+- The real provider key is read only by the Model Proxy or secret resolver.
+- The harness sees only the loopback base URL and a short-TTL token.
+- A caller-provided provider base URL is accepted only through the registry allowlist.
+- Request/response logging redacts Authorization, API keys, cookies, raw messages, and tool arguments.
+- A proxy token MUST be session-scoped, audience-restricted, and revocable.
+- The proxy MUST NOT expose arbitrary URL forwarding.
 
-## 9. 可观测性
+## 9. Observability
 
 Metrics:
 
@@ -172,24 +174,24 @@ Logs:
 - `haas.model_proxy.token_refreshed`
 - `haas.model_proxy.transform_applied`
 
-Log fields must use safe route ids, fingerprints and status codes, never prompt bodies or credentials.
+Log fields MUST use safe route ids, fingerprints, and status codes, and MUST NOT contain prompt bodies or credentials.
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
-|------|------|
-| runtime token missing/invalid | 401 `invalid_credential` |
-| runtime token expired | 401, adapter may refresh once |
-| provider unreachable | task failed with `haas_provider_error` or request 502 before task accepted |
-| stream idle timeout | retry according to provider policy; exhaust -> `timeout` |
-| unsupported tool schema | fail with safe `haas_tool_schema_unsupported`, do not drop tool silently |
-| usage missing | return usage `null` and log safe diagnostic |
-| transform fails | fail closed before upstream call if semantics are uncertain |
+| Scenario | Behavior |
+|----------|----------|
+| Runtime token missing/invalid | 401 `invalid_credential` |
+| Runtime token expired | 401; the adapter MAY refresh once |
+| Provider unreachable | Task fails with `haas_provider_error`, or the request returns 502 before task acceptance |
+| Stream idle timeout | Retry according to provider policy; when exhausted -> `timeout` |
+| Unsupported tool schema | Fail with safe `haas_tool_schema_unsupported`; do not silently drop the tool |
+| Usage missing | Return usage `null` and log a safe diagnostic |
+| Transform fails | Fail closed before the upstream call if semantics are uncertain |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：token validation、route resolution、URL allowlist、usage normalization、tool transform。
-- Integration：loopback proxy receives harness request and injects provider credential only outbound。
-- Streaming：SSE/chunked upstream relay is progressive and handles idle timeout。
-- Security：provider key never appears in harness env/config/log/event/artifact/report。
-- Negative：unsupported provider, missing key, expired token, disallowed URL and malformed upstream response。
+- Unit: token validation, route resolution, URL allowlist, usage normalization, and tool transforms.
+- Integration: the loopback proxy receives a harness request and injects the provider credential only outbound.
+- Streaming: SSE/chunked upstream relay is progressive and handles idle timeout.
+- Security: the provider key never appears in harness env/config/log/event/artifact/report.
+- Negative: unsupported provider, missing key, expired token, disallowed URL, and malformed upstream response.

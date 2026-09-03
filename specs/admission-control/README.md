@@ -1,49 +1,51 @@
-# Admission Control 组件规格
+# Admission Control Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-26
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Observability](../observability/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Admission Control 是 HaaS 服务化的准入边界。它在请求进入执行前，按 principal/tenant/workspace 维度决策：配额是否允许、速率是否超限、部署并发是否已满、是否入队等待。它是 `/run`、`/run_sse`、session mutation 与 harness mutation 的共同前置关卡。
+Admission Control is the admission boundary for HaaS as a service. Before a request enters execution, it decides along principal, tenant, and workspace dimensions whether quota permits the request, whether the rate limit has been exceeded, whether deployment concurrency is exhausted, and whether the request should wait in a queue. It is the common prerequisite gate for `/run`, `/run_sse`, session mutations, and harness mutations.
 
-它回答的核心问题：HaaS 是多租户托管服务，不能只看单 session 互斥；跨请求的公平性、容量和配额需要一个统一 owner。Session 级的 `session_busy` 互斥仍归 Session Runtime，本组件只做跨请求准入。
+It addresses a core requirement: HaaS is a multi-tenant hosted service, so per-session mutual exclusion alone is insufficient. Fairness, capacity, and quotas across requests require a single owner. Session-level `session_busy` mutual exclusion remains the responsibility of Session Runtime; this component handles only cross-request admission.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| `mpa-codex-worker` 经验 | sidecar 对并发 session、任务队列和限流的需求 |
-| ADK API server | 无内置配额/队列；HaaS 必须自行补充服务化约束 |
-| Observability spec | status 中 `queues` 摘要的 owner 归本组件 |
+| Source | Adopted concepts |
+|--------|------------------|
+| `mpa-codex-worker` experience | Sidecar requirements for concurrent sessions, task queues, and rate limiting |
+| ADK API server | No built-in quotas or queues; HaaS MUST supply service-level constraints |
+| Observability spec | This component owns the `queues` summary in status |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | HaaS Protocol | `/run`、`/run_sse`、session/harness mutation 前的准入调用 |
-| 上游 | Harness Registry | 查询 harness 执行成本与并发上限声明 |
-| 下游 | Session Runtime | 放行后创建 invocation/session |
-| 下游 | Observability | 报告队列深度、限流、准入决策 |
+| Direction | Component | Relationship |
+|-----------|-----------|--------------|
+| Upstream | HaaS Protocol | Admission calls before `/run`, `/run_sse`, and session/harness mutations |
+| Upstream | Harness Registry | Queries harness execution cost and declared concurrency limits |
+| Downstream | Session Runtime | Creates the invocation/session after admission |
+| Downstream | Observability | Reports queue depth, rate limiting, and admission decisions |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 定义并执行配额（每 principal/tenant/workspace 的 max active runs、max sessions、吞吐）。
-- 定义并执行速率限制（窗口/令牌桶，按 principal + resource 维度）。
-- 定义并执行部署级并发上限与 bounded 队列。
-- 出队与超时（入队超时返回 `429` 或 `503`）。
-- 输出低保基数 metrics 和 safe reason。
+- Define and enforce quotas: maximum active runs, maximum sessions, and throughput per principal, tenant, and workspace.
+- Define and enforce rate limits using windows or token buckets, scoped by principal and resource.
+- Define and enforce deployment-level concurrency limits and bounded queues.
+- Handle dequeue and timeout; a queue timeout returns `429` or `503`.
+- Emit low-cardinality metrics and safe reasons.
 
-不负责：
+Non-responsibilities:
 
-- 不处理同 session 单活跃 turn 互斥（Session Runtime 的 `session_busy`）。
-- 不解析 harness 原生协议。
-- 不保存 secret。
+- Does not handle single-active-turn mutual exclusion within a session; that is Session Runtime's `session_busy`.
+- Does not parse native harness protocols.
+- Does not store secrets.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ```python
 async def admit_run(ctx: RequestContext, req: AdmissionInput) -> AdmissionDecision: ...
@@ -52,7 +54,7 @@ async def admit_harness_mutation(ctx: RequestContext, action: str) -> AdmissionD
 async def snapshot_queues(ctx: RequestContext) -> QueueSnapshot: ...
 ```
 
-## 6. 数据模型
+## 6. Data Model
 
 ### 6.1 AdmissionInput
 
@@ -79,7 +81,7 @@ async def snapshot_queues(ctx: RequestContext) -> QueueSnapshot: ...
 }
 ```
 
-拒绝时：
+When rejected:
 
 ```json
 {
@@ -101,7 +103,7 @@ async def snapshot_queues(ctx: RequestContext) -> QueueSnapshot: ...
 }
 ```
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 admission requested
@@ -113,46 +115,46 @@ admission requested
   -> run finishes -> lease released
 ```
 
-Unix 语义：
+Unix semantics:
 
-- 速率与配额必须基于部署内共享 store，不能只靠单进程内存。
-- 队列 FIFO，超时未出队返回 `haas_queue_timeout`。
-- 拒绝与出队都必须可观测、可解释。
+- Rate limits and quotas MUST use a store shared within the deployment; single-process memory alone is insufficient.
+- The queue is FIFO. If a request is not dequeued before its timeout, return `haas_queue_timeout`.
+- Rejections and dequeues MUST be observable and explainable.
 
-## 8. 安全与权限
+## 8. Security and Authorization
 
-- 配额维度只能使用脱敏 principal/tenant hash 或安全 id。
-- 不得把 quota 状态、队列内容、其他 tenant 的运行信息暴露在 error detail 中。
-- Metrics label 低基数，不包含 user id、prompt、path。
+- Quota dimensions MUST use only a redacted principal/tenant hash or a safe ID.
+- Error details MUST NOT expose quota state, queue contents, or run information from other tenants.
+- Metric labels MUST be low-cardinality and MUST NOT contain user IDs, prompts, or paths.
 
-## 9. 可观测性
+## 9. Observability
 
-Metrics：
+Metrics:
 
 - `haas_admission_decision_total{resource,decision,reason}`
 - `haas_admission_active_total{resource,scope}`
 - `haas_admission_queue_depth{resource}`
 - `haas_admission_queue_wait_ms{resource,status}`
 
-Logs：
+Logs:
 
 - `haas.admission.allowed`
 - `haas.admission.rate_limited`
 - `haas.admission.queued`
 - `haas.admission.queue_timeout`
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
-|------|------|
-| store 不可用 | fail closed；正在运行的 run 继续，新 run 拒绝 `503` |
-| 队列满 | `503 queue_full` |
-| 入队超时 | `429 haas_queue_timeout` |
-| lease 丢失（进程重启） | 重算 active run 并释放孤儿 lease，或 fail closed |
+| Scenario | Behavior |
+|----------|----------|
+| Store unavailable | Fail closed; running runs continue, and new runs are rejected with `503` |
+| Queue full | `503 queue_full` |
+| Queue timeout | `429 haas_queue_timeout` |
+| Lease lost due to process restart | Recalculate active runs and release orphaned leases, or fail closed |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：速率窗口、令牌桶、配额上限、队列 FIFO/bounded/timeout。
-- Integration：并发 `/run` 超过部署上限时入队/拒绝路径正确；`retry-after` 头正确。
-- Recovery：sidecar 重启后 quota/queue 状态一致，不重复放行。
-- Observability：所有决策与队列深度指标低基数。
+- Unit: rate windows, token buckets, quota limits, and FIFO/bounded/timeout queue behavior.
+- Integration: when concurrent `/run` requests exceed the deployment limit, queue and rejection paths behave correctly; the `retry-after` header is correct.
+- Recovery: quota/queue state remains consistent after a sidecar restart, with no duplicate admission.
+- Observability: all decision and queue-depth metrics are low-cardinality.

@@ -1,51 +1,51 @@
-# HaaS 端到端时序
+# HaaS End-to-End Sequence
+
+**English** | [简体中文](WALKTHROUGH.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-26
 
-本文件把一次 `/run_sse` 与 session 读取的完整请求链路串起来，标注每个环节的
-owner 与传递对象，消解「各组件 spec 之间由 AI 脑补衔接」的问题。序号与
-`specs/architecture` 的请求流一致。
+This document connects the complete request flow for a `/run_sse` call and a session read, identifying the owner and transferred objects at each step. It eliminates gaps between component specs that would otherwise require AI inference. The numbering matches the request flow in `specs/architecture`.
 
-## 1. `POST /run_sse`（流式运行）
+## 1. `POST /run_sse` (Streaming Run)
 
 ```text
 Client
   1. POST /run_sse  {appName, userId, sessionId?, newMessage, streaming, haas?}
      Idempotency-Key?  Last-Event-ID?
   2. FastAPI route (haas.api)
-       -> Protocol Mapper: schema 校验, camelCase 解析
+       -> Protocol Mapper: schema validation, camelCase parsing
   3. Identity.authenticate(authorization) -> Principal
-     Identity.owns(principal, tenant/workspace/userId)  -> 404 若越权
+     Identity.owns(principal, tenant/workspace/userId)  -> 404 if out of scope
   4. HarnessRegistry.resolve_app(principal, appName) -> HarnessConfig
-  5. AdmissionControl.admit_run(ctx) -> AdmissionDecision（429/503 若拒绝）
+  5. AdmissionControl.admit_run(ctx) -> AdmissionDecision (429/503 if rejected)
   6. SessionRuntime.run(...)
-       a. IdempotencyStore.reserve(key_hash, request_hash)  // 若带 key
+       a. IdempotencyStore.reserve(key_hash, request_hash)  // if a key is supplied
        b. SessionStore.get_session((appName,userId,sessionId))
-          -> 创建或缺省 sessionId=hsess_<rand>
-       c. SessionStore.acquire_lease(sessionKey, holder)  // session_busy 若被占
-       d. InvocationRecord 创建 (inv_...)
-       e. HarnessRegistry.snapshot_for_session -> EffectiveHarnessConfig 冻结
+          -> create, or default sessionId=hsess_<rand>
+       c. SessionStore.acquire_lease(sessionKey, holder)  // session_busy if held
+       d. Create InvocationRecord (inv_...)
+       e. HarnessRegistry.snapshot_for_session -> freeze EffectiveHarnessConfig
        f. PolicyController.compile_policy -> EffectivePolicy
        g. SandboxRuntime.create_sandbox(sessionId, SandboxSpec)
        h. HarnessAdapter.prepare_session -> native session ref
-       i. TurnRecord 创建（与 invocation 1:1）
+       i. Create TurnRecord (1:1 with invocation)
        j. HarnessAdapter.start_turn -> TurnHandle
   7. for event in adapter.stream_events(turn):
-       -> 归一化 + redact
+       -> normalize + redact
        -> EventLogStore.append(CanonicalEventRecord)
        -> Event projection project_adk -> ADK Event
-       -> SSE frame写入响应（progressive flush）
+       -> write SSE frame to response (progressive flush)
   8. adapter finalize -> SessionRuntime.mark_turn_terminal
        -> invocation=completed|failed|incomplete|cancelled
-       -> SessionStore 落终态 + Invocation/turn 更新
-       -> SSE stream 关闭（关闭即完成信号）
-  9. session state 合并（事件 actions.stateDelta + state 更新）落 SessionStore
+       -> persist terminal state to SessionStore + update Invocation/turn
+       -> close SSE stream (closure is the completion signal)
+  9. Merge session state (event actions.stateDelta + state updates) and persist to SessionStore
 ```
 
-关键对象传递：
+Key object transfers:
 
-| 步骤 | 输入对象 | 输出对象 |
+| Step | Input object | Output object |
 |------|----------|----------|
 | 6b | `(appName,userId,sessionId)` | `SessionRecord` |
 | 6e | `HarnessConfig` | `EffectiveHarnessConfig` |
@@ -54,81 +54,75 @@ Client
 | 6j | `StartTurnRequest` | `TurnHandle` |
 | 7 | `HarnessEvent` | `CanonicalEventRecord` -> ADK `Event` |
 
-## 2. `POST /run`（非流式）
+## 2. `POST /run` (Non-Streaming)
 
-与 `/run_sse` 唯一差异：第 7 步不刷 SSE，事件全部累积；第 8 步终止后一次性
-返回 JSON 数组。**数组必须等于 `/run_sse` 流式聚合输出（parity）**——两者共用
-同一事件累积路径，只差输出时序。
+The only difference from `/run_sse` is that step 7 does not flush SSE frames; all events are accumulated. After step 8 terminates, the JSON array is returned in one response. **The array MUST equal the aggregated streaming output of `/run_sse` (parity)**—both use the same event accumulation path and differ only in output timing.
 
-## 3. `GET /apps/{app}/users/{user}/sessions/{sid}`（读回）
+## 3. `GET /apps/{app}/users/{user}/sessions/{sid}` (Readback)
 
 ```text
 Client
   1. GET /apps/{appName}/users/{userId}/sessions/{sessionId}
-  2. Identity.authenticate + owns(principal, userId) -> 404 若越权
+  2. Identity.authenticate + owns(principal, userId) -> 404 if out of scope
   3. SessionRuntime.get_session(key) -> SessionRecord
   4. EventLogStore.read_session(sessionId) -> events[]
-  5. 投影为 ADK Session {id, appName, userId, state, events[], lastUpdateTime}
+  5. Project to ADK Session {id, appName, userId, state, events[], lastUpdateTime}
 ```
 
-## 4. `PATCH /apps/.../sessions/{sid}`（stateDelta）
+## 4. `PATCH /apps/.../sessions/{sid}` (`stateDelta`)
 
 ```text
-  1-2. 同上鉴权
+  1-2. Authenticate as above
   3. SessionStore.get_session
-  4. deep-merge(state, stateDelta)（标量覆盖，对象递归合并；无删除操作）
-  5. SessionStore.put_session；lastUpdateTime 更新
+  4. deep-merge(state, stateDelta) (scalars overwrite; objects merge recursively; no delete operation)
+  5. SessionStore.put_session; update lastUpdateTime
 ```
 
-state 双写源（PATCH `stateDelta` 与事件 `actions.stateDelta`）串行化于同一
-sessionKey 的写队列，合并规则一致（deep-merge，标量后到覆盖）。
+The two state write sources (PATCH `stateDelta` and event `actions.stateDelta`) are serialized through the write queue for the same sessionKey. Both use the same merge rule (deep merge, with the later scalar overwriting the earlier one).
 
-## 5. 取消（HaaS native）
+## 5. Cancellation (HaaS Native)
 
 ```text
   POST /v1/haas/sessions/{sid}/invocations/{invId}/cancel
   -> SessionRuntime.cancel_invocation
      -> HarnessAdapter.cancel_turn -> turn/interrupt
-     -> mark invocation=cancelled -> EventLog terminal 落盘
-  cancel 幂等：重复调用返回当前状态
+     -> mark invocation=cancelled -> persist terminal record to EventLog
+  cancel is idempotent: repeated calls return the current status
 ```
 
-## 6. `/run_sse` 续接重连（Last-Event-ID）与 HaaS native replay
+## 6. `/run_sse` Resumption (`Last-Event-ID`) and HaaS Native Replay
 
 ```text
 Client disconnects mid-stream
-  -> 服务端不取消 invocation，事件继续 append 到 EventLogStore
+  -> server does not cancel the invocation; events continue to be appended to EventLogStore
 
-ADK 面续接（/run_sse + Last-Event-ID）：
-  -> client 重新 POST /run_sse，携带原 appName/userId/sessionId + header Last-Event-ID: evt_...
-  -> 服务端按 event id 定位原 invocation（校验 app/user/session scope）
-       回放 Last-Event-ID 之后的 retained events，再续接 live；不新建 turn、不重复启动 harness
-  -> 若 event id 已过期 -> 410 haas_offset_expired
+ADK-side resumption (/run_sse + Last-Event-ID):
+  -> client POSTs /run_sse again with the original appName/userId/sessionId + header Last-Event-ID: evt_...
+  -> server locates the original invocation by event id (validating app/user/session scope)
+       replays retained events after Last-Event-ID, then resumes live delivery; does not create a turn or restart the harness
+  -> if the event id has expired -> 410 haas_offset_expired
 
-HaaS native 重连（after_event_id）：
+HaaS native reconnection (after_event_id):
   -> GET /v1/haas/sessions/{sid}/invocations/{invId}/events?after_event_id=evt_...
-  -> EventLogStore.read_invocation(invId, after) 回放 cursor 之后的事件
-  -> 若无 gap -> 续接 live stream；若 cursor 已过期 -> 410 haas_offset_expired 或 reconcile event
-  -> invocation 未终止则继续收尾；已终止则回放 terminal 后关闭
+  -> EventLogStore.read_invocation(invId, after) replays events after the cursor
+  -> if there is no gap -> resume live stream; if cursor has expired -> 410 haas_offset_expired or reconcile event
+  -> if invocation is not terminal, continue through finalization; if terminal, replay terminal and close
 ```
 
-## 7. 失败路径（非流式 `/run` 与 adapter 失败）
+## 7. Failure Paths (Non-Streaming `/run` and Adapter Failure)
 
 ```text
-adapter.start_turn 或 stream_events 抛错
-  -> SessionRuntime 收敛 terminal state
-       -> failed（错误可读）/ incomplete（预算/超时截断）
-  -> EventLogStore 写 terminal failure evidence
-  -> InvocationRecord.status 落盘
+adapter.start_turn or stream_events raises an error
+  -> SessionRuntime converges on a terminal state
+       -> failed (readable error) / incomplete (budget/timeout truncation)
+  -> EventLogStore writes terminal failure evidence
+  -> persist InvocationRecord.status
 
-POST /run 非流式：不产 SSE，terminal 后一次性返回事件 JSON 数组
-  -> 若失败：返回事件数组（含错误事件）+ 公开面可读的错误；HTTP 200（数组语义）
-  -> 若请求前置失败（auth/schema/admission）：返回结构化 haasError（4xx/5xx）
+POST /run non-streaming: produces no SSE; returns the event JSON array once terminal
+  -> on failure: return event array (including error event) + public-readable error; HTTP 200 (array semantics)
+  -> on pre-request failure (auth/schema/admission): return structured haasError (4xx/5xx)
 ```
 
-## ADK 适配范围（关键澄清）
+## ADK Compatibility Scope (Critical Clarification)
 
-HaaS 只适配 ADK 2.0 的 **REST API 协议层**：HTTP 路径、请求/响应 shape、
-`Event` shape、SSE framing、camelCase 字段。**不**包含 ADK 执行引擎、图
-工作流、`BaseAgent/WorkflowGraph`、ADK Web UI 或 Python SDK 的 snake_case
-server 实现。compatibility 目标是「任何遵守 ADK 2.0 REST 协议的 HTTP 客户端」。
+HaaS supports only the **REST API protocol layer** of ADK 2.0: HTTP paths, request/response shapes, `Event` shape, SSE framing, and camelCase fields. It does **not** include the ADK execution engine, graph workflows, `BaseAgent/WorkflowGraph`, ADK Web UI, or the Python SDK's snake_case server implementation. The compatibility target is any HTTP client that conforms to the ADK 2.0 REST protocol.

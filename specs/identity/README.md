@@ -1,48 +1,50 @@
-# Identity 组件规格
+# Identity Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-26
 Related specs: [Security Boundary](../security-boundary/README.md), [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Identity 定义 HaaS 的认证与身份边界。HaaS 不实现具体 auth provider，但必须定义一个稳定的 `IdentityProvider` 接口：把 `Authorization: Bearer` 转换成 `Principal`，并把 caller-supplied 的 `tenantId`/`workspaceId`/`userId` 归属到 principal scope。
+Identity defines the authentication and identity boundary for HaaS. HaaS does not implement a specific auth provider, but it MUST define a stable `IdentityProvider` interface that converts `Authorization: Bearer` into a `Principal` and associates caller-supplied `tenantId`/`workspaceId`/`userId` values with the principal scope.
 
-首期提供 `StaticTokenIdentityProvider`（测试/单机部署）；生产通过 `ExternalJwtIdentityProvider` 委托外部 OIDC/JWT 校验（预留接口，不绑定具体实现）。
+The initial release provides `StaticTokenIdentityProvider` for testing and single-node deployments. Production deployments delegate external OIDC/JWT validation through `ExternalJwtIdentityProvider`, which is a reserved interface not bound to a specific implementation.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
+| Source | Adopted content |
 |------|----------|
-| Security Boundary | 「不实现具体 auth provider」「跨 scope 返回 404 不返回 403」 |
-| HaaS Protocol | `Authorization: Bearer` 必填（除 health/ready） |
-| Session Runtime | `userId` 必须属于认证 principal |
+| Security Boundary | No specific auth provider implementation; cross-scope access returns 404 rather than 403 |
+| HaaS Protocol | `Authorization: Bearer` is required except for health/ready |
+| Session Runtime | `userId` MUST belong to the authenticated principal |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
+| Direction | Component | Relationship |
 |------|------|------|
-| 上游 | HaaS Protocol | 每个请求进入组件管线前完成鉴权 |
-| 上游 | Security Boundary | 提供 scope 判定的 principal 事实 |
-| 下游 | Session Runtime / Registry / Artifact / Admission | 提供 `Principal` 作为 scope 依据 |
-| 下游 | Observability | 提供 `principalHash`（不提供明文） |
+| Upstream | HaaS Protocol | Authenticates each request before it enters the component pipeline |
+| Upstream | Security Boundary | Provides the principal facts used for scope decisions |
+| Downstream | Session Runtime / Registry / Artifact / Admission | Provides `Principal` as the basis for scope decisions |
+| Downstream | Observability | Provides `principalHash`, never plaintext identity |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 定义 `IdentityProvider.authenticate(authorization) -> Principal`。
-- 定义 principal 与 tenant/workspace/userId 的归属判定 `owns()`。
-- 定义 401（缺失/无效）与 404（存在但无权限）的边界。
-- 定义 admin/debug 独立授权通道（不由普通 bearer 推导）。
+- Define `IdentityProvider.authenticate(authorization) -> Principal`.
+- Define `owns()` to determine whether a tenant/workspace/userId belongs to a principal.
+- Define the boundary between 401 (missing/invalid credentials) and 404 (the object exists but is unauthorized).
+- Define an independent authorization channel for admin/debug access; it MUST NOT be derived from an ordinary bearer token.
 
-不负责：
+Non-responsibilities:
 
-- 不实现 OIDC/OAuth/token 签发服务本身。
-- 不保存 caller token 明文或完整身份到日志。
-- 不做业务计费或 entitlement。
+- Does not implement the OIDC/OAuth/token issuance service itself.
+- MUST NOT store plaintext caller tokens or complete identities in logs.
+- Does not perform business billing or entitlement checks.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ```python
 class Principal(TypedDict):
@@ -60,14 +62,14 @@ class IdentityProvider(Protocol):
         """True only for an independently granted admin/debug role."""
 ```
 
-实现登记：
+Implementation registry:
 
-| 实现 | 用途 |
+| Implementation | Purpose |
 |------|------|
-| `StaticTokenIdentityProvider` | 静态 token -> principal 映射，单机/测试 |
-| `ExternalJwtIdentityProvider` | 委托外部 JWKS/OIDC 校验（预留） |
+| `StaticTokenIdentityProvider` | Static token -> principal mapping for single-node deployments and tests |
+| `ExternalJwtIdentityProvider` | Delegates external JWKS/OIDC validation (reserved) |
 
-## 6. 数据模型
+## 6. Data Model
 
 ```json
 {
@@ -78,9 +80,9 @@ class IdentityProvider(Protocol):
 }
 ```
 
-`userId` 不是 principal 的固定字段，而是 principal scope 下的 sub-scope：`owns(principal, user_id=...)` 判定。默认 `userId` 可由 principal 派生（`defaultUserId`），也可由 caller 显式声明并在 `owns` 中校验。
+`userId` is not a fixed field of the principal. It is a sub-scope within the principal scope and is evaluated by `owns(principal, user_id=...)`. By default, `userId` MAY be derived from the principal (`defaultUserId`), or the caller MAY declare it explicitly for validation by `owns`.
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 request -> identity.authenticate(bearer)
@@ -91,33 +93,33 @@ request -> identity.authenticate(bearer)
   -> proceed with principal bound to request context
 ```
 
-## 8. 安全与权限
+## 8. Security and Authorization
 
-- 鉴权失败分两类：无/坏凭证 `401`；有凭证但对象不在其 scope `404`。
-- admin/debug 需独立授权（`is_admin`），普通 bearer 不得推导。
-- 日志只记录 `principalHash`、tenant/workspace hash 或安全 id。
+- Authentication failures fall into two classes: missing/invalid credentials return `401`; valid credentials for an object outside their scope return `404`.
+- Admin/debug access requires independent authorization (`is_admin`) and MUST NOT be derived from an ordinary bearer token.
+- Logs MUST contain only `principalHash`, tenant/workspace hashes, or safe IDs.
 
-## 9. 可观测性
+## 9. Observability
 
 - `haas.identity.authenticated`
 - `haas.identity.missing_credential`
 - `haas.identity.invalid_credential`
 - `haas.identity.scope_denied`
 
-Metrics：`haas_identity_auth_total{outcome}`，label 低基数，不含明文身份。
+Metric: `haas_identity_auth_total{outcome}`. Labels MUST be low-cardinality and MUST NOT contain plaintext identities.
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
+| Scenario | Behavior |
 |------|------|
-| bearer 缺失 | `401 missing_credential` |
-| bearer 无效/过期 | `401 invalid_credential` |
-| caller scope 不属于 principal | `404`，不暴露存在性 |
-| identity provider 不可用 | fail closed `503 haas_identity_unavailable` |
-| admin 通道失败 | 普通路径继续；admin/debug 路径失败关闭 |
+| Bearer token missing | `401 missing_credential` |
+| Bearer token invalid/expired | `401 invalid_credential` |
+| Caller scope does not belong to the principal | `404`, without revealing existence |
+| Identity provider unavailable | Fail closed with `503 haas_identity_unavailable` |
+| Admin channel failure | Ordinary paths continue; admin/debug paths fail closed |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：`authenticate` 三类输出、`owns` 判定、`is_admin`。
-- Integration：两 principal 互相访问 harness/session/invocation/file 全 404。
-- Security：token 明文、完整 principal 不进入日志/metrics。
+- Unit: the three `authenticate` outcomes, `owns` decisions, and `is_admin`.
+- Integration: cross-access by two principals to each other's harness/session/invocation/file returns 404 in all cases.
+- Security: plaintext tokens and complete principals never enter logs or metrics.

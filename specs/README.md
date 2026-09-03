@@ -1,16 +1,18 @@
-# HaaS 组件规格总览
+# HaaS Component Specification Overview
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-09-02
 Change ID: haas-platform-foundation
 
-`specs/` 是 HaaS 的长期技术规格入口。它把 Harness As A Service 的协议、组件边界、状态机、安全与容器运行时定义成可实现、可测试、可审查的工程合同。
+`specs/` is the entry point for HaaS long-term technical specifications. It defines the Harness As A Service protocol, component boundaries, state machines, security, and container runtime as implementable, testable, and reviewable engineering contracts.
 
-本目录必须自包含：组件 spec 可以引用 `specs/` 下的同级组件文档，不能依赖仓库外路径或临时报告才能理解设计。
+This directory MUST be self-contained: component specs MAY reference peer component documents under `specs/`, but understanding the design MUST NOT depend on paths outside the repository or temporary reports.
 
-## 1. 系统定位
+## 1. System Role
 
-HaaS 是多 harness 的运行托管 sidecar，northbound 协议遵循 Google ADK 2.0 REST API 协议层：
+HaaS is a runtime-hosting sidecar for multiple harnesses. Its northbound protocol follows the Google ADK 2.0 REST API protocol layer:
 
 ```text
 Client / Manager / SDK / CLI / ADK web UI
@@ -47,169 +49,164 @@ Sandbox Runtime (OpenSandbox sandbox/execd/credential vault projection)
 OpenSandbox AIO container runtime
 ```
 
-HaaS 不是模型代理本身，也不是单一 Codex Worker。模型代理是 HaaS 为 secretless 和兼容性提供的内部能力；Codex 是首期 harness adapter；Sandbox Runtime 是多 harness 运行环境标准化的承载体。
+HaaS is neither a model proxy itself nor a single Codex Worker. The model proxy is an internal HaaS capability for secretless operation and compatibility; Codex is the initial harness adapter; and Sandbox Runtime is the substrate for standardizing multi-harness runtime environments.
 
-### 1.1 调研基线
+### 1.1 Research Baseline
 
-本轮设计参考了以下外部事实；这些是设计输入，不是仓库内文件依赖：
+This design uses the following external facts as inputs; they are not in-repository file dependencies:
 
-| 来源 | Revision / version | 关键结论 |
+| Source | Revision / version | Key findings |
 |------|--------------------|----------|
-| ADK 2.0 docs | fetched 2026-08-26 | REST API 协议层：`/list-apps`、`/run`、`/run_sse`、`/apps/{app}/users/{user}/sessions/{sid}`、camelCase、`newMessage{role,parts}`、Event 含 `nodeInfo`/`output`、SSE `data:` 帧 |
-| `mpa-codex-worker` 本地参考 | local checkout on 2026-08-26 | 旧项目已经验证 sidecar API、Codex app-server、event log、SSE replay、session registry、model proxy、MCP proxy、secretless runtime 和容器化边界 |
-| Codex manual | fetched 2026-08-26 | `codex app-server` 支持 `stdio://`、`ws://IP:PORT`、`unix://`；连接必须先 `initialize` 再 `initialized` |
-| Local Codex CLI | `codex-cli 0.149.1` | `codex app-server --help` 暴露 `--listen`、`--ws-auth`、`generate-ts`、`generate-json-schema` |
-| OpenSandbox | commit `cfca10537a0af7afd11e67b8574e55b2bb2603ad` | sandbox lifecycle、execd、ingress、egress、credential vault、SDK/CLI/MCP |
-| AIO Sandbox | commit `89186e8c9fb3f78b2f67cc472a36c1cb63e25ccb` | AIO 镜像 `ghcr.io/agent-infra/sandbox`，端口 `8080`，入口 `/opt/gem/run.sh`，含 browser、shell、file、VSCode、Jupyter、MCP |
+| ADK 2.0 docs | fetched 2026-08-26 | REST API protocol layer: `/list-apps`, `/run`, `/run_sse`, `/apps/{app}/users/{user}/sessions/{sid}`, camelCase, `newMessage{role,parts}`, Event with `nodeInfo`/`output`, and SSE `data:` frames |
+| Local `mpa-codex-worker` reference | local checkout on 2026-08-26 | The predecessor project has validated the sidecar API, Codex app-server, event log, SSE replay, session registry, model proxy, MCP proxy, secretless runtime, and containerization boundaries |
+| Codex manual | fetched 2026-08-26 | `codex app-server` supports `stdio://`, `ws://IP:PORT`, and `unix://`; a connection MUST send `initialize` before `initialized` |
+| Local Codex CLI | `codex-cli 0.149.1` | `codex app-server --help` exposes `--listen`, `--ws-auth`, `generate-ts`, and `generate-json-schema` |
+| OpenSandbox | commit `cfca10537a0af7afd11e67b8574e55b2bb2603ad` | Sandbox lifecycle, execd, ingress, egress, credential vault, SDK/CLI/MCP |
+| AIO Sandbox | commit `89186e8c9fb3f78b2f67cc472a36c1cb63e25ccb` | AIO image `ghcr.io/agent-infra/sandbox`, port `8080`, entrypoint `/opt/gem/run.sh`, including browser, shell, file, VSCode, Jupyter, and MCP |
 
-## 2. 文档分层
+## 2. Documentation Layers
 
-| 文档层 | 位置 | 生命周期 | 职责 |
+| Document layer | Location | Lifecycle | Responsibility |
 |--------|------|----------|------|
-| 组件 spec | `specs/<component>/README.md` | 长期维护 | 固化组件职责、接口、状态机、安全、恢复、测试合同 |
-| Protocol schema | `specs/haas-protocol/*.openapi.yaml` | 随协议版本 | 定义可生成类型的 HTTP schema |
-| 实现代码 | `haas/`、`docker/`、`scripts/` | 版本演进 | 实现 specs 中的合同 |
-| 临时证据 | 不提交 | 单次准出 | 在最终说明或 PR/MR 描述中记录命令、结果、风险 |
+| Component spec | `specs/<component>/README.md` | Long-term maintenance | Establish component responsibility, interface, state-machine, security, recovery, and test contracts |
+| Protocol schema | `specs/haas-protocol/*.openapi.yaml` | Tracks protocol versions | Define HTTP schemas from which types can be generated |
+| Implementation code | `haas/`, `docker/`, `scripts/` | Versioned evolution | Implement the contracts in the specs |
+| Temporary evidence | Not committed | One release gate | Record commands, results, and risks in the final delivery notes or PR/MR description |
 
-## 3. 架构基线
+## 3. Architecture Baseline
 
-### 3.1 Northbound 协议
+### 3.1 Northbound Protocol
 
-HaaS 对上提供三个层级的 HTTP/SSE surface：
+HaaS exposes three tiers of HTTP/SSE surfaces upstream:
 
-| Surface | 路径 | 兼容等级 | 用途 |
+| Surface | Path | Compatibility level | Purpose |
 |---------|------|----------|------|
-| ADK-compatible | `/list-apps`、`/run`、`/run_sse`、`/apps/{app}/users/{user}/sessions/{sid}` | Public API | 长期主协议，drop-in 兼容 ADK 2.0 client |
-| HaaS native | `/v1/haas/*` | Public extension | health/ready/status、diagnostics、harness CRUD、session/event 管理、artifact 等 ADK 未覆盖能力 |
-| ~~Legacy sidecar shim~~ | ~~`/v1/codex-worker/*`~~ | **本项目不实现** | 见 §3.1.1 |
+| ADK-compatible | `/list-apps`, `/run`, `/run_sse`, `/apps/{app}/users/{user}/sessions/{sid}` | Public API | Long-term primary protocol, drop-in compatible with ADK 2.0 clients |
+| HaaS native | `/v1/haas/*` | Public extension | ADK-uncovered capabilities such as health/ready/status, diagnostics, harness CRUD, session/event management, and artifacts |
+| ~~Legacy sidecar shim~~ | ~~`/v1/codex-worker/*`~~ | **Not implemented by this project** | See §3.1.1 |
 
-规则：
+Rules:
 
-1. ADK-compatible surface 不得暴露具体 harness 原生字段；HaaS 扩展只放 `haas` 嵌套对象或 `/v1/haas/*`。
-2. HaaS native 只能做加法扩展，不得改变 ADK 字段语义。
-3. 所有 public surface 使用 `detail` + 结构化 `haasError` 错误形状。
+1. The ADK-compatible surface MUST NOT expose concrete harness-native fields. HaaS extensions belong only in the nested `haas` object or under `/v1/haas/*`.
+2. HaaS native extensions MUST be additive only and MUST NOT change ADK field semantics.
+3. All public surfaces use a `detail` + structured `haasError` error shape.
 
-### 3.1.1 范围决策：不实现 `mpa-codex-worker` 迁移 shim
+### 3.1.1 Scope Decision: Do Not Implement the `mpa-codex-worker` Migration Shim
 
-**决策（2026-08-30）**：HaaS 与 `mpa-codex-worker` 只是架构同构，不承担其迁移
-职责。`/v1/codex-worker/*` shim **不属于本项目范围**，不实现、不测试、不在
-准出门禁中要求。若将来确需迁移旧上游，**单独立项**处理。
+**Decision (2026-08-30)**: HaaS and `mpa-codex-worker` are only architecturally isomorphic; HaaS does not assume migration responsibility for it. The `/v1/codex-worker/*` shim is **out of scope for this project**: it will not be implemented, tested, or required by release gates. If migration of legacy upstream consumers becomes necessary, it will be handled as a **separate initiative**.
 
-影响与处理方式：
+Implications and handling:
 
-- 各组件 spec 中残留的 legacy/shim 描述视为**历史背景与未来可选项**，不是待办；
-  实现时不得据此新增 `/v1/codex-worker/*` 路由。
-- `mpa-codex-worker` 仍可作为**设计参考来源**（它已验证过 sidecar API、event log、
-  SSE replay、model proxy、secretless 边界等），这与「不实现 shim」并不冲突。
-- 错误码 `haas_legacy_request_invalid` 与 OpenAPI 中的 legacy 条目予以保留，
-  避免改动已发布的兼容面；它们在本项目中处于**未使用**状态。
-- 新能力一律定义在 ADK 面或 HaaS native 面。
+- Residual legacy/shim descriptions in component specs are **historical context and future options**, not pending tasks. They MUST NOT be used as grounds to add `/v1/codex-worker/*` routes during implementation.
+- `mpa-codex-worker` MAY still serve as a **design reference** because it has validated the sidecar API, event log, SSE replay, model proxy, secretless boundaries, and other patterns. This does not conflict with the decision not to implement the shim.
+- The `haas_legacy_request_invalid` error code and legacy entries in OpenAPI are retained to avoid changing a published compatibility surface; they are **unused** in this project.
+- All new capabilities MUST be defined on either the ADK surface or the HaaS native surface.
 
-### 3.2 Runtime 边界
+### 3.2 Runtime Boundary
 
-HaaS 运行在 OpenSandbox AIO 基础镜像上。AIO 提供 shell、file、browser、exec、sandbox lifecycle、credential vault 等基础能力；HaaS 叠加 sidecar、adapter、proxy、event log、policy 和 Sandbox Runtime。
+HaaS runs on the OpenSandbox AIO base image. AIO provides foundational capabilities such as shell, file, browser, exec, sandbox lifecycle, and credential vault; HaaS adds the sidecar, adapters, proxies, event log, policy, and Sandbox Runtime.
 
-容器内默认端口：
+Default container ports:
 
-| 端口 | 归属 | 用途 |
+| Port | Owner | Purpose |
 |------|------|------|
 | `8080` | OpenSandbox AIO | AIO service / shell / browser / file / sandbox API |
 | `8092` | HaaS sidecar | HaaS ADK/HTTP/SSE API |
-| `18080` | HaaS model proxy | harness-facing model proxy loopback |
-| `18081` | HaaS MCP/tool proxy | harness-facing MCP/tool proxy loopback |
+| `18080` | HaaS model proxy | Harness-facing model proxy loopback |
+| `18081` | HaaS MCP/tool proxy | Harness-facing MCP/tool proxy loopback |
 
-### 3.3 Adapter 边界
+### 3.3 Adapter Boundary
 
-每个 harness adapter 是原生 runtime 的唯一 owner：
+Each harness adapter is the sole owner of its native runtime:
 
-- Codex adapter 持有 Codex app-server JSON-RPC/WebSocket/stdio 细节。
-- Pi adapter 后续持有 Pi CLI JSON stream、session-id 和 config 细节。
-- OpenCode adapter 后续持有 OpenCode JSON stream、permission config 和 MCP config 细节。
-- AMP adapter 后续持有 AMP 原生协议、会话和工具权限细节。
+- The Codex adapter owns Codex app-server JSON-RPC/WebSocket/stdio details.
+- A future Pi adapter will own Pi CLI JSON stream, session-id, and configuration details.
+- A future OpenCode adapter will own OpenCode JSON stream, permission configuration, and MCP configuration details.
+- A future AMP adapter will own AMP native protocol, session, and tool-permission details.
 
-上游只能看到 ADK `Event`/`Session`/错误/artifact，不能看到任何原生 runtime 细节。
+Upstream consumers MAY see only ADK `Event`/`Session` objects, errors, and artifacts; they MUST NOT see any native runtime details.
 
-### 3.4 Sandbox 标准化边界
+### 3.4 Sandbox Standardization Boundary
 
-Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harness adapter 的 sandbox 声明，统一投影为 OpenSandbox sandbox/execd 配置。harness 自带 sandbox（如 Codex sandbox）只能在其内运行；provider credential 走 credential vault；网络 egress 由 OpenSandbox egress policy 与 HaaS URL validator 双层约束。详见 [Sandbox Runtime](sandbox-runtime/README.md)。
+Sandbox Runtime uniformly projects the Policy Controller's workspace/network/tool policy and the harness adapter's sandbox declaration into OpenSandbox sandbox/execd configuration. A harness-provided sandbox (such as the Codex sandbox) MUST run within it; provider credentials flow through the credential vault; and network egress is constrained by both the OpenSandbox egress policy and the HaaS URL validator. See [Sandbox Runtime](sandbox-runtime/README.md).
 
-## 4. 组件规划
+## 4. Component Plan
 
-| 优先级 | 组件 | 路径 | 主要职责 |
+| Priority | Component | Path | Primary responsibility |
 |--------|------|------|----------|
-| P0 | Architecture | `specs/architecture/README.md` | 系统级分层、事实归属、依赖方向和首期落地顺序 |
-| P0 | HaaS Protocol | `specs/haas-protocol/README.md` | ADK-compatible API、HaaS native API、错误和版本策略 |
-| P0 | Harness Registry | `specs/harness-registry/README.md` | configured harness catalog、appName 解析、base/capability/model/provider discovery |
-| P0 | Harness Adapter | `specs/harness-adapter/README.md` | 多 harness adapter 抽象、能力矩阵、ADK 事件规范化 |
-| P0 | Codex App-Server Adapter | `specs/codex-app-server-adapter/README.md` | 首期 Codex app-server 连接、thread/turn、JSON-RPC、cancel、schema pin |
-| P0 | Session Runtime | `specs/session-runtime/README.md` | session/invocation/turn/container lifecycle、idempotency、lease、continuation |
-| P0 | Admission Control | `specs/admission-control/README.md` | 配额、限流、并发、队列准入 |
-| P0 | Event Log & SSE | `specs/event-log-sse/README.md` | event log、SSE live/replay、ADK Event 投影 |
-| P0 | Security Boundary | `specs/security-boundary/README.md` | secretless、object scope、SSRF、artifact path、redaction、audit |
-| P0 | Policy Controller | `specs/policy-controller/README.md` | workspace、network、tool、approval、model policy 编译和准入 |
-| P0 | Stores | `specs/stores/README.md` | 持久化事实源：registry/session/event/idempotency/admission 接口、schema 与迁移 |
-| P0 | Identity | `specs/identity/README.md` | bearer -> principal、tenant/workspace/userId scope、`IdentityProvider` 接口 |
-| P0 | Config | `specs/config/README.md` | env/config 装配、端口表、`load_config`/`create_app` 契约 |
-| P1 | Sandbox Runtime | `specs/sandbox-runtime/README.md` | 统一投影 harness sandbox 到 OpenSandbox sandbox/execd/credential vault |
-| P1 | Model Proxy | `specs/model-proxy/README.md` | provider credential 隔离、OpenAI-compatible relay、usage normalization |
-| P1 | MCP / Tool / Skill Runtime | `specs/mcp-tool-skill-runtime/README.md` | MCP server、MCP proxy、tools、skills materialization、tool restriction |
-| P1 | Artifact Store | `specs/artifact-store/README.md` | 输入文件、session 产物、下载、归档和路径安全 |
-| P1 | Container Runtime | `specs/container-runtime/README.md` | OpenSandbox AIO Dockerfile、entrypoint、ports、health/ready、shutdown |
-| P1 | Runtime Trim | `specs/runtime-trim/README.md` | 用 AIO 官方 `DISABLE_*`/`NODE_VERSION` 关闭 HaaS 用不到的 AIO 服务，降低运行时占用 |
-| P1 | Startup | `specs/startup/README.md` | nginx 总入口、sidecar ready、Codex Unix socket 握手探测、启动 DAG、异步 warmup 和时延预算 |
-| P1 | Observability | `specs/observability/README.md` | logs、metrics、trace、diagnostics、conformance evidence |
-| P1 | Implementation Roadmap | `specs/implementation-roadmap/README.md` | 后续实现阶段、依赖、出口证据和风险收敛 |
+| P0 | Architecture | `specs/architecture/README.md` | System-level layering, fact ownership, dependency direction, and initial implementation order |
+| P0 | HaaS Protocol | `specs/haas-protocol/README.md` | ADK-compatible API, HaaS native API, errors, and versioning strategy |
+| P0 | Harness Registry | `specs/harness-registry/README.md` | Configured harness catalog, appName resolution, and base/capability/model/provider discovery |
+| P0 | Harness Adapter | `specs/harness-adapter/README.md` | Multi-harness adapter abstraction, capability matrix, and ADK event normalization |
+| P0 | Codex App-Server Adapter | `specs/codex-app-server-adapter/README.md` | Initial Codex app-server connection, thread/turn, JSON-RPC, cancel, and schema pin |
+| P0 | Session Runtime | `specs/session-runtime/README.md` | Session/invocation/turn/container lifecycle, idempotency, leases, and continuation |
+| P0 | Admission Control | `specs/admission-control/README.md` | Quota, rate limiting, concurrency, and queue admission |
+| P0 | Event Log & SSE | `specs/event-log-sse/README.md` | Event log, SSE live/replay, and ADK Event projection |
+| P0 | Security Boundary | `specs/security-boundary/README.md` | Secretless operation, object scope, SSRF, artifact paths, redaction, and audit |
+| P0 | Policy Controller | `specs/policy-controller/README.md` | Workspace, network, tool, approval, and model policy compilation and admission |
+| P0 | Stores | `specs/stores/README.md` | Persistent source of truth: registry/session/event/idempotency/admission interfaces, schemas, and migrations |
+| P0 | Identity | `specs/identity/README.md` | Bearer -> principal, tenant/workspace/userId scope, and `IdentityProvider` interface |
+| P0 | Config | `specs/config/README.md` | Env/config assembly, port table, and `load_config`/`create_app` contracts |
+| P1 | Sandbox Runtime | `specs/sandbox-runtime/README.md` | Uniformly project harness sandboxes into OpenSandbox sandbox/execd/credential vault |
+| P1 | Model Proxy | `specs/model-proxy/README.md` | Provider credential isolation, OpenAI-compatible relay, and usage normalization |
+| P1 | MCP / Tool / Skill Runtime | `specs/mcp-tool-skill-runtime/README.md` | MCP servers, MCP proxy, tools, skill materialization, and tool restrictions |
+| P1 | Artifact Store | `specs/artifact-store/README.md` | Input files, session outputs, downloads, archives, and path security |
+| P1 | Container Runtime | `specs/container-runtime/README.md` | OpenSandbox AIO Dockerfile, entrypoint, ports, health/ready, and shutdown |
+| P1 | Runtime Trim | `specs/runtime-trim/README.md` | Use official AIO `DISABLE_*`/`NODE_VERSION` controls to disable unneeded AIO services and reduce runtime resource usage |
+| P1 | Startup | `specs/startup/README.md` | nginx front door, sidecar readiness, Codex Unix socket handshake probe, startup DAG, asynchronous warmup, and latency budget |
+| P1 | Observability | `specs/observability/README.md` | Logs, metrics, traces, diagnostics, and conformance evidence |
+| P1 | Implementation Roadmap | `specs/implementation-roadmap/README.md` | Subsequent implementation stages, dependencies, exit evidence, and risk convergence |
 
-## 5. 单篇组件 Spec 标准结构
+## 5. Standard Structure for a Component Spec
 
-每个组件 spec 必须包含以下章节。章节可以精简，但不能缺失；暂无结论时必须写明 `Unknown`、影响和下一步验证。
+Every component spec MUST contain the following sections. Sections MAY be concise but MUST NOT be omitted. When no conclusion is available, the spec MUST state `Unknown`, the impact, and the next verification step.
 
-1. `组件定位`
-2. `来源与依据`
-3. `上游与下游关系`
-4. `职责边界`
-5. `核心接口`
-6. `数据模型`
-7. `运行模型与状态机`
-8. `安全与权限`
-9. `可观测性`
-10. `失败与恢复`
-11. `测试计划与验收`
+1. `Component Role`
+2. `Sources and Rationale`
+3. `Upstream and Downstream Relationships`
+4. `Responsibility Boundaries`
+5. `Core Interfaces`
+6. `Data Model`
+7. `Runtime Model and State Machine`
+8. `Security and Permissions`
+9. `Observability`
+10. `Failure and Recovery`
+11. `Test Plan and Acceptance`
 
-## 6. 全局对象模型
+## 6. Global Object Model
 
-| Object | `object` value | Id | Authority | 生命周期 |
+| Object | `object` value | Id | Authority | Lifecycle |
 |--------|----------------|-----|-----------|----------|
-| Harness | `harness` | `chrn_...`（即 ADK `appName`） | Harness Registry | 创建到删除 |
-| Invocation | `invocation` | `inv_...` | Session Runtime | 单次 `/run`，保留期内可读 |
-| Session | `session` | caller-supplied `sessionId`（默认 `hsess_...`） | Session Runtime | `(appName, userId, sessionId)` 三元组 |
-| Turn | `turn` | `turn_...` | Session Runtime | 一个 harness 执行回合 |
-| Container | `container` | `cntr_...` | Container Runtime | 跟随 session |
-| File | `file` | `file_...` | Artifact Store | 跟随 container/session |
-| Event | none | invocation-scoped | Event Log | 保留期内可 replay |
+| Harness | `harness` | `chrn_...` (the ADK `appName`) | Harness Registry | Creation through deletion |
+| Invocation | `invocation` | `inv_...` | Session Runtime | One `/run`; readable during the retention period |
+| Session | `session` | Caller-supplied `sessionId` (default `hsess_...`) | Session Runtime | `(appName, userId, sessionId)` tuple |
+| Turn | `turn` | `turn_...` | Session Runtime | One harness execution turn |
+| Container | `container` | `cntr_...` | Container Runtime | Follows the session |
+| File | `file` | `file_...` | Artifact Store | Follows the container/session |
+| Event | none | invocation-scoped | Event Log | Replayable during the retention period |
 
-`invocation` 是 public 运行单元；`turn` 是内部执行单元。首期一一对应，但协议上不依赖两者永远相同。
+An `invocation` is the public run unit; a `turn` is the internal execution unit. They are 1:1 in the initial release, but the protocol does not assume that they will always remain so.
 
-## 7. 全局 HTTP 约定
+## 7. Global HTTP Conventions
 
-### 7.1 Header
+### 7.1 Headers
 
-| Header | 必填 | 说明 |
+| Header | Required | Description |
 |--------|------|------|
-| `Authorization: Bearer <token>` | 除 health/ready probe 外必填 | HaaS caller token |
-| `Idempotency-Key` | 可选（服务端支持去重） | mutating API 幂等；重复 key 返回首次结果，不重复启动 harness |
-| `Last-Event-ID` | 可选 | `/run_sse` 与 HaaS native stream 的重连 replay cursor |
-| `X-HaaS-Tenant-ID` | 条件 | 多租户部署必填或由 token 解析 |
-| `X-HaaS-Workspace-ID` | 条件 | workspace scope，由 token 或 header 解析 |
-| `X-HaaS-Trace-ID` | 可选 | 端到端 trace id；缺失时由服务端生成 |
+| `Authorization: Bearer <token>` | Required except for health/ready probes | HaaS caller token |
+| `Idempotency-Key` | Optional (server supports deduplication) | Idempotency for mutating APIs; a repeated key returns the first result and does not restart the harness |
+| `Last-Event-ID` | Optional | Reconnection replay cursor for `/run_sse` and HaaS native streams |
+| `X-HaaS-Tenant-ID` | Conditional | Required for multi-tenant deployments or derived from the token |
+| `X-HaaS-Workspace-ID` | Conditional | Workspace scope, derived from the token or header |
+| `X-HaaS-Trace-ID` | Optional | End-to-end trace id; generated by the server if absent |
 
-### 7.2 ADK 字段命名
+### 7.2 ADK Field Naming
 
-ADK-compatible path 的请求与响应统一使用 `camelCase`（`appName`、`userId`、`sessionId`、`newMessage`、`invocationId`、`lastUpdateTime`）。HaaS native path 沿用 HaaS envelope。
+Requests and responses on ADK-compatible paths consistently use `camelCase` (`appName`, `userId`, `sessionId`, `newMessage`, `invocationId`, `lastUpdateTime`). HaaS native paths use the HaaS envelope.
 
 ### 7.3 HaaS Envelope
 
-HaaS native endpoints 使用：
+HaaS native endpoints use:
 
 ```json
 {
@@ -218,7 +215,7 @@ HaaS native endpoints 使用：
 }
 ```
 
-分页：
+Pagination:
 
 ```json
 {
@@ -228,11 +225,9 @@ HaaS native endpoints 使用：
 }
 ```
 
-单资源（Harness、File、Invocation 等）、列表与诊断响应统一包裹在 `data` 中；
-仅分页列表额外携带 `nextCursor`。Health/ready/status/diagnostics 同样返回该
-envelope。
+Single resources (Harness, File, Invocation, and others), lists, and diagnostic responses are consistently wrapped in `data`; only paginated lists additionally carry `nextCursor`. Health/ready/status/diagnostics also return this envelope.
 
-错误（所有 public surface 通用）：
+Errors (common to all public surfaces):
 
 ```json
 {
@@ -248,23 +243,20 @@ envelope。
 }
 ```
 
-HaaS 稳定错误码使用 `haas_` 前缀或 ADK 语义码（如 `session_busy`、`app_not_found`）。
-错误码唯一目录见 [ERROR-CODES](haas-protocol/ERROR-CODES.md)，OpenAPI 的
-`haasError.code` 与之一一对应。
+Stable HaaS error codes use the `haas_` prefix or ADK semantic codes (such as `session_busy` and `app_not_found`). See [ERROR-CODES](haas-protocol/ERROR-CODES.md) for the sole error-code catalog; OpenAPI `haasError.code` values map to it one-to-one.
 
-### 7.4 时间戳约定
+### 7.4 Timestamp Conventions
 
-| 层面 | 格式 | 说明 |
+| Surface | Format | Description |
 |------|------|------|
-| ADK-compatible public 字段 | float 秒 epoch（`1743712220.385936`） | `Event.timestamp`、`Session.lastUpdateTime`，是 ADK 契约，不可改 |
-| HaaS 内部记录 + HaaS native API | 整数毫秒 epoch（`1786400000000`） | `createdAtMs`/`updatedAtMs`/`observedAtMs`/`expiresAtMs`（见 [Stores](stores/README.md)） |
+| ADK-compatible public fields | Float seconds since epoch (`1743712220.385936`) | `Event.timestamp`, `Session.lastUpdateTime`; this is an ADK contract and MUST NOT change |
+| HaaS internal records + HaaS native API | Integer milliseconds since epoch (`1786400000000`) | `createdAtMs`/`updatedAtMs`/`observedAtMs`/`expiresAtMs` (see [Stores](stores/README.md)) |
 
-投影层负责 `ms -> float 秒`（`ms / 1000.0`）的转换；任何组件不得在公开面输出
-两种格式混用的时间戳。
+The projection layer is responsible for converting `ms -> float seconds` (`ms / 1000.0`). No component may expose timestamps that mix the two formats on a public surface.
 
-### 7.5 ID 约定
+### 7.5 ID Conventions
 
-| 对象 | 前缀 | 生成方 |
+| Object | Prefix | Generator |
 |------|------|--------|
 | harness / ADK app | `chrn_` | Harness Registry |
 | invocation | `inv_` | Session Runtime |
@@ -272,14 +264,13 @@ HaaS 稳定错误码使用 `haas_` 前缀或 ADK 语义码（如 `session_busy`�
 | container | `cntr_` | Container Runtime |
 | file | `file_` | Artifact Store |
 | event | `evt_` | Event Log |
-| session | caller-supplied，默认 `hsess_` | 客户端或 Session Runtime |
+| session | Caller-supplied, default `hsess_` | Client or Session Runtime |
 
-`invocationId` 与 `turnId` 首期 1:1 但 id 不相等，映射关系持久化在
-`InvocationRecord.turnId`。
+`invocationId` and `turnId` are 1:1 in the initial release but are not equal. Their mapping is persisted in `InvocationRecord.turnId`.
 
-## 8. 全局事件约定
+## 8. Global Event Conventions
 
-Public 事件是 ADK `Event`。canonical event 必须能无损投影为 ADK `Event`：
+Public events are ADK `Event` objects. A canonical event MUST support lossless projection to an ADK `Event`:
 
 ```json
 {
@@ -293,22 +284,22 @@ Public 事件是 ADK `Event`。canonical event 必须能无损投影为 ADK `Eve
 }
 ```
 
-规则：
+Rules:
 
-- `/run_sse` 事件按产生顺序 flush，`streaming:true` 时 `text` part 增量出现。
-- invocation 完成即关闭 stream；`/run` 一次性返回事件数组。
-- heartbeat 使用 SSE comment `: keep-alive`，不产生事件。
-- HaaS 内部 canonical event 可携带 `sequenceNumber`/`eventId` 用于 replay，但投影到 ADK `Event` 时只输出 ADK 字段（HaaS native stream 可额外输出 `haas` 元数据）。
-- 非流式 `/run` 输出必须等于 `/run_sse` 流式聚合输出（parity）。
+- `/run_sse` events are flushed in production order. With `streaming:true`, `text` parts appear incrementally.
+- The stream closes when the invocation completes; `/run` returns the event array in one response.
+- Heartbeats use the SSE comment `: keep-alive` and do not produce events.
+- Internal HaaS canonical events MAY carry `sequenceNumber`/`eventId` for replay, but projection to an ADK `Event` emits only ADK fields (a HaaS native stream MAY additionally emit `haas` metadata).
+- Non-streaming `/run` output MUST equal the aggregated streaming output of `/run_sse` (parity).
 
-## 9. 兼容与版本策略
+## 9. Compatibility and Versioning Strategy
 
-1. HaaS 首个协议版本为 `2026-08-26`，northbound 协议层对齐 ADK 2.0 REST API。
-2. HaaS native responses 必须返回 `HaaS-Version: 2026-08-26`。
-3. 同版本内只能新增 optional field、事件 part 类型或 `haas_` 前缀错误码。
-4. 删除、改名、改义、增加必填字段或收紧约束必须发布新版本。
+1. The first HaaS protocol version is `2026-08-26`; its northbound protocol layer aligns with the ADK 2.0 REST API.
+2. HaaS native responses MUST return `HaaS-Version: 2026-08-26`.
+3. Within the same version, changes MAY only add optional fields, event part types, or `haas_`-prefixed error codes.
+4. Removing, renaming, or changing semantics, adding required fields, or tightening constraints MUST require a new version.
 
-## 10. 组件间依赖方向
+## 10. Inter-Component Dependency Direction
 
 ```text
 api -> protocol schemas
@@ -329,30 +320,30 @@ observability <- all components through logging/metrics interfaces
 security-boundary <- all public and adapter boundaries
 ```
 
-禁止反向依赖：adapter 不 import API route；model proxy 不 import concrete adapter；observability 不改变业务状态。
+Reverse dependencies are prohibited: adapters MUST NOT import API routes; the model proxy MUST NOT import concrete adapters; and observability MUST NOT change business state.
 
-## 11. 测试与准出
+## 11. Testing and Release Gates
 
-文档初始化阶段：
+Documentation initialization stage:
 
 - `git diff --check`
 - Markdown structure/self-review
 
-实现阶段：
+Implementation stage:
 
-- ADK compatibility：用 ADK 官方 client 验证 `/list-apps`、`/run`、`/run_sse`、session 路径。
-- API/schema：FastAPI ASGI integration tests。
-- SSE：progressive flush、stream 关闭语义、heartbeat、disconnect/replay、parity。
-- Codex app-server：真实 handshake、thread/start、turn/start、cancel、schema generation/probe。
-- Sandbox：OpenSandbox sandbox/execd/credential vault 投影验证。
-- Container：OpenSandbox AIO build、ports、health/ready、SIGTERM drain。
-- Runtime trim：`DISABLE_*` 使 code-server/jupyter 不启动，而 browser/VNC/sandbox 与 Codex readiness 不回归（container smoke）。
-- Security：secret scan、redaction inverse assertions、SSRF allowlist、artifact traversal probes。
+- ADK compatibility: validate `/list-apps`, `/run`, `/run_sse`, and session paths with the official ADK client.
+- API/schema: FastAPI ASGI integration tests.
+- SSE: progressive flush, stream-closure semantics, heartbeat, disconnect/replay, and parity.
+- Codex app-server: real handshake, thread/start, turn/start, cancel, and schema generation/probe.
+- Sandbox: verify OpenSandbox sandbox/execd/credential vault projection.
+- Container: OpenSandbox AIO build, ports, health/ready, and SIGTERM drain.
+- Runtime trim: `DISABLE_*` prevents code-server/jupyter from starting without regressing browser/VNC/sandbox or Codex readiness (container smoke).
+- Security: secret scan, inverse redaction assertions, SSRF allowlist, and artifact traversal probes.
 
-## 12. 维护规则
+## 12. Maintenance Rules
 
-1. 新增组件先更新本 README 的组件规划表，再创建组件 spec。
-2. 变更 public protocol 必须同步更新 schema、tests 和 compatibility notes。
-3. 新增 harness adapter 只能通过 `harness-adapter` 定义的 interface 接入。
-4. Codex app-server 版本升级必须重新验证本机 `codex app-server --help` 与 generated schema。
-5. OpenSandbox AIO base image 升级必须更新 digest、来源和 Docker smoke 证据。
+1. Before adding a component spec, update the component plan table in this README.
+2. Changes to the public protocol MUST update schemas, tests, and compatibility notes in the same change.
+3. A new harness adapter MAY integrate only through the interface defined by `harness-adapter`.
+4. Upgrading the Codex app-server version MUST revalidate the local `codex app-server --help` output and generated schema.
+5. Upgrading the OpenSandbox AIO base image MUST update its digest, source, and Docker smoke evidence.

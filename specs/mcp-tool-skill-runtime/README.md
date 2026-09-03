@@ -1,67 +1,69 @@
-# MCP / Tool / Skill Runtime 组件规格
+# MCP / Tool / Skill Runtime Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-30
 Related specs: [Harness Registry](../harness-registry/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-MCP / Tool / Skill Runtime 负责把 configured harness 中声明的 MCP servers、skills、disabled tools 和 tool approval 策略转换为各 harness 可执行的运行时配置，并维护跨 harness 的能力声明。
+The MCP / Tool / Skill Runtime converts the MCP servers, skills, disabled tools, and tool approval policies declared in a configured harness into executable runtime configuration for each harness, and maintains cross-harness capability declarations.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| Harness Registry | `mcpServers`、`skills`、`disabledTools` 的配置 shape 与校验 |
-| `mpa-codex-worker` MCP/skill specs | source freeze、runtime headers、Codex native MCP config、skill folder materialization |
-| ADK 2.0 | `actions.artifactDelta`/skill 物化与 harness 能力声明 |
-| OpenSandbox | sandbox 内 shell/file/MCP 能力、egress policy 和 credential vault |
+| Source | Adopted Content |
+|--------|-----------------|
+| Harness Registry | Configuration shape and validation for `mcpServers`, `skills`, and `disabledTools` |
+| `mpa-codex-worker` MCP/skill specs | Source freezing, runtime headers, Codex native MCP configuration, and skill-folder materialization |
+| ADK 2.0 | `actions.artifactDelta`/skill materialization and harness capability declarations |
+| OpenSandbox | Shell/file/MCP capabilities in the sandbox, egress policy, and credential vault |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | Harness Registry | 配置校验和有效配置展开 |
-| 上游 | Session Runtime | session 创建时冻结 tools/MCP/skills |
-| 上游 | Harness Adapter | 获取 adapter-specific config materialization |
-| 下游 | MCP servers | Streamable HTTP、SSE 或 stdio |
-| 下游 | Skill Store | skill bundle 保存和 materialization |
-| 下游 | Security Boundary | URL/header/secret/path validation |
-| 下游 | Model Proxy | provider-specific tool schema transform |
+| Direction | Component | Relationship |
+|-----------|-----------|--------------|
+| Upstream | Harness Registry | Configuration validation and effective configuration expansion |
+| Upstream | Session Runtime | Freezes tools/MCP/skills when creating a session |
+| Upstream | Harness Adapter | Obtains adapter-specific configuration materialization |
+| Downstream | MCP servers | Streamable HTTP, SSE, or stdio |
+| Downstream | Skill Store | Stores and materializes skill bundles |
+| Downstream | Security Boundary | URL/header/secret/path validation |
+| Downstream | Model Proxy | Provider-specific tool schema transforms |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 校验 MCP server URL、transport、headers、auth ref、timeout、enabled flag。
-- 运行 loopback MCP proxy（端口 `18081`）：harness 连 proxy 而不是直连 MCP server。
-- 由 proxy 注入真实 MCP secret（经 Security Boundary 的 `resolve_secret` 解析），harness 不接触明文。
-- 将 enabled MCP servers 转换为 adapter-specific config（指向 loopback proxy）。
-- 保证 disabled MCP server 不被连接。
-- 物化完整 skill folder，而不是只写 `SKILL.md`。
-- 校验 skill path 不越界，二进制内容 byte-for-byte 保留。
-- 维护 disabledTools 的语义：hard、advisory、unsupported。
-- 记录 tool/MCP/skill capability 和降级事件。
+- Validate MCP server URLs, transports, headers, auth refs, timeouts, and enabled flags.
+- Run the loopback MCP proxy (port `18081`): the harness connects to the proxy rather than directly to an MCP server.
+- Have the proxy inject the real MCP secret (resolved through Security Boundary `resolve_secret`), so the harness does not access plaintext.
+- Convert enabled MCP servers into adapter-specific configuration that points to the loopback proxy.
+- Ensure that disabled MCP servers are not contacted.
+- Materialize the complete skill folder rather than writing only `SKILL.md`.
+- Validate that skill paths do not escape their boundary and preserve binary content byte-for-byte.
+- Maintain disabledTools semantics: hard, advisory, or unsupported.
+- Record tool/MCP/skill capabilities and degradation events.
 
-不负责：
+Non-responsibilities:
 
-- 不保存真实 MCP credential 明文。
-- 不直接调用模型。
-- 不向上游暴露 harness-specific config file path。
-- 不在不支持 hard-disable 的 harness 上谎称已强制禁用。
+- Does not store real MCP credentials in plaintext.
+- Does not call models directly.
+- Does not expose harness-specific configuration file paths upstream.
+- Does not falsely claim enforced disablement on a harness that does not support hard-disable.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
-### 5.1 MCP Proxy（loopback，端口 `18081`）
+### 5.1 MCP Proxy (Loopback, Port `18081`)
 
-| Method | Path | 用途 |
-|--------|------|------|
-| POST | `/mcp` | Streamable HTTP MCP relay（按 `Mcp-Proxy-Key` 或 session token 路由到目标 server） |
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/mcp` | Streamable HTTP MCP relay (routes to the target server by `Mcp-Proxy-Key` or session token) |
 | GET | `/sse` | SSE transport relay |
-| GET | `/health` | proxy liveness |
-| GET | `/ready` | secret resolver 与 allowlist readiness |
+| GET | `/health` | Proxy liveness |
+| GET | `/ready` | Secret resolver and allowlist readiness |
 
-proxy 只监听 `127.0.0.1:18081`，由 harness 在 sandbox 内经 loopback 访问；真实 MCP secret 由 proxy 注入，不进入 harness config/env。
+The proxy listens only on `127.0.0.1:18081` and is accessed by the harness through loopback from within the sandbox. The proxy injects real MCP secrets; they do not enter harness config/env.
 
 ### 5.2 Internal API
 
@@ -75,7 +77,7 @@ async def probe_mcp_server(server: McpServerConfig) -> McpProbeResult: ...
 async def relay_mcp_request(route: McpRoute, request: McpWireRequest) -> McpWireResponse: ...
 ```
 
-## 6. 数据模型
+## 6. Data Model
 
 ### 6.1 McpServerConfig
 
@@ -130,7 +132,7 @@ async def relay_mcp_request(route: McpRoute, request: McpWireRequest) -> McpWire
 }
 ```
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 harness config submitted
@@ -145,31 +147,26 @@ harness config submitted
 
 MCP requiredness:
 
-- `required=false`：MCP unavailable does not fail the turn; event records degraded capability.
-- `required=true`：MCP unavailable fails session preparation or turn start with `haas_mcp_unavailable`.
+- `required=false`: MCP unavailability does not fail the turn; an event records the degraded capability.
+- `required=true`: MCP unavailability fails session preparation or turn start with `haas_mcp_unavailable`.
 
 Skill requiredness:
 
-- Enabled skill missing `SKILL.md` fails config validation with
-  `422 haas_skill_source_invalid`；skill path 越界（`..`、绝对路径、控制字符）
-  同样返回 `422 haas_skill_source_invalid`，整个 harness 创建/更新不生效。
-- Skill file 内容支持 `content`（文本）或 `contentB64`（二进制），二进制必须
-  byte-for-byte round-trip；读取端点为
-  `GET /v1/haas/harnesses/{harness_id}/skills/{skill_id}/files`，越权与不存在
-  统一返回 404。
-- Runtime materialization failure fails session preparation unless adapter declares skills as advisory-only and the harness config accepts that degradation.
+- If an enabled skill is missing `SKILL.md`, configuration validation fails with `422 haas_skill_source_invalid`. A skill path that escapes its boundary (`..`, an absolute path, or control characters) also returns `422 haas_skill_source_invalid`, and the entire harness create/update operation does not take effect.
+- Skill file content supports `content` (text) or `contentB64` (binary). Binary content MUST round-trip byte-for-byte. The read endpoint is `GET /v1/haas/harnesses/{harness_id}/skills/{skill_id}/files`; unauthorized and nonexistent resources both return 404.
+- Runtime materialization failure fails session preparation unless the adapter declares skills advisory-only and the harness configuration accepts that degradation.
 
-## 8. 安全与权限
+## 8. Security and Permissions
 
-- `headers` values may contain templated request values or secret refs; resolved values are never returned.
-- MCP proxy 只监听 loopback；真实 MCP secret 只由 proxy 注入 outbound，harness 只见 loopback 地址和短 token。
-- URL validation rejects unsupported schemes, private networks and disallowed hosts unless policy explicitly allows them.
-- Skill paths cannot escape their skill root.
-- Skill execution scripts are treated as executable code and must remain within declared skill bundle paths.
-- Disabled tools are enforced through native config when available; instruction-only fallback must be visible in capability metadata.
-- MCP calls must not log full arguments or raw results by default.
+- `headers` values MAY contain templated request values or secret refs; resolved values are never returned.
+- The MCP proxy listens only on loopback. Only the proxy injects real MCP secrets outbound; the harness sees only the loopback address and a short-lived token.
+- URL validation rejects unsupported schemes, private networks, and disallowed hosts unless policy explicitly allows them.
+- Skill paths MUST NOT escape their skill root.
+- Skill execution scripts are treated as executable code and MUST remain within declared skill bundle paths.
+- Disabled tools are enforced through native configuration where available; instruction-only fallback MUST be visible in capability metadata.
+- MCP calls MUST NOT log full arguments or raw results by default.
 
-## 9. 可观测性
+## 9. Observability
 
 Events/logs:
 
@@ -189,23 +186,23 @@ Metrics:
 - `haas_skill_materialization_total{status}`
 - `haas_tool_restriction_total{enforcement,status}`
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
-|------|------|
-| MCP URL invalid | reject config with `haas_mcp_source_invalid` |
-| MCP required unavailable | fail session/turn preparation |
-| MCP optional unavailable | run without it and emit degraded event |
-| MCP proxy secret 解析失败 | proxy 返回 401；harness 侧回合按 adapter 语义失败 |
-| Skill missing `SKILL.md` | reject config |
-| Skill materialization partial write | remove partial directory and fail closed |
-| Disabled tool unsupported | mark `advisory` or `unsupported`; do not claim hard enforcement |
-| Header template missing value | reject turn before contacting MCP |
+| Scenario | Behavior |
+|----------|----------|
+| MCP URL invalid | Reject configuration with `haas_mcp_source_invalid` |
+| Required MCP unavailable | Fail session/turn preparation |
+| Optional MCP unavailable | Run without it and emit a degraded event |
+| MCP proxy secret resolution fails | Proxy returns 401; the harness-side turn fails according to adapter semantics |
+| Skill missing `SKILL.md` | Reject configuration |
+| Partial write during skill materialization | Remove the partial directory and fail closed |
+| Disabled tool unsupported | Mark `advisory` or `unsupported`; do not claim hard enforcement |
+| Header template value missing | Reject the turn before contacting MCP |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：MCP config validation、header resolution、skill path validation、disabled tool mapping。
-- Integration：adapter-specific config rendering for Codex, Pi and OpenCode fixtures。
-- Security：path traversal, secret header redaction, disabled source not contacted。
-- Compatibility：skill folder round-trip test；MCP unavailable degradation test。
-- E2E：Codex session with one mock MCP server proves tool discovery and safe event projection。
+- Unit: MCP configuration validation, header resolution, skill path validation, and disabled-tool mapping.
+- Integration: adapter-specific configuration rendering for Codex, Pi, and OpenCode fixtures.
+- Security: path traversal, secret-header redaction, and verification that a disabled source is not contacted.
+- Compatibility: skill-folder round-trip test; MCP-unavailable degradation test.
+- E2E: a Codex session with one mock MCP server proves tool discovery and safe event projection.

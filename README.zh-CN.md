@@ -64,7 +64,7 @@ BaseAgent / WorkflowGraph 或 ADK Web UI。旧 /v1/codex-worker/* 迁移 shim
 [![POST /run_sse 端到端时序](docs/architecture/run-sse.zh-CN.visual-check.1440x900.light.png)](docs/architecture/run-sse.zh-CN.html)
 
 点击图片打开可交互时序图；完整对象级步骤见
-[architecture walkthrough](specs/architecture/WALKTHROUGH.md)，图源见
+[architecture walkthrough](specs/architecture/WALKTHROUGH.zh-CN.md)，图源见
 [run-sse.zh-CN.sequence.json](docs/architecture/run-sse.zh-CN.sequence.json) ·
 [English diagram](docs/architecture/run-sse.html)。
 
@@ -90,7 +90,7 @@ BaseAgent / WorkflowGraph 或 ADK Web UI。旧 /v1/codex-worker/* 迁移 shim
 
 appName 对应 configured harness id（chrn_...，name 可作为别名）。完整 schema 以
 [OpenAPI](specs/haas-protocol/haas-2026-08-26.openapi.yaml) 为准，错误目录见
-[ERROR-CODES.md](specs/haas-protocol/ERROR-CODES.md)。
+[ERROR-CODES.md](specs/haas-protocol/ERROR-CODES.zh-CN.md)。
 
 ### HaaS control plane
 
@@ -175,17 +175,17 @@ haas/
 
 建议按以下顺序阅读：
 
-1. [specs/README.md](specs/README.md)：组件索引与全局约定。
-2. [architecture](specs/architecture/README.md) 与
-   [WALKTHROUGH](specs/architecture/WALKTHROUGH.md)：边界、事实归属、完整请求时序。
-3. [haas-protocol](specs/haas-protocol/README.md)：ADK 与 HaaS native 协议合同。
-4. [harness-adapter](specs/harness-adapter/README.md) 与
-   [codex-app-server-adapter](specs/codex-app-server-adapter/README.md)：adapter seam 和首期实现。
-5. [session-runtime](specs/session-runtime/README.md)、
-   [event-log-sse](specs/event-log-sse/README.md)、
-   [security-boundary](specs/security-boundary/README.md)：执行事实、恢复与安全边界。
-6. [container-runtime](specs/container-runtime/README.md)、
-   [startup](specs/startup/README.md)、[runtime-trim](specs/runtime-trim/README.md)：
+1. [specs/README.zh-CN.md](specs/README.zh-CN.md)：组件索引与全局约定。
+2. [architecture](specs/architecture/README.zh-CN.md) 与
+   [WALKTHROUGH](specs/architecture/WALKTHROUGH.zh-CN.md)：边界、事实归属、完整请求时序。
+3. [haas-protocol](specs/haas-protocol/README.zh-CN.md)：ADK 与 HaaS native 协议合同。
+4. [harness-adapter](specs/harness-adapter/README.zh-CN.md) 与
+   [codex-app-server-adapter](specs/codex-app-server-adapter/README.zh-CN.md)：adapter seam 和首期实现。
+5. [session-runtime](specs/session-runtime/README.zh-CN.md)、
+   [event-log-sse](specs/event-log-sse/README.zh-CN.md)、
+   [security-boundary](specs/security-boundary/README.zh-CN.md)：执行事实、恢复与安全边界。
+6. [container-runtime](specs/container-runtime/README.zh-CN.md)、
+   [startup](specs/startup/README.zh-CN.md)、[runtime-trim](specs/runtime-trim/README.zh-CN.md)：
    OpenSandbox AIO 镜像、启动和裁剪合同。
 
 ## 开发约束

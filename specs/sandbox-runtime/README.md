@@ -1,56 +1,58 @@
-# Sandbox Runtime 组件规格
+# Sandbox Runtime Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-26
 Related specs: [Architecture](../architecture/README.md), [Policy Controller](../policy-controller/README.md), [Harness Adapter](../harness-adapter/README.md), [Container Runtime](../container-runtime/README.md), [Security Boundary](../security-boundary/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Sandbox Runtime 是 HaaS 多 harness 运行环境标准化的承载体。它把 Policy Controller 编译出的 `EffectivePolicy` 与 harness adapter 声明的 sandbox 需求，统一投影为 OpenSandbox AIO 的 sandbox/execd/credential vault 配置，使不同 harness（Codex、Pi、OpenCode、AMP）在同一个隔离模型下执行。
+Sandbox Runtime is the standardized execution substrate for HaaS multi-harness environments. It projects the `EffectivePolicy` compiled by Policy Controller and the sandbox requirements declared by harness adapters into a unified set of OpenSandbox AIO sandbox/execd/credential vault configurations, allowing different harnesses (Codex, Pi, OpenCode, and AMP) to execute under the same isolation model.
 
-它解决的问题：harness 各自携带 sandbox 语义（Codex sandbox policy、OpenCode permission config、Pi workspace isolation）。Sandbox Runtime 让这些差异收敛到 OpenSandbox 一套底层能力上，而不是让 HaaS 为每个 harness 拼装不同的隔离策略。
+It addresses the fact that each harness carries its own sandbox semantics (Codex sandbox policy, OpenCode permission config, and Pi workspace isolation). Sandbox Runtime converges these differences onto one set of underlying OpenSandbox capabilities instead of requiring HaaS to assemble a different isolation policy for every harness.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| OpenSandbox docs | sandbox lifecycle（create/start/stop/delete）、execd 命令执行、credential vault、egress policy |
-| OpenSandbox AIO | 镜像内 shell/file/browser 能力、sandbox API 端口 `8080` |
-| Codex app-server | 自带 sandbox policy，只能作为内层，不替代 HaaS 外层 sandbox |
-| Policy Controller | workspace/network/tool/approval 的有效策略投影 |
+| Source | Adopted content |
+|--------|-----------------|
+| OpenSandbox docs | sandbox lifecycle (create/start/stop/delete), execd command execution, credential vault, egress policy |
+| OpenSandbox AIO | in-image shell/file/browser capabilities, sandbox API port `8080` |
+| Codex app-server | built-in sandbox policy, which can only be an inner layer and does not replace the outer HaaS sandbox |
+| Policy Controller | effective policy projection for workspace/network/tool/approval |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | Policy Controller | 提供 `EffectivePolicy`（workspace/network/tool/approval） |
-| 上游 | Harness Adapter | 提供 harness-specific sandbox 声明（writableRoots、cwd、approvalMode） |
-| 上游 | Session Runtime | 请求为 session/invocation 创建 sandbox 实例 |
-| 上游 | Artifact Store | 报告 workspace 文件索引与产物路径 |
-| 下游 | OpenSandbox sandbox API | 创建/销毁 sandbox 实例 |
-| 下游 | OpenSandbox execd | 在 sandbox 内执行命令，支持 SSE result |
-| 下游 | OpenSandbox credential vault | 存 provider/key 引用，按 session 签发短 token |
-| 下游 | OpenSandbox egress | 网络 egress policy |
+| Direction | Component | Relationship |
+|-----------|-----------|--------------|
+| Upstream | Policy Controller | Provides `EffectivePolicy` (workspace/network/tool/approval) |
+| Upstream | Harness Adapter | Provides harness-specific sandbox declarations (writableRoots, cwd, approvalMode) |
+| Upstream | Session Runtime | Requests creation of a sandbox instance for a session/invocation |
+| Upstream | Artifact Store | Reports workspace file indexes and artifact paths |
+| Downstream | OpenSandbox sandbox API | Creates/destroys sandbox instances |
+| Downstream | OpenSandbox execd | Executes commands inside the sandbox with SSE result support |
+| Downstream | OpenSandbox credential vault | Stores provider/key references and issues short-lived tokens per session |
+| Downstream | OpenSandbox egress | Network egress policy |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 把 `EffectivePolicy` 编译为 `SandboxSpec`（workspace mounts、writable roots、network egress、resource limit）。
-- 为每个 session/invocation 创建并跟踪 OpenSandbox sandbox 实例生命周期。
-- 把 harness adapter 的 sandbox 声明收窄投影（只允许小于等于 policy 的范围，不允许扩大）。
-- 把 provider/key 密钥写入 credential vault，adapter 只拿 vault 引用或短 token。
-- 在 sandbox 内运行 harness runtime 进程，并把 execd 输出桥接给 adapter。
-- 记录 sandbox 生命周期与安全事件。
+- Compile `EffectivePolicy` into `SandboxSpec` (workspace mounts, writable roots, network egress, resource limit).
+- Create and track the lifecycle of an OpenSandbox sandbox instance for each session/invocation.
+- Narrowly project the harness adapter's sandbox declaration (the projected scope MUST be less than or equal to the policy scope and MUST NOT expand it).
+- Write provider/key secrets to the credential vault; adapters receive only vault references or short-lived tokens.
+- Run harness runtime processes inside the sandbox and bridge execd output to the adapter.
+- Record sandbox lifecycle and security events.
 
-不负责：
+Non-responsibilities:
 
-- 不决定 workspace/network/tool policy（只消费 Policy Controller 输出）。
-- 不执行 harness 的原生协议（那是 adapter 职责）。
-- 不替代 HaaS protocol 的 public API。
-- 不保存长期 provider credential 明文；vault 内容是引用。
+- It does not decide workspace/network/tool policy; it only consumes Policy Controller output.
+- It does not execute a harness-native protocol; that is the adapter's responsibility.
+- It does not replace the HaaS protocol public API.
+- It does not store long-lived provider credentials in plaintext; vault contents are references.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ```python
 async def compile_sandbox_spec(policy: EffectivePolicy, decl: HarnessSandboxDecl) -> SandboxSpec: ...
@@ -62,7 +64,7 @@ async def destroy_sandbox(sandbox_id: str) -> None: ...
 async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 ```
 
-## 6. 数据模型
+## 6. Data Models
 
 ### 6.1 SandboxSpec
 
@@ -87,7 +89,7 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 }
 ```
 
-### 6.2 HarnessSandboxDecl（adapter 声明）
+### 6.2 HarnessSandboxDecl (adapter declaration)
 
 ```json
 {
@@ -102,7 +104,7 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 }
 ```
 
-`compile_sandbox_spec` 首期只消费 `cwd`、`writableRoots`、`approvalMode`；`base` 与 `nativeSandbox` 是 adapter 能力声明，供后续 OpenSandbox 投影（S5.3）使用。
+In the initial release, `compile_sandbox_spec` consumes only `cwd`, `writableRoots`, and `approvalMode`; `base` and `nativeSandbox` are adapter capability declarations for subsequent OpenSandbox projection (S5.3).
 
 ### 6.3 SandboxHandle
 
@@ -116,7 +118,7 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 }
 ```
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 policy compiled
@@ -129,32 +131,32 @@ policy compiled
   -> sandbox destroyed at session close
 ```
 
-Sandbox 实例状态：
+Sandbox instance states:
 
 ```text
 requested -> creating -> running -> draining -> stopped -> destroyed
                   |                     +-> failed
 ```
 
-规则：
+Rules:
 
-- sandbox 实例跟随 session；session 删除必须同步销毁 sandbox。
-- adapter 声明的 writableRoots 若超出 policy，compile 阶段拒绝，不允许静默扩大。
-- provider key 只能写入 vault，不能出现在 sandbox env 或启动命令参数中。
-- 沙箱重启后 `generation` 增加；无法恢复的 harness thread 由 adapter 判定并上报。
+- A sandbox instance follows its session; deleting a session MUST synchronously destroy its sandbox.
+- If writableRoots declared by the adapter exceed the policy, the compile phase MUST reject the declaration and MUST NOT silently expand the scope.
+- A provider key MUST only be written to the vault and MUST NOT appear in the sandbox env or startup command arguments.
+- After a sandbox restart, `generation` increases; the adapter determines and reports whether the harness thread is recoverable.
 
-## 8. 安全与权限
+## 8. Security and Permissions
 
-- Sandbox 隔离是运行时硬边界，不是唯一边界（纵深防御）。
-- harness 自带的 sandbox 只能作为内层，不能绕过 OpenSandbox sandbox/egress。
-- credential vault 的粒度到 session/audience，短 TTL，可撤销。
-- 所有 workspace 路径 canonicalize 后与 policy 比较。
-- 网络 egress 由 OpenSandbox egress policy 与 HaaS URL validator 双层约束，缺一不可。
-- sandbox env、启动命令、execd 输出在进入日志/事件前必须脱敏。
+- Sandbox isolation is a hard runtime boundary, but not the only boundary (defense in depth).
+- A harness's built-in sandbox can only serve as an inner layer and MUST NOT bypass the OpenSandbox sandbox/egress layer.
+- Credential vault scope is per session/audience, with a short TTL and revocation support.
+- All workspace paths MUST be canonicalized before comparison with policy.
+- Network egress is constrained by both OpenSandbox egress policy and the HaaS URL validator; neither MAY be omitted.
+- The sandbox env, startup commands, and execd output MUST be redacted before entering logs/events.
 
-## 9. 可观测性
+## 9. Observability
 
-Events/logs：
+Events/logs:
 
 - `haas.sandbox.spec_compiled`
 - `haas.sandbox.created`
@@ -163,33 +165,33 @@ Events/logs：
 - `haas.sandbox.vault_write`
 - `haas.sandbox.widening_rejected`
 
-Metrics：
+Metrics:
 
 - `haas_sandbox_active`
 - `haas_sandbox_create_duration_ms{status}`
 - `haas_sandbox_run_total{adapterBase,status}`
 - `haas_sandbox_vault_write_total{audience}`
 
-## 10. 失败与恢复
+## 10. Failures and Recovery
 
-| 场景 | 行为 |
-|------|------|
-| sandbox 创建失败 | invocation failed；不 fallback 到无 sandbox 执行 |
-| adapter 声明超出 policy | `haas_sandbox_widening_rejected`，fail closed |
-| sandbox 重启 | generation 增加；adapter inspect 判定 thread 是否可恢复 |
-| vault 写入失败 | turn 不启动，返回 `haas_vault_unavailable` |
-| egress 阻断网络 | 按 deny 处理；安全事件记录 host（脱敏） |
-| 销毁失败 | 保留清理队列，重试；不阻塞 session 状态收敛 |
+| Scenario | Behavior |
+|----------|----------|
+| sandbox creation fails | invocation fails; MUST NOT fall back to execution without a sandbox |
+| adapter declaration exceeds policy | `haas_sandbox_widening_rejected`; fail closed |
+| sandbox restarts | `generation` increases; adapter inspection determines whether the thread is recoverable |
+| vault write fails | turn does not start and returns `haas_vault_unavailable` |
+| egress blocks network access | handle as deny; record a security event with a redacted host |
+| destruction fails | retain a cleanup queue and retry; MUST NOT block convergence of session state |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance
 
-- Unit：SandboxSpec 编译、narrow-only 投影拒绝、路径 canonicalization、egress 编译。
-- Integration：OpenSandbox sandbox create/run/destroy、execd SSE result、credential vault 写入与短 token 撤销。
-- Security：provider key 不进 sandbox env/启动命令/日志；widening 全部拒绝。
-- E2E：Codex turn 在 sandbox 内完成文件读写并产出 artifact，verify 路径受限。
+- Unit: SandboxSpec compilation, rejection of narrow-only projection violations, path canonicalization, and egress compilation.
+- Integration: OpenSandbox sandbox create/run/destroy, execd SSE result, credential vault writes, and short-lived token revocation.
+- Security: provider keys do not enter the sandbox env/startup commands/logs; all widening is rejected.
+- E2E: a Codex turn completes file reads/writes inside the sandbox and produces an artifact; verify that paths are constrained.
 
-## 12. 下一步验证
+## 12. Next Validation Steps
 
-- 确认 OpenSandbox sandbox API 与 execd 的本机可用版本和精确 endpoint（`Unknown`，待实现阶段用 pin commit 验证）。首期 `OpenSandboxClient` 假设 REST endpoint 为 `POST/GET/DELETE /sandboxes[/{id}]`、`POST /sandboxes/{id}/exec`、`POST /vault/secrets`，并作为类常量暴露以便探测后修正。
-- 确认 Codex app-server 进程能稳定在 OpenSandbox sandbox 内以非 root 运行并点对点联通 loopback model/MCP proxy。
-- 真实 OpenSandbox 探测用显式开关 `HAAS_E2E_OPEN_SANDBOX=1`；未开开关时 OpenSandbox client 测试为 offline mock（`httpx.MockTransport`）。
+- Confirm the locally available OpenSandbox sandbox API and execd version and exact endpoints (`Unknown`; to be verified against the pinned commit during implementation). The initial `OpenSandboxClient` assumes the REST endpoints `POST/GET/DELETE /sandboxes[/{id}]`, `POST /sandboxes/{id}/exec`, and `POST /vault/secrets`, exposed as class constants so they can be corrected after probing.
+- Confirm that the Codex app-server process can run reliably as non-root inside an OpenSandbox sandbox and connect point-to-point to the loopback model/MCP proxy.
+- Real OpenSandbox probing uses the explicit `HAAS_E2E_OPEN_SANDBOX=1` switch; without it, OpenSandbox client tests use an offline mock (`httpx.MockTransport`).

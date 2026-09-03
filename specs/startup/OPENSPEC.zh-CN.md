@@ -1,10 +1,10 @@
-# Startup OpenSpec Task Breakdown
+# Startup OpenSpec 任务拆解
 
-**English** | [简体中文](OPENSPEC.zh-CN.md)
+[English](OPENSPEC.md) | **简体中文**
 
 Change ID: `haas-standard-startup`
-Source: [README.md](README.md)
-Verification: [CASES.md](CASES.md)
+Source: [README.zh-CN.md](README.zh-CN.md)
+Verification: [CASES.zh-CN.md](CASES.zh-CN.md)
 
 ## Plan
 
@@ -33,10 +33,10 @@ S2 and S4 can be developed in parallel after S1; S3 depends on S1/S2; S5 depends
 | ST-T8 | Security/observability | Add safe startup events/metrics, secretless redaction assertions, loopback checks and phase timing. | No token/raw JSON-RPC/prompt/credential in logs/status/events; required startup phase and ready latency metrics are emitted. | ST-013, ST-015 | ST-T1, ST-T4 |
 | ST-T9 | Functional and container verification | Execute all P0/P1 cases, real nginx/container smoke and record evidence in delivery summary. | All P0 cases pass; P1 pass or explicit `not_run` risk; real container path verifies nginx + sidecar + AIO + Codex. | ST-001..ST-015 | ST-T1..ST-T8 |
 
-## Alignment Gate
+## Alignment gate
 
-- Every P0/P1 requirement in `README.md` maps to at least one case in `CASES.md`.
-- Every implementation task maps to one or more cases; ST-T9 is the execution task for all cases.
+- Every P0/P1 requirement in `README.md` maps to at least one Case in `CASES.md`.
+- Every implementation task maps to one or more Cases; ST-T9 is the execution task for all Cases.
 - No task introduces `/v1/codex-worker/*`, public Codex JSON-RPC, mutable readiness shortcuts, or provider/MCP calls in the critical path.
-- Any task that changes the ADK/HaaS public schema MUST update the relevant protocol spec and OpenAPI before implementation.
+- Any task that changes the ADK/HaaS public schema must update the relevant protocol spec and OpenAPI before implementation.
 - Container and real Codex validation remain explicitly gated; default tests stay offline.

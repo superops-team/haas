@@ -1,52 +1,54 @@
-# Stores 组件规格
+# Stores Component Specification
+
+**English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
 Last reviewed: 2026-08-26
 Related specs: [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Harness Registry](../harness-registry/README.md), [Admission Control](../admission-control/README.md)
 
-## 1. 组件定位
+## 1. Component Role
 
-Stores 是 HaaS 的持久化事实源。它统一定义 registry、session、event log、idempotency 和 admission 计数等所有「store」的接口、schema、版本迁移、retention 和事务边界，避免各组件各自发明存储实现。
+Stores is HaaS's persistent source of truth. It defines common interfaces, schemas, version migrations, retention, and transaction boundaries for all stores, including registry, session, event log, idempotency, and admission counters, so that individual components do not invent their own storage implementations.
 
-首期实现顺序：S2 提供 `in-memory` 实现支撑协议与 fake adapter；**生产默认选型为 SQLite（单机单进程）**，Postgres 作为多副本部署的预留 backend，接口不变。默认测试必须用 in-memory 隔离，不访问真实磁盘路径。
+Initial implementation sequence: S2 provides an `in-memory` implementation to support the protocol and fake adapter. **SQLite is the production default for a single-host, single-process deployment.** Postgres is a reserved backend for multi-replica deployments, with no interface changes. Tests MUST use in-memory isolation by default and MUST NOT access real disk paths.
 
-## 2. 来源与依据
+## 2. Sources and Rationale
 
-| 来源 | 采用内容 |
-|------|----------|
-| Session Runtime | session/invocation/turn record、lease、idempotency reservation |
-| Event Log & SSE | canonical event 持久化与 cursor read |
-| Harness Registry | harness config 持久化 |
-| Admission Control | 共享配额/速率计数，要求「部署内共享」 |
+| Source | Adopted concepts |
+|--------|------------------|
+| Session Runtime | Session/invocation/turn records, leases, and idempotency reservations |
+| Event Log & SSE | Canonical event persistence and cursor reads |
+| Harness Registry | Harness configuration persistence |
+| Admission Control | Shared quota/rate counters that MUST be shared within a deployment |
 
-## 3. 上游与下游关系
+## 3. Upstream and Downstream Relationships
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | Session Runtime | 读写 session/invocation/turn/idempotency/lease |
-| 上游 | Event Log & SSE | append/read event、cursor replay |
-| 上游 | Harness Registry | 读写 harness config |
-| 上游 | Admission Control | 读写配额/速率计数 |
-| 下游 | 具体 backend | in-memory / SQLite / Postgres |
+| Direction | Component | Relationship |
+|-----------|-----------|--------------|
+| Upstream | Session Runtime | Reads and writes sessions/invocations/turns/idempotency/leases |
+| Upstream | Event Log & SSE | Appends and reads events; replays cursors |
+| Upstream | Harness Registry | Reads and writes harness configurations |
+| Upstream | Admission Control | Reads and writes quota/rate counters |
+| Downstream | Concrete backend | in-memory / SQLite / Postgres |
 
-## 4. 职责边界
+## 4. Responsibility Boundaries
 
-负责：
+Responsibilities:
 
-- 定义统一 `Store` 接口与分域 store 接口。
-- 定义每个持久化对象的 schema 与 `schemaVersion`。
-- 定义只向前（forward-only）的 schema migration。
-- 定义 retention：event 保留期、session TTL、idempotency 键过期。
-- 定义事务与 lease 语义（active-turn 互斥的分布式前提）。
-- 保证 redaction 之后才落盘，store 不保存明文 secret。
+- Define a unified `Store` interface and domain-specific store interfaces.
+- Define the schema and `schemaVersion` for every persistent object.
+- Define forward-only schema migrations.
+- Define retention for events, session TTLs, and idempotency-key expiry.
+- Define transaction and lease semantics, which are prerequisites for distributed active-turn mutual exclusion.
+- Ensure data is persisted only after redaction; stores do not retain plaintext secrets.
 
-不负责：
+Non-responsibilities:
 
-- 不鉴权、不做业务策略判断。
-- 不保存 credential 明文（只存 ref/fingerprint，见 Security Boundary）。
-- 不实现 auth provider 或 secret manager。
+- Does not authenticate or make business-policy decisions.
+- Does not store plaintext credentials; only references and fingerprints are stored, as specified by Security Boundary.
+- Does not implement an auth provider or secret manager.
 
-## 5. 核心接口
+## 5. Core Interfaces
 
 ```python
 class Store(Protocol):
@@ -61,10 +63,11 @@ class RegistryStore(Protocol):
     async def list_harnesses(self, account: AccountKey) -> list[HarnessRecord]: ...
     async def delete_harness(self, harness_id: str) -> None: ...
 
-> `AccountKey` = `(tenantId, workspaceId)`，两者均可为 `None`（未绑定租户的
-> 单节点部署）。Store 只按 key 做等值过滤，不做授权判断；scope 语义与越权
-> 响应码由 Harness Registry 与 Security Boundary 决定（见
-> [harness-registry](../harness-registry/README.md) §5.1.3）。
+> `AccountKey` = `(tenantId, workspaceId)`; either value MAY be `None` for a
+> single-node deployment not bound to a tenant. Store performs only equality
+> filtering by key and makes no authorization decisions. Harness Registry and
+> Security Boundary define scope semantics and unauthorized-access response codes;
+> see [harness-registry](../harness-registry/README.md) §5.1.3.
 
 class SessionStore(Protocol):
     async def get_session(self, key: SessionKey) -> SessionRecord | None: ...
@@ -92,20 +95,23 @@ class AdmissionStore(Protocol):
     async def acquire_quota(self, bucket: str, limit: int) -> bool: ...
     async def release_quota(self, bucket: str) -> None: ...
 
-> AdmissionStore 的窗口大小与配额上限由 Admission Control（组件）注入并解释，
-> Stores 只提供无状态的计数原语：`incr_window` 返回当前窗口内的计数，
-> `acquire_quota` 在计数低于 `limit` 时占一个配额，`release_quota` 归还一个。
-> S2 的 in-memory 后端可为同步实现；`async` 签名是面向 SQLite/Postgres 后端的
-> 合同，首个 I/O 后端落地时统一。
+> Admission Control injects and interprets the window size and quota limit for
+> AdmissionStore. Stores supplies only stateless counting primitives:
+> `incr_window` returns the count in the current window, `acquire_quota` consumes
+> one quota unit when the count is below `limit`, and `release_quota` returns one.
+> The S2 in-memory backend MAY implement these synchronously. The `async`
+> signatures are the contract for SQLite/Postgres backends and will be unified
+> when the first I/O backend is implemented.
 >
-> `count_sessions` 只服务 Observability 的 `activeSessions` 摘要（低基数聚合），
-> 不返回 record 内容、不做 scope 过滤、不作为业务列举入口。跨 user 的分页列举
-> 由 `GET /v1/haas/sessions` 单独定义，落在后续阶段。
+> `count_sessions` serves only the low-cardinality `activeSessions` summary for
+> Observability. It does not return record contents, apply scope filtering, or
+> serve as a business listing entry point. Paginated listing across users is
+> defined separately by `GET /v1/haas/sessions` in a later phase.
 ```
 
-## 6. 数据模型
+## 6. Data Model
 
-每个持久化 record 携带统一的元数据：
+Every persistent record carries common metadata:
 
 ```json
 {
@@ -115,18 +121,18 @@ class AdmissionStore(Protocol):
 }
 ```
 
-Retention 默认值：
+Default retention values:
 
-| 数据 | 默认保留 |
-|------|----------|
-| Event | 与 session 保留期同或按配置 |
-| Session | TTL 可配，默认 30 天；`expiresAtMs` 过期不可读 |
-| Idempotency key | 24 小时或请求终态后释放 |
-| Admission 计数 | 滚动窗口（窗口大小即维度定义） |
+| Data | Default retention |
+|------|-------------------|
+| Event | Same as session retention, or configurable |
+| Session | Configurable TTL, 30 days by default; unreadable after `expiresAtMs` |
+| Idempotency key | 24 hours, or released after the request reaches a terminal state |
+| Admission counters | Rolling window, whose size defines the dimension |
 
-时间戳一律使用**毫秒 epoch（integer）**，与 ADK 公开 float 秒的转换只发生在投影层（见 `specs/README.md` 全局约定）。
+All timestamps use **integer epoch milliseconds**. Conversion to the public ADK float-seconds representation occurs only in the projection layer; see the global convention in `specs/README.md`.
 
-## 7. 运行模型与状态机
+## 7. Runtime Model and State Machine
 
 ```text
 write path:
@@ -140,44 +146,44 @@ migration:
   store opens -> check schemaVersion -> apply forward migrations -> ready
 ```
 
-`acquire_lease` 是 active-turn 互斥的基础：同一 `SessionKey` 只允许一个 holder 持 lease；lease 过期可被接管，接管者必须能 explain 前 holder 的 final state（fail closed）。
+`acquire_lease` is the basis for active-turn mutual exclusion: only one holder MAY hold a lease for a given `SessionKey`. An expired lease MAY be taken over, and the new holder MUST be able to explain the previous holder's final state; otherwise it MUST fail closed.
 
-## 8. 安全与权限
+## 8. Security and Authorization
 
-- Store 只存脱敏后的数据；raw prompt、secret、完整 tool arg 不得入 store。
-- Idempotency key 只存 hash；request hash 只存 hash。
-- credential 以 `credentialRef` + `fingerprint` 形式存储，不存明文。
-- 越权访问由上层 scope 检查保证，store 不做授权。
+- Store persists only redacted data. Raw prompts, secrets, and complete tool arguments MUST NOT enter a store.
+- Only hashes of idempotency keys and request hashes are stored.
+- Credentials are stored as `credentialRef` + `fingerprint`, never as plaintext.
+- The upper layer enforces scope checks for unauthorized access; Store performs no authorization.
 
-## 9. 可观测性
+## 9. Observability
 
-Metrics：
+Metrics:
 
 - `haas_store_op_duration_ms{store,op,status}`
 - `haas_store_open_total{backend,status}`
 - `haas_store_migration_total{from_version,status}`
 - `haas_store_retention_evicted_total{store}`
 
-Logs：
+Logs:
 
 - `haas.store.migrated`
 - `haas.store.unavailable`
 - `haas.store.retention_evicted`
 
-## 10. 失败与恢复
+## 10. Failure and Recovery
 
-| 场景 | 行为 |
-|------|------|
-| store 不可用 | 新请求 fail closed；已冻结 session 的 read 可降级为不可用 |
-| event append 失败 | invocation 不得宣称 completed（Session Runtime 写 failure evidence） |
-| migration 失败 | startup fail closed，不裸跑旧 schema |
-| lease 过期 | 允许接管；接管前 inspect 前 holder 状态 |
-| 部分写入 | 事务回滚；无跨 store 的分布式事务保证，必要时用 Outbox 补 |
+| Scenario | Behavior |
+|----------|----------|
+| Store unavailable | New requests fail closed; reads for frozen sessions MAY degrade to unavailable |
+| Event append fails | The invocation MUST NOT claim `completed`; Session Runtime writes failure evidence |
+| Migration fails | Startup fails closed; the service MUST NOT run against an old schema |
+| Lease expires | Takeover is allowed; inspect the previous holder's state before takeover |
+| Partial write | Roll back the transaction; no distributed transaction is guaranteed across stores, and use an Outbox when necessary |
 
-## 11. 测试计划与验收
+## 11. Test Plan and Acceptance Criteria
 
-- Unit：各 record UPSERT、cursor read、idempotency replay/release。
-- Integration：in-memory store 跑通 S2 协议与 S3 fake adapter 全链路。
-- Recovery：写入后重启进程，session/event/idempotency 可从 store 恢复。
-- Schema：forward migration 后旧数据可读；rollback 明确不支持。
-- Security：store 全量审计不包含明文 secret（构造输入后反向断言）。
+- Unit: UPSERT for each record, cursor reads, and idempotency replay/release.
+- Integration: use the in-memory store to exercise the complete S2 protocol and S3 fake-adapter path.
+- Recovery: after writing and restarting the process, recover session/event/idempotency data from the store.
+- Schema: old data remains readable after a forward migration; rollback is explicitly unsupported.
+- Security: a full store audit contains no plaintext secrets, verified with negative assertions after constructed inputs.
