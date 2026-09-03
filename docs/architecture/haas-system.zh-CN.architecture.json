@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "HaaS 系统架构与信任边界",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/superops-team/haas",
+      "revision": "0b96d21821cff59ac183fcecbc6527e91313a76d"
+    },
+    "viewBox": [1390, 760],
+    "views": [
+      {
+        "id": "northbound",
+        "label": "稳定协议面",
+        "focus": ["client", "api", "identity", "registry"],
+        "note": "上游只依赖 ADK 2.0 REST 与 HaaS 控制面。"
+      },
+      {
+        "id": "execution",
+        "label": "执行主链路",
+        "focus": ["api", "session", "adapter", "codex", "sandbox", "aio"],
+        "note": "一次请求经会话编排、adapter 和 sandbox 进入 Codex app-server。"
+      },
+      {
+        "id": "secretless",
+        "label": "Secretless 边界",
+        "focus": ["session", "model_mcp", "codex", "sandbox"],
+        "note": "provider 与工具凭据经 loopback proxy 或 vault 传递，不进入持久配置。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client / Manager",
+      "sublabel": "SDK · CLI · ADK client",
+      "pos": [45, 320],
+      "size": [150, 68]
+    },
+    {
+      "id": "api",
+      "type": "frontend",
+      "label": "HaaS API",
+      "sublabel": "HTTP JSON + SSE · :8092",
+      "tag": "已实现",
+      "pos": [260, 320],
+      "size": [155, 68],
+      "sources": [{"path": "haas/api.py", "line": 110, "label": "FastAPI routes"}]
+    },
+    {
+      "id": "identity",
+      "type": "security",
+      "label": "Identity + Policy",
+      "sublabel": "scope · workspace · tools",
+      "tag": "fail closed",
+      "pos": [480, 120],
+      "size": [170, 68],
+      "sources": [
+        {"path": "haas/identity.py", "line": 17, "label": "principal"},
+        {"path": "haas/policy/controller.py", "line": 49, "label": "policy compiler"}
+      ]
+    },
+    {
+      "id": "registry",
+      "type": "backend",
+      "label": "Harness Registry",
+      "sublabel": "configured harness · models",
+      "tag": "已实现",
+      "pos": [480, 230],
+      "size": [170, 68],
+      "sources": [{"path": "haas/registry.py", "line": 103, "label": "registry"}]
+    },
+    {
+      "id": "session",
+      "type": "backend",
+      "label": "Session Runtime",
+      "sublabel": "admission · lease · events",
+      "tag": "事实编排",
+      "pos": [480, 340],
+      "size": [170, 72],
+      "sources": [{"path": "haas/sessions.py", "line": 81, "label": "run lifecycle"}]
+    },
+    {
+      "id": "stores",
+      "type": "database",
+      "label": "Stores + Event Log",
+      "sublabel": "session · invocation · replay",
+      "tag": "authority",
+      "pos": [480, 500],
+      "size": [170, 70],
+      "sources": [{"path": "haas/stores/memory.py", "line": 150, "label": "current store"}]
+    },
+    {
+      "id": "adapter",
+      "type": "backend",
+      "label": "Harness Adapter",
+      "sublabel": "canonical execution interface",
+      "tag": "隔离层",
+      "pos": [735, 340],
+      "size": [180, 72],
+      "sources": [{"path": "haas/harnesses/base.py", "line": 137, "label": "adapter protocol"}]
+    },
+    {
+      "id": "model_mcp",
+      "type": "security",
+      "label": "Model + MCP Proxies",
+      "sublabel": "loopback :18080 · :18081",
+      "tag": "secretless",
+      "pos": [750, 120],
+      "size": [185, 70],
+      "sources": [
+        {"path": "haas/model_proxy/app.py", "line": 22, "label": "model proxy"},
+        {"path": "haas/mcp/runtime.py", "line": 21, "label": "MCP and skills"}
+      ]
+    },
+    {
+      "id": "codex",
+      "type": "backend",
+      "label": "Codex app-server",
+      "sublabel": "JSON-RPC · initialize → turn",
+      "tag": "P0 已实现",
+      "pos": [990, 340],
+      "size": [180, 72],
+      "sources": [{"path": "haas/harnesses/codex_app_server/adapter.py", "line": 1, "label": "Codex adapter"}]
+    },
+    {
+      "id": "future",
+      "type": "external",
+      "label": "Pi · OpenCode · AMP",
+      "sublabel": "future adapters",
+      "tag": "规划态",
+      "pos": [990, 500],
+      "size": [180, 68]
+    },
+    {
+      "id": "sandbox",
+      "type": "security",
+      "label": "Sandbox Runtime",
+      "sublabel": "policy → sandbox spec",
+      "tag": "隔离投影",
+      "pos": [1195, 340],
+      "size": [175, 72],
+      "sources": [{"path": "haas/runtime/compiler.py", "line": 26, "label": "runtime compiler"}]
+    },
+    {
+      "id": "aio",
+      "type": "cloud",
+      "label": "OpenSandbox AIO",
+      "sublabel": "linux/amd64 · :8080",
+      "tag": "容器边界",
+      "pos": [1195, 535],
+      "size": [175, 70],
+      "sources": [{"path": "Dockerfile", "line": 1, "label": "AIO image"}]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "HaaS sidecar trust boundary",
+      "wraps": ["api", "identity", "registry", "session", "stores", "adapter", "model_mcp"],
+      "pad": 18
+    },
+    {
+      "kind": "region",
+      "label": "Harness runtime boundary",
+      "wraps": ["codex", "future", "sandbox", "aio"],
+      "pad": 18
+    }
+  ],
+  "connections": [
+    {"id": "client_api", "from": "client", "to": "api", "label": "ADK REST + SSE", "variant": "emphasis", "labelAt": [228, 402]},
+    {"id": "api_identity", "from": "api", "to": "identity", "label": "authenticate + authorize", "variant": "security", "labelAt": [402, 210]},
+    {"id": "api_registry", "from": "api", "to": "registry", "label": "resolve appName", "labelAt": [350, 310]},
+    {"id": "api_session", "from": "api", "to": "session", "label": "run / replay / cancel", "variant": "emphasis", "labelAt": [448, 426]},
+    {"id": "session_stores", "from": "session", "to": "stores", "label": "append + terminal state", "variant": "emphasis", "labelAt": [565, 438]},
+    {"id": "session_adapter", "from": "session", "to": "adapter", "label": "canonical turn", "variant": "emphasis"},
+    {"id": "adapter_codex", "from": "adapter", "to": "codex", "variant": "emphasis"},
+    {"id": "adapter_future", "from": "adapter", "to": "future", "label": "adapter contract", "variant": "dashed"},
+    {"id": "codex_proxy", "from": "codex", "to": "model_mcp", "label": "scoped loopback", "variant": "security"},
+    {"id": "codex_sandbox", "from": "codex", "to": "sandbox", "label": "workspace + exec", "variant": "security", "labelAt": [1170, 426]},
+    {"id": "sandbox_aio", "from": "sandbox", "to": "aio", "label": "sandbox / execd / vault", "variant": "emphasis", "labelAt": [1283, 448]}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "稳定北向协议",
+      "items": ["ADK 2.0 REST API 是主数据面", "/v1/haas/* 只承载控制面扩展", "harness 原生协议不泄漏到上游"]
+    },
+    {
+      "dot": "rose",
+      "title": "安全边界",
+      "items": ["Identity 与 Policy 默认 fail closed", "Model/MCP proxy 仅绑定 loopback", "凭据不进入事件、日志或持久配置"]
+    },
+    {
+      "dot": "emerald",
+      "title": "当前交付边界",
+      "items": ["Codex app-server 是首个可运行 adapter", "OpenSandbox AIO 固定 linux/amd64", "Pi / OpenCode / AMP 保留为后续扩展"]
+    }
+  ]
+}

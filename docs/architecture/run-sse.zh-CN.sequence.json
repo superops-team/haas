@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "POST /run_sse 端到端时序",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [1180, 540],
+    "views": [
+      {"id": "admission", "label": "准入与冻结", "focus": ["client", "api", "control", "session"], "note": "完成身份、configured harness、配额、幂等和 session lease 检查。"},
+      {"id": "execution", "label": "Harness 执行", "focus": ["session", "sandbox", "adapter"], "note": "策略投影到 sandbox，adapter 启动并驱动原生 harness turn。"},
+      {"id": "streaming", "label": "事件与终态", "focus": ["adapter", "session", "events", "api", "client"], "note": "原生事件归一化后先持久化，再投影为 ADK Event。"}
+    ]
+  },
+  "participants": [
+    {"id": "client", "type": "external", "label": "Client"},
+    {"id": "api", "type": "frontend", "label": "HaaS API"},
+    {"id": "control", "type": "security", "label": "Control Plane"},
+    {"id": "session", "type": "backend", "label": "Session Runtime"},
+    {"id": "sandbox", "type": "security", "label": "Sandbox Runtime"},
+    {"id": "adapter", "type": "backend", "label": "Codex Adapter"},
+    {"id": "events", "type": "database", "label": "Event Store"}
+  ],
+  "segments": [
+    {"from": 150, "to": 245, "label": "接入与准入"},
+    {"from": 255, "to": 335, "label": "执行准备"},
+    {"from": 345, "to": 480, "label": "事件与终态"}
+  ],
+  "messages": [
+    {"id": "request", "from": "client", "to": "api", "y": 170, "label": "POST /run_sse", "variant": "emphasis"},
+    {"id": "authorize", "from": "api", "to": "control", "y": 205, "label": "authenticate · resolve app · admit", "variant": "security"},
+    {"id": "run", "from": "api", "to": "session", "y": 240, "label": "run + idempotency + lease", "variant": "emphasis"},
+    {"id": "project", "from": "session", "to": "sandbox", "y": 275, "label": "compile policy + create sandbox", "variant": "security"},
+    {"id": "prepare", "from": "session", "to": "adapter", "y": 310, "label": "initialize → initialized → turn", "variant": "emphasis"},
+    {"id": "native", "from": "adapter", "to": "session", "y": 350, "label": "HarnessEvent stream", "variant": "return"},
+    {"id": "append", "from": "session", "to": "events", "y": 385, "label": "redact + append canonical event", "variant": "security"},
+    {"id": "frame", "from": "api", "to": "client", "y": 420, "label": "project ADK Event → data frame", "variant": "return"},
+    {"id": "terminal", "from": "session", "to": "events", "y": 455, "label": "persist terminal state · close stream", "variant": "emphasis"}
+  ],
+  "activations": [
+    {"participant": "api", "from": 164, "to": 430, "type": "frontend"},
+    {"participant": "control", "from": 199, "to": 214, "type": "security"},
+    {"participant": "session", "from": 234, "to": 465, "type": "backend"},
+    {"participant": "sandbox", "from": 269, "to": 284, "type": "security"},
+    {"participant": "adapter", "from": 304, "to": 360, "type": "backend"},
+    {"participant": "events", "from": 379, "to": 465, "type": "database"}
+  ],
+  "cards": [
+    {"dot": "cyan", "title": "协议稳定", "items": ["上游只看到 ADK 2.0 Event 与 SSE framing", "Codex JSON-RPC 停留在 adapter 内", "/run 与 /run_sse 共用同一事件累积路径"]},
+    {"dot": "rose", "title": "失败闭合", "items": ["准入失败在启动 harness 前返回结构化错误", "断流不自动取消 invocation", "terminal state 先持久化，再关闭 stream"]},
+    {"dot": "emerald", "title": "可恢复事实", "items": ["Idempotency-Key 防止重复启动", "session lease 保证单 active turn", "Last-Event-ID 从 canonical event log 续接"]}
+  ]
+}

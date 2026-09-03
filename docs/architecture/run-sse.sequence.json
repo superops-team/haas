@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "POST /run_sse End-to-End Sequence",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [1180, 540],
+    "views": [
+      {"id": "admission", "label": "Admit and freeze", "focus": ["client", "api", "control", "session"], "note": "Validate identity, configured harness, quota, idempotency, and session lease."},
+      {"id": "execution", "label": "Harness execution", "focus": ["session", "sandbox", "adapter"], "note": "Project policy into the sandbox, then start and drive the native harness turn."},
+      {"id": "streaming", "label": "Events and terminal state", "focus": ["adapter", "session", "events", "api", "client"], "note": "Normalize and persist native events before projecting ADK Events."}
+    ]
+  },
+  "participants": [
+    {"id": "client", "type": "external", "label": "Client"},
+    {"id": "api", "type": "frontend", "label": "HaaS API"},
+    {"id": "control", "type": "security", "label": "Control Plane"},
+    {"id": "session", "type": "backend", "label": "Session Runtime"},
+    {"id": "sandbox", "type": "security", "label": "Sandbox Runtime"},
+    {"id": "adapter", "type": "backend", "label": "Codex Adapter"},
+    {"id": "events", "type": "database", "label": "Event Store"}
+  ],
+  "segments": [
+    {"from": 150, "to": 245, "label": "Request and admission"},
+    {"from": 255, "to": 335, "label": "Execution setup"},
+    {"from": 345, "to": 480, "label": "Events and terminal state"}
+  ],
+  "messages": [
+    {"id": "request", "from": "client", "to": "api", "y": 170, "label": "POST /run_sse", "variant": "emphasis"},
+    {"id": "authorize", "from": "api", "to": "control", "y": 205, "label": "authenticate · resolve app · admit", "variant": "security"},
+    {"id": "run", "from": "api", "to": "session", "y": 240, "label": "run + idempotency + lease", "variant": "emphasis"},
+    {"id": "project", "from": "session", "to": "sandbox", "y": 275, "label": "compile policy + create sandbox", "variant": "security"},
+    {"id": "prepare", "from": "session", "to": "adapter", "y": 310, "label": "initialize → initialized → turn", "variant": "emphasis"},
+    {"id": "native", "from": "adapter", "to": "session", "y": 350, "label": "HarnessEvent stream", "variant": "return"},
+    {"id": "append", "from": "session", "to": "events", "y": 385, "label": "redact + append canonical event", "variant": "security"},
+    {"id": "frame", "from": "api", "to": "client", "y": 420, "label": "project ADK Event → data frame", "variant": "return"},
+    {"id": "terminal", "from": "session", "to": "events", "y": 455, "label": "persist terminal state · close stream", "variant": "emphasis"}
+  ],
+  "activations": [
+    {"participant": "api", "from": 164, "to": 430, "type": "frontend"},
+    {"participant": "control", "from": 199, "to": 214, "type": "security"},
+    {"participant": "session", "from": 234, "to": 465, "type": "backend"},
+    {"participant": "sandbox", "from": 269, "to": 284, "type": "security"},
+    {"participant": "adapter", "from": 304, "to": 360, "type": "backend"},
+    {"participant": "events", "from": 379, "to": 465, "type": "database"}
+  ],
+  "cards": [
+    {"dot": "cyan", "title": "Stable Protocol", "items": ["Clients see only ADK 2.0 Events and SSE framing", "Codex JSON-RPC stays inside the adapter", "/run and /run_sse share one event accumulation path"]},
+    {"dot": "rose", "title": "Closed Failure Semantics", "items": ["Admission failures return before the harness starts", "A dropped stream does not cancel the invocation", "Persist terminal state before closing the stream"]},
+    {"dot": "emerald", "title": "Recoverable Facts", "items": ["Idempotency-Key prevents duplicate starts", "A session lease permits one active turn", "Last-Event-ID resumes from the canonical event log"]}
+  ]
+}
