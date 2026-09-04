@@ -57,6 +57,8 @@ OpenSandbox AIO container runtime
 
 端到端请求时序见 [WALKTHROUGH](WALKTHROUGH.zh-CN.md)。仓库首页使用的双语
 Guided Trace GIF 合同见 [README 可视化叙事](VISUAL-STORYTELLING.zh-CN.md)。
+Logo、README 顶部、指标定义与徽章发布合同见
+[品牌与仓库指标](BRAND-AND-REPOSITORY-METRICS.zh-CN.md)。
 
 ## 2. 来源与依据
 

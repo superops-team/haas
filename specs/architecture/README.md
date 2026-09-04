@@ -58,6 +58,8 @@ Core layers:
 See [WALKTHROUGH](WALKTHROUGH.md) for the end-to-end request sequence.
 See [README Visual Storytelling](VISUAL-STORYTELLING.md) for the bilingual
 Guided Trace GIF contract used by the repository landing page.
+See [Brand and Repository Metrics](BRAND-AND-REPOSITORY-METRICS.md) for the
+logo, README masthead, metric definitions, and badge publication contract.
 
 ## 2. Sources and Rationale
 

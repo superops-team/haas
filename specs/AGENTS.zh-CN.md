@@ -11,6 +11,7 @@
 - `architecture/README.md`
 - `architecture/WALKTHROUGH.md`
 - `architecture/VISUAL-STORYTELLING.md`
+- `architecture/BRAND-AND-REPOSITORY-METRICS.zh-CN.md`
 - `config/README.md`
 - `identity/README.md`
 - `stores/README.md`
