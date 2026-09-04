@@ -55,7 +55,8 @@ OpenSandbox AIO container runtime
 5. `Admission Control` 负责服务化的配额、限流、并发与队列准入。
 6. `Stores` 是唯一持久事实源；`Identity` 是鉴权边界；`Config` 是装配契约（三者见各自 spec）。
 
-端到端请求时序见 [WALKTHROUGH](WALKTHROUGH.zh-CN.md)。
+端到端请求时序见 [WALKTHROUGH](WALKTHROUGH.zh-CN.md)。仓库首页使用的双语
+Guided Trace GIF 合同见 [README 可视化叙事](VISUAL-STORYTELLING.zh-CN.md)。
 
 ## 2. 来源与依据
 

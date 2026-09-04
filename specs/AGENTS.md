@@ -11,6 +11,7 @@ semantics, security constraints, and compatibility promises.
 - `README.md`
 - `architecture/README.md`
 - `architecture/WALKTHROUGH.md`
+- `architecture/VISUAL-STORYTELLING.md`
 - `config/README.md`
 - `identity/README.md`
 - `stores/README.md`

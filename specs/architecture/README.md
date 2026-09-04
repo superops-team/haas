@@ -56,6 +56,8 @@ Core layers:
 6. `Stores` is the sole persistent source of truth; `Identity` is the authentication boundary; and `Config` is the assembly contract (see their respective specs).
 
 See [WALKTHROUGH](WALKTHROUGH.md) for the end-to-end request sequence.
+See [README Visual Storytelling](VISUAL-STORYTELLING.md) for the bilingual
+Guided Trace GIF contract used by the repository landing page.
 
 ## 2. Sources and Rationale
 
