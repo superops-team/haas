@@ -4,13 +4,16 @@
   "meta": {
     "title": "POST /run_sse End-to-End Sequence",
     "locale": "en",
+    "animation": "trace",
     "quality_profile": "showcase",
     "column_fit": "spread",
     "viewBox": [1180, 540],
     "views": [
-      {"id": "admission", "label": "Admit and freeze", "focus": ["client", "api", "control", "session"], "note": "Validate identity, configured harness, quota, idempotency, and session lease."},
-      {"id": "execution", "label": "Harness execution", "focus": ["session", "sandbox", "adapter"], "note": "Project policy into the sandbox, then start and drive the native harness turn."},
-      {"id": "streaming", "label": "Events and terminal state", "focus": ["adapter", "session", "events", "api", "client"], "note": "Normalize and persist native events before projecting ADK Events."}
+      {"id": "admission", "label": "Authenticate and admit", "focus": ["client", "api", "control"], "note": "Resolve identity and appName, then apply quota and admission policy."},
+      {"id": "session", "label": "Freeze session facts", "focus": ["api", "session"], "note": "Idempotency and the session lease prevent duplicate or concurrent starts."},
+      {"id": "execution", "label": "Run the harness", "focus": ["session", "sandbox", "adapter"], "note": "Project policy into the sandbox, then initialize and drive the Codex turn."},
+      {"id": "events", "label": "Normalize events", "focus": ["adapter", "session", "events"], "note": "Redact and append canonical events before projecting ADK Events."},
+      {"id": "terminal", "label": "Persist and close", "focus": ["events", "api", "client"], "note": "Persist terminal state before the final SSE frame closes the stream."}
     ]
   },
   "participants": [

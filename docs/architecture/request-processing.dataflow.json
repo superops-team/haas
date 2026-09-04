@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "Secure Request Pipeline",
+    "locale": "en",
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "viewBox": [1068, 650],
+    "views": [
+      {"id": "admit", "label": "Validate and admit", "focus": ["request", "govern"], "note": "Identity, scope, policy, and admission fail closed before a harness starts."},
+      {"id": "freeze", "label": "Freeze execution facts", "focus": ["govern", "execute"], "note": "Configured-harness policy, idempotency, and lease become stable session facts."},
+      {"id": "isolate", "label": "Isolate native execution", "focus": ["execute"], "note": "The adapter owns native translation; scoped loopback handles keep credentials out of configuration."},
+      {"id": "normalize", "label": "Normalize and persist", "focus": ["execute", "canonical"], "note": "Native output is normalized and redacted before canonical events and terminal state are appended."},
+      {"id": "recover", "label": "Project and recover", "focus": ["canonical", "deliver"], "note": "ADK Events stream live, and Last-Event-ID resumes from the canonical event log after disconnect."}
+    ]
+  },
+  "stages": [{"label": "Input"}, {"label": "Govern"}, {"label": "Execute"}, {"label": "Canonicalize"}, {"label": "Deliver"}],
+  "nodes": [
+    {"id": "request", "type": "frontend", "label": "Raw Request", "sublabel": "POST /run_sse", "tag": "input", "stage": 0, "row": 1},
+    {"id": "govern", "type": "security", "label": "Govern", "sublabel": "identity · policy", "tag": "fail closed", "stage": 1, "row": 1},
+    {"id": "execute", "type": "cloud", "label": "Execute", "sublabel": "adapter · sandbox", "tag": "secretless", "stage": 2, "row": 1},
+    {"id": "canonical", "type": "database", "label": "Event Log", "sublabel": "redact · append", "tag": "authority", "stage": 3, "row": 1},
+    {"id": "deliver", "type": "messagebus", "label": "ADK Result", "sublabel": "live SSE · replay", "tag": "recoverable", "stage": 4, "row": 1}
+  ],
+  "flows": [
+    {"id": "request_govern", "from": "request", "to": "govern", "label": "validate", "classification": "caller-controlled", "variant": "security"},
+    {"id": "govern_execute", "from": "govern", "to": "execute", "label": "freeze", "classification": "stable facts", "variant": "emphasis"},
+    {"id": "execute_canonical", "from": "execute", "to": "canonical", "label": "normalize", "classification": "safe events", "variant": "security"},
+    {"id": "canonical_deliver", "from": "canonical", "to": "deliver", "label": "project", "classification": "replayable", "variant": "emphasis"}
+  ],
+  "cards": [
+    {"dot": "rose", "title": "Safe In", "items": ["Identity, scope, policy, and admission precede harness startup", "Denied requests create no native work"]},
+    {"dot": "violet", "title": "Canonical Through", "items": ["Adapters contain harness-native protocols", "Normalization and redaction precede durable event append"]},
+    {"dot": "emerald", "title": "Recoverable Out", "items": ["Terminal state precedes stream close", "Last-Event-ID resumes from the event log"]}
+  ]
+}

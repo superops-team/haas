@@ -2,7 +2,7 @@
 
 **English** | [简体中文](VISUAL-STORYTELLING.zh-CN.md)
 
-Status: Draft
+Status: Implemented
 Last reviewed: 2026-09-04
 Change ID: `readme-guided-trace-gifs`
 
@@ -164,3 +164,9 @@ Acceptance requires six GitHub-renderable GIFs, equivalent bilingual facts, comp
 6. Perform automated and perceptual review.
 7. Embed assets in both READMEs and verify links.
 8. Run two-round change review and pre-commit gates.
+
+Regenerate the complete bilingual asset set with:
+
+```bash
+node scripts/generate-readme-gifs.mjs
+```

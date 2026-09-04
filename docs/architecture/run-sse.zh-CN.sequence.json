@@ -4,13 +4,16 @@
   "meta": {
     "title": "POST /run_sse 端到端时序",
     "locale": "zh-CN",
+    "animation": "trace",
     "quality_profile": "showcase",
     "column_fit": "spread",
     "viewBox": [1180, 540],
     "views": [
-      {"id": "admission", "label": "准入与冻结", "focus": ["client", "api", "control", "session"], "note": "完成身份、configured harness、配额、幂等和 session lease 检查。"},
-      {"id": "execution", "label": "Harness 执行", "focus": ["session", "sandbox", "adapter"], "note": "策略投影到 sandbox，adapter 启动并驱动原生 harness turn。"},
-      {"id": "streaming", "label": "事件与终态", "focus": ["adapter", "session", "events", "api", "client"], "note": "原生事件归一化后先持久化，再投影为 ADK Event。"}
+      {"id": "admission", "label": "认证与准入", "focus": ["client", "api", "control"], "note": "解析 identity 与 appName，再执行 quota 和 admission policy。"},
+      {"id": "session", "label": "冻结 session 事实", "focus": ["api", "session"], "note": "Idempotency 与 session lease 防止重复或并发启动。"},
+      {"id": "execution", "label": "执行 harness", "focus": ["session", "sandbox", "adapter"], "note": "将策略投影到 sandbox，再初始化并驱动 Codex turn。"},
+      {"id": "events", "label": "归一化事件", "focus": ["adapter", "session", "events"], "note": "Canonical event 先脱敏并持久化，再投影为 ADK Event。"},
+      {"id": "terminal", "label": "持久化并关闭", "focus": ["events", "api", "client"], "note": "先持久化 terminal state，再用最终 SSE frame 关闭 stream。"}
     ]
   },
   "participants": [

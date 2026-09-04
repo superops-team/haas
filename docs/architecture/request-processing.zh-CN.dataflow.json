@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "安全请求加工流水线",
+    "locale": "zh-CN",
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "viewBox": [1068, 650],
+    "views": [
+      {"id": "admit", "label": "校验与准入", "focus": ["request", "govern"], "note": "Identity、scope、policy 与 admission 在 harness 启动前 fail closed。"},
+      {"id": "freeze", "label": "冻结执行事实", "focus": ["govern", "execute"], "note": "Configured-harness policy、idempotency 与 lease 成为稳定 session 事实。"},
+      {"id": "isolate", "label": "隔离原生执行", "focus": ["execute"], "note": "Adapter 独占原生协议转换；scoped loopback handle 避免 credential 进入配置。"},
+      {"id": "normalize", "label": "归一化并持久化", "focus": ["execute", "canonical"], "note": "原生输出先归一化和脱敏，再 append canonical event 与 terminal state。"},
+      {"id": "recover", "label": "投影与恢复", "focus": ["canonical", "deliver"], "note": "ADK Event 实时输出；断线后通过 Last-Event-ID 从 canonical event log 恢复。"}
+    ]
+  },
+  "stages": [{"label": "输入"}, {"label": "治理"}, {"label": "执行"}, {"label": "标准化"}, {"label": "交付"}],
+  "nodes": [
+    {"id": "request", "type": "frontend", "label": "原始请求", "sublabel": "POST /run_sse", "tag": "输入", "stage": 0, "row": 1},
+    {"id": "govern", "type": "security", "label": "治理", "sublabel": "identity · policy", "tag": "fail closed", "stage": 1, "row": 1},
+    {"id": "execute", "type": "cloud", "label": "隔离执行", "sublabel": "adapter · sandbox", "tag": "secretless", "stage": 2, "row": 1},
+    {"id": "canonical", "type": "database", "label": "事件日志", "sublabel": "脱敏 · 持久化", "tag": "事实源", "stage": 3, "row": 1},
+    {"id": "deliver", "type": "messagebus", "label": "ADK 结果", "sublabel": "live SSE · replay", "tag": "可恢复", "stage": 4, "row": 1}
+  ],
+  "flows": [
+    {"id": "request_govern", "from": "request", "to": "govern", "label": "校验", "classification": "caller-controlled", "variant": "security"},
+    {"id": "govern_execute", "from": "govern", "to": "execute", "label": "冻结", "classification": "stable facts", "variant": "emphasis"},
+    {"id": "execute_canonical", "from": "execute", "to": "canonical", "label": "归一化", "classification": "safe events", "variant": "security"},
+    {"id": "canonical_deliver", "from": "canonical", "to": "deliver", "label": "投影", "classification": "replayable", "variant": "emphasis"}
+  ],
+  "cards": [
+    {"dot": "rose", "title": "安全进入", "items": ["Identity、scope、policy 与 admission 在 harness 启动前执行", "被拒请求 fail closed，不创建原生执行"]},
+    {"dot": "violet", "title": "标准加工", "items": ["Adapter 封装 harness 原生协议", "归一化和脱敏先于持久化 event append"]},
+    {"dot": "emerald", "title": "可恢复输出", "items": ["Stream 关闭前持久化 terminal state", "Last-Event-ID 从 canonical event log 恢复"]}
+  ]
+}

@@ -2,7 +2,7 @@
 
 [English](VISUAL-STORYTELLING.md) | **简体中文**
 
-Status: Draft
+Status: Implemented
 Last reviewed: 2026-09-04
 Change ID: `readme-guided-trace-gifs`
 
@@ -164,3 +164,9 @@ GIF 是由同一组架构事实派生的沟通资产，不是新的协议合同�
 6. 执行自动化和感知视觉审查。
 7. 嵌入两份 README 并验证链接。
 8. 执行两轮变更 review 与 pre-commit 门禁。
+
+使用以下命令重新生成完整的双语资产：
+
+```bash
+node scripts/generate-readme-gifs.mjs
+```

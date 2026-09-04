@@ -4,6 +4,7 @@
   "meta": {
     "title": "HaaS 系统架构与信任边界",
     "locale": "zh-CN",
+    "animation": "trace",
     "quality_profile": "showcase",
     "repository": {
       "url": "https://github.com/superops-team/haas",

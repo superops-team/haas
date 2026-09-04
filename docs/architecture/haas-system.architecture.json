@@ -4,6 +4,7 @@
   "meta": {
     "title": "HaaS System Architecture and Trust Boundaries",
     "locale": "en",
+    "animation": "trace",
     "quality_profile": "showcase",
     "repository": {
       "url": "https://github.com/superops-team/haas",

@@ -14,6 +14,30 @@ models, tools, and credentials share one service boundary.
 > adapter. Pi, OpenCode, and AMP remain planned. Real Codex, OpenSandbox, and
 > provider checks are gated behind explicit E2E switches.
 
+## HaaS in 30 seconds
+
+### One protocol, isolated runtimes
+
+[![HaaS concept: one stable protocol across isolated agent runtimes](docs/architecture/haas-concept.gif)](docs/architecture/haas-system.html)
+
+Clients use one ADK-compatible surface while HaaS isolates policy, sessions,
+native harness protocols, credentials, and sandbox execution behind adapters.
+
+### From `POST /run_sse` to terminal state
+
+[![POST /run_sse guided request flow](docs/architecture/run-sse-flow.gif)](docs/architecture/run-sse.html)
+
+Admission, idempotency, leases, Codex execution, canonical events, and terminal
+state form one ordered request path.
+
+### Safe in, canonical through, recoverable out
+
+[![Secure request-processing pipeline](docs/architecture/request-processing.gif)](docs/architecture/request-processing.html)
+
+Every request is governed before execution, normalized and redacted before
+persistence, then projected as live or replayed ADK Events. Click any animation
+to open its interactive Archify walkthrough.
+
 ## Why HaaS
 
 Each agent harness has its own session, tool, file, approval, event, and recovery

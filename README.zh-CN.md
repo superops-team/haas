@@ -11,6 +11,29 @@ runtime，并统一处理 session、事件、策略、sandbox、模型与工具�
 > 和 AIO 容器启动链路。Codex 是当前首个实现的生产 adapter；Pi、OpenCode 和 AMP
 > 仍处于规划阶段。真实 Codex/OpenSandbox/provider 验证由显式 E2E 开关控制。
 
+## 30 秒了解 HaaS
+
+### 一套协议，隔离多种 runtime
+
+[![HaaS 核心概念：用一套稳定协议纳管相互隔离的 agent runtime](docs/architecture/haas-concept.zh-CN.gif)](docs/architecture/haas-system.zh-CN.html)
+
+Client 只依赖 ADK-compatible 接口；HaaS 在 adapter 后隔离 policy、session、
+harness 原生协议、credential 与 sandbox execution。
+
+### 从 `POST /run_sse` 到终态
+
+[![POST /run_sse 引导式请求链路](docs/architecture/run-sse-flow.zh-CN.gif)](docs/architecture/run-sse.zh-CN.html)
+
+Admission、idempotency、lease、Codex 执行、canonical event 与 terminal state
+组成一条有序的请求链路。
+
+### 安全进入，标准加工，可恢复输出
+
+[![安全请求加工流水线](docs/architecture/request-processing.zh-CN.gif)](docs/architecture/request-processing.zh-CN.html)
+
+请求先治理再执行，输出先归一化和脱敏再持久化，最终投影为 live 或 replayed
+ADK Event。点击任一动画可打开对应的 Archify 交互式讲解。
+
 ## 为什么需要 HaaS
 
 不同 agent harness 拥有各自的会话、工具、文件写入、审批、事件和恢复协议。
