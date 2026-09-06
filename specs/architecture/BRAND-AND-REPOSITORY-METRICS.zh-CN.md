@@ -73,8 +73,9 @@ SVG 必须声明固有尺寸与 `viewBox`，不得包含 script、外部资源�
 
 ## 6. 发布模型
 
-`.github/workflows/repository-metrics.yml` 在影响相关文件的 `main` push、每日定时
-和 `workflow_dispatch` 时运行。Job 完整 checkout 历史，通过 `uv` 安装锁定的开发
+`.github/workflows/repository-metrics.yml` 在每次 `main` push、每日定时和
+`workflow_dispatch` 时运行。即使源码行数不变，commit 数也会变化，因此不设置
+path filter。Job 完整 checkout 历史，通过 `uv` 安装锁定的开发
 环境，运行 coverage，调用仓库指标生成器，并只把生成的 SVG 发布到独立
 `metrics` 分支。
 

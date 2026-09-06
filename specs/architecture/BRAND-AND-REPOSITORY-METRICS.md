@@ -81,8 +81,9 @@ the badge rounds the JSON value to one decimal place.
 
 ## 6. Publication Model
 
-`.github/workflows/repository-metrics.yml` runs on relevant pushes to `main`,
-daily schedule, and `workflow_dispatch`. It checks out full history, installs the
+`.github/workflows/repository-metrics.yml` runs on every push to `main`, a daily
+schedule, and `workflow_dispatch`. Every push is included because the commit
+count changes even when source lines do not. It checks out full history, installs the
 locked development environment with `uv`, runs coverage, invokes the repository
 metric generator, and publishes only generated SVG badges to a dedicated
 `metrics` branch.

@@ -9,7 +9,7 @@ FROM ${HAAS_BASE_IMAGE}
 # --- Codex CLI (P0 harness runtime) ---
 # Bump CODEX_NPM_VERSION together with specs/codex-app-server-adapter schema
 # fixture and re-run `make adk-compat` / schema drift check.
-ARG CODEX_NPM_VERSION=0.150.1
+ARG CODEX_NPM_VERSION=0.151.0
 RUN --mount=type=cache,target=/root/.npm npm install -g "@openai/codex@${CODEX_NPM_VERSION}" \
     && codex --version \
     && npm cache clean --force

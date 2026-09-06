@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,19 @@ from haas.harnesses.base import PrepareSessionRequest, StartTurnRequest
 from haas.harnesses.codex_app_server.adapter import CodexAdapter
 from haas.harnesses.codex_app_server.rpc import CodexJsonRpc
 from haas.harnesses.codex_app_server.transport import CodexEndpoint
+
+
+@pytest.fixture(autouse=True)
+def _isolated_codex_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate Codex state DB from the real ~/.codex.
+
+    Without this, Codex app-server fails to initialize its sqlite state
+    runtime when the host ~/.codex is in use by another Codex process.
+    """
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
 
 _requires_codex = pytest.mark.skipif(
     os.environ.get("HAAS_E2E") != "1" and os.environ.get("HAAS_E2E_CODEX") != "1",

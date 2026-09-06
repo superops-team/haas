@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">HaaS Protocol Bridge mark</title>
+  <desc id="desc">A geometric H whose bridge represents one stable protocol connecting isolated harness runtimes.</desc>
+  <defs>
+    <linearGradient id="left" gradientUnits="userSpaceOnUse" x1="62" y1="48" x2="62" y2="208"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#38bdf8"/></linearGradient>
+    <linearGradient id="bridge" gradientUnits="userSpaceOnUse" x1="62" y1="128" x2="194" y2="128"><stop stop-color="#22d3ee"/><stop offset=".5" stop-color="#34d399"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>
+    <linearGradient id="right" gradientUnits="userSpaceOnUse" x1="194" y1="48" x2="194" y2="208"><stop stop-color="#a78bfa"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#08111f"/>
+  <path d="M62 48v160" fill="none" stroke="url(#left)" stroke-width="28" stroke-linecap="round"/>
+  <path d="M194 48v160" fill="none" stroke="url(#right)" stroke-width="28" stroke-linecap="round"/>
+  <path d="M62 128h132" fill="none" stroke="url(#bridge)" stroke-width="28" stroke-linecap="round"/>
+  <path d="M22 128h40M194 128h40" fill="none" stroke="#f8fafc" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="62" cy="128" r="7" fill="#f8fafc"/><circle cx="194" cy="128" r="7" fill="#f8fafc"/>
+</svg>

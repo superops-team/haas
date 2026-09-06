@@ -144,6 +144,48 @@ def _terminal_status(notification: JsonObject) -> str | None:
     return _TERMINAL_METHODS.get(event_type)
 
 
+def _to_codex_input(items: list[Any]) -> list[JsonObject]:
+    """Convert HaaS/ADK input items to Codex app-server ``turn/start`` input.
+
+    The SessionRuntime passes ADK message objects (``{"role": "user",
+    "parts": [{"text": "..."}]}``) as the ``input`` list.  Codex app-server
+    expects ``[{"type": "text", "text": "..."}]``.  This function normalises
+    both ADK messages and already-native Codex items to the Codex format,
+    keeping the conversion inside the adapter (adapter isolation, 铁律 #5).
+    """
+    if not items:
+        return [{"type": "text", "text": ""}]
+
+    codex_input: list[JsonObject] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        # Already in Codex native format: {"type": "text", "text": "..."}
+        if "type" in item:
+            codex_input.append(item)
+            continue
+
+        # ADK message format: {"role": "user", "parts": [{"text": "..."}, ...]}
+        parts = item.get("parts")
+        if isinstance(parts, list):
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                if isinstance(text, str):
+                    codex_input.append({"type": "text", "text": text})
+            continue
+
+        # Simplified format: {"text": "..."} (used in some tests)
+        text = item.get("text")
+        if isinstance(text, str):
+            codex_input.append({"type": "text", "text": text})
+            continue
+
+    return codex_input or [{"type": "text", "text": ""}]
+
+
 class CodexAdapter:
     """Harness adapter driving a Codex app-server runtime."""
 
@@ -370,7 +412,7 @@ class CodexAdapter:
 
         turn_params: JsonObject = {
             "threadId": thread_id,
-            "input": request.input or [{"type": "text", "text": ""}],
+            "input": _to_codex_input(request.input),
             "sandboxPolicy": to_turn_sandbox_policy(mode, writable_roots, network_policy),
             "approvalPolicy": request.policy.get("approvalPolicy", DEFAULT_APPROVAL_POLICY),
             "cwd": cwd,
