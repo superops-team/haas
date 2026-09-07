@@ -50,7 +50,13 @@ from haas.sessions import (
     SessionNotFoundError,
     SessionRuntime,
 )
-from haas.stores import CursorNotFoundError, IdempotencyConflictError, MemoryStore
+from haas.stores import (
+    CursorNotFoundError,
+    IdempotencyConflictError,
+    InvocationRecord,
+    MemoryStore,
+    SessionRecord,
+)
 
 DEFAULT_TOKEN = "dev-token"
 
@@ -89,6 +95,20 @@ class HaasError(Exception):
         self.retryable = retryable
 
 
+def _haas_error_content(exc: HaasError) -> dict[str, Any]:
+    return {
+        "detail": exc.safe_reason,
+        "haasError": {
+            "type": exc.type,
+            "code": exc.code,
+            "param": None,
+            "safeReason": exc.safe_reason,
+            "retryable": exc.retryable,
+            "traceId": f"tr_{uuid.uuid4().hex[:16]}",
+        },
+    }
+
+
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -115,8 +135,17 @@ def build_app(
     run_quota: int = 20,
     rate_limit: int = 100,
     max_file_bytes: int | None = None,
+    session_lease_ttl_ms: int | None = None,
+    session_lease_renew_interval_ms: int | None = None,
+    session_turn_timeout_s: float | None = None,
 ) -> FastAPI:
     config = config if config is not None else AppConfig()
+    if session_lease_ttl_ms is None:
+        session_lease_ttl_ms = config.session_runtime.lease_ttl_ms
+    if session_lease_renew_interval_ms is None:
+        session_lease_renew_interval_ms = config.session_runtime.lease_renew_interval_ms
+    if session_turn_timeout_s is None:
+        session_turn_timeout_s = config.session_runtime.turn_timeout_seconds
     store = MemoryStore()
     adapter = adapter or FakeAdapter()
     identity = StaticTokenIdentityProvider(
@@ -134,7 +163,13 @@ def build_app(
     event_log = EventLog(store=store)
     admission = AdmissionControl(store=store, run_quota=run_quota, rate_limit=rate_limit)
     sessions = SessionRuntime(
-        store=store, registry=registry, adapter=adapter, event_log=event_log
+        store=store,
+        registry=registry,
+        adapter=adapter,
+        event_log=event_log,
+        lease_ttl_ms=session_lease_ttl_ms,
+        lease_renew_interval_ms=session_lease_renew_interval_ms,
+        turn_timeout_s=session_turn_timeout_s,
     )
     artifact_policy = ArtifactPolicy()
     if max_file_bytes is not None:
@@ -158,20 +193,7 @@ def build_app(
 
     @app.exception_handler(HaasError)
     async def haas_error_handler(request: Request, exc: HaasError) -> JSONResponse:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "detail": exc.safe_reason,
-                "haasError": {
-                    "type": exc.type,
-                    "code": exc.code,
-                    "param": None,
-                    "safeReason": exc.safe_reason,
-                    "retryable": exc.retryable,
-                    "traceId": f"tr_{uuid.uuid4().hex[:16]}",
-                },
-            },
-        )
+        return JSONResponse(status_code=exc.status_code, content=_haas_error_content(exc))
 
     @app.get("/v1/haas/health")
     async def health() -> dict[str, Any]:
@@ -250,7 +272,7 @@ def build_app(
             session = runtime.sessions.get_session(app_name, user_id, session_id)
         except SessionNotFoundError as exc:
             raise HaasError(404, "invalid_request_error", "session_not_found") from exc
-        events = runtime.event_log.read_session(session_id)
+        events = runtime.event_log.read_session(app_name, user_id, session_id)
         return {
             "id": session.id,
             "appName": session.appName,
@@ -315,9 +337,12 @@ def build_app(
     async def session_events(
         session_id: str, request: Request, after_event_id: str | None = None
     ) -> StreamingResponse:
-        await _authenticate(runtime.identity, request)
+        principal = await _authenticate(runtime.identity, request)
+        session = _resolve_visible_session(runtime, principal, session_id)
         try:
-            events = runtime.event_log.read_session(session_id, after_event_id)
+            events = runtime.event_log.read_session(
+                session.appName, session.userId, session.id, after_event_id
+            )
         except CursorNotFoundError as exc:
             raise HaasError(
                 410, "invalid_request_error", "haas_offset_expired"
@@ -334,8 +359,13 @@ def build_app(
     async def invocation_events(
         session_id: str, invocation_id: str, request: Request
     ) -> StreamingResponse:
-        await _authenticate(runtime.identity, request)
-        events = runtime.event_log.read_invocation(invocation_id)
+        principal = await _authenticate(runtime.identity, request)
+        invocation = _resolve_visible_invocation(
+            runtime, principal, session_id, invocation_id
+        )
+        events = runtime.event_log.read_invocation(
+            invocation.appName, invocation.userId, invocation.sessionId, invocation_id
+        )
 
         async def frames() -> Any:
             for event in events:
@@ -724,7 +754,7 @@ def build_app(
                     "state": r.state,
                     "events": [
                         runtime.event_log.project_adk(e)
-                        for e in runtime.event_log.read_session(r.id)
+                        for e in runtime.event_log.read_session(r.appName, r.userId, r.id)
                     ],
                     "lastUpdateTime": r.updatedAtMs / 1000.0,
                 }
@@ -750,6 +780,53 @@ async def _authenticate(identity: IdentityProvider, request: Request) -> Princip
 def _ensure_owns(identity: IdentityProvider, principal: Principal, user_id: str) -> None:
     if not identity.owns(principal, user_id=user_id):
         raise HaasError(404, "invalid_request_error", "session_not_found")
+
+
+def _resolve_visible_session(
+    runtime: _Runtime, principal: Principal, session_id: str
+) -> SessionRecord:
+    """Resolve a native HaaS session id to exactly one caller-visible session.
+
+    The native `/v1/haas/sessions/{session_id}/events` route is intentionally a
+    control-plane convenience route and does not carry ADK's app/user path
+    scope. Because `sessionId` is caller-controlled, the implementation must
+    not guess when several visible `(appName, userId, sessionId)` tuples share
+    the same bare id.
+    """
+    visible_apps = {
+        h.id
+        for h in runtime.store.list_harnesses(
+            (principal.tenantId, principal.workspaceId)
+        )
+    }
+    records = [
+        r
+        for r in runtime.store.list_sessions(user_ids=principal.userIds)
+        if r.id == session_id and r.appName in visible_apps
+    ]
+    if len(records) != 1:
+        raise HaasError(404, "invalid_request_error", "session_not_found")
+    return records[0]
+
+
+def _resolve_visible_invocation(
+    runtime: _Runtime, principal: Principal, session_id: str, invocation_id: str
+) -> InvocationRecord:
+    invocation = runtime.store.get_invocation(invocation_id)
+    if invocation is None or invocation.sessionId != session_id:
+        raise HaasError(404, "invalid_request_error", "haas_invocation_not_found")
+    _ensure_owns(runtime.identity, principal, invocation.userId)
+    visible_apps = {
+        h.id
+        for h in runtime.store.list_harnesses(
+            (principal.tenantId, principal.workspaceId)
+        )
+    }
+    if invocation.appName not in visible_apps:
+        raise HaasError(404, "invalid_request_error", "haas_invocation_not_found")
+    if runtime.store.get_session((invocation.appName, invocation.userId, session_id)) is None:
+        raise HaasError(404, "invalid_request_error", "haas_invocation_not_found")
+    return invocation
 
 
 async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
@@ -837,18 +914,36 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             ) from exc
         except AdapterTurnError as exc:
             if key_hash:
+                invocation = runtime.store.get_invocation(exc.invocation_id)
                 events = [
                     runtime.event_log.project_adk(e)
-                    for e in runtime.event_log.read_invocation(exc.invocation_id)
+                    for e in (
+                        runtime.event_log.read_invocation(
+                            invocation.appName,
+                            invocation.userId,
+                            invocation.sessionId,
+                            exc.invocation_id,
+                        )
+                        if invocation is not None
+                        else []
+                    )
                 ]
-                runtime.store.complete(key_hash, {"events": events})
+                error = HaasError(
+                    502, "invalid_request_error", "haas_adapter_error", retryable=True
+                )
+                body = _haas_error_content(error)
+                runtime.store.complete(
+                    key_hash,
+                    {"status_code": error.status_code, "body": body, "events": events},
+                )
+                return JSONResponse(status_code=error.status_code, content=body)
             raise HaasError(
                 502, "invalid_request_error", "haas_adapter_error", retryable=True
             ) from exc
 
         adk_events = [runtime.event_log.project_adk(e) for e in result.events]
         if key_hash:
-            runtime.store.complete(key_hash, {"events": adk_events})
+            runtime.store.complete(key_hash, {"status_code": 200, "events": adk_events})
 
         if not streaming:
             return adk_events
@@ -882,7 +977,19 @@ async def _wait_for_idempotency(
 
 
 def _render_cached(cached: Any, *, streaming: bool) -> Any:
-    events = cached.get("events", []) if isinstance(cached, dict) else []
+    if not isinstance(cached, dict):
+        events: list[Any] = []
+        status_code = 200
+        body: Any = None
+    else:
+        events = cached.get("events", [])
+        status_code = int(cached.get("status_code", 200))
+        body = cached.get("body")
+    if status_code >= 400:
+        return JSONResponse(
+            status_code=status_code,
+            content=body if isinstance(body, dict) else {"detail": "request_failed"},
+        )
     if not streaming:
         return events
 

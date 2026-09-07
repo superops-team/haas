@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-07
 Related specs: [Container Runtime](../container-runtime/README.md), [Stores](../stores/README.md), [Identity](../identity/README.md), [HaaS Protocol](../haas-protocol/README.md)
 
 ## 1. Component Role
@@ -51,6 +51,7 @@ class AppConfig:
     model_proxy: ModelProxyConfig
     mcp_proxy: McpProxyConfig
     adapters: AdaptersConfig
+    session_runtime: SessionRuntimeConfig
     observability: ObservabilityConfig
 
 def load_config(path: str | None) -> AppConfig: ...
@@ -83,6 +84,9 @@ the harness is ready, consistent with the health/ready separation defined by
 | Variable | Meaning |
 |------|------|
 | `HAAS_ADAPTER_BASE` | Default harness base (`codex` / `fake`) |
+| `HAAS_SESSION_LEASE_TTL_MS` | Active-turn session lease TTL in milliseconds (default: `30000`) |
+| `HAAS_SESSION_LEASE_RENEW_INTERVAL_MS` | Active-turn lease renewal interval in milliseconds (default: `10000`; must be less than half the TTL) |
+| `HAAS_SESSION_TURN_TIMEOUT_SECONDS` | End-to-end adapter invocation timeout in seconds (default: `900`; must be greater than lease TTL) |
 
 The environment-variable prefix is uniformly `HAAS_`. For example:
 
@@ -116,6 +120,10 @@ adapters:
   codex:
     transport: unix_websocket
     socket_path: /tmp/haas/codex.sock
+session_runtime:
+  lease_ttl_ms: 30000
+  lease_renew_interval_ms: 10000
+  turn_timeout_seconds: 900
 ```
 
 Ports and service discovery are fixed as follows:

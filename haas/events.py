@@ -19,6 +19,8 @@ class EventLog:
     def append(
         self,
         *,
+        app_name: str,
+        user_id: str,
         invocation_id: str,
         session_id: str,
         turn_id: str,
@@ -28,13 +30,16 @@ class EventLog:
         content: dict[str, Any],
         actions: dict[str, Any],
     ) -> CanonicalEventRecord:
-        existing = self.store.read_invocation(invocation_id, after=-1)
+        key = (app_name, user_id, session_id)
+        existing = self.store.read_invocation(key, invocation_id, after=-1)
         sequence = len(existing)
         event = CanonicalEventRecord(
             eventId=f"evt_{self._event_seq:013d}",
             invocationId=invocation_id,
             sessionId=session_id,
             turnId=turn_id,
+            appName=app_name,
+            userId=user_id,
             harnessId=harness_id,
             adapterId=adapter_id,
             author=author,
@@ -47,13 +52,21 @@ class EventLog:
         self.store.append(event)
         return event
 
-    def read_invocation(self, invocation_id: str) -> list[CanonicalEventRecord]:
-        return self.store.read_invocation(invocation_id, after=-1)
+    def read_invocation(
+        self, app_name: str, user_id: str, session_id: str, invocation_id: str
+    ) -> list[CanonicalEventRecord]:
+        return self.store.read_invocation((app_name, user_id, session_id), invocation_id, after=-1)
 
     def read_session(
-        self, session_id: str, after_event_id: str | None = None
+        self,
+        app_name: str,
+        user_id: str,
+        session_id: str,
+        after_event_id: str | None = None,
     ) -> list[CanonicalEventRecord]:
-        return self.store.read_session(session_id, after_cursor=after_event_id)
+        return self.store.read_session(
+            (app_name, user_id, session_id), after_cursor=after_event_id
+        )
 
     def project_adk(self, event: CanonicalEventRecord) -> dict[str, Any]:
         return {

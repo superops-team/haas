@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-07
 Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -66,10 +66,10 @@ SSE 是 delivery channel，不是唯一事实源。断线、客户端超时或�
 
 ```python
 async def append_event(event: CanonicalEvent) -> StoredEvent: ...
-async def read_session_events(session_id: str, after_event_id: str | None) -> list[StoredEvent]: ...
-async def read_invocation_events(invocation_id: str) -> list[StoredEvent]: ...
-async def stream_invocation(invocation_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
-async def stream_session(session_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
+async def read_session_events(app_name: str, user_id: str, session_id: str, after_event_id: str | None) -> list[StoredEvent]: ...
+async def read_invocation_events(app_name: str, user_id: str, session_id: str, invocation_id: str) -> list[StoredEvent]: ...
+async def stream_invocation(app_name: str, user_id: str, session_id: str, invocation_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
+async def stream_session(app_name: str, user_id: str, session_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
 def project_adk(event: StoredEvent) -> AdkEvent: ...
 # project_legacy(): 不实现，legacy shim 不在本项目范围（specs/README §3.1.1）
 ```
@@ -83,6 +83,8 @@ def project_adk(event: StoredEvent) -> AdkEvent: ...
   "eventId": "evt_0000000001042",
   "invocationId": "inv_abc",
   "sessionId": "hsess_abc",
+  "appName": "chrn_codex_default",
+  "userId": "u_123",
   "turnId": "turn_abc",
   "harnessId": "chrn_codex_default",
   "adapterId": "codex-app-server",
@@ -112,6 +114,7 @@ Event Log 归一化后落库：
 |-------------------|----------------|------|
 | `type` / `nativeType` | 不落库 | 仅归一化时用于判定 part 类型与 terminal |
 | `invocationId` / `sessionId` / `turnId` | 同名保留 | 必须与执行上下文一致 |
+| 执行上下文 `appName` / `userId` | `appName` / `userId` | 为 store 层 scope 隔离而持久化；必须匹配 ADK session 三元组 |
 | `author` | `author` | 保留 |
 | `content` / `actions` / `usage` | 同名字段 | 经 `redact()` 后保留 |
 | `safe` | 不落库 | 由 `redactionApplied` 替代 |
@@ -177,6 +180,12 @@ Ordering invariants:
 ## 8. 安全与权限
 
 - 读取事件需要 session/invocation ownership；跨 scope 返回 404 或 auth error。
+- Event log 读取和 replay 必须按完整 ADK session 三元组
+  `(appName, userId, sessionId)` 作用域查询。由于 `sessionId` 由调用方控制，
+  session replay 与 invocation replay 都不得使用裸 `sessionId` 作为持久化查询 key。
+- HaaS native `/v1/haas/sessions/{session_id}/events` 在读取前必须把裸路径 id
+  解析为唯一一个调用方可见的 `(appName, userId, sessionId)`；无匹配或匹配多个可见
+  session 时返回 `404 session_not_found`，不得跨 scope 合并或猜测。
 - Raw adapter event 必须 redact 后才能 append。
 - `include_debug=true` 需要显式 debug/admin scope，仍不能包含 credentials。
 - Tool input/output payloads 默认摘要；full payload 需要单独的已批准 debug 设计。
@@ -218,4 +227,6 @@ Logs：
 - Integration：`/run` vs `/run_sse` parity、断线后 `GET session` read-back、reconnect replay。
 - Backpressure：慢客户端不阻塞 adapter terminal 写入。
 - Security：raw prompt、Authorization、cookie、完整 tool args/result 不进入 event log。
+- Security：不同 user 或 app 使用同一裸 `sessionId` 时事件互不混读；跨 user
+  native event replay 返回 404。
 - Compatibility：ADK client 对 `/run_sse` 输出逐条解析成功，stream 关闭语义正确。

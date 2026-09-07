@@ -209,6 +209,8 @@ class PolicyController:
         host = parsed.hostname or ""
         if not host:
             return self._deny("url_host_missing")
+        if _effective_port(parsed) is None:
+            return self._deny("url_port_invalid")
 
         allowed = any(self._allowlist_matches(entry, parsed) for entry in policy.network.allow)
         # Loopback/private hosts are only allowed when explicitly allowlisted.
@@ -245,12 +247,26 @@ class PolicyController:
 
     def _allowlist_matches(self, entry: str, parsed: ParseResult) -> bool:
         e = urlparse(entry)
-        e_host = e.hostname or entry
-        if e.hostname and parsed.hostname != e_host:
+        if e.hostname is None:
+            host = entry
+            explicit_port: int | None = None
+            if ":" in entry and entry.rsplit(":", 1)[1].isdigit():
+                host, port_text = entry.rsplit(":", 1)
+                explicit_port = int(port_text)
+            if parsed.hostname != host:
+                return False
+            if explicit_port is not None:
+                return _effective_port(parsed) == explicit_port
+            return _effective_port(parsed) == _default_port_for_scheme(parsed.scheme)
+        if parsed.hostname != e.hostname:
             return False
         if e.scheme and parsed.scheme != e.scheme:
             return False
-        return not (e.port and parsed.port and e.port != parsed.port)
+        entry_port = _effective_port(e)
+        request_port = _effective_port(parsed)
+        if entry_port is None or request_port is None:
+            return False
+        return entry_port == request_port
 
     def _is_private_or_special(self, host: str) -> bool:
         try:
@@ -287,3 +303,21 @@ def _is_within(path: str, roots: list[str]) -> bool:
         if path == r or path.startswith(r + "/"):
             return True
     return False
+
+
+def _effective_port(parsed: ParseResult) -> int | None:
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is not None:
+        return port
+    return _default_port_for_scheme(parsed.scheme)
+
+
+def _default_port_for_scheme(scheme: str) -> int | None:
+    if scheme == "http":
+        return 80
+    if scheme == "https":
+        return 443
+    return None

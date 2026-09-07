@@ -160,7 +160,10 @@ Skill requiredness:
 
 - `headers` values MAY contain templated request values or secret refs; resolved values are never returned.
 - The MCP proxy listens only on loopback. Only the proxy injects real MCP secrets outbound; the harness sees only the loopback address and a short-lived token.
-- URL validation rejects unsupported schemes, private networks, and disallowed hosts unless policy explicitly allows them.
+- URL validation reuses Policy Controller network authorization rather than
+  duplicating SSRF logic. Unsupported schemes, private, loopback, link-local,
+  reserved, metadata, and otherwise disallowed hosts are rejected by default
+  unless the frozen network policy explicitly allowlists the normalized target.
 - Skill paths MUST NOT escape their skill root.
 - Skill execution scripts are treated as executable code and MUST remain within declared skill bundle paths.
 - Disabled tools are enforced through native configuration where available; instruction-only fallback MUST be visible in capability metadata.

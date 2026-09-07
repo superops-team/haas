@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-07
 Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -41,6 +41,7 @@ ADK 的 session 由 `(appName, userId, sessionId)` 三元组唯一标识；`invo
 - 解析 `(appName, userId, sessionId)`，校验 principal scope，创建或复用 session。
 - 在 request validation 后、执行前完成 idempotency reservation。
 - 保证同一 session 内一次只运行一个 active invocation/turn（`session_busy`）。
+- 通过周期性续租维护整个 turn 期间的 active session lease，并对所有 turn-owned 写入使用 store fencing token。
 - 将 session 创建时的 configured harness 冻结为 `EffectiveHarnessConfig`。
 - 将 adapter events 写入 Event Log，并维护 session `state`（ADK `stateDelta`）。
 - 处理 streaming run（`/run_sse`）和 non-streaming run（`/run`）的一致终态。
@@ -187,6 +188,10 @@ Terminal states are immutable。`/run` 在终态后返回事件数组；`/run_ss
 
 ### 7.2 Session
 
+Session Runtime 使用短 TTL 的 active-turn lease 来串行化同一 `(appName, userId, sessionId)` 的写入。默认 lease TTL 为 30 秒，默认续租周期为 10 秒；续租周期必须小于 TTL 的一半。配置超时时间超过一个 lease TTL 的 turn，必须持续续租直到进入终态。turn 正常结束、失败、取消或超时时，续租后台任务必须被取消并等待结束，不能残留后台任务。
+
+active turn 写入 event、session/invocation/turn 终态前，都必须通过 store 的 holder/token fencing 校验。lease 已过期或已被接管的 stale holder 不得继续 append event、合并 `stateDelta` 或覆盖终态。stale-write 拒绝沿用现有 adapter failure 路径（`haas_adapter_error`），不新增公开错误码。
+
 ```text
 new -> active -> idle -> active
 new -> active -> cancelling -> idle
@@ -236,21 +241,23 @@ Session Runtime 产生：
 
 ## 10. 失败与恢复
 
+Adapter 调用（`prepare_session`、`start_turn`、`stream_events`、`finalize_turn`）运行在同一个 invocation timeout budget 内。默认 timeout 为 900 秒，并可在 `SessionRuntime` 配置；该值必须大于 lease TTL，保证正常长 turn 能在 timeout 前至少续租一次。超时后，Runtime 会取消正在等待的 adapter 调用，写入 terminal `failed` event（`actions.stateDelta.status = "failed"` 且 `actions.stateDelta.reason = "timeout"`），持久化 invocation/turn/session 终态，由 API 层释放 admission quota，并用该 failed terminal event 完成幂等 reservation，使重试不再看到 pending key。
+
 | 场景 | 行为 |
 |------|------|
 | request 在执行前失败 | release idempotency reservation |
 | request 已进入执行 | idempotency reservation 保留，后续重试 replay 首次结果 |
 | sidecar 进程重启 | 从 store 读取 running 状态并调用 adapter inspect/resume；无法确认则 fail closed |
-| adapter 无终态 | timeout 后写 terminal failed/incomplete |
+| adapter 无终态 | timeout 后取消 adapter await 并写 terminal `failed` |
 | cancel 后断线 | cancel intent 持久化；最终状态仍必须可读 |
-| session lease 过期 | 后续 continuation 返回 `session_expired` |
+| session lease 续租失败或被 fencing out | stale holder 停止写入；仅在 fencing 仍允许时写失败终态，并走现有 adapter-error 路径 |
 | event log 写失败 | 不能宣称 run 成功；已接受任务必须生成 terminal failure evidence |
 
 ## 11. 测试计划与验收
 
 - Unit：id 生成、三元组解析、scope、state transition、terminal immutability、request hash、idempotency replay。
 - Integration：`/run` 非流式与 `/run_sse` 流式 parity、read back session、PATCH stateDelta、cancel、DELETE。
-- Concurrency：同 session 并发返回 `session_busy`；不同 session 可并发。
+- Concurrency：同 session 并发返回 `session_busy`；不同 session 可并发；超过一个 lease TTL 的长 turn 仍必须因续租受到保护。
 - Recovery：模拟 sidecar restart、adapter reconnect、missing native ref、expired session。
 - Compatibility：ADK client session GET/PATCH/DELETE 行为对齐。
 - Security：跨 principal 访问全部返回 404；secret-shaped input 不落默认日志。

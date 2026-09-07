@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-07
 Related specs: [Session Runtime](../session-runtime/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -75,13 +75,15 @@ class SessionStore(Protocol):
     async def count_sessions(self) -> int: ...
     async def put_invocation(self, inv: InvocationRecord) -> InvocationRecord: ...
     async def put_turn(self, t: TurnRecord) -> TurnRecord: ...
-    async def acquire_lease(self, key: SessionKey, holder: str) -> Lease: ...
-    async def release_lease(self, key: SessionKey, holder: str) -> None: ...
+    async def acquire_lease(self, key: SessionKey, holder: str, ttl_ms: int) -> Lease: ...
+    async def renew_lease(self, key: SessionKey, holder: str, token: int, ttl_ms: int) -> Lease: ...
+    async def assert_lease(self, key: SessionKey, holder: str, token: int) -> None: ...
+    async def release_lease(self, key: SessionKey, holder: str, token: int | None = None) -> None: ...
 
 class EventLogStore(Protocol):
     async def append(self, e: CanonicalEventRecord) -> None: ...
-    async def read_invocation(self, invocation_id: str, after: int) -> list[CanonicalEventRecord]: ...
-    async def read_session(self, session_id: str, after_cursor: str | None) -> list[CanonicalEventRecord]: ...
+    async def read_invocation(self, key: SessionKey, invocation_id: str, after: int) -> list[CanonicalEventRecord]: ...
+    async def read_session(self, key: SessionKey, after_cursor: str | None) -> list[CanonicalEventRecord]: ...
 
 class IdempotencyStore(Protocol):
     async def reserve(self, key_hash: str, request_hash: str) -> IdempotencyReservation: ...
@@ -128,6 +130,11 @@ Retention 默认值：
 
 时间戳一律使用**毫秒 epoch（integer）**，与 ADK 公开 float 秒的转换只发生在投影层（见 `specs/README.md` 全局约定）。
 
+Event log 记录的 session 读取索引必须使用完整 `SessionKey`
+`(appName, userId, sessionId)`；invocation 读取索引必须使用
+`(appName, userId, sessionId, invocationId)`。caller-supplied 的裸
+`sessionId` 不具备全局唯一性，禁止作为 event replay 的 store key。
+
 ## 7. 运行模型与状态机
 
 ```text
@@ -142,7 +149,9 @@ migration:
   store opens -> check schemaVersion -> apply forward migrations -> ready
 ```
 
-`acquire_lease` 是 active-turn 互斥的基础：同一 `SessionKey` 只允许一个 holder 持 lease；lease 过期可被接管，接管者必须能 explain 前 holder 的 final state（fail closed）。
+`acquire_lease` 是 active-turn 互斥的基础：同一 `SessionKey` 只允许一个 holder 持 lease。返回的 `Lease` 包含不透明且单调递增的 fencing token（`token`）。所有代表 active turn 的写入都必须用 holder 与 token 做保护；如果当前 lease 不存在、已过期、归属其他 holder，或 token 不一致，写入必须 fail closed，不能追加 event 或覆盖 session/invocation/turn 状态。
+
+运行中的 holder 必须在过期前续租。`renew_lease` 仅在当前 holder/token 匹配时成功，并延长 `expiresAtMs` 且不改变 token。过期 lease 可被新 holder 接管，接管必须分配更大的 token。新 holder 必须能 explain 前 holder 的 final state，否则 fail closed。release 是 best-effort，只有 holder 与（如提供）token 匹配当前 lease 时才删除 lease。
 
 ## 8. 安全与权限
 
@@ -150,6 +159,8 @@ migration:
 - Idempotency key 只存 hash；request hash 只存 hash。
 - credential 以 `credentialRef` + `fingerprint` 形式存储，不存明文。
 - 越权访问由上层 scope 检查保证，store 不做授权。
+- Store 层 event index 仍必须通过完整 session scope key 实现命名空间隔离；
+  只在 API 层过滤是不充分的。
 
 ## 9. 可观测性
 
@@ -173,12 +184,12 @@ Logs：
 | store 不可用 | 新请求 fail closed；已冻结 session 的 read 可降级为不可用 |
 | event append 失败 | invocation 不得宣称 completed（Session Runtime 写 failure evidence） |
 | migration 失败 | startup fail closed，不裸跑旧 schema |
-| lease 过期 | 允许接管；接管前 inspect 前 holder 状态 |
+| lease 过期 | 仅允许使用更新的 fencing token 接管；过期 holder 不能 append event 或覆盖 record，接管者必须先 inspect/explain 前 holder 状态 |
 | 部分写入 | 事务回滚；无跨 store 的分布式事务保证，必要时用 Outbox 补 |
 
 ## 11. 测试计划与验收
 
-- Unit：各 record UPSERT、cursor read、idempotency replay/release。
+- Unit：各 record UPSERT、cursor read、lease acquire/renew/assert/release（含 fencing 拒绝）、idempotency replay/release。
 - Integration：in-memory store 跑通 S2 协议与 S3 fake adapter 全链路。
 - Recovery：写入后重启进程，session/event/idempotency 可从 store 恢复。
 - Schema：forward migration 后旧数据可读；rollback 明确不支持。

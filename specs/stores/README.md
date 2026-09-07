@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-07
 Related specs: [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Harness Registry](../harness-registry/README.md), [Admission Control](../admission-control/README.md)
 
 ## 1. Component Role
@@ -76,13 +76,15 @@ class SessionStore(Protocol):
     async def count_sessions(self) -> int: ...
     async def put_invocation(self, inv: InvocationRecord) -> InvocationRecord: ...
     async def put_turn(self, t: TurnRecord) -> TurnRecord: ...
-    async def acquire_lease(self, key: SessionKey, holder: str) -> Lease: ...
-    async def release_lease(self, key: SessionKey, holder: str) -> None: ...
+    async def acquire_lease(self, key: SessionKey, holder: str, ttl_ms: int) -> Lease: ...
+    async def renew_lease(self, key: SessionKey, holder: str, token: int, ttl_ms: int) -> Lease: ...
+    async def assert_lease(self, key: SessionKey, holder: str, token: int) -> None: ...
+    async def release_lease(self, key: SessionKey, holder: str, token: int | None = None) -> None: ...
 
 class EventLogStore(Protocol):
     async def append(self, e: CanonicalEventRecord) -> None: ...
-    async def read_invocation(self, invocation_id: str, after: int) -> list[CanonicalEventRecord]: ...
-    async def read_session(self, session_id: str, after_cursor: str | None) -> list[CanonicalEventRecord]: ...
+    async def read_invocation(self, key: SessionKey, invocation_id: str, after: int) -> list[CanonicalEventRecord]: ...
+    async def read_session(self, key: SessionKey, after_cursor: str | None) -> list[CanonicalEventRecord]: ...
 
 class IdempotencyStore(Protocol):
     async def reserve(self, key_hash: str, request_hash: str) -> IdempotencyReservation: ...
@@ -132,6 +134,12 @@ Default retention values:
 
 All timestamps use **integer epoch milliseconds**. Conversion to the public ADK float-seconds representation occurs only in the projection layer; see the global convention in `specs/README.md`.
 
+Event-log records MUST be indexed by the complete `SessionKey`
+`(appName, userId, sessionId)` for session reads and by
+`(appName, userId, sessionId, invocationId)` for invocation reads. A bare
+caller-supplied `sessionId` is not unique and MUST NOT be used as a store key
+for event replay.
+
 ## 7. Runtime Model and State Machine
 
 ```text
@@ -146,7 +154,9 @@ migration:
   store opens -> check schemaVersion -> apply forward migrations -> ready
 ```
 
-`acquire_lease` is the basis for active-turn mutual exclusion: only one holder MAY hold a lease for a given `SessionKey`. An expired lease MAY be taken over, and the new holder MUST be able to explain the previous holder's final state; otherwise it MUST fail closed.
+`acquire_lease` is the basis for active-turn mutual exclusion: only one holder MAY hold a lease for a given `SessionKey`. The returned `Lease` includes an opaque, monotonically increasing fencing token (`token`). Every write performed on behalf of an active turn MUST be guarded by the holder and token. If the current lease is absent, expired, held by another holder, or has a different token, the write MUST fail closed instead of appending events or overwriting session/invocation/turn state.
+
+A running holder MUST renew its lease before expiry. `renew_lease` succeeds only for the current holder/token and extends `expiresAtMs` without changing the token. An expired lease MAY be taken over by a new holder, and takeover MUST allocate a strictly newer token. The new holder MUST be able to explain the previous holder's final state; otherwise it MUST fail closed. Release is best-effort and MUST remove the lease only when holder and, when supplied, token match the current lease.
 
 ## 8. Security and Authorization
 
@@ -154,6 +164,8 @@ migration:
 - Only hashes of idempotency keys and request hashes are stored.
 - Credentials are stored as `credentialRef` + `fingerprint`, never as plaintext.
 - The upper layer enforces scope checks for unauthorized access; Store performs no authorization.
+- Store-level event indexes still enforce namespace separation by requiring the
+  full session scope key on reads; API-layer filtering alone is insufficient.
 
 ## 9. Observability
 
@@ -177,12 +189,12 @@ Logs:
 | Store unavailable | New requests fail closed; reads for frozen sessions MAY degrade to unavailable |
 | Event append fails | The invocation MUST NOT claim `completed`; Session Runtime writes failure evidence |
 | Migration fails | Startup fails closed; the service MUST NOT run against an old schema |
-| Lease expires | Takeover is allowed; inspect the previous holder's state before takeover |
+| Lease expires | Takeover is allowed only with a newer fencing token; stale holders cannot append events or overwrite records and the new holder must inspect/explain previous state before proceeding |
 | Partial write | Roll back the transaction; no distributed transaction is guaranteed across stores, and use an Outbox when necessary |
 
 ## 11. Test Plan and Acceptance Criteria
 
-- Unit: UPSERT for each record, cursor reads, and idempotency replay/release.
+- Unit: UPSERT for each record, cursor reads, lease acquire/renew/assert/release including fencing rejection, and idempotency replay/release.
 - Integration: use the in-memory store to exercise the complete S2 protocol and S3 fake-adapter path.
 - Recovery: after writing and restarting the process, recover session/event/idempotency data from the store.
 - Schema: old data remains readable after a forward migration; rollback is explicitly unsupported.

@@ -142,6 +142,66 @@ def test_authorize_network_port_must_match_when_pinned() -> None:
     ).allowed is True
 
 
+def test_authorize_network_pinned_port_rejects_default_port_omission() -> None:
+    controller = PolicyController()
+    ported = _compile(
+        _layer(
+            workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+            network=NetworkPolicy(defaultAction="deny",
+                                  allow=["http://api.example.com:8080"]),
+        )
+    )
+    assert controller.authorize_network(
+        ported, "http://api.example.com/x"
+    ).allowed is False
+    assert controller.authorize_network(
+        ported, "http://api.example.com:80/x"
+    ).allowed is False
+    assert controller.authorize_network(
+        ported, "http://api.example.com:8080/x"
+    ).allowed is True
+
+
+def test_authorize_network_http_entry_without_port_rejects_non_default_port() -> None:
+    controller = PolicyController()
+    default_port_only = _compile(
+        _layer(
+            workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+            network=NetworkPolicy(defaultAction="deny",
+                                  allow=["http://api.example.com"]),
+        )
+    )
+    assert controller.authorize_network(
+        default_port_only, "http://api.example.com/x"
+    ).allowed is True
+    assert controller.authorize_network(
+        default_port_only, "http://api.example.com:80/x"
+    ).allowed is True
+    assert controller.authorize_network(
+        default_port_only, "http://api.example.com:8080/x"
+    ).allowed is False
+
+
+def test_authorize_network_https_entry_without_port_rejects_non_default_port() -> None:
+    controller = PolicyController()
+    default_port_only = _compile(
+        _layer(
+            workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+            network=NetworkPolicy(defaultAction="deny",
+                                  allow=["https://api.example.com"]),
+        )
+    )
+    assert controller.authorize_network(
+        default_port_only, "https://api.example.com/x"
+    ).allowed is True
+    assert controller.authorize_network(
+        default_port_only, "https://api.example.com:443/x"
+    ).allowed is True
+    assert controller.authorize_network(
+        default_port_only, "https://api.example.com:8443/x"
+    ).allowed is False
+
+
 def test_authorize_network_allow_all_when_default_action_allow() -> None:
     """`defaultAction=allow` widens the deny baseline, so it needs delegation."""
     policy = _compile(

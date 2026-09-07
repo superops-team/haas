@@ -6,6 +6,7 @@ from haas.stores.memory import (
     IdempotencyConflictError,
     InvocationRecord,
     LeaseConflictError,
+    LeaseFencingError,
     MemoryStore,
     SessionRecord,
     TurnRecord,
@@ -58,9 +59,55 @@ def test_event_append_and_cursor_reads() -> None:
     store.append(e0)
     store.append(e1)
 
-    assert [e.eventId for e in store.read_invocation("inv_1", after=0)] == ["evt_1"]
-    assert [e.eventId for e in store.read_session("hsess_1")] == ["evt_0", "evt_1"]
-    assert [e.eventId for e in store.read_session("hsess_1", after_cursor="evt_0")] == ["evt_1"]
+    key = ("", "", "hsess_1")
+    assert [e.eventId for e in store.read_invocation(key, "inv_1", after=0)] == ["evt_1"]
+    assert [e.eventId for e in store.read_session(key)] == ["evt_0", "evt_1"]
+    assert [e.eventId for e in store.read_session(key, after_cursor="evt_0")] == ["evt_1"]
+
+
+def test_event_session_index_is_scoped_by_app_user_session() -> None:
+    store = MemoryStore()
+    store.append(
+        _event(
+            eventId="evt_user_1",
+            invocationId="inv_user_1",
+            appName="chrn_app",
+            userId="u_1",
+            sessionId="hsess_shared",
+        )
+    )
+    store.append(
+        _event(
+            eventId="evt_user_2",
+            invocationId="inv_user_2",
+            appName="chrn_app",
+            userId="u_2",
+            sessionId="hsess_shared",
+        )
+    )
+    store.append(
+        _event(
+            eventId="evt_app_2",
+            invocationId="inv_app_2",
+            appName="chrn_other",
+            userId="u_1",
+            sessionId="hsess_shared",
+        )
+    )
+
+    assert [
+        e.eventId for e in store.read_session(("chrn_app", "u_1", "hsess_shared"))
+    ] == ["evt_user_1"]
+    assert [
+        e.eventId for e in store.read_session(("chrn_app", "u_2", "hsess_shared"))
+    ] == ["evt_user_2"]
+    assert [
+        e.eventId for e in store.read_session(("chrn_other", "u_1", "hsess_shared"))
+    ] == ["evt_app_2"]
+    assert (
+        store.read_invocation(("chrn_app", "u_2", "hsess_shared"), "inv_user_1")
+        == []
+    )
 
 
 def test_idempotency_reserve_replay_conflict_release() -> None:
@@ -106,7 +153,7 @@ def test_session_read_unknown_cursor_raises() -> None:
     store = MemoryStore()
     store.append(_event(eventId="evt_0", sequenceNumber=0))
     try:
-        store.read_session("hsess_1", after_cursor="evt_missing")
+        store.read_session(("", "", "hsess_1"), after_cursor="evt_missing")
         raise AssertionError("expected CursorNotFoundError")
     except CursorNotFoundError:
         pass
@@ -138,3 +185,27 @@ def test_admission_window_and_quota() -> None:
     assert store.acquire_quota("sessions:tenant_1", limit=1) is False
     store.release_quota("sessions:tenant_1")
     assert store.acquire_quota("sessions:tenant_1", limit=1) is True
+
+
+def test_lease_renew_and_fencing_token_rejects_stale_holder() -> None:
+    store = MemoryStore()
+    key = ("chrn_1", "u_1", "hsess_fence")
+    first = store.acquire_lease(key, holder="run_a", ttl_ms=30)
+    renewed = store.renew_lease(key, holder="run_a", token=first.token, ttl_ms=30)
+    assert renewed.token == first.token
+    assert renewed.expiresAtMs >= first.expiresAtMs
+
+    # Force a takeover without sleeping; the new holder must receive a newer token.
+    store._leases[key].expiresAtMs = 0  # type: ignore[attr-defined]
+    second = store.acquire_lease(key, holder="run_b", ttl_ms=30)
+    assert second.token > first.token
+
+    try:
+        store.assert_lease(key, holder="run_a", token=first.token)
+        raise AssertionError("expected stale holder to be fenced")
+    except LeaseFencingError:
+        pass
+
+    # Stale release must not remove the current holder's lease.
+    store.release_lease(key, holder="run_a", token=first.token)
+    store.assert_lease(key, holder="run_b", token=second.token)

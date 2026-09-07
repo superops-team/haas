@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 SessionKey = tuple[str, str, str]  # (appName, userId, sessionId)
+InvocationEventKey = tuple[str, str, str, str]  # (appName, userId, sessionId, invocationId)
 AccountKey = tuple[str | None, str | None]  # (tenantId, workspaceId)
 
 
@@ -78,6 +79,7 @@ class InvocationRecord:
     sessionId: str
     appName: str
     turnId: str
+    userId: str = ""
     status: str = "running"
     schemaVersion: int = 1
     startedAtMs: int = field(default_factory=_now_ms)
@@ -110,6 +112,8 @@ class CanonicalEventRecord:
     redactionApplied: bool = True
     harnessId: str = ""
     adapterId: str = ""
+    appName: str = ""
+    userId: str = ""
 
 
 @dataclass
@@ -141,10 +145,15 @@ class CursorNotFoundError(Exception):
 class Lease:
     holder: str
     expiresAtMs: int
+    token: int
 
 
 class LeaseConflictError(Exception):
     """Another holder owns the active lease (maps to 409 session_busy)."""
+
+
+class LeaseFencingError(Exception):
+    """Holder/token no longer owns the lease; stale writes must fail closed."""
 
 
 class MemoryStore:
@@ -155,10 +164,13 @@ class MemoryStore:
         self._sessions: dict[SessionKey, SessionRecord] = {}
         self._invocations: dict[str, InvocationRecord] = {}
         self._turns: dict[str, TurnRecord] = {}
-        self._events_by_invocation: dict[str, list[CanonicalEventRecord]] = {}
-        self._events_by_session: dict[str, list[CanonicalEventRecord]] = {}
+        self._events_by_invocation: dict[
+            InvocationEventKey, list[CanonicalEventRecord]
+        ] = {}
+        self._events_by_session: dict[SessionKey, list[CanonicalEventRecord]] = {}
         self._idempotency: dict[str, IdempotencyRecord] = {}
         self._leases: dict[SessionKey, Lease] = {}
+        self._lease_tokens: dict[SessionKey, int] = {}
         self._windows: dict[str, list[int]] = {}
         self._quotas: dict[str, int] = {}
 
@@ -240,25 +252,55 @@ class MemoryStore:
             raise LeaseConflictError(
                 f"session busy: held by {existing.holder!r} until {existing.expiresAtMs}"
             )
-        lease = Lease(holder=holder, expiresAtMs=now + ttl_ms)
+        token = self._lease_tokens.get(key, 0) + 1
+        self._lease_tokens[key] = token
+        lease = Lease(holder=holder, expiresAtMs=now + ttl_ms, token=token)
         self._leases[key] = lease
         return lease
 
-    def release_lease(self, key: SessionKey, holder: str) -> None:
+    def renew_lease(
+        self, key: SessionKey, holder: str, token: int, ttl_ms: int = 30_000
+    ) -> Lease:
+        self.assert_lease(key, holder, token)
+        lease = Lease(holder=holder, expiresAtMs=_now_ms() + ttl_ms, token=token)
+        self._leases[key] = lease
+        return lease
+
+    def assert_lease(self, key: SessionKey, holder: str, token: int) -> None:
+        now = _now_ms()
         existing = self._leases.get(key)
-        if existing is not None and existing.holder == holder:
+        if (
+            existing is None
+            or existing.expiresAtMs <= now
+            or existing.holder != holder
+            or existing.token != token
+        ):
+            raise LeaseFencingError("stale session lease holder")
+
+    def release_lease(self, key: SessionKey, holder: str, token: int | None = None) -> None:
+        existing = self._leases.get(key)
+        if (
+            existing is not None
+            and existing.holder == holder
+            and (token is None or existing.token == token)
+        ):
             self._leases.pop(key, None)
 
     # --- EventLogStore --------------------------------------------------
 
     def append(self, event: CanonicalEventRecord) -> None:
-        self._events_by_invocation.setdefault(event.invocationId, []).append(event)
-        self._events_by_session.setdefault(event.sessionId, []).append(event)
+        session_key = (event.appName, event.userId, event.sessionId)
+        invocation_key = (*session_key, event.invocationId)
+        self._events_by_invocation.setdefault(invocation_key, []).append(event)
+        self._events_by_session.setdefault(session_key, []).append(event)
 
     def read_invocation(
-        self, invocation_id: str, after: int = -1
+        self,
+        key: SessionKey,
+        invocation_id: str,
+        after: int = -1,
     ) -> list[CanonicalEventRecord]:
-        events = self._events_by_invocation.get(invocation_id, [])
+        events = self._events_by_invocation.get((*key, invocation_id), [])
         return [
             e
             for e in sorted(events, key=lambda e: e.sequenceNumber)
@@ -266,9 +308,9 @@ class MemoryStore:
         ]
 
     def read_session(
-        self, session_id: str, after_cursor: str | None = None
+        self, key: SessionKey, after_cursor: str | None = None
     ) -> list[CanonicalEventRecord]:
-        events = self._events_by_session.get(session_id, [])
+        events = self._events_by_session.get(key, [])
         if after_cursor is None:
             return list(events)
         index = next((i for i, e in enumerate(events) if e.eventId == after_cursor), None)

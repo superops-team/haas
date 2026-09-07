@@ -12,6 +12,14 @@ from haas.mcp import (
     materialize_skills,
     validate_mcp_server,
 )
+from haas.policy.models import (
+    EffectivePolicy,
+    ModelPolicy,
+    NetworkPolicy,
+    PolicyScope,
+    ToolsPolicy,
+    WorkspacePolicy,
+)
 
 
 def test_validate_mcp_server_valid() -> None:
@@ -31,6 +39,39 @@ def test_validate_mcp_server_requires_secret_ref() -> None:
         McpServerConfig(name="repo", url="https://mcp.example.com", authType="secret_ref")
     )
     assert "auth_ref_required" in errors
+
+
+def test_validate_mcp_server_rejects_metadata_endpoint_by_default() -> None:
+    errors = validate_mcp_server(
+        McpServerConfig(name="repo", url="http://169.254.169.254/latest/meta-data")
+    )
+    assert "url_private_network_blocked" in errors
+
+
+def test_validate_mcp_server_rejects_loopback_by_default() -> None:
+    errors = validate_mcp_server(
+        McpServerConfig(name="repo", url="http://localhost:18080/mcp")
+    )
+    assert "url_private_network_blocked" in errors
+
+
+def test_validate_mcp_server_allows_private_host_when_policy_allowlists_it() -> None:
+    policy = EffectivePolicy(
+        policyId="pol_test",
+        version=1,
+        scope=PolicyScope(),
+        workspace=WorkspacePolicy(),
+        network=NetworkPolicy(defaultAction="deny", allow=["http://10.0.0.1:8080"]),
+        tools=ToolsPolicy(),
+        model=ModelPolicy(),
+    )
+    assert (
+        validate_mcp_server(
+            McpServerConfig(name="repo", url="http://10.0.0.1:8080/mcp"),
+            policy=policy,
+        )
+        == []
+    )
 
 
 def test_materialize_skills_valid() -> None:

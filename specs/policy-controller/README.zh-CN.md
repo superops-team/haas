@@ -156,6 +156,14 @@ Lower levels may only narrow unless a higher level explicitly grants delegation.
 
 - Unknown policy fields fail closed when they would affect security.
 - Network allowlist is evaluated before model/MCP proxy outbound calls.
+- Allowlist entry 和请求 URL 在比较前必须规范化。若 allowlist entry
+  显式指定端口，请求的有效端口（显式端口或 scheme 默认端口：HTTP 为
+  `80`，HTTPS 为 `443`）必须严格相等。例如，`http://host:8080`
+  不得放行 `http://host` 或 `http://host:80`。若 allowlist entry
+  未指定端口，则只允许该 scheme 的默认端口：`http://host` 允许
+  `http://host` 与 `http://host:80`，但不得允许 `http://host:8080`；
+  `https://host` 允许 `https://host` 与 `https://host:443`，但不得允许
+  `https://host:8443`。
 - Workspace paths are canonicalized before comparison.
 - Policy compilation stores secret fingerprints, not values.
 - Approval modes must map truthfully to adapter capabilities.

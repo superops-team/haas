@@ -61,7 +61,10 @@ Non-responsibilities:
 Initial support order:
 
 1. `unix://PATH`: production default. Uses standard WebSocket HTTP Upgrade over a Unix socket.
-2. `ws://127.0.0.1:PORT`: local debugging and in-container loopback.
+2. `ws://127.0.0.1:PORT` / `ws://[::1]:PORT` / `ws://localhost:PORT`:
+   local debugging and in-container loopback. When `transport` is
+   `loopback_websocket`, the adapter MUST parse `listenUrl` and reject any host
+   other than `127.0.0.1`, `::1`, or `localhost` before opening a connection.
 3. `stdio://`: test fallback and minimal local smoke testing. The child process uses stdin/stdout NDJSON, with one JSON-RPC message per line.
 
 Non-loopback WebSocket transports MUST enable `--ws-auth` and MUST be placed behind TLS or a trusted tunnel. HaaS MUST NOT expose the Codex app-server listener directly to the public network.

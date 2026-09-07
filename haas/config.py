@@ -61,6 +61,13 @@ class ObservabilityConfig:
 
 
 @dataclass
+class SessionRuntimeConfig:
+    lease_ttl_ms: int = 30_000
+    lease_renew_interval_ms: int = 10_000
+    turn_timeout_seconds: float = 900.0
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     store: StoreConfig = field(default_factory=StoreConfig)
@@ -68,6 +75,7 @@ class AppConfig:
     model_proxy: ModelProxyConfig = field(default_factory=ModelProxyConfig)
     mcp_proxy: McpProxyConfig = field(default_factory=McpProxyConfig)
     adapters: AdaptersConfig = field(default_factory=AdaptersConfig)
+    session_runtime: SessionRuntimeConfig = field(default_factory=SessionRuntimeConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
 
@@ -94,6 +102,16 @@ def load_config(path: str | None = None) -> AppConfig:
         cfg.identity.provider = os.environ["HAAS_IDENTITY_PROVIDER"]
     if os.environ.get("HAAS_ADAPTER_BASE"):
         cfg.adapters.default_base = os.environ["HAAS_ADAPTER_BASE"]
+    if os.environ.get("HAAS_SESSION_LEASE_TTL_MS"):
+        cfg.session_runtime.lease_ttl_ms = int(os.environ["HAAS_SESSION_LEASE_TTL_MS"])
+    if os.environ.get("HAAS_SESSION_LEASE_RENEW_INTERVAL_MS"):
+        cfg.session_runtime.lease_renew_interval_ms = int(
+            os.environ["HAAS_SESSION_LEASE_RENEW_INTERVAL_MS"]
+        )
+    if os.environ.get("HAAS_SESSION_TURN_TIMEOUT_SECONDS"):
+        cfg.session_runtime.turn_timeout_seconds = float(
+            os.environ["HAAS_SESSION_TURN_TIMEOUT_SECONDS"]
+        )
 
     return cfg
 
@@ -133,6 +151,18 @@ def _overlay_file(cfg: AppConfig, path: str) -> None:
     adapters = data.get("adapters") or {}
     if isinstance(adapters, dict) and "default_base" in adapters:
         cfg.adapters.default_base = str(adapters["default_base"])
+    session_runtime = data.get("session_runtime") or {}
+    if isinstance(session_runtime, dict):
+        if "lease_ttl_ms" in session_runtime:
+            cfg.session_runtime.lease_ttl_ms = int(session_runtime["lease_ttl_ms"])
+        if "lease_renew_interval_ms" in session_runtime:
+            cfg.session_runtime.lease_renew_interval_ms = int(
+                session_runtime["lease_renew_interval_ms"]
+            )
+        if "turn_timeout_seconds" in session_runtime:
+            cfg.session_runtime.turn_timeout_seconds = float(
+                session_runtime["turn_timeout_seconds"]
+            )
     codex = (adapters or {}).get("codex") or {}
     if isinstance(codex, dict):
         if "transport" in codex:

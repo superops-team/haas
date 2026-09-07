@@ -14,6 +14,7 @@ import contextlib
 import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
+from urllib.parse import urlparse
 
 from websockets.asyncio.client import ClientConnection, connect, unix_connect
 
@@ -22,6 +23,7 @@ from websockets.asyncio.client import ClientConnection, connect, unix_connect
 UDS_WEBSOCKET_HANDSHAKE_URL = "ws://localhost/rpc"
 WEBSOCKET_MAX_MESSAGE_SIZE = 128 << 20  # 128 MiB
 DEFAULT_OPEN_TIMEOUT = 30.0
+LOOPBACK_WEBSOCKET_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 CODEX_APP_SERVER_ENV_ALLOWLIST = frozenset(
     {
         "PATH",
@@ -90,6 +92,16 @@ def codex_app_server_env(source: Mapping[str, str] | None = None) -> dict[str, s
     }
     env.setdefault("PATH", os.defpath)
     return env
+
+
+def validate_loopback_websocket_url(listen_url: str) -> None:
+    """Fail closed unless a loopback WebSocket endpoint targets loopback only."""
+    parsed = urlparse(listen_url)
+    host = parsed.hostname
+    if parsed.scheme not in {"ws", "wss"} or host not in LOOPBACK_WEBSOCKET_HOSTS:
+        raise CodexTransportError(
+            "loopback_websocket listen_url must target 127.0.0.1, ::1, or localhost"
+        )
 
 
 class WebSocketTransport:
@@ -165,6 +177,7 @@ async def _connect_websocket(
             open_timeout=open_timeout,
         )
     elif endpoint.transport == "loopback_websocket":
+        validate_loopback_websocket_url(endpoint.listen_url)
         ws = await connect(
             endpoint.listen_url,
             max_size=WEBSOCKET_MAX_MESSAGE_SIZE,

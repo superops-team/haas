@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-07
 Related specs: [Container Runtime](../container-runtime/README.zh-CN.md), [Stores](../stores/README.zh-CN.md), [Identity](../identity/README.zh-CN.md), [HaaS Protocol](../haas-protocol/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -51,6 +51,7 @@ class AppConfig:
     model_proxy: ModelProxyConfig
     mcp_proxy: McpProxyConfig
     adapters: AdaptersConfig
+    session_runtime: SessionRuntimeConfig
     observability: ObservabilityConfig
 
 def load_config(path: str | None) -> AppConfig: ...
@@ -80,6 +81,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI: ...
 | 变量 | 含义 |
 |------|------|
 | `HAAS_ADAPTER_BASE` | 默认 harness base（`codex` / `fake`） |
+| `HAAS_SESSION_LEASE_TTL_MS` | active-turn session lease TTL（毫秒，默认 `30000`） |
+| `HAAS_SESSION_LEASE_RENEW_INTERVAL_MS` | active-turn lease 续租周期（毫秒，默认 `10000`；必须小于 TTL 一半） |
+| `HAAS_SESSION_TURN_TIMEOUT_SECONDS` | adapter invocation 端到端超时（秒，默认 `900`；必须大于 lease TTL） |
 
 环境变量前缀统一为 `HAAS_`，例如：
 
@@ -113,6 +117,10 @@ adapters:
   codex:
     transport: unix_websocket
     socket_path: /tmp/haas/codex.sock
+session_runtime:
+  lease_ttl_ms: 30000
+  lease_renew_interval_ms: 10000
+  turn_timeout_seconds: 900
 ```
 
 端口与服务发现固定为：

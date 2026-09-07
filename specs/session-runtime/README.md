@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-07
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Registry](../harness-registry/README.md), [Harness Adapter](../harness-adapter/README.md), [Event Log & SSE](../event-log-sse/README.md), [Admission Control](../admission-control/README.md)
 
 ## 1. Component Role
@@ -41,6 +41,7 @@ Responsibilities:
 - Resolve `(appName, userId, sessionId)`, validate principal scope, and create or reuse a session.
 - Reserve idempotency after request validation and before execution.
 - Ensure that only one active invocation/turn runs in a session at a time, returning `session_busy` otherwise.
+- Maintain the active session lease for the whole turn through periodic renewal and use store fencing tokens for every turn-owned write.
 - Freeze the configured harness as `EffectiveHarnessConfig` when the session is created.
 - Write adapter events to Event Log and maintain session `state` from ADK `stateDelta`.
 - Ensure consistent terminal states for streaming `/run_sse` and non-streaming `/run`.
@@ -166,7 +167,12 @@ Constraints: deletion is not allowed and requires an explicit extension field; o
 - Matching `request_hash` -> return the first result without starting the harness again (replay).
 - Different `request_hash` -> fail closed and return `409 haas_idempotency_conflict`; do not silently return the old result, so the caller must handle the conflict explicitly.
 
-Release is idempotent: failures before execution release the reservation. Once execution begins, the reservation is retained and subsequent retries replay the first result.
+Release is idempotent: failures before execution release the reservation. Once
+execution begins, the reservation is retained and subsequent retries replay the
+first result. The retained idempotency result is a response envelope, not just an
+event array: it MUST include HTTP status, structured error body when present,
+and projected events. Adapter failures that first returned `502
+haas_adapter_error` therefore replay as HTTP 502 with the same error semantics.
 
 ## 7. Runtime Model and State Machines
 
@@ -179,9 +185,21 @@ accepted -> running -> failed
 accepted -> running -> cancelling -> cancelled
 ```
 
-Terminal states are immutable. `/run` returns the event array after a terminal state; `/run_sse` closes the stream at a terminal state.
+Terminal states are immutable. `/run` returns the event array after a terminal
+state; `/run_sse` closes the stream at a terminal state. Before a terminal event
+is appended to Event Log or yielded to an SSE/non-streaming caller, Session
+Runtime MUST persist the corresponding invocation and turn terminal state and
+merge terminal session state under the same lease/fencing guard, unless the
+store backend provides a single atomic boundary that covers both terminal state
+and terminal event writes. This ordering prevents recovery from observing a
+completed/failed terminal event while invocation or turn records still read as
+`running`.
 
 ### 7.2 Session
+
+Session Runtime uses a short-lived active-turn lease to serialize writes for one `(appName, userId, sessionId)`. The default lease TTL is 30 seconds and the default renewal interval is 10 seconds; the renewal interval MUST remain less than half of the TTL. A turn whose configured timeout is longer than one lease TTL MUST keep renewing until it reaches a terminal state. Renewal tasks MUST be cancelled and awaited when the turn finishes normally, fails, is cancelled, or times out, so no background task survives the invocation.
+
+Every event append and session/invocation/turn terminal write performed by the active turn MUST pass the store's holder/token fencing check. A stale holder whose lease expired or was taken over MUST NOT append more events, merge `stateDelta`, or overwrite terminal state. Stale-write rejection maps to the existing adapter-failure path (`haas_adapter_error`) rather than introducing a public error code.
 
 ```text
 new -> active -> idle -> active
@@ -232,21 +250,23 @@ Metrics:
 
 ## 10. Failure and Recovery
 
+Adapter calls (`prepare_session`, `start_turn`, `stream_events`, and `finalize_turn`) execute inside a single invocation timeout budget. The default timeout is 900 seconds and is configurable per `SessionRuntime`; the value MUST be greater than the lease TTL so normal long turns renew at least once before timing out. On timeout, Runtime cancels the in-flight adapter await, persists terminal invocation/turn/session state, writes a terminal `failed` event with `actions.stateDelta.status = "failed"` and `actions.stateDelta.reason = "timeout"`, releases admission quota in the API layer, and completes any idempotency reservation with the failed response envelope so retries no longer observe a pending key or downgrade the HTTP status.
+
 | Scenario | Behavior |
 |----------|----------|
 | Request fails before execution | Release the idempotency reservation |
 | Request has entered execution | Retain the idempotency reservation; subsequent retries replay the first result |
 | Sidecar process restarts | Read the running state from the store and call adapter inspect/resume; fail closed if the state cannot be confirmed |
-| Adapter produces no terminal state | Write terminal `failed`/`incomplete` after timeout |
+| Adapter produces no terminal state | Cancel the adapter await and write terminal `failed` after timeout |
 | Disconnect after cancellation | Persist cancellation intent; the final state MUST remain readable |
-| Session lease expires | A subsequent continuation returns `session_expired` |
+| Session lease renew fails or lease is fenced out | Stop writing through the stale holder, write failure only if fencing still allows it, and surface the existing adapter-error path |
 | Event log write fails | The run MUST NOT claim success; an accepted task MUST produce terminal failure evidence |
 
 ## 11. Test Plan and Acceptance Criteria
 
 - Unit: ID generation, tuple parsing, scope, state transitions, terminal immutability, request hashes, and idempotency replay.
 - Integration: parity between non-streaming `/run` and streaming `/run_sse`, session read-back, PATCH stateDelta, cancellation, and DELETE.
-- Concurrency: concurrent requests in the same session return `session_busy`; different sessions MAY run concurrently.
-- Recovery: simulate sidecar restart, adapter reconnect, missing native reference, and expired session.
+- Concurrency: concurrent requests in the same session return `session_busy`; different sessions MAY run concurrently; a long turn exceeding one lease TTL remains protected by renewal.
+- Recovery: simulate sidecar restart, adapter reconnect, missing native reference, expired session, stale holder fencing rejection, and adapter timeout terminalization.
 - Compatibility: align ADK client behavior for session GET/PATCH/DELETE.
 - Security: all cross-principal access returns 404; secret-shaped input does not enter default logs.

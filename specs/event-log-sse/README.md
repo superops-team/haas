@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-07
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
@@ -66,10 +66,10 @@ Non-responsibilities:
 
 ```python
 async def append_event(event: CanonicalEvent) -> StoredEvent: ...
-async def read_session_events(session_id: str, after_event_id: str | None) -> list[StoredEvent]: ...
-async def read_invocation_events(invocation_id: str) -> list[StoredEvent]: ...
-async def stream_invocation(invocation_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
-async def stream_session(session_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
+async def read_session_events(app_name: str, user_id: str, session_id: str, after_event_id: str | None) -> list[StoredEvent]: ...
+async def read_invocation_events(app_name: str, user_id: str, session_id: str, invocation_id: str) -> list[StoredEvent]: ...
+async def stream_invocation(app_name: str, user_id: str, session_id: str, invocation_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
+async def stream_session(app_name: str, user_id: str, session_id: str, after_event_id: str | None) -> AsyncIterator[SSEFrame]: ...
 def project_adk(event: StoredEvent) -> AdkEvent: ...
 # project_legacy(): not implemented; the legacy shim is out of scope (specs/README §3.1.1)
 ```
@@ -83,6 +83,8 @@ def project_adk(event: StoredEvent) -> AdkEvent: ...
   "eventId": "evt_0000000001042",
   "invocationId": "inv_abc",
   "sessionId": "hsess_abc",
+  "appName": "chrn_codex_default",
+  "userId": "u_123",
   "turnId": "turn_abc",
   "harnessId": "chrn_codex_default",
   "adapterId": "codex-app-server",
@@ -109,6 +111,7 @@ Timestamp convention: internal canonical events use `observedAtMs`, in epoch mil
 |--------------------|----------------|------|
 | `type` / `nativeType` | Not persisted | Used only during normalization to determine part type and terminal state |
 | `invocationId` / `sessionId` / `turnId` | Preserved under the same names | MUST match the execution context |
+| Execution context `appName` / `userId` | `appName` / `userId` | Persisted for store-level scope isolation; MUST match the ADK session tuple |
 | `author` | `author` | Preserved |
 | `content` / `actions` / `usage` | Same-name fields | Preserved after `redact()` |
 | `safe` | Not persisted | Replaced by `redactionApplied` |
@@ -167,12 +170,24 @@ Ordering invariants:
 
 - Events within an invocation are emitted in production order without gaps.
 - Event ordering for the same item is stable.
+- Terminal state persistence is ordered before terminal event publication:
+  Session Runtime MUST commit invocation/turn/session terminal state before
+  appending/yielding a terminal event, or use a backend transaction that makes
+  the terminal state and terminal event visible atomically.
 - The event array returned by non-streaming `/run` MUST equal the aggregate result from streaming `/run_sse` (parity).
 - Stream closure itself signals invocation completion.
 
 ## 8. Security and Authorization
 
 - Reading events requires session/invocation ownership; cross-scope access returns 404 or an auth error.
+- Event-log reads and replay MUST be scoped by the full ADK session tuple
+  `(appName, userId, sessionId)`. Because `sessionId` is caller-controlled,
+  neither session replay nor invocation replay may use a bare `sessionId` as
+  the persistence lookup key.
+- HaaS native `/v1/haas/sessions/{session_id}/events` resolves the bare path id
+  to exactly one caller-visible `(appName, userId, sessionId)` before reading.
+  If no visible session or more than one visible session matches, it returns
+  `404 session_not_found`; it MUST NOT merge or guess between scopes.
 - Raw adapter events MUST be redacted before append.
 - `include_debug=true` requires explicit debug/admin scope and still MUST NOT include credentials.
 - Tool input/output payloads are summarized by default; full payloads require a separately approved debug design.
@@ -214,4 +229,6 @@ Logs:
 - Integration: `/run` versus `/run_sse` parity, `GET session` read-back after disconnect, and reconnect replay.
 - Backpressure: a slow client does not block adapter terminal-event persistence.
 - Security: raw prompts, Authorization, cookies, and complete tool arguments/results do not enter the event log.
+- Security: same bare `sessionId` in different users or apps never mixes events;
+  cross-user native event replay returns 404.
 - Compatibility: an ADK client successfully parses each `/run_sse` event, with correct stream-close semantics.

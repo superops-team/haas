@@ -252,6 +252,12 @@ Invocation (internal Run) states:
 | `cancelled` | yes | Cancelled by caller; committed events are retained |
 
 Only one running invocation is allowed per session at a time. A second `/run` returns `409 session_busy`.
+`Idempotency-Key` replay MUST reproduce the first completed HTTP response
+envelope for `/run` and `/run_sse`, including HTTP status, structured error
+body, and the canonical event array retained for read-back. If the first
+execution reaches the adapter-error path and returns `502 haas_adapter_error`,
+a retry with the same key and request hash MUST also return HTTP 502 rather
+than converting the retained failed event into HTTP 200.
 
 SSE framing (`/run_sse`):
 
@@ -284,6 +290,7 @@ The following MUST NOT be logged: raw prompts, provider API keys, Authorization/
 | Session busy | `409 session_busy`, optionally with `retryAfterMs` |
 | `/run_sse` disconnects | The invocation is not cancelled. The client reconnects with `POST /run_sse` + `Last-Event-ID`; the server locates the original invocation by event ID, replays subsequent events, and continues live without creating a new turn. Alternatively, the client reads events through `GET /apps/.../sessions/{sid}`. |
 | Adapter crashes | The invocation enters `failed`/`incomplete` and remains readable after persistence |
+| Idempotent retry after adapter failure | Replays the stored response envelope with HTTP `502`, `haasError.code=haas_adapter_error`, and the same retained invocation events available through session read-back |
 | Cancellation retried | Succeeds idempotently and does not delete the session (see the `POST /v1/haas/.../invocations/{id}/cancel` extension in session-runtime) |
 
 ## 11. Test Plan and Acceptance Criteria

@@ -155,6 +155,14 @@ Lower levels may only narrow unless a higher level explicitly grants delegation.
 
 - Unknown policy fields fail closed when they would affect security.
 - The network allowlist is evaluated before outbound calls from the model/MCP proxy.
+- Allowlist entries and request URLs are normalized before comparison. If an
+  allowlist entry specifies a port, the request's effective port (explicit or
+  scheme default: `80` for HTTP, `443` for HTTPS) MUST exactly equal it. For
+  example, `http://host:8080` MUST NOT allow `http://host` or `http://host:80`.
+  If an allowlist entry omits a port, it only allows the scheme's default port:
+  `http://host` allows `http://host` and `http://host:80`, but MUST NOT allow
+  `http://host:8080`; `https://host` allows `https://host` and
+  `https://host:443`, but MUST NOT allow `https://host:8443`.
 - Workspace paths are canonicalized before comparison.
 - Policy compilation stores secret fingerprints, not values.
 - Approval modes MUST map truthfully to adapter capabilities.

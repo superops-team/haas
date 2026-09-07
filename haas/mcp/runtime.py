@@ -4,6 +4,15 @@ from __future__ import annotations
 import os
 
 from haas.mcp.models import McpServerConfig, SkillBundle, ToolRestrictionResult
+from haas.policy.controller import PolicyController
+from haas.policy.models import (
+    EffectivePolicy,
+    ModelPolicy,
+    NetworkPolicy,
+    PolicyScope,
+    ToolsPolicy,
+    WorkspacePolicy,
+)
 
 _VALID_TRANSPORTS = {"http", "sse", "stdio"}
 _VALID_AUTH_TYPES = {"none", "secret_ref"}
@@ -18,7 +27,9 @@ class SkillMaterializationError(Exception):
     """Raised when a skill bundle cannot be safely materialized."""
 
 
-def validate_mcp_server(server: McpServerConfig) -> list[str]:
+def validate_mcp_server(
+    server: McpServerConfig, policy: EffectivePolicy | None = None
+) -> list[str]:
     """Return a list of validation errors (empty means valid)."""
     errors: list[str] = []
     if not server.name:
@@ -27,6 +38,11 @@ def validate_mcp_server(server: McpServerConfig) -> list[str]:
         errors.append("url_required")
     elif not server.url.startswith(("http://", "https://")):
         errors.append("url_scheme_invalid")
+    else:
+        network_policy = policy if policy is not None else _default_mcp_url_policy()
+        decision = PolicyController().authorize_network(network_policy, server.url)
+        if not decision.allowed:
+            errors.append(f"url_{decision.safeReason}")
     if server.transport not in _VALID_TRANSPORTS:
         errors.append("transport_invalid")
     if server.authType not in _VALID_AUTH_TYPES:
@@ -34,6 +50,19 @@ def validate_mcp_server(server: McpServerConfig) -> list[str]:
     if server.authType == "secret_ref" and not server.authRef:
         errors.append("auth_ref_required")
     return errors
+
+
+def _default_mcp_url_policy() -> EffectivePolicy:
+    """Default MCP validation policy: public HTTP(S) allowed, SSRF ranges denied."""
+    return EffectivePolicy(
+        policyId="pol_mcp_default",
+        version=1,
+        scope=PolicyScope(),
+        workspace=WorkspacePolicy(),
+        network=NetworkPolicy(defaultAction="allow", allow=[]),
+        tools=ToolsPolicy(),
+        model=ModelPolicy(),
+    )
 
 
 def materialize_skills(skills: list[SkillBundle]) -> dict[str, list[str]]:

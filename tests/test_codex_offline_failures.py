@@ -43,6 +43,7 @@ from haas.harnesses.codex_app_server.transport import (
     codex_app_server_env,
     connect_endpoint,
     unix_socket_path,
+    validate_loopback_websocket_url,
 )
 
 # --- fake transport ---------------------------------------------------------
@@ -310,6 +311,17 @@ def test_unix_socket_path_parsing_and_errors() -> None:
 async def test_connect_endpoint_rejects_unknown_transport() -> None:
     with pytest.raises(CodexTransportError, match="unsupported transport"):
         await connect_endpoint(CodexEndpoint(transport="carrier-pigeon", listen_url="x"))
+
+
+def test_loopback_websocket_rejects_non_loopback_host() -> None:
+    with pytest.raises(CodexTransportError, match="loopback_websocket listen_url"):
+        validate_loopback_websocket_url("ws://evil.example/rpc")
+
+
+def test_loopback_websocket_allows_loopback_hosts() -> None:
+    validate_loopback_websocket_url("ws://127.0.0.1:1234/rpc")
+    validate_loopback_websocket_url("ws://[::1]:1234/rpc")
+    validate_loopback_websocket_url("ws://localhost:1234/rpc")
 
 
 def test_codex_app_server_env_uses_allowlist_not_polluted_environment() -> None:

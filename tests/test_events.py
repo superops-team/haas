@@ -6,12 +6,14 @@ from haas.stores import MemoryStore
 def test_append_assigns_gapless_sequence_and_project_adk() -> None:
     log = EventLog(store=MemoryStore())
     first = log.append(
+        app_name="chrn_1", user_id="u_1",
         invocation_id="inv_1", session_id="hsess_1", turn_id="turn_1",
         harness_id="chrn_1", adapter_id="fake", author="codex",
         content={"role": "model", "parts": [{"text": "hi"}]},
         actions={},
     )
     second = log.append(
+        app_name="chrn_1", user_id="u_1",
         invocation_id="inv_1", session_id="hsess_1", turn_id="turn_1",
         harness_id="chrn_1", adapter_id="fake", author="codex",
         content={"role": "model", "parts": [{"text": "there"}]},
@@ -19,7 +21,10 @@ def test_append_assigns_gapless_sequence_and_project_adk() -> None:
     )
     assert first.sequenceNumber == 0
     assert second.sequenceNumber == 1
-    assert [e.sequenceNumber for e in log.read_invocation("inv_1")] == [0, 1]
+    assert [
+        e.sequenceNumber
+        for e in log.read_invocation("chrn_1", "u_1", "hsess_1", "inv_1")
+    ] == [0, 1]
 
     adk = log.project_adk(first)
     assert adk["id"] == first.eventId
@@ -31,6 +36,7 @@ def test_append_assigns_gapless_sequence_and_project_adk() -> None:
 def test_sse_frame_and_heartbeat() -> None:
     log = EventLog(store=MemoryStore())
     event = log.append(
+        app_name="chrn_1", user_id="u_1",
         invocation_id="inv_1", session_id="hsess_1", turn_id="turn_1",
         harness_id="chrn_1", adapter_id="fake", author="codex",
         content={"role": "model", "parts": [{"text": "hi"}]},
@@ -47,6 +53,7 @@ def test_append_redacts_secret_material_before_persist() -> None:
     log = EventLog(store=MemoryStore())
     secret_text = "token sk-ant-abcdefghijklmnopqrstuvwxyz123456"  # haas-secret-ignore
     event = log.append(
+        app_name="chrn_1", user_id="u_1",
         invocation_id="inv_1", session_id="hsess_1", turn_id="turn_1",
         harness_id="chrn_1", adapter_id="fake", author="codex",
         content={"role": "model", "parts": [{"text": secret_text}]},

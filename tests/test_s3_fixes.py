@@ -54,6 +54,27 @@ def test_adapter_error_returns_502_with_terminal_failed_event() -> None:
     assert session["events"][-1]["actions"]["stateDelta"]["status"] == "failed"
 
 
+def test_idempotency_replay_preserves_adapter_error_http_status() -> None:
+    client = make_client(adapter=RaisingAdapter())
+    headers = {**HEADERS, "Idempotency-Key": "adapter-fails-once"}
+    body = {**BODY, "sessionId": "hsess_idem_err"}
+
+    first = client.post("/run", json=body, headers=headers)
+    replay = client.post("/run", json=body, headers=headers)
+
+    assert first.status_code == 502
+    assert replay.status_code == 502
+    assert first.json()["haasError"]["code"] == "haas_adapter_error"
+    assert replay.json()["haasError"]["code"] == "haas_adapter_error"
+
+    session = client.get(
+        "/apps/chrn_codex_default/users/u_1/sessions/hsess_idem_err",
+        headers=HEADERS,
+    ).json()
+    assert len(session["events"]) == 1
+    assert session["events"][0]["actions"]["stateDelta"]["status"] == "failed"
+
+
 def test_session_events_unknown_cursor_410() -> None:
     client = make_client()
     client.post("/run", json={**BODY, "sessionId": "hsess_cur"}, headers=HEADERS)
