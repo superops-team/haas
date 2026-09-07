@@ -88,6 +88,57 @@ def test_compile_rejects_widening_writable_root() -> None:
         )
 
 
+def test_compile_rejects_workspace_root_widening_to_filesystem_root() -> None:
+    with pytest.raises(PolicyWideningRejected, match="workspace root widened"):
+        _compile(
+            PolicyLayer("tenant", workspace=WorkspacePolicy(root="/workspace")),
+            PolicyLayer("workspace", workspace=WorkspacePolicy(root="/")),
+        )
+
+
+def test_compile_allows_workspace_root_narrowing_to_child_path() -> None:
+    policy = _compile(
+        PolicyLayer("tenant", workspace=WorkspacePolicy(root="/workspace")),
+        PolicyLayer("workspace", workspace=WorkspacePolicy(root="/workspace/project")),
+    )
+    assert policy.workspace.root == "/workspace/project"
+    assert policy.workspace.writableRoots == ["/workspace/project"]
+
+
+def test_compile_allows_workspace_root_to_remain_equal() -> None:
+    policy = _compile(
+        PolicyLayer("tenant", workspace=WorkspacePolicy(root="/workspace")),
+        PolicyLayer("workspace", workspace=WorkspacePolicy(root="/workspace")),
+    )
+    assert policy.workspace.root == "/workspace"
+
+
+def test_compile_rejects_workspace_root_widening_with_traversal() -> None:
+    with pytest.raises(PolicyWideningRejected, match="workspace root widened"):
+        _compile(
+            PolicyLayer("tenant", workspace=WorkspacePolicy(root="/workspace")),
+            PolicyLayer("workspace", workspace=WorkspacePolicy(root="/workspace/../..")),
+        )
+
+
+def test_compile_does_not_treat_prefix_sibling_as_workspace_root_child() -> None:
+    with pytest.raises(PolicyWideningRejected, match="workspace root widened"):
+        PolicyController()._merge_workspace(
+            WorkspacePolicy(root="/a"),
+            WorkspacePolicy(root="/ab"),
+            allow_widening=False,
+        )
+
+
+def test_compile_allows_workspace_root_widening_after_delegation() -> None:
+    policy = _compile(
+        PolicyLayer("tenant", workspace=WorkspacePolicy(root="/workspace"), delegation=True),
+        PolicyLayer("workspace", workspace=WorkspacePolicy(root="/")),
+    )
+    assert policy.workspace.root == "/"
+    assert policy.workspace.writableRoots == ["/"]
+
+
 def test_compile_rejects_widening_network_allow() -> None:
     with pytest.raises(PolicyWideningRejected):
         _compile(

@@ -143,7 +143,8 @@ async def notifications(conn: CodexConnection) -> AsyncIterator[CodexWireMessage
   "approvalPolicy": "never",
   "sandboxPolicy": {
     "mode": "workspace-write",
-    "writableRoots": ["/workspace"]
+    "writableRoots": ["/workspace"],
+    "networkAccess": false
   },
   "timeoutMs": 900000
 }
@@ -182,8 +183,10 @@ Turn 规则：
 
 - `CODEX_HOME` 必须是 session/workspace scoped 或明确隔离的 runtime home。
 - Codex model provider 不得保存真实 API key；优先通过 model proxy 和 `auth.command` 获取短期 bearer。
+- Adapter 启动的任何 Codex app-server 子进程都必须接收显式 allowlist 环境变量。默认继承 allowlist 仅限执行 Codex 所需的进程基础项（`PATH`）、解析隔离 home（`HOME`）、创建临时文件（`TMPDIR`/`TMP`/`TEMP`）以及保持 Unicode/locale 行为稳定（`LANG`/`LC_ALL`/`LC_CTYPE`/`LC_MESSAGES`）。Provider key、云凭据、token、password、cookie 和其他 credential-like 变量必须从构造上不被继承；新增任何环境变量都必须先有 spec delta，说明其必要性以及为什么它不是 secret channel。
 - `approvalPolicy=never` 是无人值守默认；需要人工审批必须通过 HaaS approval bridge 扩展后再启用。
 - Codex sandbox policy 来自 Sandbox Runtime 的投影（由 Policy Controller 驱动），不由 adapter 自行推断扩大；adapter 通过 `sandbox_declaration()` 仅声明需求。
+- Codex `turn/start.sandboxPolicy.networkAccess` 必须 fail-closed。默认值为 `false`，只有冻结后的有效网络策略显式设置 `defaultAction=allow` 时才可为 `true`；`defaultAction=deny`、缺少策略数据或策略数据格式错误都必须投影为 `false`。
 - WebSocket auth token 只能通过文件或 secret handle 提供，不出现在命令行参数、日志或 status。
 - Codex raw event、rollout、command output 在进入 Event Log 前必须脱敏。
 

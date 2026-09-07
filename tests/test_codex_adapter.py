@@ -22,6 +22,7 @@ from haas.harnesses.codex_app_server.sandbox import (
     to_turn_sandbox_policy,
 )
 from haas.harnesses.codex_app_server.transport import CodexEndpoint
+from haas.policy import NetworkPolicy
 
 # --- offline: sandbox projection -------------------------------------------
 
@@ -42,11 +43,37 @@ def test_turn_sandbox_policy_workspace_write() -> None:
     policy = to_turn_sandbox_policy("workspace-write", ["/workspace"])
     assert policy["type"] == "workspaceWrite"
     assert policy["writableRoots"] == ["/workspace"]
+    assert policy["networkAccess"] is False
+
+
+def test_turn_sandbox_policy_network_default_deny_disables_access() -> None:
+    policy = to_turn_sandbox_policy(
+        "workspace-write",
+        ["/workspace"],
+        NetworkPolicy(defaultAction="deny", allow=["https://api.openai.com"]),
+    )
+    assert policy["networkAccess"] is False
+
+
+def test_turn_sandbox_policy_network_allow_enables_access() -> None:
+    policy = to_turn_sandbox_policy(
+        "workspace-write",
+        ["/workspace"],
+        NetworkPolicy(defaultAction="allow"),
+    )
+    assert policy["networkAccess"] is True
 
 
 def test_turn_sandbox_policy_read_only() -> None:
-    policy = to_turn_sandbox_policy("read-only", [])
+    policy = to_turn_sandbox_policy("read-only", [], NetworkPolicy(defaultAction="deny"))
     assert policy["type"] == "readOnly"
+    assert policy["networkAccess"] is False
+
+
+def test_turn_sandbox_policy_read_only_network_allow_enables_access() -> None:
+    policy = to_turn_sandbox_policy("read-only", [], NetworkPolicy(defaultAction="allow"))
+    assert policy["type"] == "readOnly"
+    assert policy["networkAccess"] is True
 
 
 def test_turn_sandbox_policy_danger_full_access() -> None:

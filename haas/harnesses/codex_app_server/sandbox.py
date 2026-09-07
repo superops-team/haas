@@ -7,13 +7,15 @@ Codex uses two different enum shapes for sandbox:
 - ``turn/start`` ``SandboxPolicy`` is a camelCase tagged enum:
   ``{"type": "readOnly" | "workspaceWrite" | "dangerFullAccess", ...}``
 
-The adapter only projects the Sandbox Runtime result (mode + writable roots);
-it never widens isolation.
+The adapter only projects the Sandbox Runtime result (mode + writable roots +
+network policy); it never widens isolation. Network access is fail-closed.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+
+from haas.policy.models import NetworkPolicy
 
 JsonObject = dict[str, Any]
 
@@ -42,20 +44,39 @@ def to_thread_sandbox_mode(mode: str) -> str:
     return _THREAD_SANDBOX_MODE_MAP[normalize_mode(mode)]
 
 
-def to_turn_sandbox_policy(mode: str, writable_roots: list[str]) -> JsonObject:
-    """Convert a HaaS sandbox mode to Codex ``turn/start`` SandboxPolicy."""
+def to_turn_sandbox_policy(
+    mode: str,
+    writable_roots: list[str],
+    network_policy: NetworkPolicy | dict[str, Any] | None = None,
+) -> JsonObject:
+    """Convert a HaaS sandbox mode to Codex ``turn/start`` SandboxPolicy.
+
+    Network access is fail-closed: missing or malformed policy data denies
+    egress, and only an explicit ``defaultAction=allow`` enables it.
+    """
     normalized = normalize_mode(mode)
+    network_access = _network_access_allowed(network_policy)
     if normalized == "workspace-write":
         return {
             "type": "workspaceWrite",
             "writableRoots": _dedupe_writable_roots(writable_roots),
-            "networkAccess": True,
+            "networkAccess": network_access,
         }
     if normalized == "read-only":
-        return {"type": "readOnly", "networkAccess": True}
+        return {"type": "readOnly", "networkAccess": network_access}
     if normalized == "danger-full-access":
         return {"type": "dangerFullAccess"}
     raise SandboxPolicyError(f"unsupported sandbox mode: {mode}")
+
+
+def _network_access_allowed(network_policy: NetworkPolicy | dict[str, Any] | None) -> bool:
+    if network_policy is None:
+        return False
+    if isinstance(network_policy, NetworkPolicy):
+        return network_policy.defaultAction == "allow"
+    if isinstance(network_policy, dict):
+        return network_policy.get("defaultAction") == "allow"
+    return False
 
 
 def _dedupe_writable_roots(roots: list[str]) -> list[str]:

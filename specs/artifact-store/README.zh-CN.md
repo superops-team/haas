@@ -133,6 +133,13 @@ S6 只实现上传态内容的回读与归档；container 内容读取在 S5 san
 }
 ```
 
+`includeRoots` 是可发布 artifact 相对路径的 allowlist。候选 artifact 路径与
+policy root 都必须先 canonicalize；规范化后的路径必须等于某个 include root，
+或位于某个 include root 之下，才允许发布。比较必须按路径段进行：例如
+`includeRoots=["output"]` 允许 `output/report.md`，但不得允许
+`output_secret/report.md`。空 `includeRoots` 对发布无效，必须 fail closed，
+拒绝所有候选 artifact 路径。
+
 ## 7. 运行模型与状态机
 
 ```text

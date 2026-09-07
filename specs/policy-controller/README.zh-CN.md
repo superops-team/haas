@@ -115,7 +115,7 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
 - `layers` 从宽到窄排列（platform/tenant → workspace → harness → session → turn）。
 - 每层的字段 `null` 表示该层不覆盖该维度，合并时跳过。
 - `delegation: true` 表示该层显式授予其下所有层放宽该层约束的权利；未授予时，下层任何放宽都 fail closed（`PolicyWideningRejected`）。
-- 合并规则：workspace mode 只能向更严格方向（`danger-full-access` → `workspace-write` → `read-only`）；writableRoots / network.allow / model.allowedModels 只能收窄；tools.disabled 只能增加；approvalMode 只能向更严格方向（`never` → `on-request` → `always`，`always` 表示每次工具调用都需人工批准，最严格）。
+- 合并规则：workspace mode 只能向更严格方向（`danger-full-access` → `workspace-write` → `read-only`）；workspace.root 和 writableRoots / network.allow / model.allowedModels 只能收窄；tools.disabled 只能增加；approvalMode 只能向更严格方向（`never` → `on-request` → `always`，`always` 表示每次工具调用都需人工批准，最严格）。只有下层 workspace.root 的规范化路径等于当前 workspace.root 的规范化路径，或位于其子路径内时，才视为收窄；`/ab` 相对 `/a` 这类字符串前缀匹配和 `/a/../..` 这类穿越形式不得绕过检查。
 
 ### 6.2 PolicyDecision
 

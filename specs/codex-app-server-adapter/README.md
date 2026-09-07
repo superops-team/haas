@@ -143,7 +143,8 @@ async def notifications(conn: CodexConnection) -> AsyncIterator[CodexWireMessage
   "approvalPolicy": "never",
   "sandboxPolicy": {
     "mode": "workspace-write",
-    "writableRoots": ["/workspace"]
+    "writableRoots": ["/workspace"],
+    "networkAccess": false
   },
   "timeoutMs": 900000
 }
@@ -182,8 +183,10 @@ Turn rules:
 
 - `CODEX_HOME` MUST be scoped to a session/workspace or be an explicitly isolated runtime home.
 - The Codex model provider MUST NOT store real API keys; it SHOULD obtain a short-lived bearer through the model proxy and `auth.command`.
+- Any Codex app-server child process started by the adapter MUST receive an explicit allowlisted environment. The default inherited allowlist is limited to process basics required to execute Codex (`PATH`), resolve an isolated home (`HOME`), create temporary files (`TMPDIR`/`TMP`/`TEMP`), and keep Unicode/locale behavior stable (`LANG`/`LC_ALL`/`LC_CTYPE`/`LC_MESSAGES`). Provider keys, cloud credentials, tokens, passwords, cookies, and other credential-like variables MUST NOT be inherited by construction; adding any new environment variable requires a spec delta documenting why it is required and why it is not a secret channel.
 - `approvalPolicy=never` is the unattended default. Human approval MUST NOT be enabled until the HaaS approval bridge has been extended to support it.
 - Codex sandbox policy is a projection from Sandbox Runtime, driven by the Policy Controller. The adapter MUST NOT infer or broaden it independently; through `sandbox_declaration()`, the adapter only declares requirements.
+- Codex `turn/start.sandboxPolicy.networkAccess` MUST be fail-closed. It is `false` by default and MAY be `true` only when the frozen effective network policy explicitly sets `defaultAction=allow`; `defaultAction=deny`, missing policy data, or malformed policy data MUST project to `false`.
 - A WebSocket authentication token may be supplied only through a file or secret handle and MUST NOT appear in command-line arguments, logs, or status.
 - Raw Codex events, rollouts, and command output MUST be redacted before entering Event Log.
 

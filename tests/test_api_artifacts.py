@@ -87,6 +87,17 @@ def test_upload_rejects_traversal_filename() -> None:
     assert resp.json()["haasError"]["code"] == "invalid_input"
 
 
+@pytest.mark.parametrize("filename", ["nested/report.md", r"nested\\report.md", "..", "."])
+def test_upload_rejects_non_basename_filename(filename: str) -> None:
+    resp = _client().post(
+        "/v1/haas/files",
+        files={"file": (filename, b"x", "text/plain")},
+        headers=AUTH,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["haasError"]["code"] == "invalid_input"
+
+
 # --- download ---------------------------------------------------------------
 
 

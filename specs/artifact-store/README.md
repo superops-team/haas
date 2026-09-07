@@ -129,6 +129,14 @@ S6 implements content readback and archiving only for uploaded content; containe
 }
 ```
 
+`includeRoots` is an allowlist for publishable artifact relative paths. A
+normalized artifact path MUST be equal to one configured include root or be
+located below one configured include root after both the candidate path and
+policy roots are canonicalized. Segment-aware comparison is required: for
+example, `includeRoots=["output"]` allows `output/report.md` but MUST NOT
+allow `output_secret/report.md`. An empty `includeRoots` list is invalid for
+publishing and MUST fail closed by rejecting every candidate artifact path.
+
 ## 7. Runtime Model and State Machine
 
 ```text

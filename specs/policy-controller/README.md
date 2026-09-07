@@ -115,7 +115,7 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
 - `layers` are ordered from broadest to narrowest (platform/tenant → workspace → harness → session → turn).
 - A field set to `null` in a layer means that the layer does not override that dimension, and the field is skipped during merging.
 - `delegation: true` means that the layer explicitly authorizes all lower layers to widen its constraints. Without delegation, any widening by a lower layer fails closed (`PolicyWideningRejected`).
-- Merge rules: workspace mode may only become stricter (`danger-full-access` → `workspace-write` → `read-only`); writableRoots / network.allow / model.allowedModels may only narrow; tools.disabled may only grow; approvalMode may only become stricter (`never` → `on-request` → `always`, where `always` means that every tool call requires human approval and is the strictest mode).
+- Merge rules: workspace mode may only become stricter (`danger-full-access` → `workspace-write` → `read-only`); workspace.root and writableRoots / network.allow / model.allowedModels may only narrow; tools.disabled may only grow; approvalMode may only become stricter (`never` → `on-request` → `always`, where `always` means that every tool call requires human approval and is the strictest mode). A lower-layer workspace.root is narrower only when its canonical path is equal to, or a child of, the current canonical workspace.root; string-prefix matches such as `/ab` under `/a` and traversal forms such as `/a/../..` MUST NOT bypass this check.
 
 ### 6.2 PolicyDecision
 

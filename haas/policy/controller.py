@@ -115,9 +115,18 @@ class PolicyController:
                 if not allow_widening and set(nxt.writableRoots) < set(current.writableRoots):
                     new_roots = list(nxt.writableRoots)
 
+        new_root = current.root
+        if nxt.root:
+            if not _is_same_or_within(nxt.root, current.root):
+                if not allow_widening:
+                    raise PolicyWideningRejected(
+                        f"workspace root widened from {current.root!r} to {nxt.root!r}"
+                    )
+            new_root = nxt.root
+
         return WorkspacePolicy(
             mode=new_mode,
-            root=nxt.root or current.root,
+            root=new_root,
             writableRoots=new_roots,
         )
 
@@ -260,6 +269,16 @@ class PolicyController:
 
 def _canonicalize(path: str) -> str:
     return str(Path(path).expanduser().resolve())
+
+
+def _is_same_or_within(path: str, root: str) -> bool:
+    canonical_path = Path(path).expanduser().resolve()
+    canonical_root = Path(root).expanduser().resolve()
+    try:
+        canonical_path.relative_to(canonical_root)
+    except ValueError:
+        return False
+    return True
 
 
 def _is_within(path: str, roots: list[str]) -> bool:

@@ -408,9 +408,16 @@ def build_app(
             raise HaasError(413, "invalid_request_error", "haas_file_too_large")
         filename = file.filename or ""
         try:
+            if (
+                not filename
+                or filename in {".", ".."}
+                or "/" in filename
+                or "\\" in filename
+            ):
+                raise ArtifactPathRejected("absolute_path_rejected")
             record = runtime.artifacts.register(
                 session_id="",
-                relative_path=filename,
+                relative_path=f"output/{filename}",
                 content=content,
                 owner_principal_id=principal.principalId,
             )

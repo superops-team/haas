@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from websockets.asyncio.client import ClientConnection, connect, unix_connect
 
@@ -21,6 +22,19 @@ from websockets.asyncio.client import ClientConnection, connect, unix_connect
 UDS_WEBSOCKET_HANDSHAKE_URL = "ws://localhost/rpc"
 WEBSOCKET_MAX_MESSAGE_SIZE = 128 << 20  # 128 MiB
 DEFAULT_OPEN_TIMEOUT = 30.0
+CODEX_APP_SERVER_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+    }
+)
 
 
 @dataclass
@@ -58,6 +72,26 @@ def unix_socket_path(listen_url: str) -> str:
     return path
 
 
+def codex_app_server_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build the explicit secretless environment for Codex app-server.
+
+    This is an allowlist by design: Codex may inherit only process basics
+    needed to locate the executable (PATH), resolve its isolated home (HOME),
+    create temporary files (TMPDIR/TMP/TEMP), and keep locale/Unicode behavior
+    stable (LANG/LC_*). Provider keys, cloud credentials, tokens, passwords,
+    cookies, and similar credential variables are never passed through.
+    """
+    if source is None:
+        source = os.environ
+    env = {
+        key: source[key]
+        for key in CODEX_APP_SERVER_ENV_ALLOWLIST
+        if key in source
+    }
+    env.setdefault("PATH", os.defpath)
+    return env
+
+
 class WebSocketTransport:
     """CodexTransport wrapper around a websockets ClientConnection."""
 
@@ -90,6 +124,7 @@ class StdioTransport:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            env=codex_app_server_env(),
         )
         return cls(proc)
 

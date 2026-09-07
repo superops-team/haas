@@ -356,6 +356,9 @@ class CodexAdapter:
         writable_roots = sandbox.get("writableRoots") or [cwd]
         if not isinstance(writable_roots, list):
             writable_roots = [cwd]
+        network_policy = (
+            sandbox["network"] if "network" in sandbox else request.policy.get("network")
+        )
 
         thread_id = self._session_threads.get(request.sessionId, "")
         if thread_id:
@@ -368,7 +371,7 @@ class CodexAdapter:
         turn_params: JsonObject = {
             "threadId": thread_id,
             "input": request.input or [{"type": "text", "text": ""}],
-            "sandboxPolicy": to_turn_sandbox_policy(mode, writable_roots),
+            "sandboxPolicy": to_turn_sandbox_policy(mode, writable_roots, network_policy),
             "approvalPolicy": request.policy.get("approvalPolicy", DEFAULT_APPROVAL_POLICY),
             "cwd": cwd,
         }

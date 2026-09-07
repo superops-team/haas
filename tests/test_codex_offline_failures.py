@@ -40,6 +40,7 @@ from haas.harnesses.codex_app_server.transport import (
     CodexEndpoint,
     CodexTransportError,
     StdioTransport,
+    codex_app_server_env,
     connect_endpoint,
     unix_socket_path,
 )
@@ -309,6 +310,72 @@ def test_unix_socket_path_parsing_and_errors() -> None:
 async def test_connect_endpoint_rejects_unknown_transport() -> None:
     with pytest.raises(CodexTransportError, match="unsupported transport"):
         await connect_endpoint(CodexEndpoint(transport="carrier-pigeon", listen_url="x"))
+
+
+def test_codex_app_server_env_uses_allowlist_not_polluted_environment() -> None:
+    polluted = {
+        "PATH": "/safe/bin",
+        "HOME": "/tmp/haas-codex-home",
+        "TMPDIR": "/tmp",
+        "LANG": "C.UTF-8",
+        "OPENAI_API_KEY": "not-a-real-openai-key",
+        "AWS_SECRET_ACCESS_KEY": "fake-aws-secret-for-filter-test",
+        "GITHUB_TOKEN": "not-a-real-github-token",
+        "COOKIE": "session=fake-cookie",
+        "SERVICE_PASSWORD": "fake-service-password",
+    }
+
+    env = codex_app_server_env(polluted)
+
+    assert env == {
+        "PATH": "/safe/bin",
+        "HOME": "/tmp/haas-codex-home",
+        "TMPDIR": "/tmp",
+        "LANG": "C.UTF-8",
+    }
+    assert "OPENAI_API_KEY" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert "COOKIE" not in env
+    assert "SERVICE_PASSWORD" not in env
+
+
+async def test_stdio_transport_start_passes_explicit_secretless_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeProcess:
+        stdin = None
+        stdout = None
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setenv("PATH", "/safe/bin")
+    monkeypatch.setenv("HOME", "/tmp/haas-codex-home")
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-openai-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake-aws-secret-for-filter-test")
+    monkeypatch.setenv("GITHUB_TOKEN", "not-a-real-github-token")
+    monkeypatch.setenv("COOKIE", "session=fake-cookie")
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    transport = await StdioTransport.start("codex")
+
+    assert isinstance(transport, StdioTransport)
+    assert captured["args"] == ("codex", "app-server", "--listen", "stdio://")
+    env = captured["kwargs"]["env"]
+    assert env is not None
+    assert env["PATH"] == "/safe/bin"
+    assert env["HOME"] == "/tmp/haas-codex-home"
+    assert "OPENAI_API_KEY" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert "COOKIE" not in env
 
 
 async def test_stdio_transport_roundtrip_and_close() -> None:
