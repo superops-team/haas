@@ -95,10 +95,15 @@ The HaaS native control plane provides only capabilities not covered by U and MU
 | PUT | `/v1/haas/harnesses/{harness_id}` | Updates a harness; `id`, `base`, and `createdAtMs` remain unchanged |
 | DELETE | `/v1/haas/harnesses/{harness_id}` | Deletes a harness without deleting historical sessions |
 | GET | `/v1/haas/models` | Global model catalog, grouped by base |
+| POST | `/v1/haas/delegated-sessions` | Creates or binds a manager-owned delegated session (supports `Idempotency-Key`) |
+| GET | `/v1/haas/delegated-sessions/{delegated_session_id}` | Reads delegated-session contract, policy snapshot, mount manifest, and runtime status |
+| POST | `/v1/haas/delegated-sessions/{delegated_session_id}/restore` | Recreates runtime resources from the persisted delegated-session contract |
+| POST | `/v1/haas/delegated-sessions/{delegated_session_id}/policy` | Explicitly updates/rebinds the policy snapshot for future delegated turns |
 | GET | `/v1/haas/sessions` | Lists sessions across users with pagination (administrative view) |
 | GET | `/v1/haas/sessions/{session_id}/events` | HaaS canonical SSE replay/live stream with cursor |
 | GET | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/events` | Invocation-level canonical SSE replay/live stream |
 | POST | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel` | Idempotently cancels a running invocation (supports `Idempotency-Key`) |
+| POST | `/v1/haas/sessions/{session_id}/approvals/{approval_id}` | Returns a manager approval decision to a waiting delegated action |
 | GET | `/v1/haas/sessions/{session_id}/artifacts` | Lists HaaS artifacts |
 | GET | `/v1/haas/sessions/{session_id}/artifacts/archive` | Downloads a session artifact archive (zip) |
 | POST | `/v1/haas/files` | Uploads an input file (multipart) and returns a `File` object |
@@ -221,6 +226,25 @@ ADK-compatible paths return errors with `detail`, following the FastAPI conventi
 ```
 
 `code` uses a stable HaaS error code. `haasError` is a HaaS extension; ADK clients read only `detail`. See [ERROR-CODES](ERROR-CODES.md) for the sole error-code catalog. OpenAPI `haasError.code` values MUST align with that catalog, and the catalog MUST be updated before adding an error code.
+
+### 6.5 Delegated Session
+
+HaaS native delegated-session APIs use the `DelegatedSessionContract` defined by
+[Manager Delegation](../manager-delegation/README.md). This contract is public only on
+the HaaS native surface; ADK-compatible paths MUST NOT expose manager session ids,
+host mount paths, image digests, credential references, runtime container ids, or
+approval ids unless they are explicitly represented as redacted/safe HaaS events.
+
+`POST /v1/haas/delegated-sessions` requires a manager-approved mount manifest and
+delegation policy snapshot. A repeated `Idempotency-Key` with the same request hash
+returns the first delegated-session result and MUST NOT create another container.
+
+`POST /v1/haas/delegated-sessions/{id}/restore` performs recovery only from the
+persisted contract. Restore revalidates the mount manifest and policy before runtime
+creation; any drift fails closed with a stable error code.
+
+`POST /v1/haas/sessions/{session_id}/approvals/{approval_id}` accepts only explicit
+manager approval decisions. HaaS MUST NOT auto-approve if this bridge is unavailable.
 
 ## 7. Runtime Model and State Machine
 

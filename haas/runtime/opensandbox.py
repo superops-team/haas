@@ -11,13 +11,13 @@ from typing import Any
 
 import httpx
 
-from haas.security.redact import safe_upstream_body
 from haas.runtime.models import (
     ExecResult,
     SandboxHandle,
     SandboxInspection,
     SandboxSpec,
 )
+from haas.security.redact import safe_upstream_body
 
 
 class OpenSandboxError(Exception):

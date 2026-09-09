@@ -1,0 +1,621 @@
+"""OpenAI Chat Completions provider — the compat workhorse.
+
+Uses the OpenAI Python SDK `chat.completions` API only, which is what the entire
+OpenAI-compatible world implements: the compat vendors (DeepSeek, Z AI, Kimi, …),
+resellers, Ollama, custom endpoints (Azure OpenAI, vLLM), and the Bedrock/Vertex MaaS
+paths. Native OpenAI models (the `openai` provider with no custom endpoint) route to
+`openai_responses.OpenAIResponsesProvider` instead — Chat Completions rejects function
+tools combined with reasoning on GPT-5.6+, so reasoning + tools needs `/v1/responses`.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Optional
+
+from .base import (
+    AssistantTurn,
+    ModelCapabilities,
+    ProviderClient,
+    StreamChunk,
+    TokenUsage,
+    ToolCall,
+)
+from .capabilities import capabilities_for
+
+
+def resolve_api_key(secrets: Any = None) -> Optional[str]:
+    """Resolve the OpenAI API key: env `OPENAI_API_KEY` first, else the SecretStore
+    `provider:openai` profile (`{api_key}`). Lets a Tauri-launched sidecar — which does NOT
+    inherit the shell env — still find a key the user entered in Settings. The value never
+    enters the model context; it only configures the SDK client.
+    """
+    import os
+
+    key = os.environ.get("OPENAI_API_KEY")
+    if key:
+        return key
+    if secrets is not None:
+        profile = secrets.get("provider:openai") or {}
+        return profile.get("api_key") or None
+    return None
+
+
+# GPT-5.6 (2026-07) defaults reasoning_effort to "medium" server-side, and
+# /v1/chat/completions rejects function tools combined with any effort other than
+# "none" ("use /v1/responses"). Native OpenAI now routes to the Responses provider,
+# but GPT-5.6 can still land here through a custom endpoint (Azure OpenAI serves the
+# same wire), so keep pinning effort to none whenever tools ride along on these
+# models — and when the API rejects a call with that exact complaint anyway (a future
+# generation, an alias we didn't list), retry once at effort none so the user gets a
+# working turn instead of a 400.
+_EFFORT_ERROR = "function tools with reasoning_effort are not supported"
+
+
+def _pin_reasoning_effort(kwargs: dict[str, Any]) -> None:
+    if kwargs.get("tools") and str(kwargs.get("model", "")).startswith("gpt-5.6"):
+        kwargs.setdefault("reasoning_effort", "none")
+
+
+def _delta_reasoning(obj: Any) -> Optional[str]:
+    """Thinking text off a delta/message: `reasoning_content` (DeepSeek, GLM, Kimi, and
+    most compat vendors) or `reasoning` (xAI, OpenRouter). Extra response fields survive
+    the OpenAI SDK's models (extra="allow"), so plain getattr sees them."""
+    value = getattr(obj, "reasoning_content", None) or getattr(obj, "reasoning", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _strip_foreign_sidecars(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop provider-private message sidecars (underscore-prefixed keys, e.g. `_gemini`
+    thought signatures — see providers/base.py): they belong to other providers, and the
+    OpenAI wire (and its compat servers) rejects unknown message fields."""
+    return [
+        (
+            {k: v for k, v in m.items() if not k.startswith("_")}
+            if any(k.startswith("_") for k in m)
+            else m
+        )
+        for m in messages
+    ]
+
+
+_MAX_TOKENS_ERROR = "'max_tokens' is not supported"
+
+# Ceiling, not a spend target — same rationale as the Anthropic provider's default: a
+# coworker writing a report ships the whole file inside one tool call's arguments, and
+# compat servers left to their OWN defaults cap completions absurdly low (observed
+# 2026-08-15: Together defaulted Kimi K3 to ~2k tokens — every ~5KB write truncated).
+DEFAULT_MAX_TOKENS = 32000
+
+
+def _param_fix_retry(kwargs: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    """Kwargs for the one retry an unsupported-parameter error earns, or re-raise.
+
+    Reasoning-routed OpenAI models reject `max_tokens` outright (they want
+    `max_completion_tokens`) — but compat servers (Ollama's /v1) know ONLY
+    `max_tokens`, so the swap must happen on rejection, never up front. Same
+    contract as the reasoning_effort retry: fix exactly what the server named.
+    """
+    msg = str(exc).lower()
+    if _EFFORT_ERROR in msg and kwargs.get("reasoning_effort") != "none":
+        return {**kwargs, "reasoning_effort": "none"}
+    if _MAX_TOKENS_ERROR in msg and "max_tokens" in kwargs:
+        fixed = dict(kwargs)
+        fixed["max_completion_tokens"] = fixed.pop("max_tokens")
+        return fixed
+    if "stream_options" in msg and "stream_options" in kwargs:
+        # Older compat servers don't know the usage opt-in; drop it, lose only metering.
+        fixed = dict(kwargs)
+        fixed.pop("stream_options")
+        return fixed
+    if ("max_tokens" in msg or "max_new_tokens" in msg) and "max_tokens" in kwargs:
+        # Our 32k default exceeded this model's completion limit (each server words the
+        # 400 differently, so no number parsing) — drop the param and retry on the
+        # server's own default rather than surfacing the 400. Worst case is exactly
+        # yesterday's behavior; best case the server allows far more once asked.
+        fixed = dict(kwargs)
+        fixed.pop("max_tokens")
+        return fixed
+    raise exc
+
+
+def _usage_from(usage: Any) -> Optional[TokenUsage]:
+    """chat.completions usage → normalized counts. `prompt_tokens` INCLUDES cached
+    tokens, so the cached share is subtracted into `cache_read`; no write-side split
+    exists on this API shape."""
+    if usage is None:
+        return None
+    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = int(getattr(details, "cached_tokens", 0) or 0)
+    return TokenUsage(
+        input=max(prompt - cached, 0),
+        output=int(getattr(usage, "completion_tokens", 0) or 0),
+        cache_read=cached,
+    )
+
+
+class OpenAIProvider(ProviderClient):
+    def __init__(
+        self,
+        client: Any = None,
+        *,
+        default_model: str = "gpt-5.6-sol",
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        secrets: Any = None,
+    ):
+        # The SDK client is built lazily on first use, NOT at construction. This lets an engine
+        # be assembled before any key exists — the desktop app lets you enter the key in Settings
+        # *after* launch — and the super-agent engine to be built at startup with no key. The key
+        # is resolved at call time: explicit `api_key` → env `OPENAI_API_KEY` → SecretStore. Tests
+        # inject a `client` directly, bypassing all of this.
+        #
+        # `base_url` points the same OpenAI SDK at any OpenAI-compatible endpoint — used by the
+        # provider router for Ollama (`http://localhost:11434/v1`, with a placeholder key) and,
+        # later, other OpenAI-shaped backends. When None, behavior is identical to stock OpenAI.
+        self._client = client
+        self._api_key = api_key
+        self._base_url = base_url
+        self._secrets = secrets
+        self.default_model = default_model
+
+    def _ensure_client(self) -> Any:
+        if self._client is None:
+            # Lazy import so the SDK is only required when actually talking to OpenAI.
+            from openai import OpenAI
+
+            key = self._api_key or resolve_api_key(self._secrets)
+            if not key:
+                raise RuntimeError(
+                    "No model API key configured. Set OPENAI_API_KEY in the environment, "
+                    "or add your key in Manage → Settings."
+                )
+            kwargs: dict[str, Any] = {"api_key": key}
+            if self._base_url:
+                kwargs["base_url"] = self._base_url
+            self._client = OpenAI(**kwargs)
+        return self._client
+
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]] = None,
+        **settings: Any,
+    ) -> AssistantTurn:
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": _strip_foreign_sidecars(messages),
+            **settings,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        kwargs.setdefault("max_tokens", DEFAULT_MAX_TOKENS)
+        _pin_reasoning_effort(kwargs)
+
+        client = self._ensure_client()
+        # Up to three param-fix retries: effort, the max_tokens rename, and the
+        # max_tokens over-limit drop can ALL need fixing on one call.
+        for _ in range(3):
+            try:
+                response = client.chat.completions.create(**kwargs)
+                break
+            except Exception as exc:
+                kwargs = _param_fix_retry(kwargs, exc)
+        else:
+            response = client.chat.completions.create(**kwargs)
+        choice = response.choices[0]
+        message = choice.message
+        text = getattr(message, "content", None)
+        tool_calls = _parse_tool_calls(getattr(message, "tool_calls", None))
+        text, tool_calls = _maybe_salvage_tool_calls(text, tool_calls, tools=tools)
+        return AssistantTurn(
+            text=text,
+            tool_calls=tool_calls,
+            finish_reason=getattr(choice, "finish_reason", None),
+            raw=response,
+            reasoning=_delta_reasoning(message),
+            usage=_usage_from(getattr(response, "usage", None)),
+        )
+
+    def capabilities(self, model: str) -> ModelCapabilities:
+        return capabilities_for(model)
+
+    def stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]] = None,
+        **settings: Any,
+    ):
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": _strip_foreign_sidecars(messages),
+            "stream": True,
+            # Usage on the final chunk (empty `choices`). Compat servers that reject
+            # the option get a one-shot retry without it (_param_fix_retry).
+            "stream_options": {"include_usage": True},
+            **settings,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        kwargs.setdefault("max_tokens", DEFAULT_MAX_TOKENS)
+        _pin_reasoning_effort(kwargs)
+        client = self._ensure_client()
+
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_accum: dict[int, dict[str, str]] = {}
+        finish_reason = None
+        usage: Optional[TokenUsage] = None
+
+        # Up to three param-fix retries: effort, the max_tokens rename, and the
+        # max_tokens over-limit drop can ALL need fixing on one call.
+        for _ in range(3):
+            try:
+                chunks = client.chat.completions.create(**kwargs)
+                break
+            except Exception as exc:
+                kwargs = _param_fix_retry(kwargs, exc)
+        else:
+            chunks = client.chat.completions.create(**kwargs)
+        for chunk in chunks:
+            chunk_usage = _usage_from(getattr(chunk, "usage", None))
+            if chunk_usage is not None:
+                usage = chunk_usage
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = getattr(choice, "delta", None)
+            if delta is not None:
+                reasoning = _delta_reasoning(delta)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+                    yield StreamChunk(reasoning_delta=reasoning)
+                content = getattr(delta, "content", None)
+                if content:
+                    text_parts.append(content)
+                    yield StreamChunk(text_delta=content)
+                for tc in getattr(delta, "tool_calls", None) or []:
+                    acc = tool_accum.setdefault(
+                        getattr(tc, "index", 0), {"id": "", "name": "", "args": ""}
+                    )
+                    if getattr(tc, "id", None):
+                        acc["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            acc["name"] = fn.name
+                        if getattr(fn, "arguments", None):
+                            acc["args"] += fn.arguments
+            if getattr(choice, "finish_reason", None):
+                finish_reason = choice.finish_reason
+
+        tool_calls = []
+        for index in sorted(tool_accum):
+            acc = tool_accum[index]
+            try:
+                arguments = json.loads(acc["args"]) if acc["args"] else {}
+            except (TypeError, json.JSONDecodeError):
+                arguments = {"_raw": acc["args"]}
+            tool_calls.append(
+                ToolCall(id=acc["id"], name=acc["name"], arguments=arguments)
+            )
+
+        text, tool_calls = _maybe_salvage_tool_calls(
+            "".join(text_parts) or None, tool_calls, tools=tools
+        )
+        yield StreamChunk(
+            turn=AssistantTurn(
+                text=text,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+                reasoning="".join(reasoning_parts) or None,
+                usage=usage,
+            )
+        )
+
+
+def _parse_tool_calls(raw_tool_calls: Any) -> list[ToolCall]:
+    calls: list[ToolCall] = []
+    for tc in raw_tool_calls or []:
+        function = tc.function
+        raw_args = getattr(function, "arguments", None)
+        try:
+            arguments = json.loads(raw_args) if raw_args else {}
+        except (TypeError, json.JSONDecodeError):
+            # Surface unparseable arguments rather than dropping the call; the engine
+            # can return a tool-error so the model corrects itself.
+            arguments = {"_raw": raw_args}
+        calls.append(
+            ToolCall(id=getattr(tc, "id", ""), name=function.name, arguments=arguments)
+        )
+    return calls
+
+
+# Some OpenAI-compatible backends — notably Ollama for several local models (qwen, etc.) —
+# fail to populate the structured `tool_calls` field and instead emit the call as TEXT, in
+# wildly varied shapes: a `<tool_call>{…}</tool_call>` block, a bare `{"name","arguments"}` object
+# (often mixed in with prose), or a `toolname {args}` / `toolname [args]` shorthand. Our agent
+# loop needs structured calls, so we recover them — using the requested tool SCHEMAS to recognize
+# tool-name forms and to filter out anything whose name isn't a real tool (no false positives).
+# Gated on: tools were requested AND no structured calls came back. Never fires for OpenAI.
+_TOOLCALL_OPEN = re.compile(r"<tool_call>\s*", re.IGNORECASE)
+
+# Qwen/Hermes native tool-call template — NOT JSON. The model writes the call as nested XML:
+#   <function=write_file><parameter=path>hello.txt</parameter><parameter=content>hi</parameter></function>
+# (usually wrapped in <tool_call>…</tool_call>). qwen3-coder emits exactly this, so we parse the
+# function/parameter tags directly. Values are taken verbatim (stripped); only no-whitespace JSON
+# tokens (numbers, bools, objects/arrays) are coerced, so free-text content stays a string.
+_FUNCTION_BLOCK = re.compile(
+    r"<function\s*=\s*(?P<name>[^>\s]+)\s*>(?P<body>.*?)</function\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_PARAM_BLOCK = re.compile(
+    r"<parameter\s*=\s*(?P<key>[^>\s]+)\s*>(?P<val>.*?)</parameter\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# A `<function=NAME>` that never closes — the model ran out of tokens (or drifted) partway
+# through writing the call. Anchored to end-of-text so it only matches a genuinely unfinished
+# tail, never a well-formed block earlier in the message. Small local models hit this often on
+# a large tool schema, and the turn used to end silently on the leftover text.
+_FUNCTION_OPEN_TRUNCATED = re.compile(
+    r"<function\s*=\s*(?P<name>[^>\s]+)\s*>(?P<body>(?:(?!</function\s*>).)*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Markers that mean "this text IS a tool call the endpoint failed to parse", used to tell a
+# real answer from a leaked one. Fenced code is stripped first: a model *explaining* tool-call
+# syntax in a ``` block is answering, not calling.
+_LEAKED_TOOL_SYNTAX = (
+    "<tool_call>",
+    "</tool_call>",
+    "<function=",
+    "</function>",
+    "<parameter=",
+    "</parameter>",
+    "<function_calls>",
+    "<invoke ",
+)
+_FENCED = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
+
+
+def looks_like_unparsed_tool_call(
+    text: Optional[str], tools: Optional[list[dict[str, Any]]] = None
+) -> bool:
+    """True when assistant text still carries tool-call markup that salvage couldn't turn into
+    a call — i.e. the model tried to call a tool and the syntax was mangled or cut off.
+
+    Only meaningful when tools were actually offered, and only over OpenAI-compatible endpoints
+    that parse tool calls out of the model's raw output (LM Studio, Ollama, vLLM). The caller
+    uses it to end the turn as a retriable error instead of presenting the fragment as an answer.
+    """
+    if not tools or not text:
+        return False
+    return any(m in _FENCED.sub("", text).lower() for m in _LEAKED_TOOL_SYNTAX)
+
+
+def _coerce_param(raw: str) -> Any:
+    """Keep free-text verbatim (the common case: file content), but recover real JSON values when
+    the whole token is unambiguous JSON (no embedded whitespace) — e.g. `3`, `true`, `{"a":1}`.
+    """
+    s = raw.strip()
+    if s and not any(c.isspace() for c in s):
+        v = _loads(s)
+        if isinstance(v, (dict, list, int, float, bool)):
+            return v
+    return s
+
+
+def _maybe_salvage_tool_calls(
+    text: Optional[str],
+    tool_calls: list[ToolCall],
+    *,
+    tools: Optional[list[dict[str, Any]]],
+) -> tuple[Optional[str], list[ToolCall]]:
+    """If the model returned tool calls as text, convert them. Returns (text, tool_calls):
+    on success the salvaged calls replace `tool_calls` and `text` is cleared."""
+    if tool_calls or not tools or not text:
+        return text, tool_calls
+    salvaged = _salvage_tool_calls_from_text(text, tools)
+    if salvaged:
+        return None, salvaged
+    return text, tool_calls
+
+
+def _tool_index(
+    tools: Optional[list[dict[str, Any]]],
+) -> tuple[Optional[set[str]], dict[str, Optional[str]]]:
+    """(known tool names, {name: sole-parameter-name}) from OpenAI tool schemas. The sole-param
+    map lets us map a bare `toolname [args]` to `{param: args}` when a tool has one parameter.
+    """
+    if not tools:
+        return None, {}
+    names: set[str] = set()
+    single: dict[str, Optional[str]] = {}
+    for t in tools:
+        fn = (t or {}).get("function") or {}
+        name = fn.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        names.add(name)
+        params = fn.get("parameters") or {}
+        props = params.get("properties") or {}
+        if len(props) == 1:
+            single[name] = next(iter(props))
+        else:
+            required = params.get("required") or []
+            single[name] = required[0] if len(required) == 1 else None
+    return names, single
+
+
+def _loads(s: str) -> Any:
+    try:
+        return json.loads(s)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def _extract_balanced(text: str, start: int) -> Optional[str]:
+    """Return the balanced `{…}`/`[…]` substring beginning at `text[start]` (string-aware), or
+    None if it doesn't close — so nested braces/brackets are handled correctly."""
+    open_ch = text[start]
+    close_ch = "]" if open_ch == "[" else "}"
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _iter_top_objects(text: str):
+    """Yield balanced `{…}` substrings at brace-depth 0 (array brackets ignored), so embedded
+    JSON objects are found even amid surrounding prose."""
+    i = 0
+    while i < len(text):
+        if text[i] == "{":
+            sub = _extract_balanced(text, i)
+            if sub:
+                yield sub
+                i += len(sub)
+                continue
+        i += 1
+
+
+def _call_from_dict(d: Any, names: Optional[set[str]]) -> Optional[ToolCall]:
+    """Build a ToolCall from a `{"name","arguments"}` dict, or None if it isn't one / the name
+    isn't a known tool."""
+    if not isinstance(d, dict):
+        return None
+    name = d.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    if names is not None and name not in names:
+        return None
+    args = d.get("arguments", d.get("parameters"))
+    if args is None:
+        args = {}
+    if isinstance(args, str):
+        args = _loads(args)
+        if not isinstance(args, dict):
+            args = {"_raw": d.get("arguments")}
+    if not isinstance(args, dict):
+        args = {"_raw": args}
+    return ToolCall(id="", name=name, arguments=args)
+
+
+def _renumber(calls: list[ToolCall]) -> list[ToolCall]:
+    return [
+        ToolCall(id=f"call_salvaged_{i}", name=c.name, arguments=c.arguments)
+        for i, c in enumerate(calls)
+    ]
+
+
+def _salvage_tool_calls_from_text(
+    content: str, tools: Optional[list[dict[str, Any]]] = None
+) -> list[ToolCall]:
+    """Best-effort recovery of tool calls embedded in assistant text. Tries, in order:
+    1. `<tool_call>…</tool_call>` blocks (anywhere, balanced); 2. embedded `{"name","arguments"}`
+    objects (even mixed with prose); 3. `toolname {args}` / `toolname [args]` for known tools.
+    Returns [] (treat as plain text) when nothing tool-shaped is found."""
+    text = (content or "").strip()
+    if not text:
+        return []
+    names, single = _tool_index(tools)
+
+    # 1) <tool_call> … </tool_call> blocks.
+    calls: list[ToolCall] = []
+    for m in _TOOLCALL_OPEN.finditer(text):
+        j = m.end()
+        if j < len(text) and text[j] in "{[":
+            sub = _extract_balanced(text, j)
+            parsed = _loads(sub) if sub else None
+            for d in parsed if isinstance(parsed, list) else [parsed]:
+                c = _call_from_dict(d, names)
+                if c:
+                    calls.append(c)
+    if calls:
+        return _renumber(calls)
+
+    # 1b) Qwen/Hermes XML calls: <function=NAME><parameter=KEY>VAL</parameter>…</function>.
+    for fm in _FUNCTION_BLOCK.finditer(text):
+        name = fm.group("name").strip()
+        if names is not None and name not in names:
+            continue
+        args = {
+            pm.group("key").strip(): _coerce_param(pm.group("val"))
+            for pm in _PARAM_BLOCK.finditer(fm.group("body"))
+        }
+        calls.append(ToolCall(id="", name=name, arguments=args))
+    if calls:
+        return _renumber(calls)
+
+    # 1c) A TRUNCATED XML call: `<function=NAME>` with no closing tag, because the model ran
+    # out of tokens mid-call. Take the name plus every parameter that DID close; a trailing
+    # unterminated `<parameter=…>` is dropped rather than guessed, so a half-written path or
+    # file body can never reach a tool. If that leaves a required argument missing the call
+    # fails validation and the model gets a corrective tool error — which is the agent loop
+    # working, and strictly better than the turn ending on the leftover fragment.
+    tm = _FUNCTION_OPEN_TRUNCATED.search(text)
+    if tm:
+        name = tm.group("name").strip()
+        if names is None or name in names:
+            args = {
+                pm.group("key").strip(): _coerce_param(pm.group("val"))
+                for pm in _PARAM_BLOCK.finditer(tm.group("body"))
+            }
+            return _renumber([ToolCall(id="", name=name, arguments=args)])
+
+    # 2) Embedded {"name": …, "arguments": …} objects, even surrounded by prose.
+    for sub in _iter_top_objects(text):
+        d = _loads(sub)
+        if isinstance(d, dict) and "name" in d:
+            c = _call_from_dict(d, names)
+            if c:
+                calls.append(c)
+    if calls:
+        return _renumber(calls)
+
+    # 3) `toolname {args}` / `toolname [args]` shorthand — only for tools we actually offered.
+    if names:
+        for name in names:
+            for m in re.finditer(re.escape(name) + r"\s*[:=]?\s*", text):
+                j = m.end()
+                if j >= len(text) or text[j] not in "{[":
+                    continue
+                sub = _extract_balanced(text, j)
+                parsed = _loads(sub) if sub else None
+                if parsed is None:
+                    continue
+                if isinstance(parsed, dict):
+                    args = parsed
+                else:
+                    param = single.get(name)
+                    if not param:
+                        continue
+                    args = {param: parsed}
+                calls.append(ToolCall(id="", name=name, arguments=args))
+                break  # one salvaged call per tool name
+    return _renumber(calls)

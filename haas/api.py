@@ -5,10 +5,12 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import time
 import uuid
 import zipfile
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, replace
 from typing import Annotated, Any, cast
 
 from fastapi import FastAPI, File, Request, UploadFile
@@ -42,6 +44,8 @@ from haas.registry import (
     harness_to_dict,
     seed_codex,
 )
+from haas.runtime import DelegatedContainerRuntime, DelegatedContainerUnavailable
+from haas.runtime.delegation import DisabledDelegatedContainerRuntime
 from haas.sessions import (
     AdapterTurnError,
     InvocationNotFoundError,
@@ -51,11 +55,19 @@ from haas.sessions import (
     SessionRuntime,
 )
 from haas.stores import (
+    ApprovalNotFoundError,
+    ApprovalStateConflictError,
+    CanonicalEventRecord,
     CursorNotFoundError,
+    DelegatedRuntimeRecord,
+    DelegatedSessionRecord,
+    HarnessRecord,
     IdempotencyConflictError,
     InvocationRecord,
+    LeaseConflictError,
     MemoryStore,
     SessionRecord,
+    TurnRecord,
 )
 
 DEFAULT_TOKEN = "dev-token"
@@ -109,8 +121,243 @@ def _haas_error_content(exc: HaasError) -> dict[str, Any]:
     }
 
 
+class MountManifestInvalid(ValueError):
+    """Delegated mount manifest violates the manager-approved contract."""
+
+
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _trace_id() -> str:
+    return f"tr_{uuid.uuid4().hex[:16]}"
+
+
+def _deep_merge(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for key, value in delta.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _delegation_policy_from_config(config: AppConfig) -> dict[str, Any]:
+    d = config.delegation
+    return {
+        "version": 1,
+        "idleTtlSeconds": d.idle_ttl_seconds,
+        "maxContainerLifetimeSeconds": d.max_container_lifetime_seconds,
+        "rwWorkspaceConcurrency": d.rw_workspace_concurrency,
+        "queuePolicy": d.queue_policy,
+        "restorePolicy": d.restore_policy,
+        "policyChangeMode": d.policy_change_mode,
+        "mountPolicy": d.mount_policy,
+    }
+
+
+def _validate_delegation_policy(policy: dict[str, Any]) -> None:
+    required = {
+        "idleTtlSeconds",
+        "maxContainerLifetimeSeconds",
+        "rwWorkspaceConcurrency",
+        "queuePolicy",
+        "restorePolicy",
+        "mountPolicy",
+    }
+    if not required.issubset(policy):
+        raise ValueError("missing delegation policy fields")
+    if int(policy["idleTtlSeconds"]) <= 0 or int(policy["maxContainerLifetimeSeconds"]) <= 0:
+        raise ValueError("invalid delegation ttl")
+    if policy["rwWorkspaceConcurrency"] != "single_writer":
+        raise ValueError("unsupported workspace concurrency")
+    if policy["queuePolicy"] != "fifo" or policy["restorePolicy"] != "fail_closed":
+        raise ValueError("unsupported delegation policy")
+
+
+def _validate_mount_entry(entry: Any, *, primary: bool) -> None:
+    if not isinstance(entry, dict):
+        raise MountManifestInvalid("invalid mount")
+    host_path = entry.get("hostPathCanonical")
+    container_path = entry.get("containerPath")
+    access = entry.get("access")
+    if (
+        not isinstance(host_path, str)
+        or not host_path
+        or not isinstance(container_path, str)
+        or not container_path
+        or not isinstance(access, str)
+        or not access
+    ):
+        raise MountManifestInvalid("invalid mount fields")
+    if not host_path.startswith("/") or not container_path.startswith("/"):
+        raise MountManifestInvalid("mount paths must be absolute")
+    normalized_host = os.path.normpath(host_path)
+    if normalized_host != host_path or normalized_host == "/":
+        raise MountManifestInvalid("mount host path must be canonical")
+    home = os.path.expanduser("~")
+    if normalized_host == home:
+        raise MountManifestInvalid("must not mount user home")
+    if normalized_host in {"/var/run/docker.sock", "/run/docker.sock"}:
+        raise MountManifestInvalid("must not mount docker socket")
+    if normalized_host.endswith("/.ssh") or "/.ssh/" in normalized_host:
+        raise MountManifestInvalid("must not mount ssh directory")
+    if access not in {"ro", "rw"}:
+        raise MountManifestInvalid("invalid mount access")
+    if primary and (container_path != "/workspace" or access != "rw"):
+        raise MountManifestInvalid("primary workspace must be /workspace:rw")
+    if not primary and access != "ro":
+        raise MountManifestInvalid("extra mounts default to ro in the skeleton")
+
+
+def _validate_mount_manifest(manifest: dict[str, Any]) -> None:
+    if not isinstance(manifest, dict):
+        raise MountManifestInvalid("invalid mount manifest")
+    if int(manifest.get("version", 0)) < 1:
+        raise MountManifestInvalid("invalid mount manifest version")
+    _validate_mount_entry(manifest.get("primaryWorkspace"), primary=True)
+    for entry in manifest.get("extraMounts") or []:
+        _validate_mount_entry(entry, primary=False)
+
+
+def _delegated_session_from_body(
+    body: dict[str, Any], config: AppConfig
+) -> DelegatedSessionRecord:
+    for key in ("managerSessionId", "haasSessionId", "haasUserId", "harnessId"):
+        if not isinstance(body.get(key), str) or not body[key]:
+            raise ValueError(f"missing {key}")
+    image = body.get("image")
+    provider = body.get("provider")
+    mount_manifest = body.get("mountManifest")
+    policy = body.get("delegationPolicySnapshot") or _delegation_policy_from_config(config)
+    if not isinstance(image, dict) or not isinstance(image.get("reference"), str):
+        raise ValueError("invalid image")
+    digest = image.get("digest")
+    if not isinstance(digest, str):
+        raise ValueError("invalid image digest")
+    if (
+        not digest
+        and "@sha256:" not in image["reference"]
+        and not config.delegation.allow_unpinned_local_image
+    ):
+        raise ValueError("invalid image digest")
+    if (
+        not isinstance(provider, dict)
+        or not isinstance(provider.get("providerId"), str)
+        or not isinstance(provider.get("model"), str)
+        or not isinstance(provider.get("credentialRef"), str)
+    ):
+        raise ValueError("invalid provider")
+    credential_ref = provider["credentialRef"]
+    if not credential_ref.startswith("secret://"):
+        raise ValueError("invalid credential ref")
+    if not isinstance(policy, dict):
+        raise ValueError("invalid delegation policy")
+    _validate_delegation_policy(policy)
+    if not isinstance(mount_manifest, dict):
+        raise ValueError("invalid mount manifest")
+    _validate_mount_manifest(mount_manifest)
+    return DelegatedSessionRecord(
+        id=f"dgsess_{uuid.uuid4().hex[:16]}",
+        managerSessionId=body["managerSessionId"],
+        haasSessionId=body["haasSessionId"],
+        haasUserId=body["haasUserId"],
+        harnessId=body["harnessId"],
+        harnessBase=str(body.get("harnessBase") or "codex"),
+        image=image,
+        provider=provider,
+        mountManifest=mount_manifest,
+        delegationPolicySnapshot=policy,
+    )
+
+
+def _delegated_session_envelope(record: DelegatedSessionRecord) -> dict[str, Any]:
+    return {"data": record.to_dict(), "traceId": _trace_id()}
+
+
+def _delegated_session_ref(record: DelegatedSessionRecord) -> dict[str, Any]:
+    return {
+        "delegatedSessionId": record.id,
+        "managerSessionId": record.managerSessionId,
+        "containerGeneration": record.runtime.containerGeneration,
+        "runtimeStatus": record.runtime.status,
+    }
+
+
+def _delegated_session_matches_body(
+    record: DelegatedSessionRecord, body: dict[str, Any]
+) -> bool:
+    return (
+        record.haasSessionId == body.get("haasSessionId")
+        and record.haasUserId == body.get("haasUserId")
+        and record.harnessId == body.get("harnessId")
+        and record.harnessBase == str(body.get("harnessBase") or "codex")
+        and record.image == body.get("image")
+        and record.provider == body.get("provider")
+        and record.mountManifest == body.get("mountManifest")
+        and record.delegationPolicySnapshot
+        == (body.get("delegationPolicySnapshot") or record.delegationPolicySnapshot)
+    )
+
+
+def _ensure_delegated_access(
+    runtime: _Runtime, principal: Principal, record: DelegatedSessionRecord
+) -> None:
+    if not runtime.identity.owns(principal, user_id=record.haasUserId):
+        raise HaasError(
+            404, "invalid_request_error", "haas_delegated_session_not_found"
+        )
+    try:
+        runtime.registry.get_scoped(principal, record.harnessId)
+    except HarnessNotFoundError as exc:
+        raise HaasError(
+            404, "invalid_request_error", "haas_delegated_session_not_found"
+        ) from exc
+
+
+def _has_session_access(runtime: _Runtime, principal: Principal, session_id: str) -> bool:
+    visible_apps = {h.id for h in runtime.registry.list_active(principal)}
+    return any(
+        r.id == session_id and r.appName in visible_apps
+        for r in runtime.store.list_sessions(user_ids=principal.userIds)
+    )
+
+
+def _session_key(app_name: str, user_id: str, session_id: str) -> tuple[str, str, str]:
+    return (app_name, user_id, session_id)
+
+
+def _session_to_adk(
+    runtime: _Runtime, session: SessionRecord, *, include_events: bool = True
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "id": session.id,
+        "appName": session.appName,
+        "userId": session.userId,
+        "state": session.state,
+        "lastUpdateTime": session.updatedAtMs / 1000.0,
+    }
+    if session.delegatedSessionRef is not None:
+        data["delegatedSessionRef"] = dict(session.delegatedSessionRef)
+    if include_events:
+        data["events"] = [
+            runtime.event_log.project_adk(e)
+            for e in runtime.event_log.read_session(
+                session.appName, session.userId, session.id
+            )
+        ]
+    return data
+
+
+async def _json_object(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except (ValueError, TypeError) as exc:
+        raise HaasError(400, "invalid_request_error", "invalid_input") from exc
+    if not isinstance(body, dict):
+        raise HaasError(400, "invalid_request_error", "invalid_input")
+    return body
 
 
 @dataclass
@@ -123,6 +370,7 @@ class _Runtime:
     sessions: SessionRuntime
     adapter: HarnessAdapter
     artifacts: ArtifactStore
+    delegated_containers: DelegatedContainerRuntime
     metrics: Metrics
     logger: StructuredLogger
 
@@ -132,6 +380,7 @@ def build_app(
     *,
     adapter: HarnessAdapter | None = None,
     identity_tokens: dict[str, Principal] | None = None,
+    delegated_containers: DelegatedContainerRuntime | None = None,
     run_quota: int = 20,
     rate_limit: int = 100,
     max_file_bytes: int | None = None,
@@ -149,7 +398,9 @@ def build_app(
     store = MemoryStore()
     adapter = adapter or FakeAdapter()
     identity = StaticTokenIdentityProvider(
-        identity_tokens or {DEFAULT_TOKEN: Principal(principalId="p_dev")}
+        {DEFAULT_TOKEN: Principal(principalId="p_dev")}
+        if identity_tokens is None
+        else identity_tokens
     )
     registry = HarnessRegistry(
         store=store,
@@ -183,6 +434,7 @@ def build_app(
         sessions=sessions,
         adapter=adapter,
         artifacts=ArtifactStore(artifact_policy),
+        delegated_containers=delegated_containers or DisabledDelegatedContainerRuntime(),
         metrics=Metrics(),
         logger=StructuredLogger(),
     )
@@ -272,15 +524,7 @@ def build_app(
             session = runtime.sessions.get_session(app_name, user_id, session_id)
         except SessionNotFoundError as exc:
             raise HaasError(404, "invalid_request_error", "session_not_found") from exc
-        events = runtime.event_log.read_session(app_name, user_id, session_id)
-        return {
-            "id": session.id,
-            "appName": session.appName,
-            "userId": session.userId,
-            "state": session.state,
-            "events": [runtime.event_log.project_adk(e) for e in events],
-            "lastUpdateTime": session.updatedAtMs / 1000.0,
-        }
+        return _session_to_adk(runtime, session)
 
     @app.patch("/apps/{app_name}/users/{user_id}/sessions/{session_id}")
     async def patch_session(
@@ -308,6 +552,17 @@ def build_app(
         principal = await _authenticate(runtime.identity, request)
         _ensure_owns(runtime.identity, principal, user_id)
         try:
+            delegated = runtime.store.get_delegated_session_by_haas_session(session_id)
+            if delegated is not None:
+                _ensure_delegated_access(runtime, principal, delegated)
+                destroyed = await runtime.delegated_containers.destroy(
+                    delegated, reason="session_deleted"
+                )
+                runtime.store.update_delegated_runtime(delegated.id, destroyed)
+                primary_workspace = delegated.mountManifest.get("primaryWorkspace") or {}
+                workspace_path = primary_workspace.get("hostPathCanonical")
+                if isinstance(workspace_path, str):
+                    runtime.store.release_workspace_lock(workspace_path, delegated.id)
             runtime.sessions.delete_session(app_name, user_id, session_id)
         except SessionNotFoundError as exc:
             raise HaasError(404, "invalid_request_error", "session_not_found") from exc
@@ -332,6 +587,36 @@ def build_app(
             },
             "traceId": f"tr_{_hash(invocation_id)[:16]}",
         }
+
+    @app.post("/v1/haas/sessions/{session_id}/approvals/{approval_id}")
+    async def resolve_approval(
+        session_id: str, approval_id: str, request: Request
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        body = await _json_object(request)
+        decision = body.get("decision")
+        if decision not in {"approved", "denied"}:
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+        approval = runtime.store.get_approval(approval_id)
+        if approval is None or approval.sessionId != session_id:
+            raise HaasError(404, "invalid_request_error", "haas_approval_not_found")
+        if not _has_session_access(runtime, principal, session_id):
+            raise HaasError(404, "invalid_request_error", "haas_approval_not_found")
+        try:
+            resolved = runtime.store.resolve_approval(approval_id, body)
+        except ApprovalNotFoundError as exc:
+            raise HaasError(
+                404, "invalid_request_error", "haas_approval_not_found"
+            ) from exc
+        except ApprovalStateConflictError as exc:
+            raise HaasError(
+                409, "invalid_request_error", "haas_approval_state_conflict"
+            ) from exc
+        runtime.logger.event(
+            "haas.approval.resolved",
+            {"approvalId": approval_id, "sessionId": session_id, "status": resolved.status},
+        )
+        return {"data": resolved.to_dict(), "traceId": _trace_id()}
 
     @app.get("/v1/haas/sessions/{session_id}/events")
     async def session_events(
@@ -551,13 +836,7 @@ def build_app(
         }
 
     async def _harness_body(request: Request) -> dict[str, Any]:
-        try:
-            body = await request.json()
-        except (ValueError, TypeError) as exc:
-            raise HaasError(400, "invalid_request_error", "invalid_input") from exc
-        if not isinstance(body, dict):
-            raise HaasError(400, "invalid_request_error", "invalid_input")
-        return body
+        return await _json_object(request)
 
     @app.get("/v1/haas/harnesses")
     async def list_harnesses(request: Request) -> dict[str, Any]:
@@ -584,8 +863,12 @@ def build_app(
                 raise HaasError(
                     409, "invalid_request_error", "haas_idempotency_conflict"
                 ) from exc
-            if reservation.replay and reservation.result is not None:
-                return dict(reservation.result)
+            if reservation.replay:
+                result = reservation.result
+                if result is None:
+                    result = await _wait_for_idempotency(runtime.store, key_hash)
+                if result is not None:
+                    return dict(result)
 
         try:
             record = runtime.registry.create(principal, body)
@@ -681,6 +964,274 @@ def build_app(
             "traceId": f"tr_{uuid.uuid4().hex[:16]}",
         }
 
+    @app.post("/v1/haas/delegated-sessions")
+    async def create_delegated_session(request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        body = await _json_object(request)
+        idempotency_key = request.headers.get("Idempotency-Key")
+        key_hash: str | None = None
+        if idempotency_key:
+            key_hash = _hash(idempotency_key)
+            request_hash = _hash(json.dumps(body, sort_keys=True, default=str))
+            try:
+                reservation = runtime.store.reserve(key_hash, request_hash)
+            except IdempotencyConflictError as exc:
+                raise HaasError(
+                    409, "invalid_request_error", "haas_idempotency_conflict"
+                ) from exc
+            if reservation.replay:
+                result = reservation.result
+                if result is None:
+                    result = await _wait_for_idempotency(runtime.store, key_hash)
+                if result is not None:
+                    return dict(result)
+                raise HaasError(
+                    409, "invalid_request_error", "session_busy", retryable=True
+                )
+
+        try:
+            record = _delegated_session_from_body(body, config)
+            _ensure_owns(runtime.identity, principal, record.haasUserId)
+            try:
+                harness = runtime.registry.get_scoped(principal, record.harnessId)
+            except HarnessNotFoundError as exc:
+                raise HaasError(
+                    404, "invalid_request_error", "haas_harness_not_found"
+                ) from exc
+            if harness.base != record.harnessBase:
+                raise HaasError(400, "invalid_request_error", "invalid_input")
+
+            existing = runtime.store.get_delegated_session_by_manager(
+                record.managerSessionId
+            )
+            if existing is not None:
+                _ensure_delegated_access(runtime, principal, existing)
+                if not _delegated_session_matches_body(existing, body):
+                    raise HaasError(
+                        409,
+                        "invalid_request_error",
+                        "haas_delegated_session_conflict",
+                        safe_reason="delegated_session_binding_conflict",
+                    )
+                saved = existing
+            else:
+                saved = runtime.store.put_delegated_session(record)
+                session = runtime.store.get_session(
+                    _session_key(record.harnessId, record.haasUserId, record.haasSessionId)
+                )
+                if session is None:
+                    session = SessionRecord(
+                        id=record.haasSessionId,
+                        appName=record.harnessId,
+                        userId=record.haasUserId,
+                    )
+                session = replace(
+                    session,
+                    delegatedSessionRef=_delegated_session_ref(saved),
+                )
+                runtime.store.put_session(session)
+        except HaasError:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise
+        except MountManifestInvalid as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                403,
+                "invalid_request_error",
+                "haas_delegation_mount_invalid",
+                safe_reason="delegation_mount_invalid",
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(400, "invalid_request_error", "invalid_input") from exc
+
+        envelope = _delegated_session_envelope(saved)
+        if key_hash:
+            runtime.store.complete(key_hash, envelope)
+        runtime.logger.event(
+            "haas.delegation.session_bound",
+            {"delegatedSessionId": saved.id, "harnessId": saved.harnessId},
+        )
+        return envelope
+
+    @app.get("/v1/haas/delegated-sessions/{delegated_session_id}")
+    async def get_delegated_session(
+        delegated_session_id: str, request: Request
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        record = runtime.store.get_delegated_session(delegated_session_id)
+        if record is None:
+            raise HaasError(
+                404, "invalid_request_error", "haas_delegated_session_not_found"
+            )
+        _ensure_delegated_access(runtime, principal, record)
+        return _delegated_session_envelope(record)
+
+    @app.post("/v1/haas/delegated-sessions/{delegated_session_id}/restore")
+    async def restore_delegated_session(
+        delegated_session_id: str, request: Request
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        if request.headers.get("content-length") not in {None, "0"}:
+            await _json_object(request)
+        record = runtime.store.get_delegated_session(delegated_session_id)
+        if record is None:
+            raise HaasError(
+                404, "invalid_request_error", "haas_delegated_session_not_found"
+            )
+        _ensure_delegated_access(runtime, principal, record)
+        try:
+            _validate_mount_manifest(record.mountManifest)
+        except MountManifestInvalid as exc:
+            raise HaasError(
+                403,
+                "invalid_request_error",
+                "haas_delegation_mount_invalid",
+                safe_reason="delegation_mount_invalid",
+            ) from exc
+        primary_workspace = record.mountManifest["primaryWorkspace"]
+        lock = runtime.store.acquire_workspace_lock(
+            primary_workspace["hostPathCanonical"],
+            record.id,
+            primary_workspace["access"],
+            ttl_ms=record.delegationPolicySnapshot["maxContainerLifetimeSeconds"]
+            * 1000,
+        )
+        if not lock.acquired:
+            raise HaasError(
+                409,
+                "invalid_request_error",
+                "haas_workspace_lock_busy",
+                safe_reason="workspace_lock_busy",
+                retryable=True,
+            )
+        try:
+            restored_runtime = await runtime.delegated_containers.restore(record)
+        except DelegatedContainerUnavailable as exc:
+            runtime.store.release_workspace_lock(
+                primary_workspace["hostPathCanonical"], record.id
+            )
+            runtime.store.update_delegated_runtime(
+                delegated_session_id,
+                DelegatedRuntimeRecord(
+                    status="failed",
+                    containerId=None,
+                    containerGeneration=record.runtime.containerGeneration,
+                    lastStartedAtMs=record.runtime.lastStartedAtMs,
+                    lastActiveAtMs=record.runtime.lastActiveAtMs,
+                ),
+            )
+            raise HaasError(
+                503,
+                "invalid_request_error",
+                "haas_delegation_backend_unavailable",
+                safe_reason="delegation_backend_unavailable",
+                retryable=True,
+            ) from exc
+        restored = runtime.store.update_delegated_runtime(
+            delegated_session_id, restored_runtime
+        )
+        session = runtime.store.get_session(
+            _session_key(restored.harnessId, restored.haasUserId, restored.haasSessionId)
+        )
+        if session is not None:
+            runtime.store.put_session(
+                replace(session, delegatedSessionRef=_delegated_session_ref(restored))
+            )
+        runtime.logger.event(
+            "haas.delegation.restore_started",
+            {
+                "delegatedSessionId": restored.id,
+                "containerGeneration": restored.runtime.containerGeneration,
+            },
+        )
+        return _delegated_session_envelope(restored)
+
+    @app.post("/v1/haas/delegated-sessions/{delegated_session_id}/policy")
+    async def update_delegated_session_policy(
+        delegated_session_id: str, request: Request
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        body = await _json_object(request)
+        record = runtime.store.get_delegated_session(delegated_session_id)
+        if record is None:
+            raise HaasError(
+                404, "invalid_request_error", "haas_delegated_session_not_found"
+            )
+        _ensure_delegated_access(runtime, principal, record)
+        policy = body.get("delegationPolicySnapshot")
+        if not isinstance(policy, dict):
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+        mount_manifest = body.get("mountManifest", record.mountManifest)
+        if not isinstance(mount_manifest, dict):
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+        try:
+            _validate_delegation_policy(policy)
+            _validate_mount_manifest(mount_manifest)
+        except MountManifestInvalid as exc:
+            raise HaasError(
+                403,
+                "invalid_request_error",
+                "haas_delegation_mount_invalid",
+                safe_reason="delegation_mount_invalid",
+            ) from exc
+        except ValueError as exc:
+            raise HaasError(400, "invalid_request_error", "invalid_input") from exc
+        old_primary_workspace = record.mountManifest["primaryWorkspace"]
+        runtime_after_policy = record.runtime
+        if record.runtime.containerId is not None and record.runtime.status in {
+            "running",
+            "idle",
+            "restoring",
+        }:
+            try:
+                runtime_after_policy = await runtime.delegated_containers.destroy(
+                    record, reason="policy_updated"
+                )
+            except DelegatedContainerUnavailable as exc:
+                raise HaasError(
+                    503,
+                    "invalid_request_error",
+                    "haas_delegation_backend_unavailable",
+                    safe_reason="delegation_backend_unavailable",
+                    retryable=True,
+                ) from exc
+            runtime.store.release_workspace_lock(
+                old_primary_workspace["hostPathCanonical"], record.id
+            )
+        updated = runtime.store.put_delegated_session(
+            DelegatedSessionRecord(
+                id=record.id,
+                managerSessionId=record.managerSessionId,
+                haasSessionId=record.haasSessionId,
+                haasUserId=record.haasUserId,
+                harnessId=record.harnessId,
+                harnessBase=record.harnessBase,
+                image=record.image,
+                provider=record.provider,
+                mountManifest=mount_manifest,
+                delegationPolicySnapshot=policy,
+                runtime=runtime_after_policy,
+                binding=record.binding,
+                createdAtMs=record.createdAtMs,
+            )
+        )
+        runtime.logger.event(
+            "haas.delegation.policy_updated",
+            {"delegatedSessionId": updated.id},
+        )
+        session = runtime.store.get_session(
+            _session_key(updated.harnessId, updated.haasUserId, updated.haasSessionId)
+        )
+        if session is not None:
+            runtime.store.put_session(
+                replace(session, delegatedSessionRef=_delegated_session_ref(updated))
+            )
+        return _delegated_session_envelope(updated)
+
     @app.get("/v1/haas/harnesses/{harness_id}/skills/{skill_id}/files")
     async def list_skill_files(
         harness_id: str, skill_id: str, request: Request
@@ -746,20 +1297,7 @@ def build_app(
         exhausted = start + limit >= len(records)
         next_cursor = None if exhausted or not page else page[-1].id
         return {
-            "data": [
-                {
-                    "id": r.id,
-                    "appName": r.appName,
-                    "userId": r.userId,
-                    "state": r.state,
-                    "events": [
-                        runtime.event_log.project_adk(e)
-                        for e in runtime.event_log.read_session(r.appName, r.userId, r.id)
-                    ],
-                    "lastUpdateTime": r.updatedAtMs / 1000.0,
-                }
-                for r in page
-            ],
+            "data": [_session_to_adk(runtime, r) for r in page],
             "nextCursor": next_cursor,
             "traceId": f"tr_{uuid.uuid4().hex[:16]}",
         }
@@ -900,9 +1438,126 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
         )
 
     lease_id = admission.leaseId
+    delegated_record = (
+        runtime.store.get_delegated_session_by_haas_session(session_id)
+        if isinstance(session_id, str)
+        else None
+    )
+    if delegated_record is not None:
+        try:
+            if delegated_record.harnessId != app.id or delegated_record.haasUserId != user_id:
+                raise HaasError(404, "invalid_request_error", "session_not_found")
+            _ensure_delegated_access(runtime, principal, delegated_record)
+        except HaasError:
+            if key_hash:
+                runtime.store.release(key_hash)
+            if lease_id:
+                runtime.admission.release_run(lease_id)
+            raise
+        return await _run_delegated(
+            runtime,
+            app=app,
+            user_id=user_id,
+            session_id=delegated_record.haasSessionId,
+            message=new_message,
+            delegated=delegated_record,
+            streaming=streaming,
+            key_hash=key_hash,
+            lease_id=lease_id,
+        )
     req = RunRequest(
         app=app, user_id=user_id, session_id=session_id, message=new_message
     )
+    if streaming:
+        stream = runtime.sessions.run_stream(req)
+        adk_events: list[dict[str, Any]] = []
+        try:
+            first = await stream.__anext__()
+        except SessionBusyError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            if lease_id:
+                runtime.admission.release_run(lease_id)
+            raise HaasError(
+                409, "invalid_request_error", "session_busy", retryable=True
+            ) from exc
+        except StopAsyncIteration:
+            if key_hash:
+                runtime.store.complete(key_hash, {"events": []})
+            if lease_id:
+                runtime.admission.release_run(lease_id)
+            return StreamingResponse(iter(()), media_type="text/event-stream")
+        except AdapterTurnError as exc:
+            if key_hash:
+                invocation = runtime.store.get_invocation(exc.invocation_id)
+                events = [
+                    runtime.event_log.project_adk(e)
+                    for e in (
+                        runtime.event_log.read_invocation(
+                            invocation.appName,
+                            invocation.userId,
+                            invocation.sessionId,
+                            exc.invocation_id,
+                        )
+                        if invocation is not None
+                        else []
+                    )
+                ]
+                runtime.store.complete(key_hash, {"events": events})
+            if lease_id:
+                runtime.admission.release_run(lease_id)
+            raise HaasError(
+                502, "invalid_request_error", "haas_adapter_error", retryable=True
+            ) from exc
+
+        first_adk = runtime.event_log.project_adk(first)
+        adk_events.append(first_adk)
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        disconnected = False
+
+        async def produce() -> None:
+            nonlocal disconnected
+            try:
+                try:
+                    async for event in stream:
+                        adk_event = runtime.event_log.project_adk(event)
+                        adk_events.append(adk_event)
+                        if not disconnected:
+                            queue.put_nowait(
+                                f"data: {json.dumps(adk_event, separators=(',', ':'))}\n\n"
+                            )
+                except AdapterTurnError:
+                    # SessionRuntime has already persisted and yielded the
+                    # terminal failed event before raising; the SSE response
+                    # cannot change HTTP status after headers are sent.
+                    pass
+                if key_hash:
+                    runtime.store.complete(key_hash, {"events": adk_events})
+            finally:
+                if lease_id:
+                    runtime.admission.release_run(lease_id)
+                if not disconnected:
+                    queue.put_nowait(HEARTBEAT_FRAME)
+                queue.put_nowait(None)
+
+        producer = asyncio.create_task(produce())
+
+        async def frames() -> Any:
+            nonlocal disconnected
+            try:
+                yield f"data: {json.dumps(first_adk, separators=(',', ':'))}\n\n"
+                while True:
+                    frame = await queue.get()
+                    if frame is None:
+                        break
+                    yield frame
+            finally:
+                disconnected = True
+                if producer.done():
+                    producer.result()
+
+        return StreamingResponse(frames(), media_type="text/event-stream")
+
     try:
         try:
             result = await runtime.sessions.run(req)
@@ -945,18 +1600,246 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
         if key_hash:
             runtime.store.complete(key_hash, {"status_code": 200, "events": adk_events})
 
-        if not streaming:
-            return adk_events
-
-        async def frames() -> Any:
-            for event in adk_events:
-                yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
-            yield ": keep-alive\n\n"
-
-        return StreamingResponse(frames(), media_type="text/event-stream")
+        return adk_events
     finally:
         if lease_id:
             runtime.admission.release_run(lease_id)
+
+
+async def _run_delegated(
+    runtime: _Runtime,
+    *,
+    app: HarnessRecord,
+    user_id: str,
+    session_id: str,
+    message: dict[str, Any],
+    delegated: DelegatedSessionRecord,
+    streaming: bool,
+    key_hash: str | None,
+    lease_id: str | None,
+) -> Any:
+    key = _session_key(app.id, user_id, session_id)
+    holder = f"run_{uuid.uuid4().hex[:8]}"
+    try:
+        lease = runtime.store.acquire_lease(key, holder)
+    except LeaseConflictError as exc:
+        if key_hash:
+            runtime.store.release(key_hash)
+        if lease_id:
+            runtime.admission.release_run(lease_id)
+        raise HaasError(409, "invalid_request_error", "session_busy", retryable=True) from exc
+    token = lease.token
+
+    existing_session = runtime.store.get_session(key)
+    if existing_session is None:
+        existing_session = SessionRecord(
+            id=session_id,
+            appName=app.id,
+            userId=user_id,
+            delegatedSessionRef=_delegated_session_ref(delegated),
+        )
+    session = runtime.store.put_session(
+        replace(existing_session, delegatedSessionRef=_delegated_session_ref(delegated))
+    )
+    invocation = InvocationRecord(
+        id=f"inv_{uuid.uuid4().hex[:16]}",
+        sessionId=session_id,
+        appName=app.id,
+        turnId=f"turn_{uuid.uuid4().hex[:16]}",
+        userId=user_id,
+        status="running",
+    )
+    turn = TurnRecord(
+        id=invocation.turnId,
+        invocationId=invocation.id,
+        sessionId=session_id,
+        status="running",
+    )
+    runtime.store.put_invocation(invocation)
+    runtime.store.put_turn(turn)
+
+    async def events() -> AsyncIterator[CanonicalEventRecord]:
+        nonlocal delegated, session, invocation, turn
+        primary_workspace = delegated.mountManifest["primaryWorkspace"]
+        lock_acquired = False
+        try:
+            _validate_mount_manifest(delegated.mountManifest)
+            lock = runtime.store.acquire_workspace_lock(
+                primary_workspace["hostPathCanonical"],
+                delegated.id,
+                primary_workspace["access"],
+                ttl_ms=delegated.delegationPolicySnapshot["maxContainerLifetimeSeconds"] * 1000,
+            )
+            if not lock.acquired:
+                raise HaasError(
+                    409,
+                    "invalid_request_error",
+                    "haas_workspace_lock_busy",
+                    safe_reason="workspace_lock_busy",
+                    retryable=True,
+                )
+            lock_acquired = True
+            restored_runtime = await runtime.delegated_containers.restore(delegated)
+            delegated = runtime.store.update_delegated_runtime(delegated.id, restored_runtime)
+            session = runtime.store.put_session(
+                replace(session, delegatedSessionRef=_delegated_session_ref(delegated))
+            )
+            body = {
+                "appName": app.id,
+                "userId": user_id,
+                "sessionId": session_id,
+                "newMessage": message,
+                "streaming": True,
+            }
+            async for event in runtime.delegated_containers.run_stream(delegated, body):
+                content = event.get("content") if isinstance(event, dict) else {}
+                actions = event.get("actions") if isinstance(event, dict) else {}
+                canonical = runtime.event_log.append(
+                    app_name=app.id,
+                    user_id=user_id,
+                    invocation_id=invocation.id,
+                    session_id=session_id,
+                    turn_id=turn.id,
+                    harness_id=app.id,
+                    adapter_id="delegated-container",
+                    author=str(event.get("author") or delegated.harnessBase)
+                    if isinstance(event, dict)
+                    else delegated.harnessBase,
+                    content=content if isinstance(content, dict) else {},
+                    actions=actions if isinstance(actions, dict) else {},
+                )
+                delta = canonical.actions.get("stateDelta")
+                if isinstance(delta, dict):
+                    session.state = _deep_merge(session.state, delta)
+                    session = runtime.store.put_session(session)
+                yield canonical
+            final_status = str(session.state.get("status") or "completed")
+            if final_status not in {"completed", "failed", "cancelled", "incomplete"}:
+                final_status = "completed"
+            invocation.status = final_status
+            turn.status = final_status
+        except (DelegatedContainerUnavailable, MountManifestInvalid, HaasError) as exc:
+            if lock_acquired and (
+                isinstance(exc, MountManifestInvalid)
+                or (
+                    isinstance(exc, DelegatedContainerUnavailable)
+                    and delegated.runtime.containerId is None
+                )
+            ):
+                runtime.store.release_workspace_lock(
+                    primary_workspace["hostPathCanonical"], delegated.id
+                )
+            invocation.status = "failed"
+            turn.status = "failed"
+            if isinstance(exc, HaasError):
+                code = exc.code
+                safe_reason = exc.safe_reason
+                status_code = exc.status_code
+                retryable = exc.retryable
+            elif isinstance(exc, MountManifestInvalid):
+                code = "haas_delegation_mount_invalid"
+                safe_reason = "delegation_mount_invalid"
+                status_code = 403
+                retryable = False
+            else:
+                code = "haas_delegation_backend_unavailable"
+                safe_reason = "delegation_backend_unavailable"
+                status_code = 503
+                retryable = True
+            terminal = runtime.event_log.append(
+                app_name=app.id,
+                user_id=user_id,
+                invocation_id=invocation.id,
+                session_id=session_id,
+                turn_id=turn.id,
+                harness_id=app.id,
+                adapter_id="delegated-container",
+                author=delegated.harnessBase,
+                content={"role": "model", "parts": []},
+                actions={
+                    "stateDelta": {
+                        "status": "failed",
+                        "safeReason": safe_reason,
+                    }
+                },
+            )
+            session.state = _deep_merge(session.state, terminal.actions["stateDelta"])
+            runtime.store.put_session(session)
+            yield terminal
+            raise HaasError(
+                status_code,
+                "invalid_request_error",
+                code,
+                safe_reason=safe_reason,
+                retryable=retryable,
+            ) from exc
+        finally:
+            invocation.completedAtMs = int(time.time() * 1000)
+            turn.completedAtMs = invocation.completedAtMs
+            runtime.store.put_invocation(invocation)
+            runtime.store.put_turn(turn)
+            runtime.store.put_session(session)
+            runtime.store.release_lease(key, holder, token)
+
+    if streaming:
+        adk_events: list[dict[str, Any]] = []
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        disconnected = False
+
+        async def produce() -> None:
+            nonlocal disconnected
+            try:
+                try:
+                    async for event in events():
+                        adk_event = runtime.event_log.project_adk(event)
+                        adk_events.append(adk_event)
+                        if not disconnected:
+                            queue.put_nowait(
+                                f"data: {json.dumps(adk_event, separators=(',', ':'))}\n\n"
+                            )
+                except HaasError:
+                    # The delegated runtime already emitted a terminal failure
+                    # event.  SSE headers may already be committed, so complete
+                    # the stream with persisted evidence instead of raising
+                    # through the response task.
+                    pass
+                finally:
+                    if key_hash:
+                        runtime.store.complete(key_hash, {"events": adk_events})
+            finally:
+                if lease_id:
+                    runtime.admission.release_run(lease_id)
+                if not disconnected:
+                    queue.put_nowait(HEARTBEAT_FRAME)
+                queue.put_nowait(None)
+
+        producer = asyncio.create_task(produce())
+
+        async def frames() -> Any:
+            nonlocal disconnected
+            try:
+                while True:
+                    frame = await queue.get()
+                    if frame is None:
+                        break
+                    yield frame
+            finally:
+                disconnected = True
+                if producer.done():
+                    producer.result()
+
+        return StreamingResponse(frames(), media_type="text/event-stream")
+
+    delegated_adk_events: list[dict[str, Any]] = []
+    try:
+        async for event in events():
+            delegated_adk_events.append(runtime.event_log.project_adk(event))
+    finally:
+        if key_hash:
+            runtime.store.complete(key_hash, {"events": delegated_adk_events})
+        if lease_id:
+            runtime.admission.release_run(lease_id)
+    return delegated_adk_events
 
 
 async def _wait_for_idempotency(

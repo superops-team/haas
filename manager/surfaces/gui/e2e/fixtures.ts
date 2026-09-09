@@ -1,0 +1,2268 @@
+import { test as base, expect, type Page } from "@playwright/test";
+
+// The app-wide /ws/events socket each page opened (UX-026 toast et al.) — specs
+// push server events through it via sendAppEvent below.
+const eventSockets = new WeakMap<Page, { send: (data: string) => void }>();
+
+/** Push an app-wide event exactly as the server would over /ws/events. Waits for
+ * the GUI to have connected its socket first. */
+export async function sendAppEvent(page: Page, obj: unknown): Promise<void> {
+  for (let i = 0; i < 50 && !eventSockets.get(page); i++) await page.waitForTimeout(100);
+  const ws = eventSockets.get(page);
+  if (!ws) throw new Error("the app never opened /ws/events");
+  ws.send(JSON.stringify(obj));
+}
+
+// Hermetic API mock. Every /v1 request the GUI makes is fulfilled from the fixtures below (shapes
+// mirrored from the real backend), and the event WebSocket is a SCRIPTED FAKE AGENT (ready on
+// connect; user_message → turn_start/deltas/assistant_message/turn_done; "run a tool" triggers the
+// approval flow), so specs run with no Python server and never touch real state. Mutations
+// (sessions, personas, inbox, routing, channel subscriptions) are held in per-test in-memory state
+// so add/remove/toggle reflect through the real UI on re-fetch.
+
+const HEALTH = { status: "ok", default_workspace: null, model: "anthropic:claude-opus-4-8" };
+
+const SETTINGS = {
+  provider: "openai",
+  auto_approve: true, // surfaces the Auto-approve mode entry (reviewer feature flag)
+  model: "anthropic:claude-opus-4-8",
+  models: ["anthropic:claude-opus-4-8", "gpt-5.5", "gpt-4o", "gpt-4o-mini", "o3-mini"],
+  has_key: true,
+  model_ready: true,
+  source: "store",
+  onboarded: true,
+  experimental_connectors: false,
+  surfaces: { cowork: true, chat: false, code: true },
+  nav_layout: "grouped",
+  scratch_base: "~/OpenWorker",
+  secrets_path: "/Users/test/.config/coworker/secrets.json",
+  sessions_peek: 5,
+  // Token savings (PDF attachments): 2-page limit keeps the composer threshold test's
+  // fixture PDF small; the real default is 20.
+  pdf_fallback: "text",
+  pdf_max_pages: 2,
+  pdf_max_mb: 10,
+  // Curated-matrix display names (subset — mirrors /v1/settings.model_labels).
+  model_labels: {
+    "anthropic:claude-opus-4-8": "Claude Opus 4.8 · Anthropic",
+    "zai:glm-5.2": "GLM-5.2 · Z AI",
+    "ark:dola-seed-evolving-latest-version": "Dola Seed Evolving · BytePlus Ark",
+    "ark:dola-seed-2-1-turbo-260628": "Dola Seed 2.1 Turbo · BytePlus Ark",
+    "ark-agent-plan-cn:doubao-seed-evolving": "Doubao Seed Evolving · Volcengine Agent Plan",
+    "ark-agent-plan-cn:doubao-seed-2.1-turbo": "Doubao Seed 2.1 Turbo · Volcengine Agent Plan",
+  },
+  // Context windows (subset — mirrors /v1/settings.model_context_windows); drives the
+  // composer usage chip's context-fill meter.
+  model_context_windows: {
+    "anthropic:claude-opus-4-8": 200_000,
+  },
+};
+
+// UX-035 lineup: Chat is gone; Code ships disabled; the security bundles group under
+// "Security"; ops is ships:false (visible here because the mock plays an internal build).
+const PERSONAS = {
+  internal: true,
+  personas: [
+    { id: "cowork", name: "OpenWorker", icon: "cowork", tagline: "Produce a deliverable — research, analysis, scripts", requires_folder: false, builtin: true, tools: ["files", "search"], enabled: true, surfaced: true, default: true, ships: true, group: "general" },
+    { id: "code", name: "Code", icon: "code", tagline: "Work in a codebase — files, git, shell", requires_folder: true, builtin: true, tools: ["code_files", "git"], enabled: false, surfaced: false, default: false, ships: true, group: "general" },
+    { id: "security", name: "Security Coworker", icon: "shield", tagline: "Find and fix security issues — scan, triage, PR", requires_folder: true, builtin: true, tools: ["code_files", "git", "shell"], enabled: true, surfaced: true, default: false, ships: true, group: "security" },
+    { id: "ops", name: "Ops Coworker", icon: "wrench", tagline: "Operate and investigate — runbooks, logs, infrastructure", requires_folder: false, builtin: true, tools: ["files", "shell"], enabled: true, surfaced: true, default: false, ships: false, group: "general" },
+    // A non-builtin install (disabled pending consent — invisible to picker specs) so the
+    // Personas page's delete/enable affordances have a target.
+    { id: "acme-notes", name: "Acme Notes", icon: "pencil", tagline: "Acme's note-taking coworker", requires_folder: false, builtin: false, tools: ["files"], enabled: false, surfaced: false, default: false, ships: true, group: "general" },
+  ],
+};
+
+// The boot-resume target (most recent updated_at) — existing specs open it by title.
+const PINNED_SESSION = {
+  session_id: "pinned-cowork-1",
+  title: "Draft the launch note",
+  workspace: "/Users/test/OpenWorker/launch-note",
+  agent: "cowork",
+  model: "anthropic:claude-opus-4-8",
+  mode: "interactive",
+  updated_at: "2026-07-01 09:00:00",
+  messages: 2,
+  pinned: true,
+  archived: false,
+  attention: 0,
+  liveness: "idle",
+  subscriptions: [],
+};
+
+// Seven unpinned Coworker sessions: enough to exercise the sidebar peek cap (5) + "Show more (2)".
+// wp-3 carries the pending Inbox approval below (attention badge parity). All OLDER than the
+// pinned session so boot-resume stays deterministic.
+const EXTRA_SESSIONS = Array.from({ length: 7 }, (_, i) => ({
+  session_id: `wp-${i + 1}`,
+  title: `Weekly plan ${i + 1}`,
+  workspace: "",
+  agent: "cowork",
+  model: "anthropic:claude-opus-4-8",
+  mode: "interactive",
+  updated_at: `2026-06-2${8 - Math.min(i, 7)} 10:00:00`,
+  messages: 3,
+  pinned: false,
+  archived: false,
+  attention: i + 1 === 3 ? 1 : 0,
+  liveness: "idle",
+  subscriptions: [],
+}));
+
+// One Ops session (older than everything above so boot-resume stays deterministic) — the
+// target for the disable-archives-conversations confirm flow on the Personas page.
+const OPS_SESSION = {
+  session_id: "ops-1",
+  title: "Ops triage",
+  workspace: "/Users/test/OpenWorker/ops-triage",
+  agent: "ops",
+  model: "anthropic:claude-opus-4-8",
+  mode: "interactive",
+  updated_at: "2026-06-15 10:00:00",
+  messages: 4,
+  pinned: false,
+  archived: false,
+  attention: 0,
+  liveness: "idle",
+  subscriptions: [],
+};
+
+// A session whose turn is LIVE on the server — its ws `ready` carries running:true, the
+// reconnect-mid-turn case (owner catch 2026-08-24): Stop + waiting row must show without
+// a local turn_start. Older than the pinned session so boot-resume stays deterministic.
+const LIVE_SESSION = {
+  session_id: "resume-live-1",
+  title: "Long audit",
+  workspace: "",
+  agent: "cowork",
+  model: "anthropic:claude-opus-4-8",
+  mode: "interactive",
+  updated_at: "2026-06-20 10:00:00",
+  messages: 2,
+  pinned: false,
+  archived: false,
+  attention: 0,
+  liveness: "working",
+  subscriptions: [],
+};
+
+// §31: a mention-spawned session — lives in the sidebar's collapsed "From Slack" group, never
+// in Recent. Older than everything else so boot-resume stays deterministic.
+const SLACK_SESSION = {
+  session_id: "slack-thread-1",
+  title: "#general — check the deploy?",
+  workspace: "",
+  agent: "cowork",
+  model: "anthropic:claude-opus-4-8",
+  mode: "interactive",
+  updated_at: "2026-06-10 10:00:00",
+  messages: 2,
+  pinned: false,
+  archived: false,
+  attention: 0,
+  liveness: "idle",
+  subscriptions: [],
+  origin: "slack",
+  origin_label: "#general · T0AB",
+};
+
+const CONNECTORS = {
+  connectors: [
+    { name: "browser", title: "Browser", icon: "B", blurb: "Headless browser.", auth: "none", two_way: false, channels: false, available: true, brand_color: "#6b7280", logo: "", fields: [], instructions: [], connected: true, account: null, enabled: true, allowed_users: [], tools: [], managed: false, managed_profile: false },
+    { name: "telegram", title: "Telegram", icon: "T", blurb: "Two-way Telegram messaging.", auth: "bot_token", two_way: true, channels: true, available: true, brand_color: "#229ed9", logo: "telegram", fields: [{ key: "bot_token", label: "Bot token", secret: true, required: true, help: "", placeholder: "123456:ABC…" }], instructions: [], connected: false, account: null, enabled: false, allowed_users: [], tools: [], managed: false, managed_profile: false },
+    // Managed-capable connector (one-click via cloud when signed in; manual paste otherwise).
+    // Carries pre-connect detail copy (§38): about + access + tools drive available-detail.spec.ts.
+    { name: "gmail", title: "Gmail", icon: "✉", blurb: "Search, summarize, draft, and send email.", about: "Search, summarize, and send over your Gmail.", access: ["Reads and searches your mail.", "Sends email as you.", "Never deletes mail or changes account settings."], auth: "oauth", two_way: false, channels: false, available: true, brand_color: "#ea4335", logo: "gmail", fields: [{ key: "access_token", label: "OAuth access token", secret: true, required: true, help: "", placeholder: "" }], instructions: [], connected: false, account: null, enabled: false, allowed_users: [], tools: [{ name: "gmail_search", label: "Search mail", kind: "read", description: "Search messages.", enabled: true, requires_approval: false }, { name: "gmail_send", label: "Send email", kind: "write", description: "Send a message.", enabled: true, requires_approval: true }], managed: true, managed_profile: false },
+    { name: "google_calendar", title: "Google Calendar", icon: "◷", blurb: "Read availability, summarize schedules, and create events.", auth: "oauth", two_way: false, channels: false, available: true, brand_color: "#4285f4", logo: "google_calendar", fields: [{ key: "access_token", label: "OAuth access token", secret: true, required: true, help: "", placeholder: "" }], instructions: [], connected: false, account: null, enabled: false, allowed_users: [], tools: [], managed: true, managed_profile: false },
+    // Two-mode connector: one-click with access radios (read | write) OR a private-app token.
+    { name: "hubspot", title: "HubSpot", icon: "⊚", blurb: "Search CRM records; log notes and tasks, update records. No deletes.", auth: "token", two_way: false, channels: false, available: true, brand_color: "#ff7a59", logo: "hubspot", fields: [{ key: "token", label: "Private app token", secret: true, required: true, help: "", placeholder: "pat-…" }], instructions: [], connected: false, account: null, enabled: false, allowed_users: [], tools: [], managed: true, managed_profile: false },
+    // Generic multi-account connector (accounts.py layer): one-click OR integration token.
+    { name: "notion", title: "Notion", icon: "◰", blurb: "Search pages, read content, query databases, create pages.", auth: "oauth", two_way: false, channels: false, available: true, brand_color: "#1f2328", logo: "", fields: [{ key: "access_token", label: "Integration secret", secret: true, required: true, help: "", placeholder: "ntn_…" }], instructions: [], connected: false, account: null, enabled: false, allowed_users: [], tools: [], managed: true, managed_profile: false },
+    // Managed email-keyed multi-account connector (outlook) — drives the onboarding tools gallery.
+    { name: "outlook", title: "Outlook", icon: "◎", blurb: "Microsoft 365 mail and calendar: search, draft, and send email; manage events and respond to invites.", aliases: ["calendar", "email", "mail", "microsoft", "office"], auth: "oauth", two_way: false, channels: false, available: true, brand_color: "#0078d4", logo: "outlook", fields: [{ key: "access_token", label: "OAuth access token", secret: true, required: true, help: "", placeholder: "" }], instructions: [], connected: false, account: null, enabled: false, allowed_users: [], tools: [], managed: true, managed_profile: false },
+    // Sixth active card in the onboarding gallery (promoted 2026-07-19 to even the grid).
+    { name: "attio", title: "Attio", icon: "▣", blurb: "Search and read Attio CRM records; log notes.", auth: "oauth", two_way: false, channels: false, available: true, brand_color: "#2d6ae0", logo: "attio", fields: [{ key: "access_token", label: "OAuth access token", secret: true, required: true, help: "", placeholder: "" }], instructions: [], connected: false, account: null, enabled: false, allowed_users: [], tools: [], managed: true, managed_profile: false },
+    // MCP-BACKED connectors (§42): vendor-hosted MCP + local OAuth, pinned tool subset.
+    // monday is one-click ONLY (no manual fields); jira also has a manual token path
+    // (two-mode modal). Neither needs cloud sign-in.
+    { name: "monday", title: "monday.com", icon: "▦", blurb: "Read boards and items, track work, create items and post updates.", aliases: ["project management", "tasks", "boards"], auth: "oauth", two_way: false, channels: false, available: true, brand_color: "#6161ff", logo: "monday", mcp: true, fields: [], instructions: ["One click connects via monday.com sign-in in your browser.", "Sign-in is fully local — tokens stay on this computer."], connected: false, account: null, enabled: false, allowed_users: [], tools: [{ name: "mcp__monday__get_board_info", label: "Read board", kind: "read", description: "Read a board's columns and groups.", enabled: true, requires_approval: false }, { name: "mcp__monday__create_item", label: "Create item", kind: "write", description: "Create an item on a board.", enabled: true, requires_approval: true }], managed: false, managed_profile: false },
+    { name: "jira", title: "Jira", icon: "◆", blurb: "Search, summarize, create, and update issues.", aliases: ["issues", "tickets", "atlassian"], auth: "api_token", two_way: false, channels: false, available: true, brand_color: "#0052cc", logo: "jira", mcp: true, fields: [{ key: "base_url", label: "Atlassian site URL", secret: false, required: true, help: "", placeholder: "" }, { key: "email", label: "Account email", secret: false, required: true, help: "", placeholder: "" }, { key: "api_token", label: "API token", secret: true, required: true, help: "", placeholder: "" }], instructions: [], connected: false, account: null, enabled: false, allowed_users: [], tools: [], managed: false, managed_profile: false },
+  ],
+};
+
+// Two pending items across two personas: drives the Inbox kind tabs, the persona filter chips
+// (which only render with >1 persona), and resolve-removes-card. The question's session is NOT in
+// the sessions list on purpose — the Inbox must be self-contained (server-joined context fields).
+const INBOX_ITEMS = [
+  {
+    id: "inb-approval-1",
+    session_id: "wp-3",
+    kind: "approval",
+    title: "Approve: run_shell",
+    body: "rm -rf build/",
+    state: "pending",
+    resolution: null,
+    inbox: "default",
+    created_at: "2026-07-01 08:00:00",
+    resolved_at: null,
+    session_title: "Weekly plan 3",
+    session_agent: "cowork",
+    session_workspace: "",
+    session_exists: true,
+  },
+  {
+    id: "inb-question-1",
+    session_id: "ops-1",
+    kind: "question",
+    title: "Which environment should I restart?",
+    body: "",
+    options: ["staging", "production"],
+    allow_text: true,
+    multi: false,
+    state: "pending",
+    resolution: null,
+    inbox: "default",
+    created_at: "2026-07-01 08:05:00",
+    resolved_at: null,
+    session_title: "Investigate alerts",
+    session_agent: "ops",
+    session_workspace: "",
+    session_exists: true,
+  },
+];
+
+// Mutable cloud sign-in state: POST /v1/cloud/login flips it (the real flow
+// goes through the browser; the mock completes instantly), logout flips back.
+export const CLOUD_STATE = {
+  signed_in: false,
+  account: "",
+  user_id: "",
+  telemetry_enabled: true,
+};
+
+const GALLERY_PERSONAS = [
+  {
+    slug: "sales",
+    version: 1,
+    name: "Sales Coworker",
+    icon: "chart",
+    tagline: "Research accounts, prep meetings, draft follow-ups",
+    description: "A sales-focused coworker.",
+    family: "knowledge",
+    workspace: "deliverable",
+    publisher: "OpenWorker",
+    recommended_connectors: ["hubspot", "gmail"],
+    risk_summary: "Declarative manifest; no executable code.",
+    featured: true,
+  },
+  {
+    slug: "recruiter",
+    version: 1,
+    name: "Recruiter",
+    icon: "search",
+    tagline: "Sourcing summaries and scheduling loops",
+    description: "A recruiting coworker.",
+    family: "knowledge",
+    workspace: "deliverable",
+    publisher: "OpenWorker",
+    recommended_connectors: ["gmail"],
+    risk_summary: "Declarative manifest; no executable code.",
+    featured: false,
+  },
+];
+
+// Persona detail (GET /v1/personas/:id) — SourcesDrawer/PersonaView read `recommends` and
+// `default_connections` as arrays, so these must be present (not the catch-all {}).
+const PERSONA_DETAIL = {
+  id: "cowork",
+  name: "OpenWorker",
+  icon: "cowork",
+  tagline: "Produce a deliverable — research, analysis, scripts",
+  description: "",
+  enabled: true,
+  tools: ["files", "search"],
+  recommended_models: ["anthropic:claude-opus-4-8"],
+  default_permission_mode: "interactive",
+  workspace: "deliverable",
+  recommends: [],
+  default_connections: [],
+};
+
+const CONNECTIONS = {
+  connected: [
+    { connector: "browser", enabled: true, detail: "Browser" },
+    { connector: "slack", enabled: true, detail: "Slack" },
+    // two_way WITHOUT channels (relay mentions, no subscriptions) — pins the
+    // "GitHub shows Channels" regression (owner report 2026-07-13).
+    { connector: "github", enabled: true, detail: "GitHub" },
+  ],
+  recommended: [
+    { connector: "gmail", reason: "email context for morning summaries", tier: "core", connected: false },
+  ],
+  attention: 1,
+};
+
+// One scheduled automation with a running run: its session id uses the real `__run__` convention
+// so the session view's run banner (detection is id-based) can be exercised end-to-end.
+const AUTOMATION = {
+  id: "task-1",
+  title: "Daily AI News",
+  instructions: "Fetch the latest AI news and produce an HTML+Tailwind presentation.",
+  schedule: "Every day at ~5:40 PM",
+  schedule_raw: { kind: "cron", cron: "40 17 * * *", fire_at: null, timezone: "local" },
+  workspace: "",
+  agent: "cowork",
+  enabled: true,
+  next_run: Math.floor(Date.now() / 1000) + 3600,
+  last_run: Math.floor(Date.now() / 1000) - 60,
+  last_status: "running",
+  run_count: 1,
+  notify_on_completion: false,
+  // One standing scoped approval (§25) so the detail page's revoke list has content.
+  always_allowed: [
+    { entry: "send_message slack:T1/C1", tool: "send_message", target: "slack:T1/C1" },
+  ],
+  // UX-023 sidebar badges: two unopened runs, the newest of them failed.
+  unseen_runs: 2,
+  unseen_failed: true,
+  seen_runs_at: 0,
+};
+// A second, quiet automation so the Scheduled band shows badge-less rows too.
+const AUTOMATION_CLEAN = {
+  ...AUTOMATION,
+  id: "task-2",
+  title: "Weekly CRM digest",
+  schedule: "Every Monday at ~9:00 AM",
+  last_status: "ok",
+  unseen_runs: 0,
+  unseen_failed: false,
+  always_allowed: [],
+};
+const AUTOMATION_RUNS = [
+  {
+    run_id: "r1",
+    task_id: "task-1",
+    session_id: "__run__r1",
+    started_at: Math.floor(Date.now() / 1000) - 60,
+    finished_at: null,
+    status: "running",
+    result_text: null,
+    artifacts: [],
+    error: null,
+    trigger: "schedule",
+  },
+];
+
+const PRIMARY_ROOT = { path: "/Users/test/OpenWorker/launch-note", writable: true, label: "scratch", primary: true, exists: true };
+const baseName = (p: string) => p.split("/").filter(Boolean).pop() || p;
+
+const PROVIDERS = [
+  // openai: configured + used (drives the "Last used" sub-line and the status dot).
+  { name: "openai", title: "OpenAI", needs_key: true, fields: [{ key: "api_key", label: "OpenAI API key", secret: true, required: true, help: "", placeholder: "sk-…" }], configured: true, values: {}, suggested_models: ["gpt-5.5"], key_set_at: "2026-06-12", last_used_at: Math.floor(Date.now() / 1000) - 7200 },
+  // anthropic: configured but never used ("Not used yet").
+  { name: "anthropic", title: "Claude (Anthropic)", needs_key: true, fields: [{ key: "api_key", label: "API key", secret: true, required: true, help: "", placeholder: "sk-…" }], configured: true, values: {}, suggested_models: ["claude-opus-4-8"], key_set_at: null, last_used_at: null },
+  // zai: an OpenAI-compatible vendor — unconfigured, with a prefilled editable endpoint + blurb.
+  { name: "zai", title: "Z AI (GLM)", needs_key: true, blurb: "Uses Z AI's OpenAI-compatible API — the endpoint is prefilled, just add your key.", fields: [{ key: "api_key", label: "Z AI API key", secret: true, required: true, help: "", placeholder: "" }, { key: "base_url", label: "Endpoint", secret: false, required: false, help: "Prefilled with Z AI's international endpoint.", placeholder: "https://api.z.ai/api/paas/v4", default: "https://api.z.ai/api/paas/v4" }], configured: false, values: {}, suggested_models: ["glm-5.2"], key_set_at: null, last_used_at: null },
+  // Ark uses two provider identities: BytePlus pay-as-you-go and Volcengine Agent Plan CN
+  // have independent credentials, endpoints, and strict curated model lists.
+  { name: "ark", title: "BytePlus Ark", needs_key: true, blurb: "Uses BytePlus Ark's OpenAI-compatible Responses API — the endpoint is prefilled, just add your key.", fields: [{ key: "api_key", label: "BytePlus Ark API key", secret: true, required: true, help: "", placeholder: "" }, { key: "base_url", label: "Endpoint", secret: false, required: false, help: "BytePlus Ark's Asia Pacific endpoint.", placeholder: "https://ark.ap-southeast.bytepluses.com/api/v3", default: "https://ark.ap-southeast.bytepluses.com/api/v3" }], configured: false, values: {}, suggested_models: ["dola-seed-evolving-latest-version", "dola-seed-2-1-turbo-260628"], key_set_at: null, last_used_at: null },
+  { name: "ark-agent-plan-cn", title: "Volcengine Ark Agent Plan", needs_key: true, blurb: "Uses Volcengine Ark Agent Plan's OpenAI-compatible Responses API — the endpoint is prefilled, just add your key.", fields: [{ key: "api_key", label: "Volcengine Ark Agent Plan API key", secret: true, required: true, help: "", placeholder: "" }, { key: "base_url", label: "Endpoint", secret: false, required: false, help: "Volcengine Ark Agent Plan's China (Beijing) endpoint.", placeholder: "https://ark.cn-beijing.volces.com/api/plan/v3", default: "https://ark.cn-beijing.volces.com/api/plan/v3" }], configured: false, values: {}, suggested_models: ["doubao-seed-evolving", "doubao-seed-2.1-turbo"], key_set_at: null, last_used_at: null },
+  // ollama: keyless local provider — "configured" without proving anything runs; the
+  // onboarding gallery shows "No key needed" and its form is endpoint + Detect (§39).
+  { name: "ollama", title: "Ollama (local models)", needs_key: false, fields: [{ key: "base_url", label: "Endpoint", secret: false, required: false, help: "", placeholder: "http://127.0.0.1:11434", default: "http://127.0.0.1:11434" }], configured: true, values: {}, suggested_models: ["qwen3-coder:30b"], key_set_at: null, last_used_at: null },
+  // openai-codex: the subscription OAuth provider — no key form; the gallery card and
+  // form render sign-in state instead (auth: "oauth"). Starts signed out.
+  { name: "openai-codex", title: "ChatGPT subscription", needs_key: false, auth: "oauth", signed_in: false, account: null, authorizing: false, last_error: null, blurb: "Sign in with your ChatGPT plan and run OpenAI models through your subscription — no API key. Tokens stay on this machine.", fields: [], configured: false, values: {}, suggested_models: ["gpt-5.6-sol"], key_set_at: null, last_used_at: null },
+];
+
+/** Install the API + WebSocket mocks on a page. Returns handles for assertions/seed data. */
+export async function mockApi(page: import("@playwright/test").Page) {
+  // The rail defaults to HIDDEN (UX-038 follow-up). Existing specs were written
+  // against a visible rail, so run them in the "user opened it" state; the
+  // default + persistence themselves are pinned by rail-default.spec.ts.
+  await page.addInitScript(() => {
+    try {
+      if (!localStorage.getItem("ocw-e2e-rail-default")) {
+        localStorage.setItem("coworker:rail-hidden:v1", "0");
+      }
+    } catch { /* ignore */ }
+  });
+  const subscriptions: any[] = [
+    // One existing subscription (a non-pinned session) so the Slack page's per-workspace
+    // "Listening" row has an entry. Relay-mode channels are team-qualified (slack:T…/C…).
+    { session_id: "wp-1", session_title: "Weekly plan 1", agent: "cowork", channel: "slack:T1DL/C0AAA111", channel_name: "ocw-test", routing_target: null, collision: false },
+  ];
+  // Parked unauthorized messages (§19) — mutable so Allow/Dismiss round-trip through the UI.
+  // The relay is multi-workspace: parked items carry their team so the Slack page files them
+  // under the right workspace card.
+  const parked: any[] = [
+    { id: "pk1", platform: "slack", chat_id: "C0AAA111", chat_name: "#ocw-test", user_id: "U0NEW", user_name: "Maya", chat_type: "channel", text: "hey ocw, can you summarize this thread?", ts: Date.now() / 1000 - 120, team_id: "T1DL" },
+  ];
+  // Slack connector — PER-TEST state (managed relay, two workspaces) so allow/disconnect
+  // mutations never leak across tests sharing a worker. Backend parity: `workspaces` mirrors
+  // the slack:team:* profiles, each with its OWN allow-list.
+  const slackState = {
+    connected: true,
+    mode: "relay" as "" | "relay",
+    account: "deeplearning.ai",
+    allowed_users: [] as string[], // flat list (manual Socket Mode only)
+    approval_owner_ids: [] as string[],
+    workspaces: [
+      // T1DL mirrors a managed install: the installer (authed_user) was pre-added
+      // to the allow-list on connect (UX-027) — keys the "you" chip + setup card.
+      { team_id: "T1DL", account: "deeplearning.ai", domain: "dlaiteam", allowed_users: ["U_ME"] as string[], allow_all: false, allowed_user_names: {} as Record<string, string | null>, approval_owner_ids: ["U_ME"] as string[], approval_owner_names: { U_ME: "Rohit Prasad" } as Record<string, string | null>, installer_user_id: "U_ME", installer_name: "Rohit Prasad" },
+      { team_id: "T2AC", account: "acme-partners", domain: "acmehq", allowed_users: [] as string[], allow_all: false, allowed_user_names: {} as Record<string, string | null>, approval_owner_ids: [] as string[], approval_owner_names: {} as Record<string, string | null>, installer_user_id: "", installer_name: "" },
+    ],
+  };
+  const slackConnector = () => ({
+    name: "slack", title: "Slack", icon: "#", blurb: "Two-way Slack messaging.",
+    auth: "bot_token", two_way: true, channels: true, available: true, brand_color: "#611f69", logo: "slack",
+    fields: [], instructions: [], connected: slackState.connected,
+    account: slackState.account, enabled: slackState.connected,
+    allowed_users: [...slackState.allowed_users],
+    approval_owner_ids: [...slackState.approval_owner_ids],
+    tools: [], managed: true,
+    managed_profile: slackState.mode === "relay", mode: slackState.mode,
+    workspaces: slackState.workspaces.map((w) => ({ ...w, allowed_users: [...w.allowed_users] })),
+    unauthorized: parked.map((x) => ({ ...x })),
+  });
+  // GitHub — PER-TEST multi-installation state (managed relay, one installation +
+  // one parked mention) mirroring the backend's github:install:<id> profiles.
+  const githubParked: any[] = [
+    { id: "gh-pk1", platform: "github", chat_id: "acme/site#7", chat_name: "acme/site#7", user_id: "maya-dev", user_name: "maya-dev", chat_type: "channel", text: "@ocw please take a look at this flaky test", ts: Date.now() / 1000 - 90, team_id: "101" },
+  ];
+  const githubState = {
+    connected: true,
+    mode: "relay" as "" | "relay",
+    installations: [
+      { installation_id: "101", account_login: "acme", account_type: "Organization", repo_selection: "selected", github_login: "rohit-dev", allowed_users: ["rohit-dev"], allow_all: false },
+    ],
+  };
+  const githubConnector = () => ({
+    name: "github", title: "GitHub", icon: "⌘", blurb: "Work with issues, pull requests, repository files, and CI status.",
+    auth: "token", two_way: true, channels: false, available: true, brand_color: "#1f2328", logo: "github",
+    fields: [{ key: "token", label: "Personal access token", secret: true, required: true, help: "", placeholder: "" }],
+    instructions: [], connected: githubState.connected,
+    account: githubState.installations[0]?.account_login ?? null,
+    enabled: githubState.connected, allowed_users: [], tools: [], managed: true,
+    managed_profile: githubState.mode === "relay", mode: githubState.mode,
+    installations: githubState.installations.map((i) => ({ ...i, allowed_users: [...i.allowed_users] })),
+    unauthorized: githubParked.map((x) => ({ ...x })),
+  });
+  // Gmail — PER-TEST multi-account state (starts disconnected; managed connects add
+  // mailboxes instantly, mirroring the backend's gmail:account:<email> profiles).
+  // NOTE: the real server currently sends managed_paused: true for the Google trio
+  // (CASA pending). The fixture keeps gmail UNPAUSED because the cloud-machinery specs
+  // use its one-click as their subject; the paused UI is covered by google-paused.spec.ts
+  // via a per-test connectors override.
+  const gmailState = {
+    accounts: [] as {
+      email: string; default: boolean; managed: boolean; scopes: string; needs_reauth: boolean;
+    }[],
+    filters: { senders: [] as string[], labels: [] as string[] },
+  };
+  const GMAIL_NEXT = ["rohit@gmail.com", "work@dlai.com", "third@x.com"];
+  const gmailConnector = () => {
+    const base = CONNECTORS.connectors.find((c: any) => c.name === "gmail");
+    return {
+      ...base,
+      connected: gmailState.accounts.length > 0,
+      enabled: gmailState.accounts.length > 0,
+      account: gmailState.accounts.find((a) => a.default)?.email ?? null,
+      accounts: gmailState.accounts.map((a) => ({ ...a })),
+      filters: { senders: [...gmailState.filters.senders], labels: [...gmailState.filters.labels] },
+    };
+  };
+  // Google Calendar — PER-TEST multi-account state (gmail's shape, no filters).
+  const gcalState = {
+    accounts: [] as {
+      email: string; default: boolean; managed: boolean; scopes: string; needs_reauth: boolean;
+    }[],
+  };
+  const GCAL_NEXT = ["rohit@gmail.com", "work@dlai.com", "third@x.com"];
+  const gcalConnector = () => {
+    const base = CONNECTORS.connectors.find((c: any) => c.name === "google_calendar");
+    return {
+      ...base,
+      connected: gcalState.accounts.length > 0,
+      enabled: gcalState.accounts.length > 0,
+      account: gcalState.accounts.find((a) => a.default)?.email ?? null,
+      accounts: gcalState.accounts.map((a) => ({ ...a })),
+    };
+  };
+  // Notion — PER-TEST generic multi-account state (accounts.py layer: AccountRow shape).
+  const notionState = {
+    accounts: [] as { account_id: string; name: string; default: boolean; managed: boolean }[],
+  };
+  const NOTION_NEXT = [
+    { account_id: "ws-1", name: "Rohit's Workspace" },
+    { account_id: "ws-2", name: "Ops Space" },
+  ];
+  const notionConnector = () => {
+    const base = CONNECTORS.connectors.find((c: any) => c.name === "notion");
+    return {
+      ...base,
+      connected: notionState.accounts.length > 0,
+      enabled: notionState.accounts.length > 0,
+      account: notionState.accounts.find((a) => a.default)?.name ?? null,
+      accounts: notionState.accounts.map((a) => ({ ...a })),
+    };
+  };
+  // Outlook — email-keyed managed accounts (mirrors outlook:account:<email> profiles).
+  const outlookState = {
+    accounts: [] as { account_id: string; name: string; default: boolean; managed: boolean }[],
+  };
+  // MCP-backed connectors (§42) — per-test connect state; the mock "browser flow"
+  // completes instantly so the modal's poll picks it up.
+  const mcpState = { monday: false, jira: false };
+  const mcpConnector = (name: "monday" | "jira") => {
+    const base = CONNECTORS.connectors.find((c: any) => c.name === name);
+    return {
+      ...base,
+      connected: mcpState[name],
+      enabled: mcpState[name],
+      mode: mcpState[name] ? "mcp" : "",
+    };
+  };
+  const outlookConnector = () => {
+    const base = CONNECTORS.connectors.find((c: any) => c.name === "outlook");
+    return {
+      ...base,
+      connected: outlookState.accounts.length > 0,
+      enabled: outlookState.accounts.length > 0,
+      account: outlookState.accounts.find((a) => a.default)?.name ?? null,
+      accounts: outlookState.accounts.map((a) => ({ ...a })),
+    };
+  };
+  // HubSpot — PER-TEST multi-portal state (starts disconnected; managed connects add
+  // portals instantly, mirroring the backend's hubspot:portal:<hub_id> profiles).
+  const hubspotState = {
+    portals: [] as {
+      hub_id: string; name: string; sandbox: boolean; default: boolean;
+      managed: boolean; access: string;
+    }[],
+    hidden_fields: [] as string[],
+    nextAccess: "read", // captured from the last connect-managed body
+  };
+  const HUBSPOT_NEXT = [
+    { hub_id: "111", name: "Acme Inc", sandbox: false },
+    { hub_id: "222", name: "Acme Sandbox", sandbox: true },
+  ];
+  const hubspotConnector = () => {
+    const base = CONNECTORS.connectors.find((c: any) => c.name === "hubspot");
+    return {
+      ...base,
+      connected: hubspotState.portals.length > 0,
+      enabled: hubspotState.portals.length > 0,
+      account: hubspotState.portals.find((p) => p.default)?.name ?? null,
+      portals: hubspotState.portals.map((p) => ({ ...p })),
+      hidden_fields: [...hubspotState.hidden_fields],
+    };
+  };
+  // Installed personas — mutable so enable/surface/delete round-trip through the UI.
+  const personas: any[] = PERSONAS.personas.map((p) => ({ ...p }));
+  // Sessions — mutable so archive (PATCH), rename (PATCH), and delete round-trip.
+  // UX-044: mutable binding state for the project-menu mocks.
+  const projectBindings: Record<string, string> = {};
+  const projectNames: Record<string, { name: string; key: string }[]> = {
+    memory: [
+      { name: "openworker", key: "/k/openworker" },
+      { name: "personal-ops", key: "/k/ops" },
+    ],
+    board: [{ name: "aicreator-ops", key: "/k/aico" }],
+  };
+  const sessions: any[] = [
+    { ...PINNED_SESSION },
+    ...EXTRA_SESSIONS.map((s) => ({ ...s })),
+    { ...OPS_SESSION },
+    { ...LIVE_SESSION },
+    { ...SLACK_SESSION },
+  ];
+  // Inbox items + the outbound routing binding — mutable for resolve + the inline Slack config.
+  const inbox: any[] = INBOX_ITEMS.map((i) => ({ ...i }));
+  const routing: { name: string; channel: string | null; target: string } = {
+    name: "default",
+    channel: null,
+    target: "",
+  };
+  // Session roots — the primary (writable, non-removable) scratch plus any added folders. Mutable so
+  // the RO/RW add/toggle round-trips through the real UI. POST upserts by path (a toggle re-adds).
+  const roots: any[] = [{ ...PRIMARY_ROOT }];
+  // Session connections — PER-TEST copy so the Access section's mute toggle (POST) can flip
+  // `enabled` without leaking into sibling tests.
+  const connections = {
+    connected: CONNECTIONS.connected.map((c) => ({ ...c })),
+    recommended: CONNECTIONS.recommended.map((r) => ({ ...r })),
+    attention: CONNECTIONS.attention,
+  };
+  // Providers — mutable so save (POST) flips `configured` and stamps key_set_at, matching the
+  // backend's set_provider. verify (POST) never mutates: it's a live read-only credential check.
+  const providers: any[] = PROVIDERS.map((p) => ({ ...p }));
+  // Automations — mutable so Run now appends a run, enable/disable toggles, and delete removes.
+  const automations: any[] = [{ ...AUTOMATION }, { ...AUTOMATION_CLEAN }];
+  // MCP servers (empty by default; the granola OAuth quick-add test populates it).
+  const mcpServers: any[] = [];
+  const automationRuns: any[] = AUTOMATION_RUNS.map((r) => ({ ...r }));
+  // Per-session unattended flag — mutable so the composer's "Send to Inbox" toggle persists and
+  // the app reads it back (which is what gates parking approvals to the Inbox vs an inline card).
+  const unattended: Record<string, boolean> = {};
+  // Skills (SKILLS-SPEC) — mutable folder-is-truth mirror: Settings CRUD, the enabled flag,
+  // staged uploads (stage → preview → confirm), and the composer's per-session menu all
+  // round-trip through this one list.
+  const skills: any[] = [
+    { name: "weekly-report", description: "Monday status report", instructions: "1. Collect updates\n2. Write it up", scope: "global", source: "local", enabled: true, path: "/state/skills/weekly-report", files: 0 },
+    { name: "html-to-markdown", description: "Convert an HTML document or fragment to clean markdown.", instructions: "Convert the given HTML to markdown, preserving structure.", scope: "global", source: "uploaded", enabled: true, path: "/state/skills/html-to-markdown", files: 2 },
+  ];
+  let stagedSkill: any = null;
+
+  // Agent teams (OPE-96): the session's board — empty until a test opts in by sending
+  // "plan the work" (the fake agent then files items; no draft state — the board only
+  // holds accepted work). Mutable so transitions round-trip through the real endpoints.
+  const boardItems: any[] = [];
+  // # team chat log — seeded with one lead question so mention highlighting renders.
+  const chatMessages: any[] = [
+    {
+      seq: 1,
+      ts: new Date().toISOString(),
+      author: "lead",
+      author_role: "lead",
+      text: "@nia does the api assume the assets bucket is public? quick check before you write it up.",
+      mentions: ["nia"],
+    },
+  ];
+  // Pure notes added from the detail pane (never change state) — appended to
+  // the item's timeline so the pane reflects them after reload.
+  const itemNotes: Record<number, any[]> = {};
+  const seedBoard = () => {
+    if (boardItems.length) return;
+    boardItems.push(
+      { id: 1, title: "Code security review — api", description: "", criteria: "every finding triaged with file:line evidence", state: "open", assignee: "", creator: "lead", refs: [], links: [] },
+      { id: 2, title: "Secrets — git history, both repos", description: "", criteria: "every hit dismissed-with-reason or rotation-instructed", state: "open", assignee: "", creator: "lead", refs: [], links: [] },
+      { id: 3, title: "Dependency audit — lockfiles", description: "", criteria: "reachable vs theoretical separated; upgrade branch green", state: "in_progress", assignee: "dep-audit", creator: "lead", refs: [], links: [] },
+      { id: 4, title: "Cloud posture — infra", description: "", criteria: "trivy config clean or findings triaged", state: "blocked", assignee: "cloud-posture", creator: "lead", refs: [], links: [], blocker: "need tfvars for staging" },
+      { id: 5, title: "Report rollup", description: "", criteria: "one report, all sections", state: "review", assignee: "security", creator: "lead", refs: [`attachment://${"a".repeat(64)}.png#rendered-page.png`], links: [] },
+    );
+  };
+  const boardPayload = () =>
+    boardItems.length
+      ? { space: "/Users/test/OpenWorker/launch-note", name: "launch-note", items: boardItems }
+      : { space: null, name: "", items: [] };
+
+  // Fresh cloud sign-in state per test (module state outlives a page).
+  Object.assign(CLOUD_STATE, {
+    signed_in: false,
+    account: "",
+    user_id: "",
+    telemetry_enabled: true,
+  });
+
+  // The scripted fake agent behind the session WebSocket. Speaks the real event protocol
+  // ({type, data}), so the full send → stream → render loop and the approval round-trip run
+  // through the production code paths:
+  //   · on connect: `ready`
+  //   · user_message: turn_start (with input, exercising the foreground dedupe) → two
+  //     assistant_deltas → assistant_message "Echo: <text>" → turn_done
+  //   · a message containing "run a tool": tool_proposed + permission_required, then the turn
+  //     SUSPENDS until the client's approval decision arrives (deny → skipped; else → ran)
+  // App-wide event stream: register the socket so sendAppEvent can push into it.
+  await page.routeWebSocket(/\/ws\/events$/, (ws) => {
+    eventSockets.set(page, ws);
+  });
+
+  await page.routeWebSocket(/\/ws\/session\//, (ws) => {
+    const send = (type: string, data: Record<string, unknown> = {}) =>
+      ws.send(JSON.stringify({ type, data }));
+    // The page's session id, from the socket URL — team approval stamps THIS session
+    // as the lead (the active conversation IS the lead; workers hang off it).
+    const sid = ws.url().split("/ws/session/")[1]?.split("?")[0] || "sess-lead";
+    send("ready", sid === "resume-live-1" ? { running: true } : {});
+    let pendingTool = "run_shell"; // which proposal the next approval decision resolves
+    let epicTimer: ReturnType<typeof setInterval> | null = null; // the slow stream, stoppable via interrupt
+    let hadTurn = false; // a user_message landed — set_model is now a mid-session switch
+    ws.onMessage((raw) => {
+      const msg = JSON.parse(String(raw));
+      if (msg.type === "user_message") {
+        hadTurn = true;
+        // Force-run (SKILLS-SPEC §6): like the real server, TURN_START ships the user's
+        // literal "/name …" line as `display` so the client dedupes on what the user sees.
+        send("turn_start", {
+          input: msg.text,
+          ...(msg.skill ? { display: `/${msg.skill}${msg.text ? ` ${msg.text}` : ""}` } : {}),
+        });
+        if (/trip the reviewer/i.test(msg.text)) {
+          send("tool_proposed", { name: "run_shell", arguments: { command: "semgrep scan" } });
+          send("tool_finished", {
+            name: "run_shell",
+            status: "denied",
+            reason: "blocked by the safety reviewer",
+            reviewer_reason: "This creates files even though you asked not to.",
+            allow_anyway: true,
+            reviewer_paused:
+              "Auto-approve is paused for the rest of this turn — the reviewer blocked 5 actions in a row, so approvals now come to you.",
+          });
+          return; // turn stays open: the pause is a mid-turn state
+        }
+        if (/run an unsure tool/i.test(msg.text)) {
+          // The Auto-Approve reviewer answered `unsure`: the card carries its reason.
+          pendingTool = "run_shell";
+          send("tool_proposed", { name: "run_shell", arguments: { command: "python3 helper.py" } });
+          send("permission_required", {
+            name: "run_shell",
+            arguments: { command: "python3 helper.py" },
+            reason: "requires approval",
+            reviewer_unsure: "This runs a newly created script whose effects cannot be determined from the command.",
+          });
+          return; // suspended on the approval
+        }
+        if (/run a tool/i.test(msg.text)) {
+          pendingTool = "run_shell";
+          send("tool_proposed", { name: "run_shell", arguments: { command: "ls" } });
+          send("permission_required", {
+            name: "run_shell",
+            arguments: { command: "ls" },
+            reason: "The coworker wants to run a command.",
+            readonly_ok: true, // `ls` classifies read-only server-side
+          });
+          return; // suspended on the approval
+        }
+        // Agent teams: the decomposition gate — the lead proposes work items and
+        // SUSPENDS until the items_response verdict arrives (approval creates them).
+        // A board wake arriving on this session: the digest rides `source` with
+        // structured rows — the BoardWakeCard renders collapsed by default.
+        if (/board wake/i.test(msg.text)) {
+          send("turn_start", {
+            source: {
+              connector: "board",
+              kind: "channel",
+              channel_id: "/Users/test/OpenWorker/launch-note",
+              channel_name: "Team board",
+              sender_id: "board",
+              sender_name: "Board",
+              ts: Date.now() / 1000,
+              text: "⏰ Board wake — your team needs decisions:\n- #2 moved to review by webb",
+              board: {
+                rows: [
+                  {
+                    kind: "moved",
+                    item: 2,
+                    title: "Statements page",
+                    actor: "webb",
+                    to: "review",
+                    note: "Ready for review on feat/customer-statements, commit 029f9f7. Build verified; final verdict stays with the tester.",
+                  },
+                  { kind: "filed", item: 5, title: "Follow-up: rate limit", actor: "nia" },
+                ],
+              },
+            },
+          });
+          send("assistant_message", { text: "Reviewing the hand-off now." });
+          send("turn_done");
+          return;
+        }
+        if (/propose the split/i.test(msg.text)) {
+          send("items_proposed", {
+            items: [
+              { title: "Statement API endpoint", criteria: "returns opening/closing balances over the chosen range; 8 endpoint tests green; malformed, missing, and reversed date ranges return 400; draft invoices are excluded from issued totals; inclusive boundaries verified end to end" },
+              { title: "Statements dashboard page", criteria: "renders seeded data for Ada / Northgate; empty + error states covered" },
+              { title: "Statement totals reconcile", criteria: "running balance matches invoices minus payments for the range" },
+              { title: "Verification pass", criteria: "tester confirms page renders with live API data" },
+            ],
+            note: "Shared journal case: statements.",
+          });
+          return; // suspended on the items decision
+        }
+        // Agent teams (OPE-97): the staffing gate — the lead proposes a roster and
+        // SUSPENDS until the team_response verdict arrives.
+        if (/staff the team/i.test(msg.text)) {
+          send("team_proposed", {
+            members: [
+              { persona: "swe-worker", name: "nia", model: "anthropic:claude-opus-4-8", reason: "implementation" },
+              { persona: "design-worker", name: "webb", reason: "UI polish" },
+              { persona: "test-worker", name: "checks", reason: "verifies against acceptance criteria" },
+            ],
+            enable_chat: false,
+            note: "Three workers cover the plan; checks verifies before anything closes.",
+          });
+          return; // suspended on the staffing decision
+        }
+        // Agent teams (OPE-96): a decomposition turn — the plan was approved in
+        // conversation (plan-approval flow); the agent files the items and the
+        // board rail appears on the next board fetch.
+        if (/plan the work/i.test(msg.text)) {
+          seedBoard();
+          send("assistant_message", {
+            text: "Plan approved — filed 5 work items on the board.",
+          });
+          send("turn_done");
+          return;
+        }
+        // A deliverable turn ending in an artifact chip (§34) — for the chip-open flow.
+        if (/show the report/i.test(msg.text)) {
+          send("assistant_message", {
+            text: "Done — [Security review](artifact:reports/security-review.html)",
+          });
+          send("turn_done");
+          return;
+        }
+        // The pre-fix payload shape (owner-hit 2026-08-14): no installable/version/summary
+        // — an older sidecar, or any surface that forgets the field. Must render NOT
+        // installable, never a guessed Install offer.
+        if (/request an unpinned tool/i.test(msg.text)) {
+          send("tool_requested", {
+            name: "somescanner",
+            reason: "scan the Terraform for misconfigurations",
+          });
+          return; // suspended on the tool request
+        }
+        // OPE-85: the agent hits a missing scanner and asks instead of skipping the check.
+        if (/scan for secrets/i.test(msg.text)) {
+          send("tool_requested", {
+            name: "gitleaks",
+            reason: "scan the git history for committed secrets",
+            installable: true,
+            version: "8.30.1",
+            summary: "scans git history and the working tree for committed secrets",
+            source: "github.com/gitleaks",
+          });
+          return; // suspended on the tool request
+        }
+        // §35 compact row: a routine workspace write (content rides in the args).
+        if (/write a file/i.test(msg.text)) {
+          pendingTool = "write_file";
+          const args = {
+            path: "src/fetch_data.py",
+            content: "import json\nimport urllib.request\n\ncompanies = [\"NVDA\", \"AMD\"]\nprint(len(companies))\ndone = True",
+          };
+          send("tool_proposed", { name: "write_file", arguments: args });
+          send("permission_required", { name: "write_file", arguments: args, reason: "" });
+          return; // suspended on the approval
+        }
+        // A one-paragraph digest with NO newlines — the owner-repro shape that once
+        // ballooned the card to full-transcript height (char clamp, 2026-07-15).
+        if (/post the long digest/i.test(msg.text)) {
+          pendingTool = "send_message";
+          const args = {
+            target: "slack:T1/C1",
+            text:
+              "aisuite — last 24 hours of work (through Jul 15): 5 PRs merged covering chat-completion streaming with unified chunks across providers, multimodal input conversion, Slack collaboration improvements, human attribution for outbound posts, and repo-wide formatting. ".repeat(
+                6,
+              ),
+          };
+          send("tool_proposed", { name: "send_message", arguments: args });
+          send("permission_required", { name: "send_message", arguments: args, reason: "", category: "messaging" });
+          return;
+        }
+        // Standing scoped approvals (§25): an eligible connector-ish write — the event
+        // carries the pinnable target, exactly like the real engine computes it.
+        if (/post the digest/i.test(msg.text)) {
+          pendingTool = "send_message";
+          send("tool_proposed", {
+            name: "send_message",
+            arguments: { target: "slack:T1/C1", text: "Weekly digest ready" },
+          });
+          send("permission_required", {
+            name: "send_message",
+            arguments: { target: "slack:T1/C1", text: "Weekly digest ready" },
+            reason: "",
+            category: "messaging",
+            standing_target: "slack:T1/C1",
+          });
+          return;
+        }
+        // §25 consent card: the agent proposes the automation's permission set on the
+        // gated create call; the existing approval card renders disclosure/grant lines.
+        if (/create an automation/i.test(msg.text)) {
+          pendingTool = "create_scheduled_task";
+          send("tool_proposed", { name: "create_scheduled_task", arguments: {} });
+          send("permission_required", {
+            name: "create_scheduled_task",
+            arguments: {
+              title: "Weekly digest",
+              instructions: "Summarize the week and post it.",
+              cron: "0 9 * * 1",
+              permissions: [
+                { tool: "send_message", target: "slack:T1/C1", access: "write" },
+                { tool: "github_list_commits", target: "rohit/agent-platform", access: "read" },
+              ],
+            },
+            reason: "",
+            category: "automation",
+          });
+          return;
+        }
+        // A reasoning model's turn: thinking deltas tick in slowly, then the answer —
+        // the assistant_message carries the full trace like the real engine's payload.
+        if (/think hard/i.test(msg.text)) {
+          const thoughts = ["Weighing options. ", "Comparing tradeoffs. ", "Settling it. "];
+          let tick = 0;
+          const timer = setInterval(() => {
+            if (tick < thoughts.length) {
+              send("reasoning_delta", { text: thoughts[tick] });
+              tick += 1;
+              return;
+            }
+            clearInterval(timer);
+            send("assistant_delta", { text: "Decision made." });
+            send("assistant_message", {
+              text: "Decision made.",
+              reasoning: thoughts.join(""),
+            });
+            send("turn_done");
+          }, 120);
+          return;
+        }
+        // Auto-compaction (OPE-27): the server signals `compacting` (the transient
+        // spinner label), summarizes for a beat, then emits the marker and the turn
+        // continues normally — the divider must render inline.
+        if (/compact the context/i.test(msg.text)) {
+          send("compacting", {});
+          setTimeout(() => {
+            send("compacted", { text: "Context compacted — earlier turns were summarized" });
+            send("assistant_message", { text: "Still on it — continuing where I left off." });
+            send("turn_done");
+          }, 400);
+          return;
+        }
+        // A turn that dies on a provider error; the follow-up {type:"retry"} recovers.
+        if (/fail the turn/i.test(msg.text)) {
+          send("error", { error: "model unreachable" });
+          send("turn_done");
+          return;
+        }
+        // A deliberately SLOW multi-second stream (~40 ticks × 120ms) so specs can
+        // interact mid-turn — the follow/pin scroll contract (FB-004) is untestable
+        // against the instant echo below.
+        if (/stream the epic/i.test(msg.text)) {
+          let ticks = 0;
+          const line = "The epic scrolls ever onward, line upon line upon line. ";
+          epicTimer = setInterval(() => {
+            ticks += 1;
+            send("assistant_delta", { text: line.repeat(3) + "\n\n" });
+            if (ticks >= 40) {
+              clearInterval(epicTimer!);
+              epicTimer = null;
+              send("assistant_message", { text: ("The epic concludes. " + line).repeat(20) });
+              send("turn_done");
+            }
+          }, 120);
+          return;
+        }
+        send("assistant_delta", { text: "Echo: " });
+        send("assistant_delta", { text: msg.text });
+        // Echo the model the message carried — pins the model-per-message contract (the
+        // composer's visible model must ride on every user_message; 2026-07-04 fix).
+        // Same for `skill`: the force-run pick must ride as its OWN FIELD, never as text.
+        // `usage` mirrors the real engine's assistant_message sidecar (OPE-42): fixed
+        // counts per turn so the usage-chip specs can assert exact accumulation.
+        send("assistant_message", {
+          text: `Echo: ${msg.text} [model=${msg.model || "none"}]${msg.skill ? ` [skill=${msg.skill}]` : ""}`,
+          usage: {
+            model: msg.model || "anthropic:claude-opus-4-8",
+            input: 1_000,
+            output: 200,
+            cache_read: 8_000,
+            cache_write: 800,
+          },
+        });
+        send("turn_done");
+      } else if (msg.type === "approval") {
+        if (pendingTool === "run_shell") {
+          if (msg.decision === "deny") {
+            send("tool_finished", { name: "run_shell", status: "denied" });
+            send("assistant_message", { text: "Understood — skipped the command." });
+          } else {
+            send("tool_finished", { name: "run_shell", status: "done", result_preview: "README.md" });
+            send("assistant_message", { text: "The command ran; 1 file found." });
+          }
+        } else if (msg.decision === "deny") {
+          send("tool_finished", { name: pendingTool, status: "denied" });
+          send("assistant_message", { text: "Understood — skipped it." });
+        } else {
+          send("tool_finished", { name: pendingTool, status: "done", result_preview: "ok" });
+          // The decision echoes back so specs can pin what rode the wire (e.g. always_task).
+          send("assistant_message", { text: `Done via ${pendingTool} [decision=${msg.decision}]` });
+        }
+        send("turn_done");
+      } else if (msg.type === "items_response") {
+        if (msg.approved) {
+          seedBoard(); // "created on the board" — the board fetch now shows them
+          send("assistant_message", {
+            text: "Items created on the board — [Board · 5 items](board:) if you want to watch. Staffing next.",
+          });
+        } else {
+          send("assistant_message", { text: "Understood — reworking the split." });
+        }
+        send("turn_done");
+      } else if (msg.type === "team_response") {
+        if (msg.approved) {
+          // Server-side create_team pre-spawned the workers. The ACTIVE session IS
+          // the lead (seventeenth pass): stamp it in the sessions list — RECENT keeps
+          // this ONE entry — and hang the workers off it for the drawer's Team panel.
+          let lead = sessions.find((s) => s.session_id === sid);
+          if (!lead) {
+            lead = {
+              session_id: sid,
+              workspace: "/Users/test/OpenWorker/launch-note",
+              agent: "cowork",
+              model: "m",
+              mode: "interactive",
+              messages: 2,
+            };
+            sessions.unshift(lead);
+          }
+          lead.title = "Build the statements page";
+          lead.updated_at = new Date().toISOString();
+          lead.team = {
+            role: "lead",
+            team_id: "t1",
+            chat_enabled: !!msg.enable_chat,
+            chat_unread: msg.enable_chat ? 1 : 0,
+          };
+          // The lead sets its check-in timer after staffing — it shows as sleeping.
+          lead.liveness = "sleeping";
+          lead.sleeping_until = new Date(Date.now() + 4 * 60_000).toISOString();
+          for (const [actor, persona, status, item] of [
+            ["nia", "swe-worker", "in_progress", "#1 in progress"],
+            ["webb", "design-worker", "idle", "idle"],
+            ["checks", "test-worker", "blocked", "#4 blocked"],
+          ] as const) {
+            sessions.push({
+              session_id: `sess-${actor}`,
+              title: actor,
+              workspace: "/Users/test/OpenWorker/launch-note",
+              agent: persona,
+              model: "m",
+              mode: "interactive",
+              updated_at: new Date().toISOString(),
+              messages: 0,
+              team: {
+                role: "worker",
+                team_id: "t1",
+                lead_session: sid,
+                actor,
+                status,
+                current_item: item,
+              },
+            });
+          }
+          send("assistant_message", {
+            text: "Team created — nia, webb and checks are standing by. Assigning items now.",
+          });
+        } else {
+          send("assistant_message", { text: "Understood — tell me how to change the roster." });
+        }
+        send("turn_done");
+      } else if (msg.type === "tool_response") {
+        // Either way the turn continues — the point of the contract is that declining
+        // degrades the report openly instead of dropping the check.
+        if (msg.approved) {
+          send("assistant_message", {
+            text: "Installed gitleaks 8.30.1 — scanned history, no secrets found.",
+          });
+        } else {
+          send("assistant_message", {
+            text: "Skipped gitleaks. Coverage: history secret sweep done by hand instead.",
+          });
+        }
+        send("turn_done");
+      } else if (msg.type === "interrupt") {
+        // Stop mid-stream: like the real engine, end the turn with `interrupted` and
+        // NO assistant_message — the client owns promoting the partial into the transcript.
+        if (epicTimer) {
+          clearInterval(epicTimer);
+          epicTimer = null;
+        }
+        send("interrupted", {});
+        send("turn_done");
+      } else if (msg.type === "set_mode") {
+        // Mirrors the server: full explainer the FIRST time a session enters
+        // Auto-Approve, a one-line marker for every later change.
+        const anyWs = ws as any;
+        if (msg.mode === "auto-approve" && !anyWs.__modeNoticeShown) {
+          anyWs.__modeNoticeShown = true;
+          send("mode_notice", {
+            title: "Auto-approve is on.",
+            text:
+              "Auto-approve uses a model to let routine actions through without asking; " +
+              "anything it isn't sure about still comes to you. It cuts interruptions but " +
+              "still carries some risk i.e. a command it allows still reaches anything you " +
+              "can. These are model judgments, and not guarantees.",
+          });
+        } else {
+          const labels: Record<string, string> = {
+            discuss: "Discuss",
+            interactive: "Ask for approval",
+            "bypass-approvals": "Bypass approvals",
+            "auto-approve": "Auto-approve",
+          };
+          send("mode_notice", { text: `${labels[msg.mode] || msg.mode} is on.` });
+        }
+      } else if (msg.type === "set_model") {
+        // Mid-session switch: the server applies it and broadcasts the persisted marker.
+        // Like the real server, the FIRST bind (fresh session) is silent.
+        if (hadTurn)
+          send("model_changed", {
+            model: msg.model,
+            text: `Model switched to ${msg.model}`,
+          });
+      } else if (msg.type === "retry") {
+        // Like the real engine: re-runs with NO new user message (turn_start input is empty).
+        send("turn_start", { input: "" });
+        send("assistant_message", { text: "Recovered after retry." });
+        send("turn_done");
+      }
+    });
+  });
+
+  await page.route("**/v1/**", async (route) => {
+    const req = route.request();
+    const p = new URL(req.url()).pathname;
+    const m = req.method();
+    const json = (body: unknown, status = 200) =>
+      route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+
+    // session-scoped (id-agnostic — any session resolves to the same fixture).
+    // POST = the per-session mute override (§32 Access toggles) — flip the shared state so
+    // the section's reload sees the change.
+    if (/\/v1\/sessions\/[^/]+\/connections$/.test(p)) {
+      if (m === "POST") {
+        const b = req.postDataJSON() || {};
+        const row = connections.connected.find((c) => c.connector === b.connector);
+        if (row) row.enabled = !!b.enabled;
+        return json({ ok: true });
+      }
+      return json(connections);
+    }
+    // UX-044 project bindings: stateful per-run so specs can bind/unbind/name.
+    if (/\/v1\/sessions\/[^/]+\/project-menu$/.test(p)) {
+      const kind = new URL(req.url()).searchParams.get("kind") || "memory";
+      return json({
+        kind,
+        bound: projectBindings[kind] ?? null,
+        derived: {
+          kind: "folder",
+          label: "~/fleet/ro4d/demo-universe/notes",
+          full: "/Users/u/fleet/ro4d/demo-universe/notes",
+          key: "/Users/u/fleet/ro4d/demo-universe/notes",
+        },
+        named: projectNames[kind] || [],
+      });
+    }
+    if (/\/v1\/sessions\/[^/]+\/bindings$/.test(p) && m === "PUT") {
+      const b = req.postDataJSON() || {};
+      if (b.name) projectBindings[b.kind] = b.name;
+      else delete projectBindings[b.kind];
+      return json({ ok: true, bindings: projectBindings });
+    }
+    if (/\/v1\/sessions\/[^/]+\/project-name$/.test(p) && m === "POST") {
+      const b = req.postDataJSON() || {};
+      (projectNames[b.kind] ||= []).unshift({ name: b.name, key: "/Users/u/fleet/ro4d/demo-universe/notes" });
+      return json({ ok: true, kind: b.kind, name: b.name });
+    }
+    if (/\/v1\/sessions\/[^/]+\/roots$/.test(p)) {
+      if (m === "POST") {
+        const b = req.postDataJSON();
+        const existing = roots.find((r) => r.path === b.path);
+        if (existing) existing.writable = !!b.writable;
+        else roots.push({ path: b.path, writable: !!b.writable, label: baseName(b.path), primary: false, exists: true });
+        return json({ ok: true, roots });
+      }
+      if (m === "DELETE") {
+        const rp = new URL(req.url()).searchParams.get("path");
+        const i = roots.findIndex((r) => r.path === rp && !r.primary);
+        if (i >= 0) roots.splice(i, 1);
+        return json({ ok: true, roots });
+      }
+      return json({ roots });
+    }
+    // Artifacts (OPE-91): one HTML report whose content actively probes the sandbox —
+    // an inline script that renders proof-of-execution, a parent-window escape attempt,
+    // and an external subresource that must be CSP-blocked.
+    if (/\/v1\/sessions\/[^/]+\/artifacts\/read$/.test(p)) {
+      const reqPath = new URL(req.url()).searchParams.get("path") || "";
+      // UX-037 Files: a session root (or subfolder) reads as a folder listing.
+      const rootHit = roots.find((r) => reqPath === r.path);
+      if (rootHit) {
+        return json({
+          ok: true,
+          path: reqPath,
+          kind: "folder",
+          entries: [
+            { name: "reports", dir: true, size: 0 },
+            { name: "notes.md", dir: false, size: 128 },
+          ],
+        });
+      }
+      if (reqPath.endsWith("/reports")) {
+        return json({
+          ok: true,
+          path: reqPath,
+          kind: "folder",
+          entries: [{ name: "security-review.html", dir: false, size: 2048 }],
+        });
+      }
+      if (reqPath.endsWith("notes.md")) {
+        return json({ ok: true, path: reqPath, kind: "markdown", content: "# Notes\n\nhello from the explorer" });
+      }
+      return json({
+        ok: true,
+        path: "reports/security-review.html",
+        kind: "html",
+        content: [
+          "<h1>Security review</h1>",
+          '<div id="probe">script did not run</div>',
+          "<script>",
+          '  document.getElementById("probe").textContent = "script ran in sandbox";',
+          "  try { window.parent.document.title = 'ESCAPED'; } catch (e) {",
+          '    document.getElementById("probe").textContent += " · parent blocked";',
+          "  }",
+          "</script>",
+          '<img src="https://evil.example/exfil.png" onerror="document.getElementById(\'probe\').textContent += \' · network blocked\'">',
+        ].join("\n"),
+      });
+    }
+    if (/\/v1\/sessions\/[^/]+\/artifacts\/reveal$/.test(p)) return json({ ok: true });
+    // Item detail (merged event timeline + attachments) for the detail pane.
+    if (/\/v1\/sessions\/[^/]+\/board\/item$/.test(p)) {
+      const id = Number(new URL(req.url()).searchParams.get("id"));
+      const item = boardItems.find((i) => i.id === id);
+      if (!item) return json({ error: "no such item" });
+      const at = new Date().toISOString();
+      const timeline =
+        id === 5
+          ? [
+              { seq: 30, ts: at, actor: "lead", kind: "created" },
+              { seq: 31, ts: at, actor: "lead", kind: "assigned", assignee: "security" },
+              { seq: 32, ts: at, actor: "security", kind: "moved", to: "in_progress" },
+              {
+                seq: 41,
+                ts: at,
+                actor: "security",
+                kind: "comment",
+                body: "Rolled all four sections into report.md — balances reconcile against the seeded rows.",
+              },
+              {
+                seq: 42,
+                ts: at,
+                actor: "security",
+                kind: "comment",
+                body: "attached the rendered page",
+                refs: [`attachment://${"a".repeat(64)}.png#rendered-page.png`],
+              },
+              {
+                seq: 43,
+                ts: at,
+                actor: "security",
+                kind: "moved",
+                to: "review",
+                body: "Ready — balances verified against seeded rows.",
+              },
+            ]
+          : [{ seq: 30, ts: at, actor: "lead", kind: "created" }];
+      return json({ ...item, timeline: timeline.concat(itemNotes[id] || []) });
+    }
+    if (/\/v1\/sessions\/[^/]+\/board\/comment$/.test(p) && m === "POST") {
+      const b = req.postDataJSON() || {};
+      const id = Number(b.item);
+      (itemNotes[id] = itemNotes[id] || []).push({
+        seq: 90 + (itemNotes[id]?.length || 0),
+        ts: new Date().toISOString(),
+        actor: "user",
+        kind: "comment",
+        body: String(b.body || ""),
+      });
+      return json({ ok: true });
+    }
+    if (/\/v1\/sessions\/[^/]+\/board\/attachment$/.test(p)) {
+      // A real 1x1 PNG so the <img> actually loads (the spec asserts it renders).
+      return route.fulfill({
+        status: 200,
+        contentType: "image/png",
+        body: Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+          "base64",
+        ),
+      });
+    }
+    // Agent teams (OPE-96): board reads + the user-side mutations.
+    if (/\/v1\/sessions\/[^/]+\/board\/transition$/.test(p)) {
+      const b = req.postDataJSON() || {};
+      const item = boardItems.find((i) => i.id === Number(b.item));
+      if (!item) return json({ error: "no such item" });
+      item.state = String(b.to);
+      return json(item);
+    }
+    if (/\/v1\/sessions\/[^/]+\/board$/.test(p)) return json(boardPayload());
+    // # team chat (OPE-99): one group, message log, user posts append.
+    if (/\/v1\/teams\/[^/]+\/chat$/.test(p)) {
+      if (m === "POST") {
+        const b = req.postDataJSON() || {};
+        chatMessages.push({
+          seq: chatMessages.length + 1,
+          ts: new Date().toISOString(),
+          author: "user",
+          author_role: "user",
+          text: String(b.text || ""),
+          mentions: ["nia", "webb", "checks", "lead"].filter((h) =>
+            String(b.text || "").includes(`@${h}`),
+          ),
+        });
+        return json(chatMessages[chatMessages.length - 1]);
+      }
+      return json({
+        enabled: true,
+        team_id: "t1",
+        members: [
+          { name: "nia", persona: "swe-worker", role: "worker" },
+          { name: "webb", persona: "design-worker", role: "worker" },
+          { name: "checks", persona: "test-worker", role: "worker" },
+          { name: "lead", persona: "swe-lead", role: "lead" },
+        ],
+        messages: chatMessages,
+      });
+    }
+    if (p.endsWith("/v1/teams/journal")) {
+      return json({
+        cases: boardItems.length
+          ? [{ case: "findings", entries: 12, last_ts: new Date().toISOString() }]
+          : [],
+      });
+    }
+    if (/\/v1\/sessions\/[^/]+\/artifacts$/.test(p)) {
+      return json({
+        artifacts: [
+          {
+            path: "reports/security-review.html",
+            abs_path: "/Users/test/OpenWorker/launch-note/reports/security-review.html",
+            name: "security-review.html",
+            kind: "html",
+            size: 2048,
+            modified_at: Math.floor(Date.now() / 1000) - 60,
+          },
+        ],
+      });
+    }
+    if (/\/v1\/sessions\/[^/]+\/messages$/.test(p)) return json({ messages: [] });
+    if (/\/v1\/sessions\/[^/]+\/unattended$/.test(p)) {
+      const id = decodeURIComponent(p.split("/").slice(-2)[0]);
+      if (m === "POST") {
+        unattended[id] = !!req.postDataJSON().unattended;
+        return json({ ok: true, unattended: unattended[id] });
+      }
+      return json({ unattended: !!unattended[id] });
+    }
+    if (/\/v1\/sessions\/[^/]+$/.test(p)) {
+      const id = decodeURIComponent(p.split("/").pop()!);
+      const i = sessions.findIndex((s) => s.session_id === id);
+      if (m === "PATCH") {
+        if (i >= 0) Object.assign(sessions[i], req.postDataJSON());
+        return json({ ok: true });
+      }
+      if (m === "DELETE") {
+        if (i >= 0) sessions.splice(i, 1);
+        return json({ ok: true });
+      }
+      return json(i >= 0 ? sessions[i] : PINNED_SESSION);
+    }
+
+    // Skills (SKILLS-SPEC §5/§6). Order matters: upload/confirm before the {name} regexes.
+    if (/\/v1\/sessions\/[^/]+\/skills$/.test(p)) {
+      // The composer's live menu: every Settings-enabled skill (§4 — disabled = invisible).
+      return json({
+        skills: skills
+          .filter((s) => s.enabled)
+          .map((s) => ({ name: s.name, description: s.description, scope: s.scope, enabled: true })),
+      });
+    }
+    if (p.endsWith("/v1/skills/upload/confirm") && m === "POST") {
+      const b = req.postDataJSON() || {};
+      if (!stagedSkill || b.token !== stagedSkill.token)
+        return json({ ok: false, error: "Upload expired — pick the file again." });
+      skills.push({
+        name: stagedSkill.name, description: stagedSkill.description,
+        instructions: stagedSkill.instructions, scope: "global", source: "uploaded",
+        enabled: true, path: `/state/skills/${stagedSkill.name}`, files: stagedSkill.files.length,
+      });
+      stagedSkill = null;
+      return json({ ok: true });
+    }
+    if (p.endsWith("/v1/skills/upload") && m === "POST") {
+      // Stage → preview; nothing lands until confirm. Fixed parse (the mock reads no zips).
+      stagedSkill = {
+        token: "stage-1", name: "greet", description: "says hello",
+        instructions: "Say hello warmly.", files: ["notes.txt"],
+      };
+      return json({ ok: true, ...stagedSkill });
+    }
+    {
+      const mr = p.match(/\/v1\/skills\/([^/]+)\/reveal$/);
+      if (mr && m === "POST") {
+        return json(
+          skills.some((s) => s.name === decodeURIComponent(mr[1]))
+            ? { ok: true }
+            : { ok: false, error: `Unknown skill: ${decodeURIComponent(mr[1])}` },
+        );
+      }
+    }
+    if (/\/v1\/skills\/[^/]+$/.test(p) && (m === "PATCH" || m === "DELETE")) {
+      const name = decodeURIComponent(p.split("/").pop()!);
+      const i = skills.findIndex((s) => s.name === name);
+      if (i < 0) return json({ ok: false, error: `Unknown skill: ${name}` });
+      if (m === "DELETE") {
+        skills.splice(i, 1);
+        return json({ ok: true });
+      }
+      const b = req.postDataJSON() || {};
+      if (typeof b.enabled === "boolean") skills[i].enabled = b.enabled;
+      if (typeof b.description === "string") skills[i].description = b.description;
+      if (typeof b.instructions === "string") skills[i].instructions = b.instructions;
+      return json({ ok: true });
+    }
+    if (p.endsWith("/v1/skills") && m === "POST") {
+      const b = req.postDataJSON() || {};
+      if (!b.name || !(b.instructions || "").trim())
+        return json({ ok: false, error: "Skill name and instructions are required." });
+      if (skills.some((s) => s.name === b.name))
+        return json({ ok: false, error: `A skill named '${b.name}' already exists in that scope.` });
+      skills.push({
+        name: b.name, description: b.description || "", instructions: b.instructions,
+        scope: "global", source: "local", enabled: true, path: `/state/skills/${b.name}`, files: 0,
+      });
+      return json({ ok: true });
+    }
+    if (p.endsWith("/v1/skills")) return json({ skills });
+
+    if (p.endsWith("/v1/health")) return json(HEALTH);
+    if (p.endsWith("/v1/settings")) return json(SETTINGS);
+    if (p.endsWith("/v1/settings/context-bar") && m === "POST") {
+      Object.assign(SETTINGS, req.postDataJSON());
+      return json({ ok: true, context_bar: SETTINGS.context_bar });
+    }
+    if (p.endsWith("/v1/settings/pdf") && m === "POST") {
+      Object.assign(SETTINGS, req.postDataJSON());
+      return json({
+        ok: true,
+        pdf_fallback: SETTINGS.pdf_fallback,
+        pdf_max_pages: SETTINGS.pdf_max_pages,
+        pdf_max_mb: SETTINGS.pdf_max_mb,
+      });
+    }
+    if (p.endsWith("/v1/attachments/inspect-pdf") && m === "POST") {
+      // Page count for the composer threshold check: the tests encode it in the PDF body
+      // as "%%pages=N" (the mock doesn't parse real PDFs).
+      const data = String(req.postDataJSON()?.data_url || "");
+      const match = /%%pages=(\d+)/.exec(atob(data.split(",")[1] || "") || "");
+      return json({ ok: true, pages: match ? Number(match[1]) : 1, bytes: data.length });
+    }
+    if (p.endsWith("/v1/workspaces/recent")) return json({ workspaces: [] });
+    if (p.endsWith("/v1/workspaces/pick") && m === "POST") {
+      return json({ ok: true, path: "/tmp/picked-folder" });
+    }
+    if (p.endsWith("/v1/workspaces/open") && m === "POST") {
+      const b = req.postDataJSON();
+      return json({ ok: true, path: b.path, git_branch: "main" });
+    }
+    if (p.endsWith("/v1/workspaces/temp") && m === "POST") {
+      // UX-029: "Start in a temporary folder" — created at send time, git-ready.
+      const b = req.postDataJSON();
+      return json({ ok: true, path: `/tmp/ow-temp/${b.session_id}`, git: b.git !== false });
+    }
+    if (/\/v1\/sessions\/[^/]+\/save-as-project$/.test(p) && m === "POST") {
+      const b = req.postDataJSON();
+      return json({ ok: true, path: b.path });
+    }
+    if (/\/v1\/personas\/[^/]+\/export$/.test(p) && m === "POST") {
+      // Sharing v1: export the bundle zip into the chosen folder.
+      const id = p.split("/").slice(-2)[0];
+      const b = req.postDataJSON();
+      return json({ ok: true, path: `${b.dir}/${id}-coworker-v1.zip` });
+    }
+    // must precede the /v1/personas/{id} catch-all (install matches it too)
+    if (p.endsWith("/v1/personas/install") && m === "POST") {
+      const b = req.postDataJSON();
+      if (b.zip_b64) {
+        // Sharing v1: a bundle zip import — consent with version + replaces + recommends.
+        const imported = {
+          id: "team-sec", name: "Team Security Coworker", icon: "shield",
+          tagline: "Our security playbook", requires_folder: true, builtin: false,
+          tools: ["code_files", "search", "shell"],
+          enabled: false, surfaced: false, default: false, version: "2",
+        };
+        if (!personas.some((x) => x.id === "team-sec")) personas.push(imported);
+        return json({
+          ok: true,
+          personas,
+          consent: [{
+            id: "team-sec", name: "Team Security Coworker",
+            description: "Reviews code the way our team does.",
+            tools: ["code_files", "search", "shell"],
+            risk: ["read", "write_local", "exec"],
+            connectors: true, mcp: [], messaging: false,
+            recommended_mode: "interactive", recommended_models: [],
+            recommends: [{ kind: "connector", ref: "github", reason: "open fix PRs", tier: "core" }],
+            version: "2",
+            replaces: { version: "1", installed_at: "2026-08-01", capabilities_grew: true },
+            source: "/tmp/team-sec.zip", builtin: false,
+          }],
+        });
+      }
+      if (b.gallery_slug) {
+        return json(
+          CLOUD_STATE.signed_in
+            ? { ok: true, consent: [{ id: b.gallery_slug }], personas }
+            : { ok: false, error: "gallery requires cloud sign-in" },
+        );
+      }
+      return json({ ok: false, error: "unsupported in mock" });
+    }
+    if (/\/v1\/personas\/[^/]+$/.test(p) && m === "POST") {
+      // Persona flag update (enabled/surfaced/default). Backend parity: enabling implies
+      // surfacing (registry.set_enabled sets surfaced — the PM-invisible bug fix).
+      const id = p.split("/").pop();
+      const t = personas.find((x) => x.id === id);
+      if (!t) return json({ ok: false, error: `unknown persona: ${id}` });
+      const b = req.postDataJSON();
+      if (b.default) personas.forEach((x) => (x.default = x.id === id));
+      let archivedCount = 0;
+      if (typeof b.enabled === "boolean") {
+        t.enabled = b.enabled;
+        if (b.enabled) t.surfaced = true;
+        // Backend parity (disable-archives, §18): disabling archives the persona's real
+        // sessions server-side, so its sidebar section disappears with it.
+        if (!b.enabled) {
+          for (const s of sessions) {
+            if (s.agent === id && !s.archived && !s.session_id.startsWith("__")) {
+              s.archived = true;
+              archivedCount++;
+            }
+          }
+        }
+      }
+      if (typeof b.surfaced === "boolean") t.surfaced = b.surfaced;
+      return json({ ok: true, personas, archived_sessions: archivedCount });
+    }
+    if (/\/v1\/personas\/[^/]+$/.test(p) && m === "DELETE") {
+      const id = p.split("/").pop();
+      const i = personas.findIndex((x) => x.id === id && !x.builtin);
+      if (i < 0) return json({ ok: false, error: `unknown persona: ${id}` });
+      personas.splice(i, 1);
+      return json({ ok: true, personas });
+    }
+    if (/\/v1\/personas\/[^/]+$/.test(p)) {
+      // Detail merges the live list row over the static shape, so enable/surface/default
+      // state and builtin-ness track the same mutable array the list serves.
+      const id = decodeURIComponent(p.split("/").pop() || "");
+      const base = personas.find((x) => x.id === id);
+      return json({
+        ...PERSONA_DETAIL,
+        media: [],
+        surfaced: true,
+        default: false,
+        builtin: true,
+        group: "general",
+        ...(base || {}),
+        recommends: PERSONA_DETAIL.recommends,
+        default_connections: PERSONA_DETAIL.default_connections,
+      });
+    }
+    if (p.endsWith("/v1/personas")) return json({ internal: PERSONAS.internal, personas });
+    if (p.endsWith("/v1/sessions")) return json({ sessions });
+    if (/\/v1\/connectors\/slack\/unauthorized\/[^/]+$/.test(p) && m === "POST") {
+      const id = p.split("/").pop();
+      const i = parked.findIndex((x) => x.id === id);
+      if (i < 0) return json({ ok: false, error: "unknown item" });
+      const b = req.postDataJSON();
+      const item = parked.splice(i, 1)[0];
+      // Backend parity: allowing routes to the item's OWN workspace's list (ids are
+      // workspace-scoped); a team-less item lands on the flat list (manual mode).
+      if (b.action === "allow" || b.action === "allow_deliver") {
+        const pool = item.team_id
+          ? slackState.workspaces.find((w) => w.team_id === item.team_id)?.allowed_users
+          : slackState.allowed_users;
+        if (pool && !pool.includes(item.user_id)) pool.push(item.user_id);
+      }
+      return json({ ok: true });
+    }
+    // Per-workspace allow/disallow (team_id in the body) + the flat manual list without it.
+    if (/\/v1\/connectors\/slack\/(allow|disallow)$/.test(p) && m === "POST") {
+      const b = req.postDataJSON();
+      const add = p.endsWith("/allow");
+      const ws = b.team_id
+        ? slackState.workspaces.find((w) => w.team_id === b.team_id)
+        : null;
+      const pool = b.team_id ? ws?.allowed_users : slackState.allowed_users;
+      if (!pool) return json({ ok: false, error: "workspace not connected" });
+      const i = pool.indexOf(b.user_id);
+      if (add && i < 0) pool.push(b.user_id);
+      if (!add && i >= 0) pool.splice(i, 1);
+      // Directory picks carry the display name — backend seeds the people directory.
+      if (add && b.name && ws) ws.allowed_user_names[b.user_id] = b.name;
+      return json({ ok: true, allowed_users: [...pool], team_id: b.team_id ?? null });
+    }
+    if (p.endsWith("/v1/connectors/slack/approval-owners/add") && m === "POST") {
+      const b = req.postDataJSON();
+      if (!slackState.approval_owner_ids.includes(b.user_id))
+        slackState.approval_owner_ids.push(b.user_id);
+      if (!slackState.allowed_users.includes(b.user_id))
+        slackState.allowed_users.push(b.user_id);
+      return json({
+        ok: true,
+        approval_owner_ids: [...slackState.approval_owner_ids],
+        allowed_users: [...slackState.allowed_users],
+      });
+    }
+    if (p.endsWith("/v1/connectors/slack/approval-owners/remove") && m === "POST") {
+      const b = req.postDataJSON();
+      const i = slackState.approval_owner_ids.indexOf(b.user_id);
+      if (i >= 0) slackState.approval_owner_ids.splice(i, 1);
+      return json({ ok: true, approval_owner_ids: [...slackState.approval_owner_ids] });
+    }
+    // Workspace rosters for the pickers (users.list / conversations.list, mocked).
+    if (/\/v1\/connectors\/slack\/workspaces\/[^/]+\/directory$/.test(p) && m === "GET") {
+      const q = (new URL(req.url()).searchParams.get("q") || "").toLowerCase();
+      const members = [
+        { id: "U9MAYA", name: "Maya Chen", handle: "maya", guest: false },
+        { id: "U8ROHIT", name: "Rohit Prasad", handle: "rohit", guest: false },
+        { id: "U7CAL", name: "Contractor Cal", handle: "cal", guest: true },
+      ].filter((mem) => !q || mem.name.toLowerCase().includes(q) || mem.handle.includes(q));
+      return json({ ok: true, members });
+    }
+    if (/\/v1\/connectors\/slack\/workspaces\/[^/]+\/channels$/.test(p) && m === "GET") {
+      const team = decodeURIComponent(p.split("/workspaces/")[1].split("/")[0]);
+      const q = (new URL(req.url()).searchParams.get("q") || "").toLowerCase();
+      const channels = [
+        { id: "C9LAUNCH", name: "launch-team", is_private: false, is_member: true },
+        { id: "C8LEADS", name: "leads", is_private: true, is_member: true },
+        { id: "C7LOBBY", name: "lobby", is_private: false, is_member: false },
+      ].filter((c) => !q || c.name.includes(q));
+      return json({ ok: true, channels, team });
+    }
+    // Slack health, three layers (M3.6 Step 2): socket live + all tokens good by
+    // default; sign-in mirrors CLOUD_STATE. Specs force reconnecting/offline/dead
+    // tokens by registering a later page.route override (later routes match first).
+    if (p.endsWith("/v1/connectors/slack/status"))
+      return json({
+        ok: true,
+        mode: slackState.mode,
+        relay: { state: "live", reconnects: 0, last_event_at: Date.now() / 1000 - 30, last_error: "" },
+        signed_in: CLOUD_STATE.signed_in,
+        teams: Object.fromEntries(
+          slackState.workspaces.map((w) => [w.team_id, { token_ok: true }]),
+        ),
+      });
+    // Stop relaying one workspace; removing the last flips the connector off (backend parity).
+    if (/\/v1\/connectors\/slack\/workspaces\/[^/]+\/disconnect$/.test(p) && m === "POST") {
+      const teamId = decodeURIComponent(p.split("/").slice(-2)[0]);
+      const i = slackState.workspaces.findIndex((w) => w.team_id === teamId);
+      if (i < 0) return json({ ok: false, error: "workspace not connected" });
+      slackState.workspaces.splice(i, 1);
+      if (slackState.workspaces.length === 0) {
+        slackState.connected = false;
+        slackState.mode = "";
+      }
+      return json({ ok: true, remaining_workspaces: slackState.workspaces.length });
+    }
+    // GitHub relay (github-relay-spec §8): per-installation allow/disallow, parked
+    // resolution, status, per-installation disconnect.
+    if (/\/v1\/connectors\/github\/unauthorized\/[^/]+$/.test(p) && m === "POST") {
+      const id = p.split("/").pop();
+      const i = githubParked.findIndex((x) => x.id === id);
+      if (i < 0) return json({ ok: false, error: "unknown item" });
+      const b = req.postDataJSON();
+      const item = githubParked.splice(i, 1)[0];
+      if (b.action === "allow" || b.action === "allow_deliver") {
+        const pool = githubState.installations.find(
+          (x) => x.installation_id === item.team_id,
+        )?.allowed_users;
+        if (pool && !pool.includes(item.user_id)) pool.push(item.user_id);
+      }
+      return json({ ok: true });
+    }
+    if (/\/v1\/connectors\/github\/(allow|disallow)$/.test(p) && m === "POST") {
+      const b = req.postDataJSON();
+      const pool = githubState.installations.find(
+        (x) => x.installation_id === b.team_id,
+      )?.allowed_users;
+      if (!pool) return json({ ok: false, error: "installation not connected" });
+      const add = p.endsWith("/allow");
+      const i = pool.indexOf(b.user_id);
+      if (add && i < 0) pool.push(b.user_id);
+      if (!add && i >= 0) pool.splice(i, 1);
+      return json({ ok: true, allowed_users: [...pool], team_id: b.team_id ?? null });
+    }
+    if (p.endsWith("/v1/connectors/github/status"))
+      return json({
+        ok: true,
+        mode: githubState.mode,
+        relay: { state: "live", reconnects: 0, last_event_at: Date.now() / 1000 - 30, last_error: "" },
+        signed_in: CLOUD_STATE.signed_in,
+        installs: Object.fromEntries(
+          githubState.installations.map((x) => [x.installation_id, { token_ok: true }]),
+        ),
+        missed: {},
+      });
+    if (/\/v1\/connectors\/github\/installations\/[^/]+\/disconnect$/.test(p) && m === "POST") {
+      const iid = decodeURIComponent(p.split("/").slice(-2)[0]);
+      const i = githubState.installations.findIndex((x) => x.installation_id === iid);
+      if (i < 0) return json({ ok: false, error: "installation not connected" });
+      githubState.installations.splice(i, 1);
+      if (githubState.installations.length === 0) {
+        githubState.connected = false;
+        githubState.mode = "";
+      }
+      return json({ ok: true, remaining_installs: githubState.installations.length });
+    }
+    // Gmail multi-account management (M3.6 Step 3): per-account disconnect/default
+    // + the "Never show agents" filter lists.
+    if (/\/v1\/connectors\/gmail\/accounts\/[^/]+\/disconnect$/.test(p) && m === "POST") {
+      const email = decodeURIComponent(p.split("/").slice(-2)[0]);
+      const i = gmailState.accounts.findIndex((a) => a.email === email);
+      if (i < 0) return json({ ok: false, error: "account not connected" });
+      const wasDefault = gmailState.accounts[i].default;
+      gmailState.accounts.splice(i, 1);
+      if (wasDefault && gmailState.accounts[0]) gmailState.accounts[0].default = true;
+      return json({ ok: true, remaining_accounts: gmailState.accounts.length });
+    }
+    if (/\/v1\/connectors\/google_calendar\/accounts\/[^/]+\/disconnect$/.test(p) && m === "POST") {
+      const email = decodeURIComponent(p.split("/accounts/")[1].split("/")[0]);
+      const i = gcalState.accounts.findIndex((a) => a.email === email);
+      if (i < 0) return json({ ok: false, error: "account not connected" });
+      const wasDefault = gcalState.accounts[i].default;
+      gcalState.accounts.splice(i, 1);
+      if (wasDefault && gcalState.accounts[0]) gcalState.accounts[0].default = true;
+      return json({ ok: true, remaining_accounts: gcalState.accounts.length });
+    }
+    if (/\/v1\/connectors\/google_calendar\/accounts\/[^/]+\/default$/.test(p) && m === "POST") {
+      const email = decodeURIComponent(p.split("/accounts/")[1].split("/")[0]);
+      if (!gcalState.accounts.some((a) => a.email === email))
+        return json({ ok: false, error: "account not connected" });
+      for (const a of gcalState.accounts) a.default = a.email === email;
+      return json({ ok: true, default_account: email });
+    }
+    if (/\/v1\/connectors\/gmail\/accounts\/[^/]+\/default$/.test(p) && m === "POST") {
+      const email = decodeURIComponent(p.split("/").slice(-2)[0]);
+      if (!gmailState.accounts.some((a) => a.email === email))
+        return json({ ok: false, error: "account not connected" });
+      for (const a of gmailState.accounts) a.default = a.email === email;
+      return json({ ok: true, default_account: email });
+    }
+    if (p.endsWith("/v1/connectors/gmail/filters") && m === "PATCH") {
+      const b = req.postDataJSON() || {};
+      if (Array.isArray(b.senders)) gmailState.filters.senders = b.senders;
+      if (Array.isArray(b.labels)) gmailState.filters.labels = b.labels;
+      return json({ ok: true, filters: { ...gmailState.filters } });
+    }
+    // Generic multi-account management (accounts.py layer; notion in fixtures).
+    if (/\/v1\/connectors\/notion\/accounts\/[^/]+\/disconnect$/.test(p) && m === "POST") {
+      const id = decodeURIComponent(p.split("/accounts/")[1].split("/")[0]);
+      const i = notionState.accounts.findIndex((a) => a.account_id === id);
+      if (i < 0) return json({ ok: false, error: "account not connected" });
+      const wasDefault = notionState.accounts[i].default;
+      notionState.accounts.splice(i, 1);
+      if (wasDefault && notionState.accounts[0]) notionState.accounts[0].default = true;
+      return json({ ok: true, remaining_accounts: notionState.accounts.length });
+    }
+    if (/\/v1\/connectors\/notion\/accounts\/[^/]+\/default$/.test(p) && m === "POST") {
+      const id = decodeURIComponent(p.split("/accounts/")[1].split("/")[0]);
+      if (!notionState.accounts.some((a) => a.account_id === id))
+        return json({ ok: false, error: "account not connected" });
+      for (const a of notionState.accounts) a.default = a.account_id === id;
+      return json({ ok: true, default_account: id });
+    }
+    // HubSpot multi-portal management (M3.6 Step 4).
+    if (/\/v1\/connectors\/hubspot\/portals\/[^/]+\/disconnect$/.test(p) && m === "POST") {
+      const hub = decodeURIComponent(p.split("/").slice(-2)[0]);
+      const i = hubspotState.portals.findIndex((x) => x.hub_id === hub);
+      if (i < 0) return json({ ok: false, error: "portal not connected" });
+      const wasDefault = hubspotState.portals[i].default;
+      hubspotState.portals.splice(i, 1);
+      if (wasDefault && hubspotState.portals[0]) hubspotState.portals[0].default = true;
+      return json({ ok: true, remaining_portals: hubspotState.portals.length });
+    }
+    if (/\/v1\/connectors\/hubspot\/portals\/[^/]+\/default$/.test(p) && m === "POST") {
+      const hub = decodeURIComponent(p.split("/").slice(-2)[0]);
+      if (!hubspotState.portals.some((x) => x.hub_id === hub))
+        return json({ ok: false, error: "portal not connected" });
+      for (const x of hubspotState.portals) x.default = x.hub_id === hub;
+      return json({ ok: true, default_portal: hub });
+    }
+    if (p.endsWith("/v1/connectors/hubspot/hidden-fields") && m === "PATCH") {
+      const b = req.postDataJSON() || {};
+      if (Array.isArray(b.hidden_fields))
+        hubspotState.hidden_fields = b.hidden_fields.map((f: string) => f.trim().toLowerCase());
+      return json({ ok: true, hidden_fields: [...hubspotState.hidden_fields] });
+    }
+    if (p.endsWith("/v1/connectors"))
+      return json({
+        connectors: [
+          slackConnector(),
+          githubConnector(),
+          ...CONNECTORS.connectors.map((c: any) =>
+            c.name === "gmail"
+              ? gmailConnector()
+              : c.name === "google_calendar"
+                ? gcalConnector()
+                : c.name === "hubspot"
+                  ? hubspotConnector()
+                  : c.name === "notion"
+                    ? notionConnector()
+                    : c.name === "outlook"
+                      ? outlookConnector()
+                      : c.name === "monday" || c.name === "jira"
+                        ? mcpConnector(c.name)
+                        : { ...c },
+          ),
+        ],
+      });
+    if (p.endsWith("/v1/cloud/status")) return json({ ...CLOUD_STATE });
+    if (p.endsWith("/v1/cloud/login") && m === "POST") {
+      Object.assign(CLOUD_STATE, { signed_in: true, account: "rohit@openworker.com", user_id: "usr_e2e" });
+      return json({ ok: true });
+    }
+    if (p.endsWith("/v1/cloud/telemetry") && m === "POST") {
+      CLOUD_STATE.telemetry_enabled = !!req.postDataJSON().enabled;
+      return json({ ok: true, telemetry_enabled: CLOUD_STATE.telemetry_enabled });
+    }
+    if (p.endsWith("/v1/cloud/logout") && m === "POST") {
+      Object.assign(CLOUD_STATE, { signed_in: false, account: "", user_id: "" });
+      return json({ ok: true, signed_in: false });
+    }
+    if (/\/v1\/connectors\/[^/]+\/mcp-connect$/.test(p) && m === "POST") {
+      // Local MCP OAuth flow — no cloud sign-in required; completes instantly here.
+      const name = p.match(/\/v1\/connectors\/([^/]+)\/mcp-connect$/)?.[1] as
+        | "monday"
+        | "jira";
+      if (name in mcpState) {
+        mcpState[name] = true;
+        return json({ ok: true, started: true });
+      }
+      return json({ ok: false, error: `${name} has no MCP connect path` });
+    }
+    if (/\/v1\/connectors\/[^/]+\/connect-managed$/.test(p) && m === "POST") {
+      if (!CLOUD_STATE.signed_in) return json({ ok: false, error: "not signed in" });
+      // Slack managed install = add a workspace. The real flow completes in the system
+      // browser; the mock installs instantly so the page's poll picks it up.
+      if (p.includes("/connectors/slack/")) {
+        slackState.workspaces.push({ team_id: "T3NEW", account: "new-workspace", domain: "new-workspace", allowed_users: ["U_ME"], allow_all: false, allowed_user_names: { U_ME: "Rohit Prasad" }, approval_owner_ids: ["U_ME"], approval_owner_names: { U_ME: "Rohit Prasad" }, installer_user_id: "U_ME", installer_name: "Rohit Prasad" });
+        slackState.connected = true;
+        slackState.mode = "relay";
+      }
+      // GitHub managed connect = install on the next account (instant, like Slack).
+      if (p.includes("/connectors/github/")) {
+        githubState.installations.push({
+          installation_id: "202", account_login: "hooli", account_type: "Organization",
+          repo_selection: "all", github_login: "rohit-dev", allowed_users: ["rohit-dev"], allow_all: false,
+        });
+        githubState.connected = true;
+        githubState.mode = "relay";
+      }
+      // Gmail managed connect = add the next mailbox; the first becomes default.
+      if (p.includes("/connectors/gmail/")) {
+        const email = GMAIL_NEXT[gmailState.accounts.length] || `acct${gmailState.accounts.length}@x.com`;
+        gmailState.accounts.push({
+          email, default: gmailState.accounts.length === 0, managed: true,
+          scopes: "gmail.readonly gmail.send", needs_reauth: false,
+        });
+      }
+      // Google Calendar managed connect = add the next account (gmail's flow).
+      if (p.includes("/connectors/google_calendar/")) {
+        const email = GCAL_NEXT[gcalState.accounts.length] || `acct${gcalState.accounts.length}@x.com`;
+        gcalState.accounts.push({
+          email, default: gcalState.accounts.length === 0, managed: true,
+          scopes: "calendar", needs_reauth: false,
+        });
+      }
+      // Outlook managed connect = add the next mailbox (email-keyed accounts).
+      if (p.includes("/connectors/outlook/")) {
+        outlookState.accounts.push({
+          account_id: `mbx${outlookState.accounts.length + 1}@openworker.com`,
+          name: `mbx${outlookState.accounts.length + 1}@openworker.com`,
+          default: outlookState.accounts.length === 0,
+          managed: true,
+        });
+      }
+      // Notion managed connect = add the next workspace (generic accounts layer).
+      if (p.includes("/connectors/notion/")) {
+        const next = NOTION_NEXT[notionState.accounts.length] || {
+          account_id: `ws-${notionState.accounts.length + 1}`, name: "extra",
+        };
+        notionState.accounts.push({
+          ...next, default: notionState.accounts.length === 0, managed: true,
+        });
+      }
+      // HubSpot managed connect = add the next portal at the requested access tier.
+      if (p.includes("/connectors/hubspot/")) {
+        const access = (req.postDataJSON() || {}).access || "read";
+        const next = HUBSPOT_NEXT[hubspotState.portals.length] || {
+          hub_id: `9${hubspotState.portals.length}`, name: "extra", sandbox: false,
+        };
+        hubspotState.portals.push({
+          ...next, default: hubspotState.portals.length === 0, managed: true, access,
+        });
+      }
+      return json({ ok: true });
+    }
+    if (p.endsWith("/v1/cloud/gallery")) {
+      return json(
+        CLOUD_STATE.signed_in
+          ? { ok: true, personas: GALLERY_PERSONAS }
+          : { ok: false, error: "gallery requires cloud sign-in", personas: [] },
+      );
+    }
+    if (/\/v1\/cloud\/gallery\/[^/]+$/.test(p)) {
+      if (!CLOUD_STATE.signed_in) return json({ ok: false, error: "gallery requires cloud sign-in" });
+      const slug = p.split("/").pop();
+      const cardBase = GALLERY_PERSONAS.find((g) => g.slug === slug) ?? GALLERY_PERSONAS[0];
+      return json({
+        ok: true,
+        card: { ...cardBase, pitch_markdown: "**Walk into every call already knowing the account.**" },
+        capabilities: {
+          tools: ["files", "search", "todo"],
+          risk: [],
+          connectors: true,
+          mcp: [],
+          messaging: true,
+          recommended_mode: "interactive",
+          recommended_models: [],
+        },
+        recommends: [
+          { kind: "connector", ref: "hubspot", reason: "read deals and contacts", tier: "core" },
+        ],
+      });
+    }
+    // provider credential check (read-only) — an api_key containing "bad" fails, else ok.
+    if (p.endsWith("/v1/providers/verify") && m === "POST") {
+      const key = String(req.postDataJSON()?.fields?.api_key || "");
+      return /bad/i.test(key)
+        ? json({ ok: false, error: "Invalid API key." })
+        : json({ ok: true });
+    }
+    // save a provider key — flips `configured`, stamps key_set_at (backend set_provider parity).
+    if (p.endsWith("/v1/providers") && m === "POST") {
+      const b = req.postDataJSON();
+      const prov = providers.find((x) => x.name === b.name);
+      if (!prov) return json({ ok: false, error: `unknown provider: ${b.name}` });
+      if (b.fields?.api_key) {
+        prov.configured = true;
+        prov.key_set_at = "2026-07-05";
+      }
+      // Backend parity: non-secret fields merge into `values` (empty clears them).
+      for (const [k, v] of Object.entries(b.fields || {})) {
+        if (k === "api_key") continue;
+        if (v) prov.values = { ...prov.values, [k]: v };
+        else if (prov.values) delete prov.values[k];
+      }
+      return json({ ok: true, provider: b.name, recommended_model: null });
+    }
+    // forget a provider's stored config (Settings ▸ Models "Remove key…").
+    if (/\/v1\/providers\/[^/]+$/.test(p) && m === "DELETE") {
+      const name = p.split("/").pop()!;
+      const prov = providers.find((x) => x.name === name);
+      if (!prov) return json({ ok: false, error: `unknown provider: ${name}` });
+      prov.configured = !prov.needs_key; // keyless (ollama) stays "configured"
+      prov.key_set_at = null;
+      return json({ ok: true, provider: name });
+    }
+    // Subscription OAuth sign-in (openai-codex): the flow "completes" instantly —
+    // signin flips the row to signed in; status mirrors it; signout clears it.
+    if (p.endsWith("/v1/providers/openai-codex/signin") && m === "POST") {
+      const prov = providers.find((x) => x.name === "openai-codex");
+      if (prov) {
+        prov.signed_in = true;
+        prov.configured = true;
+        prov.account = "rohit@example.com";
+      }
+      return json({ ok: true, started: true });
+    }
+    if (p.endsWith("/v1/providers/openai-codex/status")) {
+      const prov = providers.find((x) => x.name === "openai-codex");
+      return json({
+        signed_in: !!prov?.signed_in,
+        account: prov?.account || null,
+        authorizing: false,
+        last_error: null,
+        authorize_url: null,
+      });
+    }
+    if (p.endsWith("/v1/providers/openai-codex/signout") && m === "POST") {
+      const prov = providers.find((x) => x.name === "openai-codex");
+      if (prov) {
+        prov.signed_in = false;
+        prov.configured = false;
+        prov.account = null;
+      }
+      return json({ ok: true, had_tokens: true });
+    }
+    if (p.endsWith("/v1/providers")) return json(providers);
+    if (p.endsWith("/v1/channels/recent"))
+      return json({
+        channels: [
+          { channel: "slack:C0AAA111", name: "ocw-test", last_from: "amy", last_text: "standup at 10" },
+          { channel: "slack:C0BBB222", last_from: "bob", last_text: "deploy failed" },
+        ],
+      });
+
+    // inbox: pending items + the outbound routing binding (inline Slack config)
+    if (/\/v1\/inbox\/[^/]+\/resolve$/.test(p) && m === "POST") {
+      const id = decodeURIComponent(p.split("/")[p.split("/").length - 2]);
+      const it = inbox.find((x) => x.id === id);
+      if (it) {
+        it.state = "resolved";
+        it.resolution = req.postDataJSON().resolution;
+      }
+      return json({ ok: true });
+    }
+    if (p.endsWith("/v1/inbox/routing/binding") && m === "POST") {
+      const b = req.postDataJSON();
+      routing.channel = b.channel;
+      routing.target = b.target;
+      return json({ ok: true, bindings: [{ ...routing }] });
+    }
+    if (p.endsWith("/v1/inbox/routing")) return json({ bindings: [{ ...routing }] });
+    if (p.endsWith("/v1/inbox")) {
+      const q = new URL(req.url()).searchParams;
+      const sid = q.get("session_id");
+      const state = q.get("state");
+      return json({
+        items: inbox.filter(
+          (i) => (!sid || i.session_id === sid) && (!state || i.state === state),
+        ),
+      });
+    }
+
+    // automations: one scheduled task with a running run (drives the Automations detail page
+    // and the run-session banner + Back-to-runs flow). Mutable: Run now appends a run and opens
+    // its live session; the enable toggle (PATCH) and delete (DELETE) round-trip through the UI.
+    if (/\/v1\/automations\/[^/]+\/seen$/.test(p) && m === "POST") {
+      const id = p.split("/").slice(-2)[0];
+      const task = automations.find((t) => t.id === id);
+      if (task) {
+        task.unseen_runs = 0;
+        task.unseen_failed = false;
+        task.seen_runs_at = Math.floor(Date.now() / 1000);
+      }
+      return json({ ok: !!task });
+    }
+    if (/\/v1\/automations\/[^/]+\/run$/.test(p) && m === "POST") {
+      const id = p.split("/").slice(-2)[0];
+      const task = automations.find((t) => t.id === id);
+      if (!task) return json({ ok: false, error: "unknown task" });
+      const runId = `r${automationRuns.length + 1}`;
+      automationRuns.unshift({
+        run_id: runId,
+        task_id: id,
+        session_id: `__run__${runId}`,
+        started_at: Math.floor(Date.now() / 1000),
+        finished_at: null,
+        status: "running",
+        result_text: null,
+        artifacts: [],
+        error: null,
+        trigger: "manual",
+      });
+      return json({
+        ok: true,
+        run_id: runId,
+        session_id: `__run__${runId}`,
+        workspace: task.workspace,
+        agent: task.agent,
+        prompt: task.instructions,
+      });
+    }
+    if (/\/v1\/automations\/[^/]+$/.test(p) && m === "GET") {
+      const id = p.split("/").pop();
+      const task = automations.find((t) => t.id === id) ?? automations[0];
+      return json({ task, runs: automationRuns.filter((r) => r.task_id === task?.id) });
+    }
+    if (/\/v1\/automations\/[^/]+$/.test(p) && m === "PATCH") {
+      const id = p.split("/").pop();
+      const task = automations.find((t) => t.id === id);
+      const body = req.postDataJSON() ?? {};
+      if (task && body.revoke) {
+        // Standing-rule revocation (§25): remove the entry; `revoke` is a command,
+        // not a field to Object.assign onto the task.
+        task.always_allowed = (task.always_allowed || []).filter(
+          (r: any) => r.entry !== body.revoke,
+        );
+        return json({ ok: true, task });
+      }
+      if (task) Object.assign(task, body);
+      return json({ ok: true, task });
+    }
+    if (/\/v1\/automations\/[^/]+$/.test(p) && m === "DELETE") {
+      const id = p.split("/").pop();
+      const i = automations.findIndex((t) => t.id === id);
+      if (i >= 0) automations.splice(i, 1);
+      return json({ ok: true });
+    }
+    if (p.endsWith("/v1/automations") && m === "POST") {
+      // GUI/onboarding-recipe create (§24) — mirrors the server: title+instructions+cron
+      // required; §25 permissions become always_allowed entries (write grants only).
+      const body = req.postDataJSON() || {};
+      if (!body.title || !body.instructions || !(body.cron || body.fire_at))
+        return json({ ok: false, error: "missing fields" });
+      const grants = (body.permissions || [])
+        .filter((g: any) => g && g.access === "write" && g.tool && g.target)
+        .map((g: any) => ({ entry: `${g.tool} ${g.target}`, tool: g.tool, target: g.target }));
+      const task = {
+        ...AUTOMATION,
+        id: `task-ob-${automations.length}`,
+        title: body.title,
+        instructions: body.instructions,
+        schedule: body.cron || body.fire_at,
+        always_allowed: grants,
+        run_count: 0,
+      };
+      automations.push(task);
+      return json({ ok: true, task });
+    }
+    if (p.endsWith("/v1/automations")) return json({ tasks: automations });
+    if (p.endsWith("/v1/settings/onboarded") && m === "POST") {
+      return json({ ok: true, onboarded: !!(req.postDataJSON() || {}).value });
+    }
+    // MCP servers — mutable so the OAuth quick-add (granola) flow reflects through the
+    // UI: add → needs_auth, connect → authorizing, next poll → connected (6 tools).
+    if (p.endsWith("/v1/mcp") && m === "GET") {
+      for (const s2 of mcpServers) {
+        if (s2.status === "authorizing" && s2._flip) {
+          // Servers named locked-* simulate a guarded remote: the anonymous
+          // probe 401s (→ needs sign-in) until the entry is switched to oauth.
+          if (s2.name.startsWith("locked") && s2.auth !== "oauth") {
+            s2.status = "error";
+            s2.auth_hint = true;
+            s2.last_error = "authentication required — sign in to connect";
+          } else {
+            s2.status = "connected";
+            s2.tool_count = 6;
+            s2.last_test_at = 1700000000; // the successful probe stamps the row
+          }
+        }
+        if (s2.status === "authorizing") s2._flip = true;
+      }
+      return json({ servers: mcpServers.map(({ _flip, ...s2 }) => s2) });
+    }
+    if (p.endsWith("/v1/mcp") && m === "POST") {
+      const b = req.postDataJSON();
+      mcpServers.push({
+        name: b.name,
+        enabled: true,
+        transport: b.config?.url ? "http" : "stdio",
+        requires_approval: true,
+        auth: b.config?.auth === "oauth" ? "oauth" : null,
+        status: b.config?.auth === "oauth" ? "needs_auth" : "configured",
+        auth_hint: false,
+        last_test_at: null,
+        last_error: null,
+        tool_count: null,
+        config: b.config || {},
+      });
+      return json({ ok: true, name: b.name });
+    }
+    {
+      const mc = p.match(/\/v1\/mcp\/([^/]+)\/connect$/);
+      if (mc && m === "POST") {
+        const s2 = mcpServers.find((x) => x.name === decodeURIComponent(mc[1]));
+        if (s2) {
+          s2.status = "authorizing";
+          s2.auth_hint = false;
+          s2.last_error = null;
+          s2._flip = false;
+        }
+        return json({ ok: true, started: true });
+      }
+      const ms = p.match(/\/v1\/mcp\/([^/]+)\/signout$/);
+      if (ms && m === "POST") {
+        const s2 = mcpServers.find((x) => x.name === decodeURIComponent(ms[1]));
+        if (s2) {
+          s2.status = "needs_auth";
+          s2.tool_count = null;
+          s2._flip = false;
+        }
+        return json({ ok: true });
+      }
+      const mp = p.match(/\/v1\/mcp\/([^/]+)$/);
+      if (mp && m === "PATCH") {
+        const s2 = mcpServers.find((x) => x.name === decodeURIComponent(mp[1]));
+        const b = req.postDataJSON() || {};
+        if (s2) {
+          if (b.enabled !== undefined) s2.enabled = b.enabled;
+          if (b.auth === "oauth") {
+            // The needs-sign-in fix: entry switches to oauth; the follow-up
+            // connect runs the browser flow.
+            s2.auth = "oauth";
+            s2.auth_hint = false;
+            s2.status = "needs_auth";
+          }
+          s2.config = { ...s2.config, ...b };
+        }
+        return json({ ok: !!s2, name: mp[1] });
+      }
+      const md = p.match(/\/v1\/mcp\/([^/]+)$/);
+      if (md && m === "DELETE") {
+        const i = mcpServers.findIndex((x) => x.name === decodeURIComponent(md[1]));
+        if (i >= 0) mcpServers.splice(i, 1);
+        return json({ ok: i >= 0 });
+      }
+    }
+    if (p.endsWith("/v1/unrouted")) return json([]);
+
+    // channel subscriptions — mutable so add/remove reflect through the UI
+    if (p.endsWith("/v1/subscriptions") && m === "GET") return json({ subscriptions });
+    if (p.endsWith("/v1/subscriptions") && m === "POST") {
+      const b = req.postDataJSON();
+      // Backend parity with resolve_channel: Copy-link URLs resolve to the id; bare #names
+      // can't be looked up and are rejected with the same hint the server gives.
+      const raw = String(b.channel || "").trim();
+      if (raw.startsWith("#"))
+        return json({
+          ok: false,
+          error:
+            "Channel names can't be looked up — paste the channel ID (channel name ▸ About) or the channel's Copy-link URL.",
+        });
+      const link = raw.match(/slack\.com\/archives\/([A-Za-z0-9]+)/);
+      const channel = link ? `slack:${link[1].toUpperCase()}` : raw;
+      subscriptions.push({ session_id: b.session_id, session_title: "", agent: "", channel, routing_target: null, collision: false });
+      return json({ ok: true, channel });
+    }
+    if (p.endsWith("/v1/subscriptions/remove") && m === "POST") {
+      const b = req.postDataJSON();
+      const i = subscriptions.findIndex((s) => s.session_id === b.session_id && s.channel === b.channel);
+      if (i >= 0) subscriptions.splice(i, 1);
+      return json({ ok: true });
+    }
+
+    // Anything else: an empty-but-valid body. GET list endpoints read `?? []`/`?? {}` fallbacks.
+    return json({});
+  });
+}
+
+/** Seed a replayed transcript for one session. The shared mock answers every
+ * GET /v1/sessions/{id}/messages with `[]`, so reopening a session always starts blank;
+ * this registers a LATER route (later routes win) that stages rich history for that one
+ * session — replayed tool calls with results, connector-sourced messages, notices,
+ * reasoning — so specs can assert the reopen path (itemsFromMessages) directly instead
+ * of driving every turn live through the fake agent. Call after the page has the mock
+ * (any time before the session is opened). */
+export async function seedSessionMessages(
+  page: Page,
+  sessionId: string,
+  messages: Record<string, unknown>[],
+): Promise<void> {
+  await page.route(new RegExp(`/v1/sessions/${sessionId}/messages$`), (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ messages }),
+    }),
+  );
+}
+
+// A `test` whose page has the API mocked before navigation.
+export const test = base.extend({
+  page: async ({ page }, use) => {
+    await mockApi(page);
+    await use(page);
+  },
+});
+
+export { expect };

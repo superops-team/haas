@@ -1,5 +1,12 @@
 """Sandbox Runtime: policy + harness decl -> OpenSandbox sandbox/egress (specs/sandbox-runtime/)."""
 from haas.runtime.compiler import SandboxRuntime, SandboxWideningRejected
+from haas.runtime.delegation import (
+    DelegatedContainerRuntime,
+    DelegatedContainerUnavailable,
+    DisabledDelegatedContainerRuntime,
+    DockerDelegatedContainerRuntime,
+    FakeDelegatedContainerRuntime,
+)
 from haas.runtime.models import (
     CredentialVault,
     EgressPolicy,
@@ -11,7 +18,12 @@ from haas.runtime.models import (
 
 __all__ = [
     "CredentialVault",
+    "DelegatedContainerRuntime",
+    "DelegatedContainerUnavailable",
+    "DisabledDelegatedContainerRuntime",
+    "DockerDelegatedContainerRuntime",
     "EgressPolicy",
+    "FakeDelegatedContainerRuntime",
     "SandboxHandle",
     "SandboxNetwork",
     "SandboxResources",

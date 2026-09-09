@@ -4,8 +4,14 @@ S2 starts with an in-memory backend. SQLite/Postgres backends share the same
 domain interfaces and are introduced in later stages.
 """
 from haas.stores.memory import (
+    ApprovalNotFoundError,
+    ApprovalRecord,
+    ApprovalStateConflictError,
     CanonicalEventRecord,
     CursorNotFoundError,
+    DelegatedRuntimeRecord,
+    DelegatedSessionNotFoundError,
+    DelegatedSessionRecord,
     HarnessRecord,
     IdempotencyConflictError,
     IdempotencyReservation,
@@ -17,11 +23,18 @@ from haas.stores.memory import (
     ProviderConfig,
     SessionRecord,
     TurnRecord,
+    WorkspaceLockResult,
 )
 
 __all__ = [
+    "ApprovalNotFoundError",
+    "ApprovalRecord",
+    "ApprovalStateConflictError",
     "CanonicalEventRecord",
     "CursorNotFoundError",
+    "DelegatedRuntimeRecord",
+    "DelegatedSessionNotFoundError",
+    "DelegatedSessionRecord",
     "HarnessRecord",
     "IdempotencyConflictError",
     "IdempotencyReservation",
@@ -33,4 +46,5 @@ __all__ = [
     "ProviderConfig",
     "SessionRecord",
     "TurnRecord",
+    "WorkspaceLockResult",
 ]

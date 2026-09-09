@@ -1,7 +1,12 @@
 """Contract tests for the in-memory Stores backend (specs/stores/README.md)."""
 from haas.stores.memory import (
+    ApprovalRecord,
+    ApprovalStateConflictError,
     CanonicalEventRecord,
     CursorNotFoundError,
+    DelegatedRuntimeRecord,
+    DelegatedSessionNotFoundError,
+    DelegatedSessionRecord,
     HarnessRecord,
     IdempotencyConflictError,
     InvocationRecord,
@@ -209,3 +214,96 @@ def test_lease_renew_and_fencing_token_rejects_stale_holder() -> None:
     # Stale release must not remove the current holder's lease.
     store.release_lease(key, holder="run_a", token=first.token)
     store.assert_lease(key, holder="run_b", token=second.token)
+
+
+def test_delegated_session_store_round_trip_and_runtime_update() -> None:
+    store = MemoryStore()
+    record = DelegatedSessionRecord(
+        id="dgsess_1",
+        managerSessionId="mgr_1",
+        haasSessionId="hsess_1",
+        haasUserId="u_1",
+        harnessId="chrn_1",
+        image={"reference": "haas:local", "digest": "sha256:test"},
+        provider={
+            "providerId": "volcengine-ark",
+            "model": "doubao-seed-2.1-turbo",
+            "credentialRef": "secret://provider/ark",
+        },
+        mountManifest={
+            "version": 1,
+            "primaryWorkspace": {
+                "hostPathCanonical": "/repo",
+                "containerPath": "/workspace",
+                "access": "rw",
+            },
+        },
+        delegationPolicySnapshot={
+            "version": 1,
+            "idleTtlSeconds": 1800,
+            "maxContainerLifetimeSeconds": 28800,
+            "rwWorkspaceConcurrency": "single_writer",
+            "queuePolicy": "fifo",
+            "restorePolicy": "fail_closed",
+            "mountPolicy": "project_rw_extra_ro",
+        },
+    )
+
+    saved = store.put_delegated_session(record)
+    assert store.get_delegated_session("dgsess_1") == saved
+    assert store.get_delegated_session_by_manager("mgr_1") == saved
+    assert store.get_delegated_session_by_haas_session("hsess_1") == saved
+
+    updated = store.update_delegated_runtime(
+        "dgsess_1", DelegatedRuntimeRecord(status="ttl_destroyed", containerGeneration=2)
+    )
+    assert updated.runtime.status == "ttl_destroyed"
+    assert updated.runtime.containerGeneration == 2
+
+    try:
+        store.update_delegated_runtime("dgsess_missing", DelegatedRuntimeRecord())
+        raise AssertionError("expected DelegatedSessionNotFoundError")
+    except DelegatedSessionNotFoundError:
+        pass
+
+
+def test_approval_resolve_is_single_use() -> None:
+    store = MemoryStore()
+    approval = store.put_approval(
+        ApprovalRecord(
+            id="appr_1",
+            sessionId="hsess_1",
+            invocationId="inv_1",
+            turnId="turn_1",
+            request={"kind": "tool", "safeSummary": "Run shell"},
+        )
+    )
+    assert approval.status == "waiting"
+
+    resolved = store.resolve_approval("appr_1", {"decision": "approved"})
+    assert resolved.status == "approved"
+    assert resolved.decision == {"decision": "approved"}
+    assert resolved.resolvedAtMs is not None
+
+    try:
+        store.resolve_approval("appr_1", {"decision": "denied"})
+        raise AssertionError("expected ApprovalStateConflictError")
+    except ApprovalStateConflictError:
+        pass
+
+
+def test_workspace_lock_single_writer_allows_ro_sharing() -> None:
+    store = MemoryStore()
+    first = store.acquire_workspace_lock("/repo", "dgsess_a", "rw", ttl_ms=60_000)
+    assert first.acquired is True
+
+    second = store.acquire_workspace_lock("/repo", "dgsess_b", "rw", ttl_ms=60_000)
+    assert second.acquired is False
+    assert second.holder == "dgsess_a"
+
+    readonly = store.acquire_workspace_lock("/repo", "dgsess_ro", "ro", ttl_ms=60_000)
+    assert readonly.acquired is True
+
+    store.release_workspace_lock("/repo", "dgsess_a")
+    third = store.acquire_workspace_lock("/repo", "dgsess_b", "rw", ttl_ms=60_000)
+    assert third.acquired is True

@@ -27,6 +27,7 @@ HaaS Sidecar API
   +-- Admission Control
   +-- Event Log & SSE Replay
   +-- Policy Controller
+  +-- Manager Delegation
   +-- Model Proxy
   +-- MCP / Tool / Skill Runtime
   +-- Artifact Store
@@ -149,6 +150,8 @@ Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harn
 | P0 | Event Log & SSE | `specs/event-log-sse/README.md` | event log、SSE live/replay、ADK Event 投影 |
 | P0 | Security Boundary | `specs/security-boundary/README.md` | secretless、object scope、SSRF、artifact path、redaction、audit |
 | P0 | Policy Controller | `specs/policy-controller/README.md` | workspace、network、tool、approval、model policy 编译和准入 |
+| P0 | Manager Delegation | `specs/manager-delegation/README.md` | 面向 manager 的 delegated-session binding、mount manifest、恢复、workspace single-writer 策略、approval relay 和 provider 委派合同 |
+| P0 | Manager Product Identity | `specs/manager-product-identity/README.md` | OpenHarness 产品身份、无登录桌面行为和本地账号/连接器边界 |
 | P0 | Stores | `specs/stores/README.md` | 持久化事实源：registry/session/event/idempotency/admission 接口、schema 与迁移 |
 | P0 | Identity | `specs/identity/README.md` | bearer -> principal、tenant/workspace/userId scope、`IdentityProvider` 接口 |
 | P0 | Config | `specs/config/README.md` | env/config 装配、端口表、`load_config`/`create_app` 契约 |

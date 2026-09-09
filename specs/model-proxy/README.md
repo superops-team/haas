@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-08-26
-Related specs: [Security Boundary](../security-boundary/README.md), [Harness Adapter](../harness-adapter/README.md), [Observability](../observability/README.md)
+Related specs: [Security Boundary](../security-boundary/README.md), [Harness Adapter](../harness-adapter/README.md), [Manager Delegation](../manager-delegation/README.md), [Observability](../observability/README.md)
 
 ## 1. Component Role
 
@@ -37,6 +37,9 @@ Responsibilities:
 - Receive model-provider requests from the harness.
 - Validate the session, audience, expiry, and revocation of a short-lived runtime token.
 - Resolve the provider endpoint from the configured harness and requested model.
+- For manager-delegated sessions, resolve only manager-supplied `credentialRef`
+  values that are present in the delegated-session contract and allowed by the frozen
+  policy snapshot.
 - Inject real provider credentials into outbound requests.
 - Apply allowlist and SSRF protection to provider URLs.
 - Forward streaming responses without buffering them to completion.
@@ -151,6 +154,8 @@ Provider compatibility:
 
 - The real provider key is read only by the Model Proxy or secret resolver.
 - The harness sees only the loopback base URL and a short-TTL token.
+- A delegated HaaS container MUST NOT receive the real provider key in env, config,
+  startup command, mount, event, log, or artifact metadata.
 - A caller-provided provider base URL is accepted only through the registry allowlist.
 - Request/response logging redacts Authorization, API keys, cookies, raw messages, and tool arguments.
 - A proxy token MUST be session-scoped, audience-restricted, and revocable.
@@ -182,6 +187,7 @@ Log fields MUST use safe route ids, fingerprints, and status codes, and MUST NOT
 |----------|----------|
 | Runtime token missing/invalid | 401 `invalid_credential` |
 | Runtime token expired | 401; the adapter MAY refresh once |
+| Delegated session credentialRef missing or not allowed | fail closed with `invalid_credential` or `haas_provider_source_invalid`; do not ask the harness for a key |
 | Provider unreachable | Task fails with `haas_provider_error`, or the request returns 502 before task acceptance |
 | Stream idle timeout | Retry according to provider policy; when exhausted -> `timeout` |
 | Unsupported tool schema | Fail with safe `haas_tool_schema_unsupported`; do not silently drop the tool |
@@ -192,6 +198,7 @@ Log fields MUST use safe route ids, fingerprints, and status codes, and MUST NOT
 
 - Unit: token validation, route resolution, URL allowlist, usage normalization, and tool transforms.
 - Integration: the loopback proxy receives a harness request and injects the provider credential only outbound.
+- Integration: a delegated Codex container uses only the loopback model proxy and never observes the raw manager/provider key.
 - Streaming: SSE/chunked upstream relay is progressive and handles idle timeout.
 - Security: the provider key never appears in harness env/config/log/event/artifact/report.
 - Negative: unsupported provider, missing key, expired token, disallowed URL, and malformed upstream response.

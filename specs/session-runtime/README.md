@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-07
-Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Registry](../harness-registry/README.md), [Harness Adapter](../harness-adapter/README.md), [Event Log & SSE](../event-log-sse/README.md), [Admission Control](../admission-control/README.md)
+Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Registry](../harness-registry/README.md), [Harness Adapter](../harness-adapter/README.md), [Event Log & SSE](../event-log-sse/README.md), [Admission Control](../admission-control/README.md), [Manager Delegation](../manager-delegation/README.md)
 
 ## 1. Component Role
 
@@ -45,6 +45,9 @@ Responsibilities:
 - Freeze the configured harness as `EffectiveHarnessConfig` when the session is created.
 - Write adapter events to Event Log and maintain session `state` from ADK `stateDelta`.
 - Ensure consistent terminal states for streaming `/run_sse` and non-streaming `/run`.
+- For delegated sessions, persist the HaaS session, native session reference,
+  delegated-session reference, approval waits, and runtime-generation metadata needed
+  for follow-up restoration.
 - Manage cancellation, timeout, step budget, session expiry, and session deletion.
 - After a sidecar restart, recover recoverable sessions from persistent state or fail closed into a non-recoverable state.
 
@@ -68,6 +71,7 @@ Non-responsibilities:
 | `PATCH /apps/{app}/users/{user}/sessions/{sid}` | Applies `stateDelta` idempotently |
 | `DELETE /apps/{app}/users/{user}/sessions/{sid}` | Deletes the session and cancels active work |
 | `POST /v1/haas/sessions/{sid}/invocations/{id}/cancel` | Idempotently cancels a running invocation through the HaaS native API |
+| `POST /v1/haas/sessions/{sid}/approvals/{approval_id}` | Resolves a manager approval decision for a waiting delegated action |
 
 ### 5.2 Internal API
 
@@ -79,6 +83,7 @@ async def delete_session(app_name: str, user_id: str, session_id: str) -> None: 
 async def start_turn(req: TurnStartRequest) -> TurnRecord: ...
 async def mark_turn_terminal(turn_id: str, result: TurnTerminalResult) -> None: ...
 async def cancel_invocation(session_id: str, invocation_id: str) -> InvocationRecord: ...
+async def resolve_approval(session_id: str, approval_id: str, decision: ApprovalDecision) -> ApprovalRecord: ...
 async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReservation: ...
 ```
 
@@ -105,6 +110,12 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
     "adapterId": "codex-app-server",
     "opaque": "encrypted-or-private-ref",
     "generation": 1
+  },
+  "delegatedSessionRef": {
+    "delegatedSessionId": "dgsess_abc",
+    "managerSessionId": "mgr_sess_123",
+    "containerGeneration": 3,
+    "runtimeStatus": "idle"
   },
   "createdAtMs": 1786400000000,
   "updatedAtMs": 1786400000000,
@@ -151,7 +162,49 @@ In the initial release, `turnId` and invocation are one-to-one, with distinct ID
 
 `SessionRecord` MUST project losslessly to an ADK `Session` (`{id, appName, userId, state, events[], lastUpdateTime}`). Internal fields such as tenantId MUST NOT enter public output.
 
-### 6.4 State Merge Semantics
+### 6.4 Delegated Session Reference
+
+For manager-delegated sessions, `SessionRecord.delegatedSessionRef` links the HaaS
+session to the durable delegated-session contract defined in
+[Manager Delegation](../manager-delegation/README.md). Session Runtime stores only the
+HaaS-owned reference and runtime generation. The full mount manifest, policy snapshot,
+manager session id, image digest, and provider credential reference are persisted by
+the delegated-session store contract and MUST NOT be exposed through the ADK `Session`
+projection.
+
+The presence of `delegatedSessionRef` means:
+
+- continuation uses the HaaS delegated-session restore path before starting a new turn;
+- TTL cleanup may destroy the container but MUST NOT expire the HaaS session;
+- `session_expired` is reserved for HaaS session retention expiry, not idle container TTL;
+- failed restore moves the invocation to failed/non-resumable evidence and does not
+  fall back to local execution.
+
+### 6.5 ApprovalRecord
+
+```json
+{
+  "id": "appr_abc",
+  "sessionId": "hsess_abc",
+  "invocationId": "inv_abc",
+  "turnId": "turn_abc",
+  "status": "waiting",
+  "request": {
+    "kind": "tool",
+    "safeSummary": "Run shell command in /workspace",
+    "policyReason": "tool_requires_approval"
+  },
+  "decision": null,
+  "createdAtMs": 1786400000000,
+  "resolvedAtMs": null
+}
+```
+
+Approval records are persisted so a stream disconnect or sidecar restart does not lose
+the pending decision. The record stores only a safe summary and policy reason, not full
+tool arguments or raw prompts.
+
+### 6.6 State Merge Semantics
 
 Session `state` has two write sources. Both are serialized through the same sessionKey write queue and use the same merge rules:
 
@@ -160,7 +213,7 @@ Session `state` has two write sources. Both are serialized through the same sess
 
 Constraints: deletion is not allowed and requires an explicit extension field; on conflict, the last arriving scalar wins; merge is an idempotent pure function to support recovery replay.
 
-### 6.5 Idempotency Replay Semantics
+### 6.7 Idempotency Replay Semantics
 
 `IdempotencyStore.reserve(key_hash, request_hash)` records the first `request_hash`; see [Stores](../stores/README.md) §5. Subsequent requests with the same key behave as follows:
 
@@ -215,6 +268,12 @@ Rules:
 - Only one invocation MAY run in a session at a time; concurrent requests return `409 session_busy`.
 - `model` MAY change from run to run within the same session.
 - Session deletion first cancels active work, then makes history and artifacts unreachable.
+- A manager-delegated session may transition between `active` and `idle` while its
+  container transitions through `running`, `ttl_destroyed`, and `restoring`. Container
+  TTL does not by itself expire the HaaS session or release the delegated binding.
+- `/run_sse` MUST stream while the invocation is running by consuming Session Runtime's
+  live event stream. It MUST NOT wait for `run()` to complete and then replay all
+  events as a completed batch.
 
 ## 8. Security and Authorization
 
@@ -261,6 +320,9 @@ Adapter calls (`prepare_session`, `start_turn`, `stream_events`, and `finalize_t
 | Disconnect after cancellation | Persist cancellation intent; the final state MUST remain readable |
 | Session lease renew fails or lease is fenced out | Stop writing through the stale holder, write failure only if fencing still allows it, and surface the existing adapter-error path |
 | Event log write fails | The run MUST NOT claim success; an accepted task MUST produce terminal failure evidence |
+| Delegated container was destroyed by idle TTL | Restore runtime resources from the delegated-session contract before starting the next turn |
+| Delegated restore fails | Return `haas_delegation_restore_failed` or a more specific delegation error; do not run locally |
+| Approval bridge is waiting | Persist `ApprovalRecord`; resume the adapter only after manager resolves it |
 
 ## 11. Test Plan and Acceptance Criteria
 
@@ -268,5 +330,8 @@ Adapter calls (`prepare_session`, `start_turn`, `stream_events`, and `finalize_t
 - Integration: parity between non-streaming `/run` and streaming `/run_sse`, session read-back, PATCH stateDelta, cancellation, and DELETE.
 - Concurrency: concurrent requests in the same session return `session_busy`; different sessions MAY run concurrently; a long turn exceeding one lease TTL remains protected by renewal.
 - Recovery: simulate sidecar restart, adapter reconnect, missing native reference, expired session, stale holder fencing rejection, and adapter timeout terminalization.
+- Integration: `/run_sse` emits events progressively before invocation terminal state, and native event replay can reconnect while the turn is still running.
+- Integration: delegated session continuation after container TTL restore reuses the HaaS session and native Codex reference when recoverable.
+- Approval: pending approval survives SSE disconnect and is resolved through the HaaS native approval API.
 - Compatibility: align ADK client behavior for session GET/PATCH/DELETE.
 - Security: all cross-principal access returns 404; secret-shaped input does not enter default logs.

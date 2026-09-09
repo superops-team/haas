@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-07
-Related specs: [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Harness Registry](../harness-registry/README.md), [Admission Control](../admission-control/README.md)
+Related specs: [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Harness Registry](../harness-registry/README.md), [Admission Control](../admission-control/README.md), [Manager Delegation](../manager-delegation/README.md)
 
 ## 1. Component Role
 
@@ -16,10 +16,11 @@ Initial implementation sequence: S2 provides an `in-memory` implementation to su
 
 | Source | Adopted concepts |
 |--------|------------------|
-| Session Runtime | Session/invocation/turn records, leases, and idempotency reservations |
+| Session Runtime | Session/invocation/turn records, approval waits, leases, and idempotency reservations |
 | Event Log & SSE | Canonical event persistence and cursor reads |
 | Harness Registry | Harness configuration persistence |
 | Admission Control | Shared quota/rate counters that MUST be shared within a deployment |
+| Manager Delegation | Delegated-session contracts, policy snapshots, mount manifests, runtime generations, and workspace locks |
 
 ## 3. Upstream and Downstream Relationships
 
@@ -29,6 +30,7 @@ Initial implementation sequence: S2 provides an `in-memory` implementation to su
 | Upstream | Event Log & SSE | Appends and reads events; replays cursors |
 | Upstream | Harness Registry | Reads and writes harness configurations |
 | Upstream | Admission Control | Reads and writes quota/rate counters |
+| Upstream | Manager Delegation | Reads and writes delegated-session contracts and workspace lock state |
 | Downstream | Concrete backend | in-memory / SQLite / Postgres |
 
 ## 4. Responsibility Boundaries
@@ -109,6 +111,16 @@ class AdmissionStore(Protocol):
 > Observability. It does not return record contents, apply scope filtering, or
 > serve as a business listing entry point. Paginated listing across users is
 > defined separately by `GET /v1/haas/sessions` in a later phase.
+
+class DelegationStore(Protocol):
+    async def put_delegated_session(self, record: DelegatedSessionRecord) -> DelegatedSessionRecord: ...
+    async def get_delegated_session(self, delegated_session_id: str) -> DelegatedSessionRecord | None: ...
+    async def get_by_manager_session(self, manager_session_id: str) -> DelegatedSessionRecord | None: ...
+    async def update_runtime_generation(self, delegated_session_id: str, runtime: DelegatedRuntimeRecord) -> None: ...
+    async def put_approval(self, approval: ApprovalRecord) -> ApprovalRecord: ...
+    async def resolve_approval(self, approval_id: str, decision: ApprovalDecision) -> ApprovalRecord: ...
+    async def acquire_workspace_lock(self, canonical_workspace: str, delegated_session_id: str, access: str, ttl_ms: int) -> WorkspaceLockResult: ...
+    async def release_workspace_lock(self, canonical_workspace: str, delegated_session_id: str) -> None: ...
 ```
 
 ## 6. Data Model
@@ -129,6 +141,9 @@ Default retention values:
 |------|-------------------|
 | Event | Same as session retention, or configurable |
 | Session | Configurable TTL, 30 days by default; unreadable after `expiresAtMs` |
+| Delegated session contract | Same as session retention; idle container TTL MUST NOT delete it |
+| Approval record | Same as invocation/event retention |
+| Workspace lock | Lease-backed; expires only after confirmed terminal/cleanup state or lock TTL takeover |
 | Idempotency key | 24 hours, or released after the request reaches a terminal state |
 | Admission counters | Rolling window, whose size defines the dimension |
 
@@ -157,6 +172,17 @@ migration:
 `acquire_lease` is the basis for active-turn mutual exclusion: only one holder MAY hold a lease for a given `SessionKey`. The returned `Lease` includes an opaque, monotonically increasing fencing token (`token`). Every write performed on behalf of an active turn MUST be guarded by the holder and token. If the current lease is absent, expired, held by another holder, or has a different token, the write MUST fail closed instead of appending events or overwriting session/invocation/turn state.
 
 A running holder MUST renew its lease before expiry. `renew_lease` succeeds only for the current holder/token and extends `expiresAtMs` without changing the token. An expired lease MAY be taken over by a new holder, and takeover MUST allocate a strictly newer token. The new holder MUST be able to explain the previous holder's final state; otherwise it MUST fail closed. Release is best-effort and MUST remove the lease only when holder and, when supplied, token match the current lease.
+
+Delegated-session records are the recovery source for manager-delegated execution. A
+container id, process id, socket path, or port allocation is not a durable fact. When a
+container is destroyed by idle TTL, Stores retain the delegated-session contract,
+policy snapshot, mount manifest, approval history, HaaS session id, native session
+reference, and container generation.
+
+Workspace locks are keyed by canonical host workspace and access mode. For `rw`
+delegated sessions, only one active holder is allowed; `ro` locks may be shared.
+Takeover after expiry MUST first verify that the previous holder reached terminal or
+cleanup state, or fail closed.
 
 ## 8. Security and Authorization
 
@@ -190,6 +216,9 @@ Logs:
 | Event append fails | The invocation MUST NOT claim `completed`; Session Runtime writes failure evidence |
 | Migration fails | Startup fails closed; the service MUST NOT run against an old schema |
 | Lease expires | Takeover is allowed only with a newer fencing token; stale holders cannot append events or overwrite records and the new holder must inspect/explain previous state before proceeding |
+| Delegated runtime record is missing | Restore fails closed; do not infer configuration from a live container |
+| Workspace lock holder is ambiguous | Do not grant a second `rw` lock; return `haas_workspace_lock_busy` or timeout |
+| Approval decision conflicts with resolved record | Return `haas_approval_state_conflict` |
 | Partial write | Roll back the transaction; no distributed transaction is guaranteed across stores, and use an Outbox when necessary |
 
 ## 11. Test Plan and Acceptance Criteria
@@ -197,5 +226,7 @@ Logs:
 - Unit: UPSERT for each record, cursor reads, lease acquire/renew/assert/release including fencing rejection, and idempotency replay/release.
 - Integration: use the in-memory store to exercise the complete S2 protocol and S3 fake-adapter path.
 - Recovery: after writing and restarting the process, recover session/event/idempotency data from the store.
+- Recovery: after idle TTL cleanup and process restart, recover the delegated-session contract, policy snapshot, approval waits, and workspace-lock state.
+- Concurrency: store-backed workspace lock prevents two active `rw` delegated sessions for the same canonical workspace.
 - Schema: old data remains readable after a forward migration; rollback is explicitly unsupported.
 - Security: a full store audit contains no plaintext secrets, verified with negative assertions after constructed inputs.

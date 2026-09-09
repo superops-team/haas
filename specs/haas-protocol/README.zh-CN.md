@@ -95,10 +95,15 @@ HaaS 自有控制面，只做 U 未覆盖能力，不改写 ADK 字段语义：
 | PUT | `/v1/haas/harnesses/{harness_id}` | 更新 harness，`id`/`base`/`createdAtMs` 不变 |
 | DELETE | `/v1/haas/harnesses/{harness_id}` | 删除 harness，不删历史 session |
 | GET | `/v1/haas/models` | 全局 model catalog（按 base 分组） |
+| POST | `/v1/haas/delegated-sessions` | 创建或绑定 manager 拥有的 delegated session（支持 `Idempotency-Key`） |
+| GET | `/v1/haas/delegated-sessions/{delegated_session_id}` | 读取 delegated-session contract、policy snapshot、mount manifest 与 runtime status |
+| POST | `/v1/haas/delegated-sessions/{delegated_session_id}/restore` | 按持久 delegated-session contract 重建运行资源 |
+| POST | `/v1/haas/delegated-sessions/{delegated_session_id}/policy` | 显式更新或 rebind 后续 delegated turn 使用的 policy snapshot |
 | GET | `/v1/haas/sessions` | 跨 user 分页列出 session（管理视角） |
 | GET | `/v1/haas/sessions/{session_id}/events` | HaaS canonical SSE replay/live（带 cursor） |
 | GET | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/events` | invocation 级 canonical SSE replay/live |
 | POST | `/v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel` | 取消运行中 invocation，幂等（`Idempotency-Key` 支持） |
+| POST | `/v1/haas/sessions/{session_id}/approvals/{approval_id}` | 把 manager 审批决策回传给等待中的 delegated action |
 | GET | `/v1/haas/sessions/{session_id}/artifacts` | HaaS artifact listing |
 | GET | `/v1/haas/sessions/{session_id}/artifacts/archive` | 下载 session artifact 归档（zip） |
 | POST | `/v1/haas/files` | 上传 input file（multipart），返回 `File` 对象 |
@@ -222,6 +227,25 @@ ADK 兼容路径返回带 `detail` 的错误（FastAPI 惯例），并附加结�
 `code` 使用 HaaS 稳定错误码，`haasError` 为 HaaS 扩展，ADK 客户端只读 `detail`。
 错误码唯一目录见 [ERROR-CODES](ERROR-CODES.zh-CN.md)，OpenAPI 的 `haasError.code`
 与之对齐；新增错误码必须先更新目录。
+
+### 6.5 Delegated Session
+
+HaaS native delegated-session API 使用
+[Manager Delegation](../manager-delegation/README.zh-CN.md) 定义的
+`DelegatedSessionContract`。该合同只在 HaaS native surface 上公开；
+ADK-compatible path 不得暴露 manager session id、host mount path、image digest、
+credential reference、runtime container id 或 approval id，除非它们以已脱敏/安全的
+HaaS event 明确表达。
+
+`POST /v1/haas/delegated-sessions` 要求传入 manager 已授权的 mount manifest 与
+delegation policy snapshot。相同 `Idempotency-Key` 且 request hash 相同的重放返回
+第一次 delegated-session 结果，不得创建第二个容器。
+
+`POST /v1/haas/delegated-sessions/{id}/restore` 只能按持久合同恢复。恢复前必须重新
+校验 mount manifest 与 policy；任何漂移都用稳定错误码 fail closed。
+
+`POST /v1/haas/sessions/{session_id}/approvals/{approval_id}` 只接受 manager 的显式
+审批决策。approval bridge 不可用时，HaaS 不得 auto-approve。
 
 ## 7. 运行模型与状态机
 

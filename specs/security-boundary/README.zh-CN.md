@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-08-30
-Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Model Proxy](../model-proxy/README.zh-CN.md), [MCP / Tool / Skill Runtime](../mcp-tool-skill-runtime/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md)
+Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Model Proxy](../model-proxy/README.zh-CN.md), [MCP / Tool / Skill Runtime](../mcp-tool-skill-runtime/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -54,6 +54,7 @@ Security Boundary 定义 HaaS 所有公开入口、内部 adapter、模型代理
 def redact(value: object, *, context: RedactionContext) -> object: ...
 def validate_scope(principal: Principal, obj: ScopedObject, action: str) -> ScopeDecision: ...
 def validate_url(url: str, policy: UrlPolicy) -> UrlDecision: ...
+def validate_mount_manifest(manifest: MountManifest, policy: EffectivePolicy) -> MountDecision: ...
 def issue_runtime_token(scope: RuntimeTokenScope, ttl_seconds: int) -> RuntimeToken: ...
 def resolve_secret(ref: str, audience: str) -> SecretValue: ...
 def validate_artifact_path(container_root: str, requested: str) -> SafePath: ...
@@ -173,7 +174,17 @@ secret_ref configured
 - 响应必须带 `X-Content-Type-Options: nosniff`。
 - HTML/JS/SVG 等主动内容应使用独立 origin 或 attachment。
 
-### 8.5 Redaction Taxonomy
+### 8.5 Delegated Mount Safety
+
+Manager-delegated execution 可以把用户授权的项目根目录挂进 HaaS 容器，但 mount contract 仍受 Security Boundary 约束：
+
+- primary project mount 只有在 manager 显式授权后才允许为 `/workspace:rw`；
+- extra mount 默认 `ro`，升级为 `rw` 需要显式授权；
+- 用户 HOME、超出项目授权的父目录、Docker socket、SSH 目录、credential store 和未请求路径均拒绝；
+- restore 创建容器前必须重新校验路径存在性、canonical path、类型、symlink 边界和 access mode；
+- 失败返回结构化安全错误，不回退本地执行。
+
+### 8.6 Redaction Taxonomy
 
 `redact(value, context)` 按以下分类统一处理；识别方式为「字段级规则 + 正则
 table」。正则 table 与提交门禁 `scripts/quality/secret-scan.py` 共用同一份
@@ -226,6 +237,7 @@ model proxy 与 OpenSandbox client 共用，禁止各自复制一份。
 | runtime token 过期 | proxy 返回 401；adapter 可刷新一次，失败则 task failed |
 | redaction pipeline 失败 | fail closed，不写未脱敏 payload |
 | artifact path traversal | 拒绝访问并记录安全事件 |
+| delegated mount validation 失败 | 用 `haas_delegation_mount_invalid` 拒绝；要求重新授权或 policy rebind |
 
 ## 11. 测试计划与验收
 
@@ -234,3 +246,4 @@ model proxy 与 OpenSandbox client 共用，禁止各自复制一份。
 - Proxy：真实 provider key 不进入 harness env/config；短期 token 过期和撤销生效。
 - Event/log：构造含 key/header/raw prompt/tool args 的输入，断言公开面全部脱敏。
 - Container：AIO 容器内无默认公开 secret；`/health`、`/ready` 不输出敏感环境。
+- Delegation：HOME、Docker socket、SSH path、symlink escape、父目录扩大和 mount drift 在 create 与 restore 时均被拒绝。

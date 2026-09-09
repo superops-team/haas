@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-07
-Related specs: [Container Runtime](../container-runtime/README.md), [Stores](../stores/README.md), [Identity](../identity/README.md), [HaaS Protocol](../haas-protocol/README.md)
+Related specs: [Container Runtime](../container-runtime/README.md), [Stores](../stores/README.md), [Identity](../identity/README.md), [HaaS Protocol](../haas-protocol/README.md), [Manager Delegation](../manager-delegation/README.md)
 
 ## 1. Component Role
 
@@ -52,6 +52,7 @@ class AppConfig:
     mcp_proxy: McpProxyConfig
     adapters: AdaptersConfig
     session_runtime: SessionRuntimeConfig
+    delegation: DelegationConfig
     observability: ObservabilityConfig
 
 def load_config(path: str | None) -> AppConfig: ...
@@ -96,6 +97,14 @@ The environment-variable prefix is uniformly `HAAS_`. For example:
 | `HAAS_SIDECAR_PORT` | Sidecar port (default: `8092`) |
 | `HAAS_STORE_BACKEND` | Production default: `sqlite`; `memory` is test-only; `postgres` is reserved for multi-replica deployments |
 | `HAAS_IDENTITY_PROVIDER` | `static` / `external_jwt` |
+| `HAAS_STATIC_TOKEN_FILE` | User-private file containing the local static bearer token; when configured, missing/empty files fail closed instead of falling back to `dev-token` |
+| `HAAS_DELEGATION_CONTAINER_BACKEND` | `disabled` by default; `docker` enables the Docker delegated runtime |
+| `HAAS_DELEGATION_DOCKER_BIN` | Docker CLI path/name used when the delegated backend is `docker` |
+| `HAAS_DELEGATION_DOCKER_NETWORK` | Docker network mode for delegated containers (`none` by default) |
+| `HAAS_DELEGATION_ALLOW_UNPINNED_LOCAL_IMAGE` | Local-development escape hatch allowing an unpinned image tag such as `haas:local`; default `false`, production MUST keep digest pinning |
+| `HAAS_DELEGATION_IDLE_TTL_SECONDS` | Default idle TTL for delegated-session containers (`1800`) |
+| `HAAS_DELEGATION_MAX_CONTAINER_LIFETIME_SECONDS` | Default maximum delegated container lifetime (`28800`) |
+| `HAAS_DELEGATION_RW_WORKSPACE_CONCURRENCY` | `single_writer` in the initial release |
 
 The default configuration file is `haas.yaml`. Precedence is: defaults < configuration file < environment variables.
 
@@ -111,6 +120,7 @@ store:
   event_retention_seconds: 2592000
 identity:
   provider: static
+  static_token_file: null
 model_proxy:
   listen: "127.0.0.1:18080"
 mcp_proxy:
@@ -124,7 +134,25 @@ session_runtime:
   lease_ttl_ms: 30000
   lease_renew_interval_ms: 10000
   turn_timeout_seconds: 900
+delegation:
+  container_backend: disabled
+  docker_bin: docker
+  docker_network: none
+  allow_unpinned_local_image: false
+  idle_ttl_seconds: 1800
+  max_container_lifetime_seconds: 28800
+  rw_workspace_concurrency: single_writer
+  queue_policy: fifo
+  restore_policy: fail_closed
+  policy_change_mode: snapshot_per_session
+  mount_policy: project_rw_extra_ro
 ```
+
+`delegation` is an independent configuration namespace. It provides defaults used
+when a manager creates a delegated session; the effective values are copied into the
+delegated-session policy snapshot. Later configuration changes affect only new
+delegated sessions unless an explicit policy update/rebind API call changes an existing
+session.
 
 Ports and service discovery are fixed as follows:
 
@@ -146,6 +174,8 @@ startup -> load_config(HAAS_CONFIG) -> validate -> build AppConfig -> create_app
 - Provider keys and MCP tokens MUST NOT be accepted as plaintext environment variables or YAML values; only `credentialRef` is allowed.
 - Configuration dumps and diagnostic output MUST be redacted and MUST NOT contain DSNs, keys, or passphrases.
 - Loopback services (18080/18081) MUST bind only to `127.0.0.1`.
+- Delegation policy configuration MUST NOT contain host paths or credentials. Host
+  paths are supplied only through manager-approved mount manifests.
 
 ## 9. Observability
 
@@ -164,5 +194,6 @@ startup -> load_config(HAAS_CONFIG) -> validate -> build AppConfig -> create_app
 ## 11. Test Plan and Acceptance Criteria
 
 - Unit: three-tier precedence, fail-fast behavior for invalid configuration, and secret rejection.
+- Unit: delegation defaults and environment overrides produce a stable policy snapshot without mutating existing delegated sessions.
 - Integration: `create_app(config)` starts with a memory store and static identity and passes `/v1/haas/health`.
 - Security: configuration files and dumps contain no plaintext secrets.

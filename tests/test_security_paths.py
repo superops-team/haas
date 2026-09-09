@@ -29,7 +29,6 @@ from haas.security.redact import (
     validate_url,
 )
 
-
 _COUNTER = iter(range(1000))
 
 

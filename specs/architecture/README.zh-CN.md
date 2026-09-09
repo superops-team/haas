@@ -24,6 +24,7 @@ HaaS Sidecar API (FastAPI)
   +-- Admission Control
   +-- Event Log & SSE Replay
   +-- Policy Controller
+  +-- Manager Delegation
   +-- Artifact Store
   +-- Security Boundary
   +-- Observability
@@ -53,7 +54,8 @@ OpenSandbox AIO container runtime
 3. `configured harness` 是执行能力单位，`appName` 即 configured harness `id`。
 4. `Sandbox Runtime` 把各 harness 的执行 sandbox 统一投影到 OpenSandbox AIO 的 sandbox/execd/credential vault——这是多 harness 标准化的运行时承载体，不是只把 AIO 当 base image。
 5. `Admission Control` 负责服务化的配额、限流、并发与队列准入。
-6. `Stores` 是唯一持久事实源；`Identity` 是鉴权边界；`Config` 是装配契约（三者见各自 spec）。
+6. `Manager Delegation` 定义上游 manager 如何把 session、policy、mount manifest、审批与容器恢复绑定到 HaaS 这个完整执行后端。
+7. `Stores` 是唯一持久事实源；`Identity` 是鉴权边界；`Config` 是装配契约（三者见各自 spec）。
 
 端到端请求时序见 [WALKTHROUGH](WALKTHROUGH.zh-CN.md)。仓库首页使用的双语
 Guided Trace GIF 合同见 [README 可视化叙事](VISUAL-STORYTELLING.zh-CN.md)。
@@ -78,6 +80,7 @@ Logo、README 顶部、指标定义与徽章发布合同见
 | 下游 | Harness Registry | 管理 configured harness（ADK app） |
 | 下游 | Session Runtime | 管理 session/invocation/turn |
 | 下游 | Admission Control | 配额、限流、并发、队列准入 |
+| 下游 | Manager Delegation | 面向 manager 的 delegated session binding、恢复、approval relay 和 workspace single-writer 合同 |
 | 下游 | Harness Adapter | 隔离具体 harness |
 | 下游 | Sandbox Runtime | 统一投影执行 sandbox 到 OpenSandbox |
 | 下游 | Container Runtime | 承接 OpenSandbox AIO 镜像与进程拓扑 |
@@ -123,6 +126,7 @@ Logo、README 顶部、指标定义与徽章发布合同见
 | Session | yes | Session Runtime | `(appName, userId, sessionId)` 三元组唯一 |
 | Turn | internal | Session Runtime | adapter 执行单元，首期与 invocation 一一对应 |
 | Event | yes | Event Log & SSE | ADK `Event` 投影，invocation-scoped |
+| DelegatedSession | yes on HaaS native API | Manager Delegation / Session Runtime | manager 到 HaaS 的 binding、policy snapshot、mount manifest 与 runtime restore 合同 |
 | File | yes | Artifact Store | input files and produced artifacts |
 | Policy | internal/public summary | Policy Controller | effective runtime constraints |
 | RuntimeToken | internal | Security Boundary / Model Proxy | short TTL scoped token |
@@ -134,6 +138,7 @@ request received
   -> protocol/auth/scope validation (Identity -> Principal)
   -> appName resolution (harness id/name)
   -> admission control (quota/rate/queue)
+  -> optional manager delegation binding/restore validation
   -> session/run admission (Idempotency + lease)
   -> policy compilation
   -> sandbox projection (workspace/network/tool -> OpenSandbox)

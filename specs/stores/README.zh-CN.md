@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-07
-Related specs: [Session Runtime](../session-runtime/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md)
+Related specs: [Session Runtime](../session-runtime/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -16,10 +16,11 @@ Stores 是 HaaS 的持久化事实源。它统一定义 registry、session、eve
 
 | 来源 | 采用内容 |
 |------|----------|
-| Session Runtime | session/invocation/turn record、lease、idempotency reservation |
+| Session Runtime | session/invocation/turn record、approval wait、lease、idempotency reservation |
 | Event Log & SSE | canonical event 持久化与 cursor read |
 | Harness Registry | harness config 持久化 |
 | Admission Control | 共享配额/速率计数，要求「部署内共享」 |
+| Manager Delegation | delegated-session contract、policy snapshot、mount manifest、runtime generation 和 workspace lock |
 
 ## 3. 上游与下游关系
 
@@ -29,6 +30,7 @@ Stores 是 HaaS 的持久化事实源。它统一定义 registry、session、eve
 | 上游 | Event Log & SSE | append/read event、cursor replay |
 | 上游 | Harness Registry | 读写 harness config |
 | 上游 | Admission Control | 读写配额/速率计数 |
+| 上游 | Manager Delegation | 读写 delegated-session contract 与 workspace lock 状态 |
 | 下游 | 具体 backend | in-memory / SQLite / Postgres |
 
 ## 4. 职责边界
@@ -105,6 +107,16 @@ class AdmissionStore(Protocol):
 > `count_sessions` 只服务 Observability 的 `activeSessions` 摘要（低基数聚合），
 > 不返回 record 内容、不做 scope 过滤、不作为业务列举入口。跨 user 的分页列举
 > 由 `GET /v1/haas/sessions` 单独定义，落在后续阶段。
+
+class DelegationStore(Protocol):
+    async def put_delegated_session(self, record: DelegatedSessionRecord) -> DelegatedSessionRecord: ...
+    async def get_delegated_session(self, delegated_session_id: str) -> DelegatedSessionRecord | None: ...
+    async def get_by_manager_session(self, manager_session_id: str) -> DelegatedSessionRecord | None: ...
+    async def update_runtime_generation(self, delegated_session_id: str, runtime: DelegatedRuntimeRecord) -> None: ...
+    async def put_approval(self, approval: ApprovalRecord) -> ApprovalRecord: ...
+    async def resolve_approval(self, approval_id: str, decision: ApprovalDecision) -> ApprovalRecord: ...
+    async def acquire_workspace_lock(self, canonical_workspace: str, delegated_session_id: str, access: str, ttl_ms: int) -> WorkspaceLockResult: ...
+    async def release_workspace_lock(self, canonical_workspace: str, delegated_session_id: str) -> None: ...
 ```
 
 ## 6. 数据模型
@@ -125,6 +137,9 @@ Retention 默认值：
 |------|----------|
 | Event | 与 session 保留期同或按配置 |
 | Session | TTL 可配，默认 30 天；`expiresAtMs` 过期不可读 |
+| Delegated session contract | 与 session 保留期同；idle container TTL 不得删除它 |
+| Approval record | 与 invocation/event 保留期同 |
+| Workspace lock | lease-backed；只在确认 terminal/cleanup 状态后或 lock TTL takeover 后过期 |
 | Idempotency key | 24 小时或请求终态后释放 |
 | Admission 计数 | 滚动窗口（窗口大小即维度定义） |
 
@@ -152,6 +167,15 @@ migration:
 `acquire_lease` 是 active-turn 互斥的基础：同一 `SessionKey` 只允许一个 holder 持 lease。返回的 `Lease` 包含不透明且单调递增的 fencing token（`token`）。所有代表 active turn 的写入都必须用 holder 与 token 做保护；如果当前 lease 不存在、已过期、归属其他 holder，或 token 不一致，写入必须 fail closed，不能追加 event 或覆盖 session/invocation/turn 状态。
 
 运行中的 holder 必须在过期前续租。`renew_lease` 仅在当前 holder/token 匹配时成功，并延长 `expiresAtMs` 且不改变 token。过期 lease 可被新 holder 接管，接管必须分配更大的 token。新 holder 必须能 explain 前 holder 的 final state，否则 fail closed。release 是 best-effort，只有 holder 与（如提供）token 匹配当前 lease 时才删除 lease。
+
+Delegated-session record 是 manager-delegated execution 的恢复事实源。container id、
+process id、socket path 或 port allocation 都不是持久事实。容器被 idle TTL 销毁后，
+Stores 仍保留 delegated-session contract、policy snapshot、mount manifest、approval
+history、HaaS session id、native session reference 和 container generation。
+
+Workspace lock 按 canonical host workspace 与 access mode 建模。对 `rw` delegated
+session，同一时间只允许一个 active holder；`ro` lock 可共享。过期接管前必须确认
+前 holder 已进入 terminal 或 cleanup 状态，否则 fail closed。
 
 ## 8. 安全与权限
 
@@ -185,6 +209,9 @@ Logs：
 | event append 失败 | invocation 不得宣称 completed（Session Runtime 写 failure evidence） |
 | migration 失败 | startup fail closed，不裸跑旧 schema |
 | lease 过期 | 仅允许使用更新的 fencing token 接管；过期 holder 不能 append event 或覆盖 record，接管者必须先 inspect/explain 前 holder 状态 |
+| delegated runtime record 缺失 | restore fail closed；不得从 live container 反推配置 |
+| workspace lock holder 不明确 | 不授予第二个 `rw` lock；返回 `haas_workspace_lock_busy` 或 timeout |
+| approval decision 与已解析记录冲突 | 返回 `haas_approval_state_conflict` |
 | 部分写入 | 事务回滚；无跨 store 的分布式事务保证，必要时用 Outbox 补 |
 
 ## 11. 测试计划与验收
@@ -192,5 +219,7 @@ Logs：
 - Unit：各 record UPSERT、cursor read、lease acquire/renew/assert/release（含 fencing 拒绝）、idempotency replay/release。
 - Integration：in-memory store 跑通 S2 协议与 S3 fake adapter 全链路。
 - Recovery：写入后重启进程，session/event/idempotency 可从 store 恢复。
+- Recovery：idle TTL 清理和进程重启后，delegated-session contract、policy snapshot、approval wait 和 workspace-lock state 可恢复。
+- Concurrency：store-backed workspace lock 阻止同一 canonical workspace 的两个 active `rw` delegated session。
 - Schema：forward migration 后旧数据可读；rollback 明确不支持。
 - Security：store 全量审计不包含明文 secret（构造输入后反向断言）。

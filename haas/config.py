@@ -10,6 +10,8 @@ from typing import Any
 import yaml
 from fastapi import FastAPI
 
+from haas.identity import Principal
+
 # --- Configuration models -------------------------------------------------
 
 
@@ -29,6 +31,7 @@ class StoreConfig:
 @dataclass
 class IdentityConfig:
     provider: str = "static"
+    static_token_file: str | None = None
 
 
 @dataclass
@@ -39,6 +42,21 @@ class ModelProxyConfig:
 @dataclass
 class McpProxyConfig:
     listen: str = "127.0.0.1:18081"
+
+
+@dataclass
+class DelegationConfig:
+    container_backend: str = "disabled"
+    docker_bin: str = "docker"
+    docker_network: str = "none"
+    allow_unpinned_local_image: bool = False
+    idle_ttl_seconds: int = 1_800
+    max_container_lifetime_seconds: int = 28_800
+    rw_workspace_concurrency: str = "single_writer"
+    queue_policy: str = "fifo"
+    restore_policy: str = "fail_closed"
+    policy_change_mode: str = "snapshot_per_session"
+    mount_policy: str = "project_rw_extra_ro"
 
 
 @dataclass
@@ -76,6 +94,7 @@ class AppConfig:
     mcp_proxy: McpProxyConfig = field(default_factory=McpProxyConfig)
     adapters: AdaptersConfig = field(default_factory=AdaptersConfig)
     session_runtime: SessionRuntimeConfig = field(default_factory=SessionRuntimeConfig)
+    delegation: DelegationConfig = field(default_factory=DelegationConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
 
@@ -100,6 +119,8 @@ def load_config(path: str | None = None) -> AppConfig:
         cfg.store.backend = os.environ["HAAS_STORE_BACKEND"]
     if os.environ.get("HAAS_IDENTITY_PROVIDER"):
         cfg.identity.provider = os.environ["HAAS_IDENTITY_PROVIDER"]
+    if os.environ.get("HAAS_STATIC_TOKEN_FILE"):
+        cfg.identity.static_token_file = os.environ["HAAS_STATIC_TOKEN_FILE"]
     if os.environ.get("HAAS_ADAPTER_BASE"):
         cfg.adapters.default_base = os.environ["HAAS_ADAPTER_BASE"]
     if os.environ.get("HAAS_SESSION_LEASE_TTL_MS"):
@@ -112,6 +133,30 @@ def load_config(path: str | None = None) -> AppConfig:
         cfg.session_runtime.turn_timeout_seconds = float(
             os.environ["HAAS_SESSION_TURN_TIMEOUT_SECONDS"]
         )
+    if os.environ.get("HAAS_DELEGATION_IDLE_TTL_SECONDS"):
+        cfg.delegation.idle_ttl_seconds = int(
+            os.environ["HAAS_DELEGATION_IDLE_TTL_SECONDS"]
+        )
+    if os.environ.get("HAAS_DELEGATION_MAX_CONTAINER_LIFETIME_SECONDS"):
+        cfg.delegation.max_container_lifetime_seconds = int(
+            os.environ["HAAS_DELEGATION_MAX_CONTAINER_LIFETIME_SECONDS"]
+        )
+    if os.environ.get("HAAS_DELEGATION_RW_WORKSPACE_CONCURRENCY"):
+        cfg.delegation.rw_workspace_concurrency = os.environ[
+            "HAAS_DELEGATION_RW_WORKSPACE_CONCURRENCY"
+        ]
+    if os.environ.get("HAAS_DELEGATION_CONTAINER_BACKEND"):
+        cfg.delegation.container_backend = os.environ[
+            "HAAS_DELEGATION_CONTAINER_BACKEND"
+        ]
+    if os.environ.get("HAAS_DELEGATION_DOCKER_BIN"):
+        cfg.delegation.docker_bin = os.environ["HAAS_DELEGATION_DOCKER_BIN"]
+    if os.environ.get("HAAS_DELEGATION_DOCKER_NETWORK"):
+        cfg.delegation.docker_network = os.environ["HAAS_DELEGATION_DOCKER_NETWORK"]
+    if os.environ.get("HAAS_DELEGATION_ALLOW_UNPINNED_LOCAL_IMAGE"):
+        cfg.delegation.allow_unpinned_local_image = os.environ[
+            "HAAS_DELEGATION_ALLOW_UNPINNED_LOCAL_IMAGE"
+        ].strip().lower() in {"1", "true", "yes", "on"}
 
     return cfg
 
@@ -137,8 +182,11 @@ def _overlay_file(cfg: AppConfig, path: str) -> None:
             cfg.store.event_retention_seconds = int(store["event_retention_seconds"])
 
     identity = data.get("identity") or {}
-    if isinstance(identity, dict) and "provider" in identity:
-        cfg.identity.provider = str(identity["provider"])
+    if isinstance(identity, dict):
+        if "provider" in identity:
+            cfg.identity.provider = str(identity["provider"])
+        if "static_token_file" in identity:
+            cfg.identity.static_token_file = str(identity["static_token_file"])
 
     model_proxy = data.get("model_proxy") or {}
     if isinstance(model_proxy, dict) and "listen" in model_proxy:
@@ -170,6 +218,37 @@ def _overlay_file(cfg: AppConfig, path: str) -> None:
         if "socket_path" in codex:
             cfg.adapters.codex.socket_path = str(codex["socket_path"])
 
+    delegation = data.get("delegation") or {}
+    if isinstance(delegation, dict):
+        if "container_backend" in delegation:
+            cfg.delegation.container_backend = str(delegation["container_backend"])
+        if "docker_bin" in delegation:
+            cfg.delegation.docker_bin = str(delegation["docker_bin"])
+        if "docker_network" in delegation:
+            cfg.delegation.docker_network = str(delegation["docker_network"])
+        if "allow_unpinned_local_image" in delegation:
+            cfg.delegation.allow_unpinned_local_image = bool(
+                delegation["allow_unpinned_local_image"]
+            )
+        if "idle_ttl_seconds" in delegation:
+            cfg.delegation.idle_ttl_seconds = int(delegation["idle_ttl_seconds"])
+        if "max_container_lifetime_seconds" in delegation:
+            cfg.delegation.max_container_lifetime_seconds = int(
+                delegation["max_container_lifetime_seconds"]
+            )
+        if "rw_workspace_concurrency" in delegation:
+            cfg.delegation.rw_workspace_concurrency = str(
+                delegation["rw_workspace_concurrency"]
+            )
+        if "queue_policy" in delegation:
+            cfg.delegation.queue_policy = str(delegation["queue_policy"])
+        if "restore_policy" in delegation:
+            cfg.delegation.restore_policy = str(delegation["restore_policy"])
+        if "policy_change_mode" in delegation:
+            cfg.delegation.policy_change_mode = str(delegation["policy_change_mode"])
+        if "mount_policy" in delegation:
+            cfg.delegation.mount_policy = str(delegation["mount_policy"])
+
 
 # --- App factory ----------------------------------------------------------
 
@@ -187,7 +266,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     from haas.api import build_app
 
     config = config if config is not None else load_config()
-    return build_app(config, adapter=build_adapter(config))
+    return build_app(
+        config,
+        adapter=build_adapter(config),
+        identity_tokens=_identity_tokens(config),
+        delegated_containers=build_delegated_container_runtime(config),
+    )
+
+
+def _identity_tokens(config: AppConfig) -> dict[str, Principal] | None:
+    if config.identity.provider != "static" or not config.identity.static_token_file:
+        return None
+    try:
+        token = Path(config.identity.static_token_file).read_text(encoding="utf-8").strip()
+    except OSError:
+        return {}
+    if not token:
+        return {}
+    return {token: Principal(principalId="p_local_manager")}
 
 
 def build_adapter(config: AppConfig) -> Any:
@@ -218,3 +314,26 @@ def build_adapter(config: AppConfig) -> Any:
             CodexEndpoint(transport=transport, listen_url=listen_url)
         )
     raise ValueError(f"unsupported adapters.default_base: {base}")
+
+
+def build_delegated_container_runtime(config: AppConfig) -> Any:
+    """Assemble the optional delegated container runtime.
+
+    The default is disabled so a local development server never starts Docker by
+    accident. Set `delegation.container_backend=docker` to enable the Docker CLI
+    adapter.
+    """
+    backend = config.delegation.container_backend
+    if backend == "disabled":
+        from haas.runtime import DisabledDelegatedContainerRuntime
+
+        return DisabledDelegatedContainerRuntime()
+    if backend == "docker":
+        from haas.runtime import DockerDelegatedContainerRuntime
+
+        return DockerDelegatedContainerRuntime(
+            docker_bin=config.delegation.docker_bin,
+            network=config.delegation.docker_network,
+            allow_unpinned_local_image=config.delegation.allow_unpinned_local_image,
+        )
+    raise ValueError(f"unsupported delegation.container_backend: {backend}")

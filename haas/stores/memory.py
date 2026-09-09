@@ -67,6 +67,7 @@ class SessionRecord:
     userId: str
     status: str = "active"
     state: dict[str, Any] = field(default_factory=dict)
+    delegatedSessionRef: dict[str, Any] | None = None
     schemaVersion: int = 1
     createdAtMs: int = field(default_factory=_now_ms)
     updatedAtMs: int = field(default_factory=_now_ms)
@@ -95,6 +96,90 @@ class TurnRecord:
     schemaVersion: int = 1
     startedAtMs: int = field(default_factory=_now_ms)
     completedAtMs: int | None = None
+
+
+@dataclass
+class DelegatedRuntimeRecord:
+    status: str = "no_runtime"
+    containerId: str | None = None
+    containerGeneration: int = 0
+    lastStartedAtMs: int | None = None
+    lastActiveAtMs: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "containerId": self.containerId,
+            "containerGeneration": self.containerGeneration,
+            "lastStartedAtMs": self.lastStartedAtMs,
+            "lastActiveAtMs": self.lastActiveAtMs,
+        }
+
+
+@dataclass
+class DelegatedSessionRecord:
+    id: str
+    managerSessionId: str
+    haasSessionId: str
+    haasUserId: str
+    harnessId: str
+    image: dict[str, Any]
+    provider: dict[str, Any]
+    mountManifest: dict[str, Any]
+    delegationPolicySnapshot: dict[str, Any]
+    harnessBase: str = "codex"
+    binding: str = "haas_bound"
+    runtime: DelegatedRuntimeRecord = field(default_factory=DelegatedRuntimeRecord)
+    object: str = "delegated_session"
+    schemaVersion: int = 1
+    createdAtMs: int = field(default_factory=_now_ms)
+    updatedAtMs: int = field(default_factory=_now_ms)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "object": self.object,
+            "managerSessionId": self.managerSessionId,
+            "haasSessionId": self.haasSessionId,
+            "haasUserId": self.haasUserId,
+            "harnessId": self.harnessId,
+            "harnessBase": self.harnessBase,
+            "binding": self.binding,
+            "image": dict(self.image),
+            "provider": dict(self.provider),
+            "mountManifest": dict(self.mountManifest),
+            "delegationPolicySnapshot": dict(self.delegationPolicySnapshot),
+            "runtime": self.runtime.to_dict(),
+            "createdAtMs": self.createdAtMs,
+            "updatedAtMs": self.updatedAtMs,
+        }
+
+
+@dataclass
+class ApprovalRecord:
+    id: str
+    sessionId: str
+    invocationId: str
+    turnId: str
+    status: str = "waiting"
+    request: dict[str, Any] = field(default_factory=dict)
+    decision: dict[str, Any] | None = None
+    schemaVersion: int = 1
+    createdAtMs: int = field(default_factory=_now_ms)
+    resolvedAtMs: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "approvalId": self.id,
+            "sessionId": self.sessionId,
+            "invocationId": self.invocationId,
+            "turnId": self.turnId,
+            "status": self.status,
+            "request": dict(self.request),
+            "decision": None if self.decision is None else dict(self.decision),
+            "createdAtMs": self.createdAtMs,
+            "resolvedAtMs": self.resolvedAtMs,
+        }
 
 
 @dataclass
@@ -141,6 +226,18 @@ class CursorNotFoundError(Exception):
     """SSE replay cursor is unknown -> 410 haas_offset_expired."""
 
 
+class DelegatedSessionNotFoundError(Exception):
+    """Delegated session id is unknown -> 404 haas_delegated_session_not_found."""
+
+
+class ApprovalNotFoundError(Exception):
+    """Approval id is unknown -> 404 haas_approval_not_found."""
+
+
+class ApprovalStateConflictError(Exception):
+    """Approval was already resolved -> 409 haas_approval_state_conflict."""
+
+
 @dataclass
 class Lease:
     holder: str
@@ -154,6 +251,13 @@ class LeaseConflictError(Exception):
 
 class LeaseFencingError(Exception):
     """Holder/token no longer owns the lease; stale writes must fail closed."""
+
+
+@dataclass
+class WorkspaceLockResult:
+    acquired: bool
+    holder: str | None = None
+    expiresAtMs: int | None = None
 
 
 class MemoryStore:
@@ -171,8 +275,13 @@ class MemoryStore:
         self._idempotency: dict[str, IdempotencyRecord] = {}
         self._leases: dict[SessionKey, Lease] = {}
         self._lease_tokens: dict[SessionKey, int] = {}
+        self._workspace_locks: dict[str, Lease] = {}
         self._windows: dict[str, list[int]] = {}
         self._quotas: dict[str, int] = {}
+        self._delegated_sessions: dict[str, DelegatedSessionRecord] = {}
+        self._delegated_by_manager_session: dict[str, str] = {}
+        self._delegated_by_haas_session: dict[str, str] = {}
+        self._approvals: dict[str, ApprovalRecord] = {}
 
     # --- RegistryStore --------------------------------------------------
 
@@ -244,6 +353,112 @@ class MemoryStore:
 
     def get_turn(self, turn_id: str) -> TurnRecord | None:
         return self._turns.get(turn_id)
+
+    # --- DelegationStore -----------------------------------------------
+
+    def put_delegated_session(
+        self, record: DelegatedSessionRecord
+    ) -> DelegatedSessionRecord:
+        existing = self._delegated_sessions.get(record.id)
+        created_at = existing.createdAtMs if existing is not None else record.createdAtMs
+        saved = replace(record, createdAtMs=created_at, updatedAtMs=_now_ms())
+        self._delegated_sessions[saved.id] = saved
+        self._delegated_by_manager_session[saved.managerSessionId] = saved.id
+        self._delegated_by_haas_session[saved.haasSessionId] = saved.id
+        return saved
+
+    def get_delegated_session(
+        self, delegated_session_id: str
+    ) -> DelegatedSessionRecord | None:
+        return self._delegated_sessions.get(delegated_session_id)
+
+    def get_delegated_session_by_manager(
+        self, manager_session_id: str
+    ) -> DelegatedSessionRecord | None:
+        delegated_id = self._delegated_by_manager_session.get(manager_session_id)
+        if delegated_id is None:
+            return None
+        return self.get_delegated_session(delegated_id)
+
+    def get_delegated_session_by_haas_session(
+        self, haas_session_id: str
+    ) -> DelegatedSessionRecord | None:
+        delegated_id = self._delegated_by_haas_session.get(haas_session_id)
+        if delegated_id is None:
+            return None
+        return self.get_delegated_session(delegated_id)
+
+    def update_delegated_runtime(
+        self, delegated_session_id: str, runtime: DelegatedRuntimeRecord
+    ) -> DelegatedSessionRecord:
+        record = self.get_delegated_session(delegated_session_id)
+        if record is None:
+            raise DelegatedSessionNotFoundError(delegated_session_id)
+        return self.put_delegated_session(replace(record, runtime=runtime))
+
+    def put_approval(self, approval: ApprovalRecord) -> ApprovalRecord:
+        existing = self._approvals.get(approval.id)
+        created_at = existing.createdAtMs if existing is not None else approval.createdAtMs
+        record = replace(approval, createdAtMs=created_at)
+        self._approvals[record.id] = record
+        return record
+
+    def get_approval(self, approval_id: str) -> ApprovalRecord | None:
+        return self._approvals.get(approval_id)
+
+    def resolve_approval(
+        self, approval_id: str, decision: dict[str, Any]
+    ) -> ApprovalRecord:
+        record = self.get_approval(approval_id)
+        if record is None:
+            raise ApprovalNotFoundError(approval_id)
+        if record.status != "waiting":
+            raise ApprovalStateConflictError(approval_id)
+        status = str(decision.get("decision") or "")
+        resolved = replace(
+            record,
+            status=status,
+            decision=decision,
+            resolvedAtMs=_now_ms(),
+        )
+        self._approvals[approval_id] = resolved
+        return resolved
+
+    def acquire_workspace_lock(
+        self,
+        canonical_workspace: str,
+        delegated_session_id: str,
+        access: str,
+        ttl_ms: int = 30_000,
+    ) -> WorkspaceLockResult:
+        if access == "ro":
+            return WorkspaceLockResult(acquired=True, holder=delegated_session_id)
+        now = _now_ms()
+        existing = self._workspace_locks.get(canonical_workspace)
+        if (
+            existing is not None
+            and existing.expiresAtMs > now
+            and existing.holder != delegated_session_id
+        ):
+            return WorkspaceLockResult(
+                acquired=False,
+                holder=existing.holder,
+                expiresAtMs=existing.expiresAtMs,
+            )
+        lease = Lease(holder=delegated_session_id, expiresAtMs=now + ttl_ms, token=0)
+        self._workspace_locks[canonical_workspace] = lease
+        return WorkspaceLockResult(
+            acquired=True,
+            holder=delegated_session_id,
+            expiresAtMs=lease.expiresAtMs,
+        )
+
+    def release_workspace_lock(
+        self, canonical_workspace: str, delegated_session_id: str
+    ) -> None:
+        existing = self._workspace_locks.get(canonical_workspace)
+        if existing is not None and existing.holder == delegated_session_id:
+            self._workspace_locks.pop(canonical_workspace, None)
 
     def acquire_lease(self, key: SessionKey, holder: str, ttl_ms: int = 30_000) -> Lease:
         now = _now_ms()

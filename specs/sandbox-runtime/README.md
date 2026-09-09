@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-08-26
-Related specs: [Architecture](../architecture/README.md), [Policy Controller](../policy-controller/README.md), [Harness Adapter](../harness-adapter/README.md), [Container Runtime](../container-runtime/README.md), [Security Boundary](../security-boundary/README.md)
+Related specs: [Architecture](../architecture/README.md), [Policy Controller](../policy-controller/README.md), [Harness Adapter](../harness-adapter/README.md), [Container Runtime](../container-runtime/README.md), [Security Boundary](../security-boundary/README.md), [Manager Delegation](../manager-delegation/README.md)
 
 ## 1. Component Role
 
@@ -39,6 +39,7 @@ It addresses the fact that each harness carries its own sandbox semantics (Codex
 Responsibilities:
 
 - Compile `EffectivePolicy` into `SandboxSpec` (workspace mounts, writable roots, network egress, resource limit).
+- Validate and project manager-approved mount manifests for delegated sessions.
 - Create and track the lifecycle of an OpenSandbox sandbox instance for each session/invocation.
 - Narrowly project the harness adapter's sandbox declaration (the projected scope MUST be less than or equal to the policy scope and MUST NOT expand it).
 - Write provider/key secrets to the credential vault; adapters receive only vault references or short-lived tokens.
@@ -48,6 +49,7 @@ Responsibilities:
 Non-responsibilities:
 
 - It does not decide workspace/network/tool policy; it only consumes Policy Controller output.
+- It does not accept arbitrary host paths from a harness or adapter; delegated-session host paths must already be authorized by manager and validated by Policy Controller.
 - It does not execute a harness-native protocol; that is the adapter's responsibility.
 - It does not replace the HaaS protocol public API.
 - It does not store long-lived provider credentials in plaintext; vault contents are references.
@@ -60,6 +62,7 @@ async def create_sandbox(session_id: str, spec: SandboxSpec) -> SandboxHandle: .
 async def run(sandbox_id: str, command: list[str], cwd: str, env: dict) -> ExecStream: ...
 async def write_secret(session_id: str, audience: str, ref: str, ttl: int) -> VaultRef: ...
 async def project_egress(spec: SandboxSpec) -> EgressPolicy: ...
+async def validate_mount_manifest(manifest: MountManifest, policy: EffectivePolicy) -> MountValidation: ...
 async def destroy_sandbox(sandbox_id: str) -> None: ...
 async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 ```
@@ -73,7 +76,20 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
   "sessionId": "hsess_abc",
   "workspaceRoot": "/workspace",
   "writableRoots": ["/workspace"],
-  "readOnlyRoots": ["/repo"],
+  "readOnlyRoots": ["/mnt/extra/shared"],
+  "mounts": [
+    {
+      "hostPathCanonical": "/Users/example/workspace/project",
+      "containerPath": "/workspace",
+      "access": "rw"
+    },
+    {
+      "hostPathCanonical": "/Users/example/workspace/shared",
+      "containerPath": "/mnt/extra/shared",
+      "access": "ro"
+    }
+  ],
+  "isolatedWritableRoots": ["/home/haas", "/tmp", "/data/haas/cache"],
   "network": {
     "defaultAction": "deny",
     "allow": ["https://api.openai.com"]
@@ -106,7 +122,21 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 
 In the initial release, `compile_sandbox_spec` consumes only `cwd`, `writableRoots`, and `approvalMode`; `base` and `nativeSandbox` are adapter capability declarations for subsequent OpenSandbox projection (S5.3).
 
-### 6.3 SandboxHandle
+### 6.3 Delegated Mount Manifest
+
+Manager-delegated sessions use the mount manifest defined by
+[Manager Delegation](../manager-delegation/README.md). Sandbox Runtime validates the
+manifest before container creation and before every restore:
+
+- the primary project mount is exactly `/workspace:rw`;
+- extra mounts are `ro` by default and use deterministic paths under `/mnt/extra/*`;
+- host paths are canonicalized and compared with the authorized snapshot;
+- symlink escapes, path disappearance, path type changes, Docker socket, user HOME,
+  SSH directories, credential stores, and parent-directory widening fail closed;
+- the sandbox supplies independent writable HOME, cache, and `/tmp` roots without
+  mounting host HOME.
+
+### 6.4 SandboxHandle
 
 ```json
 {
@@ -179,13 +209,14 @@ Metrics:
 | sandbox creation fails | invocation fails; MUST NOT fall back to execution without a sandbox |
 | adapter declaration exceeds policy | `haas_sandbox_widening_rejected`; fail closed |
 | sandbox restarts | `generation` increases; adapter inspection determines whether the thread is recoverable |
+| delegated mount manifest drifts | return `haas_delegation_mount_invalid`; require manager reauthorization or policy rebind |
 | vault write fails | turn does not start and returns `haas_vault_unavailable` |
 | egress blocks network access | handle as deny; record a security event with a redacted host |
 | destruction fails | retain a cleanup queue and retry; MUST NOT block convergence of session state |
 
 ## 11. Test Plan and Acceptance
 
-- Unit: SandboxSpec compilation, rejection of narrow-only projection violations, path canonicalization, and egress compilation.
+- Unit: SandboxSpec compilation, delegated mount validation, rejection of narrow-only projection violations, path canonicalization, and egress compilation.
 - Integration: OpenSandbox sandbox create/run/destroy, execd SSE result, credential vault writes, and short-lived token revocation.
 - Security: provider keys do not enter the sandbox env/startup commands/logs; all widening is rejected.
 - E2E: a Codex turn completes file reads/writes inside the sandbox and produces an artifact; verify that paths are constrained.

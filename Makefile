@@ -7,7 +7,7 @@ UVRUN := uv run --extra dev
 # linux/amd64 是本项目硬性平台约定（AGENTS.md「Docker 与 OpenSandbox AIO」）。
 # 构建/运行镜像统一走这个变量，避免在 Apple Silicon 等主机上每次重新试探架构。
 HAAS_PLATFORM := linux/amd64
-HAAS_BASE_IMAGE_DEFAULT := ghcr.io/agent-infra/sandbox@sha256:5ca2cd5619ee1e18c5479301e740c1e35307ce85d4142a145aec65d459655eee
+HAAS_BASE_IMAGE_DEFAULT := ghcr.io/agent-infra/sandbox@sha256:9a597aaa3716aca2fd42a517ceedc41063e5ceedcef43eb68bf7c059c0128b7a
 HAAS_IMAGE_DEFAULT := haas:local
 
 # HaaS 开发与提交门禁。

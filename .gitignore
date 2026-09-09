@@ -79,3 +79,5 @@ CLAUDE.md
 .claude/settings.json
 .codex/
 .agents/skills/beads/
+*.pyc
+.claude/settings.local.json

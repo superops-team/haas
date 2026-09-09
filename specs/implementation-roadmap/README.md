@@ -54,6 +54,7 @@ This component provides no runtime API. Its task interface consists of documente
 | S4 Codex adapter | S3 complete | Codex app-server handshake, thread/turn, and cancel E2E pass |
 | S5 sandbox + AIO container | S4 complete | Sandbox Runtime projection and OpenSandbox AIO-derived image smoke pass |
 | S6 extended features | S5 complete | Files/artifacts/MCP/skills/model proxy/admission control pass their respective specs |
+| S7 manager delegation backend | S6 complete, or an explicitly scoped vertical slice has equivalent store/SSE/proxy/container gates | Manager can bind a session to HaaS, run delegated Codex work, stream events, restore after TTL, and fail closed |
 
 ## 6. Data Model
 
@@ -81,7 +82,8 @@ S0 specs baseline
   -> S4 Codex app-server adapter
   -> S5 Sandbox Runtime + OpenSandbox AIO container
   -> S6 Extended features (model proxy / MCP / skills / artifacts / admission control)
-  -> S7 additional harness adapters
+  -> S7 Manager Delegation backend
+  -> S8 additional harness adapters
 ```
 
 Do not start S4 before S3 fake adapter proves that the public protocol and session runtime are independent of Codex.
@@ -121,6 +123,7 @@ Each implementation stage must report:
 | Codex E2E fails | Keep adapter unavailable; do not mark `codex` base ready |
 | Sandbox Runtime smoke fails | Do not claim harness sandbox standardization; block S6 |
 | Docker smoke fails | Do not publish runtime image |
+| Manager delegation restore fails | Keep the manager session HaaS-bound, return a safe delegated error, and do not fall back to local execution |
 
 ## 11. Test Plan and Acceptance
 
@@ -130,4 +133,6 @@ Each implementation stage must report:
 - S3: fake adapter contract tests.
 - S4: real Codex app-server E2E.
 - S5: Sandbox Runtime projection verification + Docker build/run smoke on an OpenSandbox AIO-derived image.
-- S6/S7: feature-specific integration, security and ADK compatibility expansion.
+- S6: feature-specific integration, security and ADK compatibility expansion.
+- S7: Volcengine Ark provider identity, HaaS native delegated-session APIs, live `/run_sse`, persistent store, one-container-per-delegated-session lifecycle, `/workspace:rw` mount validation, workspace single-writer lock, approval relay, model proxy secretless path, and Docker/Codex smoke behind explicit flags.
+- S8: additional harness adapter expansion after the manager delegation backend is stable.

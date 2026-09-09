@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-03
-Related specs: [Startup](../startup/README.md), [Runtime Trim](../runtime-trim/README.md), [Security Boundary](../security-boundary/README.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.md), [Observability](../observability/README.md)
+Related specs: [Startup](../startup/README.md), [Runtime Trim](../runtime-trim/README.md), [Security Boundary](../security-boundary/README.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.md), [Manager Delegation](../manager-delegation/README.md), [Observability](../observability/README.md)
 
 ## 1. Component Role
 
@@ -51,6 +51,7 @@ Responsibilities:
 - Define SIGTERM draining: stop accepting new work, flush the event log, set ready=false, and cancel or persist active turns.
 - Define base-image digest pinning and upgrade validation.
 - Apply the AIO service-trimming variables defined by [Runtime Trim](../runtime-trim/README.md) in the runtime ENV layer, ensuring that CUA/BUA, sandbox, and Codex readiness are unaffected.
+- For manager-delegated execution, support one HaaS runtime container per delegated session, with same-session reuse, idle TTL cleanup, maximum container lifetime, and restore from a persistent delegated-session contract.
 
 Non-responsibilities:
 
@@ -59,6 +60,7 @@ Non-responsibilities:
 - It does not store provider secrets.
 - It does not use Docker privileged mode or root identity to directly expand agent tool permissions.
 - It does not perform model requests, exhaustive MCP probing, remote skill downloads, or long-running recovery on the startup critical path.
+- It does not decide which host paths are mounted; it receives only manager-approved mount manifests validated by Policy Controller and Sandbox Runtime.
 
 ## 5. Core Interfaces
 
@@ -168,6 +170,16 @@ Startup rules:
 - `/ready?scope=execution` MAY use the same Codex gate for the P0 adapter; model provider, MCP discovery, and browser startup remain outside the default gate unless declared a Codex execution-safety dependency.
 - AIO readiness and HaaS readiness are reported separately.
 
+Delegated-session container rules:
+
+- Each manager delegated session owns at most one active HaaS runtime container.
+- Follow-up turns reuse the live container while it is healthy and within policy limits.
+- Idle TTL defaults to 30 minutes and is configurable through the delegated policy snapshot.
+- Maximum container lifetime defaults to 8 hours and is configurable. An active turn may finish, but the runtime refuses new turns after the maximum lifetime is reached.
+- TTL cleanup destroys only runtime resources. It MUST NOT delete HaaS sessions, event logs, delegated-session contracts, manager authorization snapshots, or host files.
+- Restore creates a fresh container generation from the persisted delegated-session contract and revalidates mounts before starting work.
+- All delegated HaaS runtime containers MUST be built and run as `linux/amd64`, matching the repository-wide hard platform contract.
+
 ## 8. Security and Permissions
 
 - Container root or privileged mode is not a substitute for harness sandbox policy.
@@ -199,6 +211,9 @@ Logs MUST go to stdout/stderr or configured log files with redaction.
 | AIO service not ready | HaaS control ready may be true; execution ready is false with a safe reason |
 | HaaS sidecar not listening | container health fails |
 | Codex app-server not ready | execution ready is false; session creation can be pending only if the API contract allows it |
+| delegated container image unavailable | return `haas_delegation_image_unavailable`; do not silently switch image or platform |
+| delegated container idle TTL reached | drain idle runtime, destroy the container, keep the delegated-session contract |
+| delegated container max lifetime reached | allow active turn to finish, then reject new turns until restore creates a new generation |
 | SIGTERM | enter draining, reject new tasks, flush the event log, and cancel/settle active turns |
 | base image unavailable | build fails; MUST NOT silently switch images |
 | digest mismatch | release blocked |
@@ -211,5 +226,6 @@ Logs MUST go to stdout/stderr or configured log files with redaction.
 - Container run smoke verifies AIO port `8080` and HaaS port `8092`, asserts that `/v1/haas/status` assembles a real harness adapter (not a test double), and asserts that the container exits with a nonzero code after the sidecar is killed. AIO starts more slowly than the sidecar, so readiness checks MUST poll.
 - Health/ready tests verify that `/health` is not gated by optional warmups.
 - Shutdown test sends SIGTERM and asserts drain events/status.
+- Delegated lifecycle test verifies same-session reuse, idle TTL cleanup, max-lifetime refusal of new turns, and restore with a new container generation.
 - Secret scan verifies that build args, env, logs, and image metadata do not contain provider credentials.
 - Service-trim check (§5.1.1 / [Runtime Trim](../runtime-trim/README.md)): statically assert that the Dockerfile sets `DISABLE_CODE_SERVER`, `DISABLE_JUPYTER`, and `DISABLE_NODEJS_REPL`; build/smoke asserts that code-server/jupyter are not listening while browser/VNC/sandbox and Codex readiness remain functional.

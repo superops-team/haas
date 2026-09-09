@@ -20,6 +20,7 @@ Harness Registry 维护 HaaS 可运行的 configured harness catalog。它回答
 | `mpa-codex-worker` profile controller | profile draft/active、session 冻结、runtime policy |
 | Model Proxy | provider 路由与 model availability |
 | 本组件总览 | configured harness catalog、appName/base/capability/model/provider discovery |
+| Manager Delegation | manager 与 HaaS 都通过 provider id、model id 和 `credentialRef` 引用 provider；raw key 不复制进 delegated-session contract |
 
 ## 3. 上游与下游关系
 
@@ -214,6 +215,18 @@ async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRou
 
 `files[].path` 必须是相对路径，不能包含 `..`、绝对路径或 symlink escape。
 
+### 6.5 Provider Identity Catalog
+
+Provider identity 是稳定配置身份。endpoint、credential source、billing region 或 API shape 不同时，不得混用：
+
+| Provider id | Endpoint | Wire/API shape | 规则 |
+|-------------|----------|----------------|------|
+| `ark` | `https://ark.ap-southeast.bytepluses.com/api/v3` | OpenAI-compatible data plane | BytePlus Ark global provider identity。 |
+| `volcengine-ark` | `https://ark.cn-beijing.volces.com/api/v3` | OpenAI-compatible data plane | 火山方舟中国区标准数据面 identity。 |
+| `ark-agent-plan-cn` | `https://ark.cn-beijing.volces.com/api/plan/v3` | Agent Plan API | 火山方舟 Agent Plan identity；不得与标准数据面互换。 |
+
+manager 本地执行与 HaaS 委派执行都通过 `providerId + model + credentialRef` 传递 provider selection。Registry 只保存 provider route 与 credential reference/fingerprint；真实 credential 由 Model Proxy 在请求时解析。
+
 ## 7. 运行模型与状态机
 
 ```text
@@ -266,6 +279,7 @@ Registry 必须产出以下安全日志/指标：
 | app 不存在或越权 | `404 app_not_found` |
 | model 不可用 | `422 haas_model_unavailable` 或显式 fallback 并写入 metadata |
 | provider URL 未通过 allowlist | `haas_provider_source_invalid` |
+| provider id 与 endpoint/API shape 不匹配 | `haas_provider_source_invalid` |
 | skill bundle 无 `SKILL.md` | config validation failed，拒绝 active |
 | MCP URL 未通过 allowlist | `haas_mcp_source_invalid` |
 | registry store 不可用 | 创建/更新 fail closed；已冻结 session 继续执行 |
