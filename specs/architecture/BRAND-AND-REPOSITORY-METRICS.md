@@ -59,17 +59,16 @@ Both READMEs start with a centered GitHub-compatible HTML masthead containing:
 
 1. The shared horizontal logo.
 2. A language-specific one-line product promise.
-3. Build, commits, lines, and coverage badges.
+3. Commits, lines, and coverage badges rendered from repository-local SVGs.
 4. The English / Simplified Chinese switch.
 
-Every image has meaningful alt text. If dynamic badges are unavailable, the
+Every image has meaningful alt text. If dynamic badge automation is unavailable, the
 README, logo, navigation, and architecture content remain usable.
 
 ## 5. Metric Definitions
 
 | Metric | Source | Definition |
 |---|---|---|
-| Build | GitHub Actions | Repository metrics workflow result on `main` |
 | Commits | Git | `git rev-list --count HEAD` from a full-history `main` checkout |
 | Lines | Git + generator | Non-blank physical lines in tracked source files under `haas/`, `tests/`, and `scripts/` |
 | Coverage | coverage.py | `totals.percent_covered` from `coverage json` after the coverage suite succeeds |
@@ -91,12 +90,14 @@ metric generator, and publishes only generated SVG badges to a dedicated
 The workflow has only `contents: write` permission and uses concurrency control.
 It must never force-push `main`, rewrite user history, execute fork-provided code
 with write credentials, or publish a partial result. The `metrics` branch is an
-output channel, not a source branch. README numeric badges load from that branch;
-the Build badge links to the workflow run list.
+output channel, not a source branch.
 
-Because a workflow cannot update its own status badge after completion, Build is
-GitHub's native workflow-status badge from the default branch. The three numeric
-SVGs—commits, lines, and coverage—are the only files published to `metrics`.
+README badges use repository-local SVGs under `docs/brand/badges/` so the
+masthead remains stable on branches, forks, private repository views, and
+network-restricted renderers. The workflow-published `metrics` branch remains
+the automation output used to refresh those values deliberately.
+
+The three numeric SVGs—commits, lines, and coverage—are the only files published to `metrics`.
 Publication copies the previously generated output into a fresh temporary Git
 worktree, replaces all three SVGs as one staged set, creates a normal commit, and
 pushes it without force. A push race fails safely and is resolved by the next
@@ -146,7 +147,7 @@ is an additive documentation surface with no API or persisted-schema change.
    `git diff --check`, and `make pre-commit`.
 
 Acceptance requires valid color/monochrome A1 assets, centered equivalent
-bilingual mastheads, four evidence-linked badges, correct metric definitions,
+bilingual mastheads, three evidence-linked badges, correct metric definitions,
 atomic publication, and zero blocking review findings. Runtime, Docker,
 OpenSandbox, and provider E2E are `not_run` because runtime behavior is unchanged.
 

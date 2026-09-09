@@ -2,10 +2,9 @@
   <img src="docs/brand/haas-logo.svg" width="520" alt="HaaS — Harness As A Service">
   <p><strong>一套稳定协议，隔离多种 Agent Runtime。</strong></p>
   <p>
-    <a href="https://github.com/superops-team/haas/actions/workflows/repository-metrics.yml"><img src="https://github.com/superops-team/haas/actions/workflows/repository-metrics.yml/badge.svg?branch=main" alt="仓库指标构建状态"></a>
-    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.zh-CN.md"><img src="https://raw.githubusercontent.com/superops-team/haas/metrics/badges/commits.svg" alt="Git 提交次数"></a>
-    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.zh-CN.md"><img src="https://raw.githubusercontent.com/superops-team/haas/metrics/badges/lines.svg" alt="受 Git 跟踪的源码行数"></a>
-    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.zh-CN.md"><img src="https://raw.githubusercontent.com/superops-team/haas/metrics/badges/coverage.svg" alt="测试覆盖率"></a>
+    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.zh-CN.md"><img src="docs/brand/badges/commits.svg" alt="Git 提交次数"></a>
+    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.zh-CN.md"><img src="docs/brand/badges/lines.svg" alt="受 Git 跟踪的源码行数"></a>
+    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.zh-CN.md"><img src="docs/brand/badges/coverage.svg" alt="测试覆盖率"></a>
   </p>
   <p><a href="README.md">English</a> · <strong>简体中文</strong></p>
 </div>

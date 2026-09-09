@@ -2,10 +2,9 @@
   <img src="docs/brand/haas-logo.svg" width="520" alt="HaaS — Harness As A Service">
   <p><strong>One stable protocol. Multiple isolated agent runtimes.</strong></p>
   <p>
-    <a href="https://github.com/superops-team/haas/actions/workflows/repository-metrics.yml"><img src="https://github.com/superops-team/haas/actions/workflows/repository-metrics.yml/badge.svg?branch=main" alt="Repository metrics build status"></a>
-    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.md"><img src="https://raw.githubusercontent.com/superops-team/haas/metrics/badges/commits.svg" alt="Git commit count"></a>
-    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.md"><img src="https://raw.githubusercontent.com/superops-team/haas/metrics/badges/lines.svg" alt="Tracked source lines"></a>
-    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.md"><img src="https://raw.githubusercontent.com/superops-team/haas/metrics/badges/coverage.svg" alt="Test coverage"></a>
+    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.md"><img src="docs/brand/badges/commits.svg" alt="Git commit count"></a>
+    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.md"><img src="docs/brand/badges/lines.svg" alt="Tracked source lines"></a>
+    <a href="specs/architecture/BRAND-AND-REPOSITORY-METRICS.md"><img src="docs/brand/badges/coverage.svg" alt="Test coverage"></a>
   </p>
   <p><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 </div>

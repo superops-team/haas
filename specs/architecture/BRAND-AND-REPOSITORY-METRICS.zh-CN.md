@@ -52,17 +52,16 @@ SVG 必须声明固有尺寸与 `viewBox`，不得包含 script、外部资源�
 
 1. 共用的横向 Logo。
 2. 对应语言的一行产品承诺。
-3. Build、Commits、Lines 与 Coverage 徽章。
+3. 使用仓库内 SVG 渲染的 Commits、Lines 与 Coverage 徽章。
 4. English / 简体中文切换入口。
 
-每张图片都必须有明确 alt。动态 badge 不可用时，README、Logo、导航与架构内容
+每张图片都必须有明确 alt。动态 badge 自动化不可用时，README、Logo、导航与架构内容
 仍保持可用。
 
 ## 5. 指标定义
 
 | 指标 | 数据源 | 定义 |
 |---|---|---|
-| Build | GitHub Actions | `main` 上 repository metrics workflow 的结果 |
 | Commits | Git | 在 `main` 完整历史执行 `git rev-list --count HEAD` |
 | Lines | Git + generator | `haas/`、`tests/`、`scripts/` 下受 Git 跟踪源码文件的非空物理行数 |
 | Coverage | coverage.py | Coverage suite 成功后 `coverage json` 中的 `totals.percent_covered` |
@@ -81,12 +80,13 @@ path filter。Job 完整 checkout 历史，通过 `uv` 安装锁定的开发
 
 Workflow 只授予 `contents: write` 权限并设置 concurrency。它不得 force-push
 `main`、重写用户历史、带写权限执行 fork 代码或发布部分结果。`metrics` 是输出
-通道而不是源码分支。README 数值 badge 从该分支加载，Build badge 链接 workflow
-运行列表。
+通道而不是源码分支。
 
-由于 workflow 无法在自身结束后更新自己的状态 badge，Build 使用 GitHub 原生的
-默认分支 workflow-status badge。只有 commits、lines 与 coverage 三个数值 SVG
-发布到 `metrics`。发布过程在新的临时 Git worktree 中复制上一版输出，再一次性
+README 徽章使用 `docs/brand/badges/` 下的仓库内 SVG，保证分支、fork、私有仓库
+视图和受限网络渲染器中 masthead 仍能稳定展示。workflow 发布的 `metrics` 分支
+仍作为自动化输出，用于按需刷新这些数值。
+
+只有 commits、lines 与 coverage 三个数值 SVG 发布到 `metrics`。发布过程在新的临时 Git worktree 中复制上一版输出，再一次性
 替换三个 SVG、创建普通 commit，并以非 force 方式 push。Push race 安全失败，
 由下一次串行或定时任务恢复。
 
@@ -125,7 +125,7 @@ artifact、observability、OpenSandbox 和 `linux/amd64` 合同均不受影响�
 7. 执行两轮 code review、架构 review、测试质量 review、`git diff --check` 和
    `make pre-commit`。
 
-验收要求：A1 彩色/单色资产有效；双语 masthead 居中且结构等价；四个 badge 均
+验收要求：A1 彩色/单色资产有效；双语 masthead 居中且结构等价；三个 badge 均
 链接到证据；指标定义准确；发布保持原子性；无阻塞 review finding。由于不改变
 runtime 行为，runtime、Docker、OpenSandbox 与 provider E2E 记为 `not_run`。
 

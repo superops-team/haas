@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+  width="150" height="28" viewBox="0 0 150 28"
+  role="img" aria-label="lines: 14,169">
+  <title>lines: 14,169</title>
+  <linearGradient id="surface" x2="0" y2="1">
+    <stop stop-color="#172033"/><stop offset="1" stop-color="#0b1220"/>
+  </linearGradient>
+  <clipPath id="round"><rect width="150" height="28" rx="7"/></clipPath>
+  <g clip-path="url(#round)">
+    <rect width="86" height="28" fill="url(#surface)"/>
+    <rect x="86" width="64" height="28" fill="#059669"/>
+    <path d="M86 0v28" stroke="#ffffff" stroke-opacity=".12"/>
+  </g>
+  <g fill="#ffffff" text-anchor="middle"
+    font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
+    font-size="11" font-weight="600">
+    <text x="43" y="18">lines</text>
+    <text x="118" y="18">14,169</text>
+  </g>
+</svg>
