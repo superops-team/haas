@@ -1,0 +1,68 @@
+name: Repository metrics
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repository-metrics
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full source history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Run coverage
+        run: |
+          uv run --extra dev coverage run -m pytest -q
+          uv run --extra dev coverage json -o coverage.json
+
+      - name: Generate metric badges
+        run: >-
+          uv run python scripts/quality/repository_metrics.py
+          --repo-root .
+          --coverage-json coverage.json
+          --output-dir "$RUNNER_TEMP/metrics-next"
+
+      - name: Publish the complete metric set
+        env:
+          METRICS_DIR: ${{ runner.temp }}/metrics-next
+        run: |
+          git fetch origin metrics:refs/remotes/origin/metrics || true
+          publish_dir="$(mktemp -d)"
+          trap 'git worktree remove --force "$publish_dir" 2>/dev/null || true' EXIT
+          if git show-ref --verify --quiet refs/remotes/origin/metrics; then
+            git worktree add --detach "$publish_dir" refs/remotes/origin/metrics
+          else
+            git worktree add --detach "$publish_dir"
+            git -C "$publish_dir" switch --orphan metrics
+            git -C "$publish_dir" rm -rf --ignore-unmatch .
+          fi
+          rm -rf "$publish_dir/badges"
+          mkdir -p "$publish_dir/badges"
+          cp "$METRICS_DIR"/*.svg "$publish_dir/badges/"
+          git -C "$publish_dir" add badges
+          if git -C "$publish_dir" diff --cached --quiet; then
+            echo "Metrics are unchanged"
+            exit 0
+          fi
+          git -C "$publish_dir" config user.name "github-actions[bot]"
+          git -C "$publish_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$publish_dir" commit -m "chore: update repository metrics"
+          git -C "$publish_dir" push origin HEAD:metrics

@@ -68,3 +68,33 @@ def test_adk_health_ready_aliases() -> None:
     client = TestClient(create_app(config))
     assert client.get("/health").json()["data"]["status"] == "ok"
     assert client.get("/ready").json()["data"]["status"] == "ready"
+
+
+def test_static_token_file_overrides_default_dev_token(tmp_path) -> None:
+    token_file = tmp_path / "haas-token"
+    token_file.write_text("local-secret\n")
+    config = AppConfig()
+    config.identity.static_token_file = str(token_file)
+    config.adapters.default_base = "fake"
+    client = TestClient(create_app(config))
+
+    assert (
+        client.get("/list-apps", headers={"Authorization": "Bearer local-secret"}).status_code
+        == 200
+    )
+    assert (
+        client.get("/list-apps", headers={"Authorization": "Bearer dev-token"}).status_code
+        == 401
+    )
+
+
+def test_missing_static_token_file_does_not_fall_back_to_dev_token(tmp_path) -> None:
+    config = AppConfig()
+    config.identity.static_token_file = str(tmp_path / "missing-token")
+    config.adapters.default_base = "fake"
+    client = TestClient(create_app(config))
+
+    assert (
+        client.get("/list-apps", headers={"Authorization": "Bearer dev-token"}).status_code
+        == 401
+    )

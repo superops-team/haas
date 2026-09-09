@@ -20,6 +20,7 @@ In ADK terminology, `appName` is the configured harness `id` (`chrn_...`); `/run
 | `mpa-codex-worker` profile controller | Profile draft/active lifecycle, session freezing, runtime policy |
 | Model Proxy | Provider routing and model availability |
 | Component overview | Configured harness catalog and appName/base/capability/model/provider discovery |
+| Manager Delegation | Manager and HaaS both reference providers by provider id, model id, and `credentialRef`; raw keys are never copied into delegated-session contracts |
 
 ## 3. Upstream and Downstream Relationships
 
@@ -203,6 +204,22 @@ async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRou
 
 `files[].path` MUST be a relative path and MUST NOT contain `..`, an absolute path, or a symlink escape.
 
+### 6.5 Provider Identity Catalog
+
+Provider identities are stable configuration identities. They MUST NOT be conflated
+when endpoints, credential source, billing region, or API shape differ:
+
+| Provider id | Endpoint | Wire/API shape | Rule |
+|-------------|----------|----------------|------|
+| `ark` | `https://ark.ap-southeast.bytepluses.com/api/v3` | OpenAI-compatible data plane | BytePlus Ark global provider identity. |
+| `volcengine-ark` | `https://ark.cn-beijing.volces.com/api/v3` | OpenAI-compatible data plane | Volcengine Ark China standard data-plane identity. |
+| `ark-agent-plan-cn` | `https://ark.cn-beijing.volces.com/api/plan/v3` | Agent Plan API | Volcengine Ark Agent Plan identity; not interchangeable with the standard data plane. |
+
+Manager-local execution and HaaS delegated execution both pass provider selection as
+`providerId + model + credentialRef`. The registry stores the provider route and
+credential reference/fingerprint only; the Model Proxy resolves real credentials at
+request time.
+
 ## 7. Runtime Model and State Machine
 
 ```text
@@ -255,6 +272,7 @@ Log fields contain only id, base, model, capability, fingerprint, and a safe rea
 | App does not exist or access is unauthorized | `404 app_not_found` |
 | Model unavailable | `422 haas_model_unavailable`, or an explicit fallback recorded in metadata |
 | Provider URL fails the allowlist | `haas_provider_source_invalid` |
+| Provider id does not match its endpoint/API shape | `haas_provider_source_invalid` |
 | Skill bundle lacks `SKILL.md` | Configuration validation fails; activation is rejected |
 | MCP URL fails the allowlist | `haas_mcp_source_invalid` |
 | Registry store unavailable | Create/update fails closed; frozen sessions continue executing |

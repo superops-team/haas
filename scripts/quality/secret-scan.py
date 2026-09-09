@@ -34,8 +34,21 @@ PATTERNS_FILE = (
 # Value hints that are clearly placeholders, not real secrets.
 PLACEHOLDER_RE = re.compile(
     r"<[^>]+>|YOUR_|your[-_]?\w+|EXAMPLE|example|xxxx+|XXXX+|placeholder|dummy|"
-    r"fake|null|none|secret_ref|secret://|vault://|FIXME|TODO|\$\{[^}]+\}",
+    r"fake|null|none|test|stale|live|openai-key|sk-ant-x|hunter2|abc123|\bsecret\b|"
+    r"secret_ref|secret://|vault://|"
+    r"FIXME|TODO|\$\{[^}]+\}",
     re.IGNORECASE,
+)
+
+DYNAMIC_VALUE_RE = re.compile(
+    r"^(?:"
+    r"[A-Za-z_][A-Za-z0-9_\.]*(?:\(|\)|\]|\s|\}|\)|,|$)"
+    r"|Optional\["
+    r"|str\)"
+    r"|os\.environ"
+    r"|\("
+    r"|\{"
+    r")"
 )
 
 
@@ -75,6 +88,8 @@ def find_in_line(line: str) -> list[tuple[str, str]]:
     hits: list[tuple[str, str]] = []
     for name, regex in PATTERNS:
         for m in regex.finditer(line):
+            if PLACEHOLDER_RE.search(m.group(0)) or PLACEHOLDER_RE.search(line):
+                continue
             hits.append((name, m.group(0)))
 
     m = GENERIC_KEY.search(line)
@@ -90,6 +105,9 @@ def find_in_line(line: str) -> list[tuple[str, str]]:
         value = value.strip()
         if (len(value) >= 8
                 and not PLACEHOLDER_RE.search(value)
+                and not PLACEHOLDER_RE.search(line)
+                and not DYNAMIC_VALUE_RE.search(value)
+                and "==" not in line
                 and value not in ("true", "false")):
             hits.append(("generic_secret_assignment", f"{m.group(1)}={value[:24]}..."))
 

@@ -114,3 +114,29 @@ def test_session_events_replay_with_cursor() -> None:
     ) as resp:
         tail = [line for line in resp.iter_lines() if line.startswith("data: ")]
     assert len(tail) == 2
+
+
+def test_api_run_sse_uses_streaming_runtime_path() -> None:
+    from fastapi.testclient import TestClient
+
+    app = make_app()
+
+    async def fail_run(_req):
+        raise AssertionError("/run_sse must not call run() and batch-replay")
+
+    app.state.runtime.sessions.run = fail_run
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/run_sse",
+        json={
+            "appName": "chrn_codex_default",
+            "userId": "u_1",
+            "sessionId": "hsess_live",
+            "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+        },
+        headers=HEADERS,
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line for line in resp.iter_lines() if line.startswith("data: ")]
+    assert json.loads(lines[0][len("data: "):])["content"]["parts"][0]["text"] == "hello"

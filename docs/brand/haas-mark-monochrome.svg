@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">HaaS Protocol Bridge monochrome mark</title>
+  <desc id="desc">A monochrome geometric H representing a stable protocol bridge and isolated harness runtimes.</desc>
+  <rect width="256" height="256" rx="56" fill="#08111f"/>
+  <g fill="none" stroke="#f8fafc" stroke-linecap="round">
+    <path d="M62 48v160M194 48v160M62 128h132" stroke-width="28"/>
+    <path d="M22 128h40M194 128h40" stroke-width="8"/>
+  </g>
+  <circle cx="62" cy="128" r="7" fill="#08111f"/><circle cx="194" cy="128" r="7" fill="#08111f"/>
+</svg>

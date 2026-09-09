@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-07
-Related specs: [Container Runtime](../container-runtime/README.zh-CN.md), [Stores](../stores/README.zh-CN.md), [Identity](../identity/README.zh-CN.md), [HaaS Protocol](../haas-protocol/README.zh-CN.md)
+Related specs: [Container Runtime](../container-runtime/README.zh-CN.md), [Stores](../stores/README.zh-CN.md), [Identity](../identity/README.zh-CN.md), [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -52,6 +52,7 @@ class AppConfig:
     mcp_proxy: McpProxyConfig
     adapters: AdaptersConfig
     session_runtime: SessionRuntimeConfig
+    delegation: DelegationConfig
     observability: ObservabilityConfig
 
 def load_config(path: str | None) -> AppConfig: ...
@@ -93,6 +94,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI: ...
 | `HAAS_SIDECAR_PORT` | sidecar 端口（默认 `8092`） |
 | `HAAS_STORE_BACKEND` | 生产默认 `sqlite`；`memory` 仅测试；`postgres` 多副本预留 |
 | `HAAS_IDENTITY_PROVIDER` | `static` / `external_jwt` |
+| `HAAS_STATIC_TOKEN_FILE` | 包含本地 static bearer token 的用户私有文件；一旦配置，文件缺失或为空时必须 fail closed，不得回退到 `dev-token` |
+| `HAAS_DELEGATION_CONTAINER_BACKEND` | 默认 `disabled`；`docker` 启用 Docker delegated runtime |
+| `HAAS_DELEGATION_DOCKER_BIN` | delegated backend 为 `docker` 时使用的 Docker CLI 路径/名称 |
+| `HAAS_DELEGATION_DOCKER_NETWORK` | delegated container 的 Docker network mode（默认 `none`） |
+| `HAAS_DELEGATION_ALLOW_UNPINNED_LOCAL_IMAGE` | 本地开发逃生口，允许 `haas:local` 这类未 pin digest 的镜像 tag；默认 `false`，生产必须保持 digest pinning |
+| `HAAS_DELEGATION_IDLE_TTL_SECONDS` | delegated-session container 默认 idle TTL（`1800`） |
+| `HAAS_DELEGATION_MAX_CONTAINER_LIFETIME_SECONDS` | delegated container 默认最大存活时间（`28800`） |
+| `HAAS_DELEGATION_RW_WORKSPACE_CONCURRENCY` | 首期为 `single_writer` |
 
 配置文件默认 `haas.yaml`，优先级：默认值 < 配置文件 < 环境变量。
 
@@ -108,6 +117,7 @@ store:
   event_retention_seconds: 2592000
 identity:
   provider: static
+  static_token_file: null
 model_proxy:
   listen: "127.0.0.1:18080"
 mcp_proxy:
@@ -121,7 +131,23 @@ session_runtime:
   lease_ttl_ms: 30000
   lease_renew_interval_ms: 10000
   turn_timeout_seconds: 900
+delegation:
+  container_backend: disabled
+  docker_bin: docker
+  docker_network: none
+  allow_unpinned_local_image: false
+  idle_ttl_seconds: 1800
+  max_container_lifetime_seconds: 28800
+  rw_workspace_concurrency: single_writer
+  queue_policy: fifo
+  restore_policy: fail_closed
+  policy_change_mode: snapshot_per_session
+  mount_policy: project_rw_extra_ro
 ```
+
+`delegation` 是独立配置命名空间。它为 manager 创建 delegated session 时提供默认值；
+生效值会复制进 delegated-session policy snapshot。后续配置变更只影响新 delegated
+session；已有 session 只有通过显式 policy update/rebind API 才会改变。
 
 端口与服务发现固定为：
 
@@ -143,6 +169,7 @@ startup -> load_config(HAAS_CONFIG) -> validate -> build AppConfig -> create_app
 - provider key / MCP token 不接受明文 env 或 yaml；只能 `credentialRef`。
 - 配置 dump/诊断输出必须脱敏，不包含 dsn、key、passphrase。
 - loopback 服务（18080/18081）只绑定 `127.0.0.1`。
+- delegation policy 配置不得包含 host path 或 credential；host path 只能通过 manager 已授权 mount manifest 提供。
 
 ## 9. 可观测性
 
@@ -161,5 +188,6 @@ startup -> load_config(HAAS_CONFIG) -> validate -> build AppConfig -> create_app
 ## 11. 测试计划与验收
 
 - Unit：三层优先级、非法配置 fail fast、secret 拒绝。
+- Unit：delegation 默认值与环境变量覆盖能生成稳定 policy snapshot，且不改变已有 delegated session。
 - Integration：`create_app(config)` 用 memory store + static identity 启动并过 `/v1/haas/health`。
 - Security：config 文件与 dump 不出现明文 secret。

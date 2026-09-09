@@ -5,7 +5,9 @@ info:
   summary: ADK 2.0-compatible protocol surface for HaaS.
   description: |
     HaaS exposes the Google ADK 2.0 REST API protocol layer as its northbound contract,
-    plus HaaS-native control-plane extensions and mpa-codex-worker migration shims.
+    plus HaaS-native control-plane extensions. Deprecated mpa-codex-worker path
+    skeletons are retained only as historical schema records and are not implemented
+    by this project.
     Prose in README.md is normative when behavior cannot be expressed in OpenAPI.
 servers:
   - url: http://127.0.0.1:8092
@@ -376,6 +378,110 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ModelCatalogEnvelope"
+  /v1/haas/delegated-sessions:
+    post:
+      tags: [HaaS]
+      operationId: createDelegatedSession
+      summary: Create or bind a manager-owned delegated session
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegatedSessionCreate"
+      responses:
+        "200":
+          description: Delegated session contract (`data` = DelegatedSessionContract)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegatedSessionEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/haas/delegated-sessions/{delegated_session_id}:
+    parameters:
+      - $ref: "#/components/parameters/DelegatedSessionId"
+    get:
+      tags: [HaaS]
+      operationId: getDelegatedSession
+      summary: Get one delegated session contract and runtime status
+      responses:
+        "200":
+          description: Delegated session contract (`data` = DelegatedSessionContract)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegatedSessionEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/delegated-sessions/{delegated_session_id}/restore:
+    parameters:
+      - $ref: "#/components/parameters/DelegatedSessionId"
+    post:
+      tags: [HaaS]
+      operationId: restoreDelegatedSession
+      summary: Restore runtime resources for a delegated session
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegatedSessionRestore"
+      responses:
+        "200":
+          description: Delegated session contract after restore (`data` = DelegatedSessionContract)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegatedSessionEnvelope"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/haas/delegated-sessions/{delegated_session_id}/policy:
+    parameters:
+      - $ref: "#/components/parameters/DelegatedSessionId"
+    post:
+      tags: [HaaS]
+      operationId: updateDelegatedSessionPolicy
+      summary: Explicitly update or rebind a delegated session policy snapshot
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegatedSessionPolicyUpdate"
+      responses:
+        "200":
+          description: Delegated session contract after policy update (`data` = DelegatedSessionContract)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegatedSessionEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /v1/haas/sessions:
     get:
       tags: [HaaS]
@@ -454,6 +560,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InvocationEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/haas/sessions/{session_id}/approvals/{approval_id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/ApprovalId"
+    post:
+      tags: [HaaS]
+      operationId: resolveApproval
+      summary: Resolve a manager approval request for a waiting delegated action
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalDecision"
+      responses:
+        "200":
+          description: Approval resolution (`data` = ApprovalResolution)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalResolutionEnvelope"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -688,6 +821,20 @@ components:
       required: true
       schema:
         type: string
+    DelegatedSessionId:
+      name: delegated_session_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^dgsess_"
+    ApprovalId:
+      name: approval_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^appr_"
     InvocationId:
       name: invocation_id
       in: path
@@ -748,6 +895,18 @@ components:
             $ref: "#/components/schemas/ErrorDetail"
     RateLimited:
       description: Rate or quota limit
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    Forbidden:
+      description: Operation is not allowed by policy or security boundary
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    ServiceUnavailable:
+      description: Required service is unavailable
       content:
         application/json:
           schema:
@@ -918,6 +1077,221 @@ components:
         error:
           type: [object, "null"]
           additionalProperties: true
+      additionalProperties: true
+    DelegatedSessionCreate:
+      type: object
+      required: [managerSessionId, haasSessionId, haasUserId, harnessId, image, provider, mountManifest]
+      properties:
+        managerSessionId:
+          type: string
+        haasSessionId:
+          type: string
+        haasUserId:
+          type: string
+        harnessId:
+          type: string
+          pattern: "^chrn_"
+        image:
+          $ref: "#/components/schemas/DelegatedImage"
+        provider:
+          $ref: "#/components/schemas/DelegatedProvider"
+        mountManifest:
+          $ref: "#/components/schemas/MountManifest"
+        delegationPolicySnapshot:
+          $ref: "#/components/schemas/DelegationPolicy"
+        metadata:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    DelegatedSessionRestore:
+      type: object
+      properties:
+        reason:
+          type: string
+          enum: [follow_up_turn, process_restart, manual_restore]
+        metadata:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    DelegatedSessionPolicyUpdate:
+      type: object
+      required: [delegationPolicySnapshot]
+      properties:
+        delegationPolicySnapshot:
+          $ref: "#/components/schemas/DelegationPolicy"
+        mountManifest:
+          $ref: "#/components/schemas/MountManifest"
+        reason:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    DelegatedSessionContract:
+      type: object
+      required: [id, object, managerSessionId, haasSessionId, haasUserId, harnessId, binding, image, provider, mountManifest, delegationPolicySnapshot, runtime, createdAtMs, updatedAtMs]
+      properties:
+        id:
+          type: string
+          pattern: "^dgsess_"
+        object:
+          type: string
+          const: delegated_session
+        managerSessionId:
+          type: string
+        haasSessionId:
+          type: string
+        haasUserId:
+          type: string
+        harnessId:
+          type: string
+          pattern: "^chrn_"
+        harnessBase:
+          type: string
+        binding:
+          type: string
+          enum: [haas_bound]
+        image:
+          $ref: "#/components/schemas/DelegatedImage"
+        provider:
+          $ref: "#/components/schemas/DelegatedProvider"
+        mountManifest:
+          $ref: "#/components/schemas/MountManifest"
+        delegationPolicySnapshot:
+          $ref: "#/components/schemas/DelegationPolicy"
+        runtime:
+          $ref: "#/components/schemas/DelegatedRuntime"
+        createdAtMs:
+          type: integer
+          minimum: 0
+        updatedAtMs:
+          type: integer
+          minimum: 0
+      additionalProperties: true
+    DelegatedImage:
+      type: object
+      required: [reference]
+      properties:
+        reference:
+          type: string
+        digest:
+          type: [string, "null"]
+      additionalProperties: false
+    DelegatedProvider:
+      type: object
+      required: [providerId, model, credentialRef]
+      properties:
+        providerId:
+          type: string
+        model:
+          type: string
+        credentialRef:
+          type: string
+      additionalProperties: false
+    MountManifest:
+      type: object
+      required: [version, primaryWorkspace]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        primaryWorkspace:
+          $ref: "#/components/schemas/MountEntry"
+        extraMounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/MountEntry"
+          default: []
+      additionalProperties: false
+    MountEntry:
+      type: object
+      required: [hostPathCanonical, containerPath, access]
+      properties:
+        hostPathCanonical:
+          type: string
+        containerPath:
+          type: string
+        access:
+          type: string
+          enum: [ro, rw]
+      additionalProperties: false
+    DelegationPolicy:
+      type: object
+      required: [version, idleTtlSeconds, maxContainerLifetimeSeconds, rwWorkspaceConcurrency, queuePolicy, restorePolicy, mountPolicy]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        idleTtlSeconds:
+          type: integer
+          minimum: 1
+        maxContainerLifetimeSeconds:
+          type: integer
+          minimum: 1
+        rwWorkspaceConcurrency:
+          type: string
+          enum: [single_writer]
+        queuePolicy:
+          type: string
+          enum: [fifo]
+        restorePolicy:
+          type: string
+          enum: [fail_closed]
+        policyChangeMode:
+          type: string
+          enum: [snapshot_per_session]
+          default: snapshot_per_session
+        mountPolicy:
+          type: string
+          enum: [project_rw_extra_ro]
+      additionalProperties: false
+    DelegatedRuntime:
+      type: object
+      required: [status, containerGeneration]
+      properties:
+        status:
+          type: string
+          enum: [no_runtime, creating, running, idle, ttl_destroyed, restoring, draining, destroyed, failed]
+        containerId:
+          type: [string, "null"]
+        containerGeneration:
+          type: integer
+          minimum: 0
+        lastStartedAtMs:
+          type: [integer, "null"]
+        lastActiveAtMs:
+          type: [integer, "null"]
+      additionalProperties: true
+    ApprovalDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [approved, denied]
+        reason:
+          type: string
+        expiresAtMs:
+          type: [integer, "null"]
+        metadata:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    ApprovalResolution:
+      type: object
+      required: [approvalId, sessionId, status]
+      properties:
+        approvalId:
+          type: string
+          pattern: "^appr_"
+        sessionId:
+          type: string
+        status:
+          type: string
+          enum: [approved, denied, expired, cancelled]
+        resolvedAtMs:
+          type: integer
+          minimum: 0
       additionalProperties: true
     SkillFile:
       type: object
@@ -1111,6 +1485,22 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/Invocation"
+    DelegatedSessionEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/DelegatedSessionContract"
+    ApprovalResolutionEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ApprovalResolution"
     ModelCatalogEnvelope:
       allOf:
         - $ref: "#/components/schemas/HaasEnvelope"
@@ -1167,6 +1557,7 @@ components:
                 - haas_harness_not_found
                 - session_not_found
                 - haas_invocation_not_found
+                - haas_delegated_session_not_found
                 - haas_file_not_found
                 - invalid_input
                 - haas_legacy_request_invalid
@@ -1176,6 +1567,9 @@ components:
                 - session_expired
                 - haas_offset_expired
                 - haas_cancel_unsupported
+                - haas_delegated_session_conflict
+                - haas_approval_not_found
+                - haas_approval_state_conflict
                 - haas_policy_denied
                 - haas_policy_invalid
                 - haas_policy_unsupported
@@ -1183,6 +1577,7 @@ components:
                 - haas_secret_input_invalid
                 - haas_provider_source_invalid
                 - haas_mcp_source_invalid
+                - haas_skill_source_invalid
                 - haas_adapter_unavailable
                 - haas_adapter_incompatible
                 - haas_adapter_overloaded
@@ -1194,6 +1589,12 @@ components:
                 - haas_sandbox_widening_rejected
                 - haas_vault_unavailable
                 - haas_request_timeout
+                - haas_delegation_backend_unavailable
+                - haas_delegation_restore_failed
+                - haas_delegation_mount_invalid
+                - haas_delegation_image_unavailable
+                - haas_workspace_lock_busy
+                - haas_workspace_lock_timeout
                 - haas_rate_limited
                 - haas_quota_exceeded
                 - haas_queue_full

@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-08-30
-Related specs: [Security Boundary](../security-boundary/README.md), [Harness Registry](../harness-registry/README.md), [Session Runtime](../session-runtime/README.md)
+Related specs: [Security Boundary](../security-boundary/README.md), [Harness Registry](../harness-registry/README.md), [Session Runtime](../session-runtime/README.md), [Manager Delegation](../manager-delegation/README.md)
 
 ## 1. Component Role
 
@@ -36,6 +36,8 @@ The Policy Controller compiles caller, tenant, workspace, configured harness, re
 Responsibilities:
 
 - Merge organization-, workspace-, harness-, session-, and turn-level policies.
+- Merge delegation policy layers for manager-delegated sessions and freeze the
+  effective delegation policy snapshot at delegated-session creation time.
 - Validate that policy changes only narrow permissions; widening MUST have an explicit authorization source.
 - Produce an `EffectivePolicy` and freeze it into the session/turn.
 - Project generic policy into adapter-specific configuration.
@@ -48,6 +50,7 @@ Non-responsibilities:
 - Does not store credential values.
 - Does not dynamically grant permissions based on harness text output.
 - Does not treat hard blocks unsupported by an adapter as enforced by default.
+- Does not decide manager intent routing; it only validates the policy and mount contract after manager authorization.
 
 ## 5. Core Interfaces
 
@@ -57,6 +60,7 @@ async def authorize_request(ctx: RequestContext, action: str, resource: str) -> 
 async def authorize_tool(policy: EffectivePolicy, tool: ToolRequest) -> PolicyDecision: ...
 async def authorize_network(policy: EffectivePolicy, url: str) -> PolicyDecision: ...
 async def authorize_workspace_path(policy: EffectivePolicy, path: str, access: str) -> PolicyDecision: ...
+async def authorize_mount_manifest(policy: EffectivePolicy, manifest: MountManifest) -> PolicyDecision: ...
 async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> AdapterPolicyProjection: ...
 ```
 
@@ -90,6 +94,15 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
   "model": {
     "allowedModels": ["gpt-5.6-terra"],
     "fallbackModel": "gpt-5.6-terra"
+  },
+  "delegation": {
+    "idleTtlSeconds": 1800,
+    "maxContainerLifetimeSeconds": 28800,
+    "rwWorkspaceConcurrency": "single_writer",
+    "queuePolicy": "fifo",
+    "restorePolicy": "fail_closed",
+    "policyChangeMode": "snapshot_per_session",
+    "mountPolicy": "project_rw_extra_ro"
   }
 }
 ```
@@ -106,6 +119,7 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
       "network": {"defaultAction": "deny", "allow": ["https://api.openai.com"]},
       "tools": {"disabled": ["web_search"], "approvalMode": "never"},
       "model": {"allowedModels": ["gpt-5.6-terra"], "fallbackModel": "gpt-5.6-terra"},
+      "delegationPolicy": {"idleTtlSeconds": 1800, "maxContainerLifetimeSeconds": 28800},
       "delegation": false
     }
   ]
@@ -151,6 +165,15 @@ Policy precedence:
 
 Lower levels may only narrow unless a higher level explicitly grants delegation.
 
+Delegation policy precedence uses the same broad-to-narrow order. The compiled
+delegation policy is snapshotted into the delegated session. Later global/workspace
+configuration changes do not change existing delegated sessions unless a HaaS native
+policy update/rebind request is explicitly authorized and recorded.
+
+Workspace write admission is part of the delegation policy: a canonical workspace may
+have only one active `rw` delegated session at a time. Other `rw` turns queue according
+to `queuePolicy=fifo`; `ro` sessions may run concurrently.
+
 ## 8. Security and Permissions
 
 - Unknown policy fields fail closed when they would affect security.
@@ -190,6 +213,9 @@ Metrics:
 | Unknown security-affecting field | Reject with `haas_policy_invalid` |
 | Adapter cannot enforce a hard requirement | Reject with `haas_policy_unsupported` |
 | Requested wider workspace root | Reject unless higher-level delegation allows it |
+| Delegated mount manifest widens access | Reject with `haas_delegation_mount_invalid` |
+| Existing delegated session receives implicit policy drift | Reject; require explicit policy update/rebind |
+| Same canonical workspace already has active `rw` delegated session | Queue or return `haas_workspace_lock_busy` / `haas_workspace_lock_timeout` according to policy |
 | Network URL fails allowlist | Reject before making an outbound connection |
 | Approval required but no approval bridge exists | Reject or mark the task blocked; do not auto-approve |
 
@@ -199,4 +225,6 @@ Metrics:
 - Adapter projection: Codex/Pi/OpenCode fixtures verify hard/advisory/unsupported declarations.
 - Security: SSRF cases, private IP, metadata endpoint, and Unix socket and Docker socket denial.
 - Integration: a session snapshot freezes policy, and a later harness update does not alter the active session.
+- Integration: a delegated-session policy snapshot is unaffected by later global/workspace config changes until an explicit policy update/rebind.
+- Concurrency: one active `rw` delegated session per canonical workspace; `ro` delegated sessions remain concurrent.
 - Review: any policy expansion requires a spec review and a security-boundary update.

@@ -54,6 +54,7 @@ Implementation Roadmap 定义 HaaS 从文档基线进入首期实现的分层任
 | S4 Codex adapter | S3 complete | Codex app-server handshake、thread/turn、cancel E2E 通过 |
 | S5 sandbox + AIO container | S4 complete | Sandbox Runtime 投影 + OpenSandbox AIO-derived image smoke 通过 |
 | S6 extended features | S5 complete | files/artifacts/MCP/skills/model proxy/admission control 按 specs 逐项通过 |
+| S7 manager delegation backend | S6 complete，或一个显式收窄的 vertical slice 具备等价 store/SSE/proxy/container 门禁 | manager 可绑定 session 到 HaaS、执行 delegated Codex work、流式事件、TTL 后恢复，并 fail closed |
 
 ## 6. 数据模型
 
@@ -81,7 +82,8 @@ S0 specs baseline
   -> S4 Codex app-server adapter
   -> S5 Sandbox Runtime + OpenSandbox AIO container
   -> S6 Extended features (model proxy / MCP / skills / artifacts / admission control)
-  -> S7 additional harness adapters
+  -> S7 Manager Delegation backend
+  -> S8 additional harness adapters
 ```
 
 Do not start S4 before S3 fake adapter proves that the public protocol and session runtime are independent of Codex.
@@ -123,6 +125,7 @@ Each implementation stage must report:
 | Codex E2E fails | Keep adapter unavailable; do not mark `codex` base ready |
 | Sandbox Runtime smoke fails | Do not claim harness sandbox 标准化；block S6 |
 | Docker smoke fails | Do not publish runtime image |
+| Manager delegation restore fails | 保持 manager session HaaS-bound，返回安全 delegated error，不回退本地执行 |
 
 ## 11. 测试计划与验收
 
@@ -132,4 +135,6 @@ Each implementation stage must report:
 - S3: fake adapter contract tests.
 - S4: real Codex app-server E2E.
 - S5: Sandbox Runtime 投影验证 + Docker build/run smoke on OpenSandbox AIO-derived image.
-- S6/S7: feature-specific integration, security and ADK compatibility expansion.
+- S6: feature-specific integration, security and ADK compatibility expansion.
+- S7: Volcengine Ark provider identity、HaaS native delegated-session API、live `/run_sse`、persistent store、每 delegated session 一个容器、`/workspace:rw` mount 校验、workspace single-writer lock、approval relay、model proxy secretless path，以及显式 flag 下的 Docker/Codex smoke。
+- S8: manager delegation backend 稳定后扩展 additional harness adapter。

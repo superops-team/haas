@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-07
-Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
+Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Harness Adapter](../harness-adapter/README.md), [Manager Delegation](../manager-delegation/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
 
@@ -38,6 +38,8 @@ Responsibilities:
 - Maintain a gapless, zero-based `sequenceNumber` for each invocation as an internal field.
 - Maintain a session-scoped `eventId` for HaaS native streams.
 - Project canonical events into ADK `Event` or HaaS events.
+- Persist and stream manager-delegation lifecycle events, including restore,
+  workspace-lock queueing, approval requests, and approval resolutions.
 - Replay missed events before entering a live stream using `Last-Event-ID` / `after_event_id`.
 - Send heartbeats without producing events or advancing the cursor.
 - Apply a bounded queue, delta dropping, or disconnect to slow clients; terminal state remains available through read-back.
@@ -135,7 +137,26 @@ Timestamp convention: internal canonical events use `observedAtMs`, in epoch mil
 
 Internal fields such as `sequenceNumber`, `sessionId`, and `adapterId` MUST NOT enter the ADK projection. A HaaS native stream MAY emit additional `haas` metadata.
 
-### 6.3 SSE Frame
+### 6.3 Manager Delegation Events
+
+Manager-delegation events are canonical HaaS events. ADK projection may represent
+them as safe status parts or `actions.requestedAuthConfigs`, but native HaaS streams
+MUST preserve their structured `haas` metadata:
+
+| Event type | Required safe metadata |
+|------------|------------------------|
+| `haas.delegation.restore_started` | delegatedSessionId, containerGeneration |
+| `haas.delegation.restore_failed` | delegatedSessionId, safeReason, retryable |
+| `haas.delegation.workspace_lock_queued` | delegatedSessionId, canonicalWorkspaceHash, queuePosition |
+| `haas.delegation.workspace_lock_acquired` | delegatedSessionId, canonicalWorkspaceHash |
+| `haas.delegation.container_ttl_destroyed` | delegatedSessionId, containerGeneration |
+| `haas.approval.required` | approvalId, kind, safeSummary, policyReason |
+| `haas.approval.resolved` | approvalId, status |
+
+Host paths, full tool arguments, raw prompts, credentials, provider response bodies,
+and internal container addresses MUST NOT appear in these events.
+
+### 6.4 SSE Frame
 
 ```text
 data: {"id":"evt_...","invocationId":"inv_abc","author":"codex","timestamp":1743712220.385936,"content":{...},"actions":{...},"longRunningToolIds":[]}
@@ -175,6 +196,8 @@ Ordering invariants:
   appending/yielding a terminal event, or use a backend transaction that makes
   the terminal state and terminal event visible atomically.
 - The event array returned by non-streaming `/run` MUST equal the aggregate result from streaming `/run_sse` (parity).
+- `/run_sse` MUST publish events while the invocation is running. It MUST NOT wait
+  for invocation terminal state and then replay a completed batch.
 - Stream closure itself signals invocation completion.
 
 ## 8. Security and Authorization
@@ -222,11 +245,14 @@ Logs:
 | Append persistence fails | The current invocation MUST NOT claim `completed`; Session Runtime generates terminal failure evidence |
 | Proxy buffering | Set `Cache-Control: no-cache` on the response; tests verify progressive flushing |
 | Adapter emits duplicate terminal events | Retain the first terminal event and write a diagnostic warning for subsequent ones |
+| Delegated approval is pending | Keep the stream open with heartbeats; terminal state is written only after approval resolution, cancellation, or timeout |
 
 ## 11. Test Plan and Acceptance Criteria
 
 - Unit: sequence allocation, terminal uniqueness, heartbeat without cursor advancement, and ADK projection mapping.
 - Integration: `/run` versus `/run_sse` parity, `GET session` read-back after disconnect, and reconnect replay.
+- Integration: `/run_sse` progressively flushes output before terminal state.
+- Integration: manager-delegation restore, queue, and approval events appear in native streams with redacted metadata.
 - Backpressure: a slow client does not block adapter terminal-event persistence.
 - Security: raw prompts, Authorization, cookies, and complete tool arguments/results do not enter the event log.
 - Security: same bare `sessionId` in different users or apps never mixes events;

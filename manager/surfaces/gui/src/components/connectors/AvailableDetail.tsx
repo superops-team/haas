@@ -1,0 +1,103 @@
+import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import { type CloudStatus, type Connector } from "../../api";
+import { ConnectorBadge } from "../../connectors/ConnectorIcon";
+import { AddConnectionModal } from "./AddConnectionModal";
+import { ApprovalChip } from "./ToolReview";
+import { FOOT, GRP, GRP_H, PILL_ACCENT, ROW } from "./ui";
+
+// Pre-connect detail page (UX-DECISIONS §38): what a connector is for and what
+// access it gets, BEFORE any credentials exist. About paragraph, honest Access
+// bullets, and the tool list behind a collapsed disclosure (advanced-reader
+// detail — no enable/disable pre-connect; that lever lives on the connected
+// page). Connect opens the same add-connection modal as the list's pill.
+
+export function AvailableDetail({
+  c,
+  cloud,
+  onChanged,
+}: {
+  c: Connector;
+  cloud: CloudStatus | null;
+  onChanged: () => void;
+}) {
+  const { t: tt } = useTranslation();
+  const [connecting, setConnecting] = useState(false);
+  const [showTools, setShowTools] = useState(false);
+  const tools = c.tools || [];
+
+  return (
+    <div data-testid="available-detail">
+      <div className="flex items-center gap-3.5 mb-5">
+        <ConnectorBadge connector={c} size={44} title={c.title} />
+        <div className="min-w-0 flex-1">
+          <h2 className="text-[20px] font-semibold tracking-tight leading-tight">{c.title}</h2>
+          <div className="text-[13px] text-muted">{c.blurb}</div>
+        </div>
+        <button
+          className={PILL_ACCENT}
+          data-testid="available-connect"
+          onClick={() => setConnecting(true)}
+        >
+          {tt("available.connect")}
+        </button>
+      </div>
+
+      {c.about && <p className="text-[13px] text-ink/90 leading-relaxed mb-1 px-0.5">{c.about}</p>}
+
+      {(c.access?.length ?? 0) > 0 && (
+        <>
+          <div className={GRP_H}>{tt("available.access")}</div>
+          <div className={GRP} data-testid="available-access">
+            {c.access!.map((line) => (
+              <div key={line} className={ROW + " !min-h-[36px] !py-2 text-[13px]"}>
+                {line}
+              </div>
+            ))}
+          </div>
+          <div className={FOOT}>
+            {tt("available.access_foot")}
+          </div>
+        </>
+      )}
+
+      {tools.length > 0 && (
+        <>
+          <div className={GRP_H}>{tt("available.tools")}</div>
+          <div className={GRP}>
+            <button
+              className={ROW + " w-full text-left hover:bg-paper/60 text-[13px]"}
+              data-testid="available-tools-toggle"
+              onClick={() => setShowTools((v) => !v)}
+            >
+              <span className="min-w-0 flex-1 text-muted">
+                {tt("available.tools_added", { count: tools.length })}
+              </span>
+              <span className="text-faint text-[13px] shrink-0">{showTools ? tt("available.hide") : tt("available.view")}</span>
+            </button>
+            {showTools &&
+              tools.map((tool) => (
+                <div key={tool.name} className={ROW + " !min-h-[38px]"}>
+                  <span className="min-w-0 flex-1">
+                    <span className="text-[13px]">{tool.label}</span>
+                    <span className="block text-[12px] text-muted">{tool.description}</span>
+                  </span>
+                  {/* Same chip, same tooltip, as the connected page's tool list. */}
+                  <ApprovalChip kind={tool.kind !== "read" ? "asks_first" : "read"} />
+                </div>
+              ))}
+          </div>
+        </>
+      )}
+
+      {connecting && (
+        <AddConnectionModal
+          c={c}
+          cloud={cloud}
+          onClose={() => setConnecting(false)}
+          onChanged={onChanged}
+        />
+      )}
+    </div>
+  );
+}

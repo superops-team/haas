@@ -24,6 +24,7 @@ ADK/FastAPI style, and `code` is a stable contract.
 | `haas_harness_not_found` | 404 | no | harness_not_found | harness-registry (`/v1/haas/harnesses/{id}`) |
 | `session_not_found` | 404 | no | session_not_found | session-runtime |
 | `haas_invocation_not_found` | 404 | no | invocation_not_found | session-runtime |
+| `haas_delegated_session_not_found` | 404 | no | delegated_session_not_found | manager-delegation |
 | `haas_file_not_found` | 404 | no | file_not_found | artifact-store |
 
 ## 2. Protocol and Validation
@@ -43,6 +44,9 @@ ADK/FastAPI style, and `code` is a stable contract.
 | `session_expired` | 410 | no | session_expired | session-runtime |
 | `haas_offset_expired` | 410 | no | offset_expired | event-log-sse (HaaS native replay cursor expired) |
 | `haas_cancel_unsupported` | 422 | no | cancel_unsupported | harness-adapter |
+| `haas_delegated_session_conflict` | 409 | no | delegated_session_binding_conflict | manager-delegation |
+| `haas_approval_not_found` | 404 | no | approval_not_found | manager-delegation / session-runtime |
+| `haas_approval_state_conflict` | 409 | no | approval_state_conflict | manager-delegation / session-runtime |
 
 ## 4. Policy and Security
 
@@ -82,6 +86,12 @@ ADK/FastAPI style, and `code` is a stable contract.
 | `haas_sandbox_widening_rejected` | 403 | no | sandbox_widening_rejected | sandbox-runtime |
 | `haas_vault_unavailable` | 503 | yes | vault_unavailable | sandbox-runtime / security-boundary |
 | `haas_request_timeout` | 504 | no | request_timeout | session-runtime |
+| `haas_delegation_backend_unavailable` | 503 | yes | delegation_backend_unavailable | manager-delegation |
+| `haas_delegation_restore_failed` | 503 | yes | delegation_restore_failed | manager-delegation / sandbox-runtime |
+| `haas_delegation_mount_invalid` | 403 | no | delegation_mount_invalid | manager-delegation / policy-controller |
+| `haas_delegation_image_unavailable` | 503 | yes | delegation_image_unavailable | manager-delegation / container-runtime |
+| `haas_workspace_lock_busy` | 409 | yes | workspace_lock_busy | manager-delegation / admission-control |
+| `haas_workspace_lock_timeout` | 429 | yes | workspace_lock_timeout | manager-delegation / admission-control |
 
 ## 8. Admission / Store
 

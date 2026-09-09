@@ -24,6 +24,7 @@ HaaS Sidecar API (FastAPI)
   +-- Admission Control
   +-- Event Log & SSE Replay
   +-- Policy Controller
+  +-- Manager Delegation
   +-- Artifact Store
   +-- Security Boundary
   +-- Observability
@@ -53,11 +54,14 @@ Core layers:
 3. A `configured harness` is the unit of execution capability; `appName` is the configured harness `id`.
 4. `Sandbox Runtime` uniformly projects each harness execution sandbox into the OpenSandbox AIO sandbox/execd/credential vault. It is the standardized runtime substrate for multiple harnesses, rather than merely using AIO as a base image.
 5. `Admission Control` manages service-level quota, rate limiting, concurrency, and queue admission.
-6. `Stores` is the sole persistent source of truth; `Identity` is the authentication boundary; and `Config` is the assembly contract (see their respective specs).
+6. `Manager Delegation` defines how an upstream manager binds sessions, policies, mount manifests, approvals, and container restore to HaaS as a full execution backend.
+7. `Stores` is the sole persistent source of truth; `Identity` is the authentication boundary; and `Config` is the assembly contract (see their respective specs).
 
 See [WALKTHROUGH](WALKTHROUGH.md) for the end-to-end request sequence.
 See [README Visual Storytelling](VISUAL-STORYTELLING.md) for the bilingual
 Guided Trace GIF contract used by the repository landing page.
+See [Brand and Repository Metrics](BRAND-AND-REPOSITORY-METRICS.md) for the
+logo, README masthead, metric definitions, and badge publication contract.
 
 ## 2. Sources and Rationale
 
@@ -77,6 +81,7 @@ Guided Trace GIF contract used by the repository landing page.
 | Downstream | Harness Registry | Manages configured harnesses (ADK apps) |
 | Downstream | Session Runtime | Manages session/invocation/turn |
 | Downstream | Admission Control | Quota, rate limiting, concurrency, and queue admission |
+| Downstream | Manager Delegation | Manager-facing delegated session binding, restore, approval relay, and workspace single-writer contract |
 | Downstream | Harness Adapter | Isolates concrete harnesses |
 | Downstream | Sandbox Runtime | Uniformly projects execution sandboxes into OpenSandbox |
 | Downstream | Container Runtime | Owns the OpenSandbox AIO image and process topology |
@@ -122,6 +127,7 @@ Key objects:
 | Session | yes | Session Runtime | Unique `(appName, userId, sessionId)` tuple |
 | Turn | internal | Session Runtime | Adapter execution unit; 1:1 with an invocation in the initial release |
 | Event | yes | Event Log & SSE | ADK `Event` projection, invocation-scoped |
+| DelegatedSession | yes on HaaS native API | Manager Delegation / Session Runtime | Manager-to-HaaS binding, policy snapshot, mount manifest, and runtime restore contract |
 | File | yes | Artifact Store | input files and produced artifacts |
 | Policy | internal/public summary | Policy Controller | Effective runtime constraints |
 | RuntimeToken | internal | Security Boundary / Model Proxy | short TTL scoped token |
@@ -133,6 +139,7 @@ request received
   -> protocol/auth/scope validation (Identity -> Principal)
   -> appName resolution (harness id/name)
   -> admission control (quota/rate/queue)
+  -> optional manager delegation binding/restore validation
   -> session/run admission (Idempotency + lease)
   -> policy compilation
   -> sandbox projection (workspace/network/tool -> OpenSandbox)

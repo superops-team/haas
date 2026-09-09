@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-07
-Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md)
+Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -45,6 +45,7 @@ ADK 的 session 由 `(appName, userId, sessionId)` 三元组唯一标识；`invo
 - 将 session 创建时的 configured harness 冻结为 `EffectiveHarnessConfig`。
 - 将 adapter events 写入 Event Log，并维护 session `state`（ADK `stateDelta`）。
 - 处理 streaming run（`/run_sse`）和 non-streaming run（`/run`）的一致终态。
+- 对 delegated session，持久化 HaaS session、native session reference、delegated-session reference、approval wait 和后续恢复所需的 runtime generation metadata。
 - 管理 cancel、timeout、step budget、session expiry、session deletion。
 - 在 sidecar restart 后根据持久状态恢复可恢复 session，或 fail closed 为不可恢复状态。
 
@@ -68,6 +69,7 @@ ADK 的 session 由 `(appName, userId, sessionId)` 三元组唯一标识；`invo
 | `PATCH /apps/{app}/users/{user}/sessions/{sid}` | 应用 `stateDelta`，幂等 |
 | `DELETE /apps/{app}/users/{user}/sessions/{sid}` | 删除 session，取消 active work |
 | `POST /v1/haas/sessions/{sid}/invocations/{id}/cancel` | 取消运行中 invocation，幂等（HaaS native） |
+| `POST /v1/haas/sessions/{sid}/approvals/{approval_id}` | 解析等待中的 delegated action 的 manager 审批决策 |
 
 ### 5.2 Internal API
 
@@ -79,6 +81,7 @@ async def delete_session(app_name: str, user_id: str, session_id: str) -> None: 
 async def start_turn(req: TurnStartRequest) -> TurnRecord: ...
 async def mark_turn_terminal(turn_id: str, result: TurnTerminalResult) -> None: ...
 async def cancel_invocation(session_id: str, invocation_id: str) -> InvocationRecord: ...
+async def resolve_approval(session_id: str, approval_id: str, decision: ApprovalDecision) -> ApprovalRecord: ...
 async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReservation: ...
 ```
 
@@ -105,6 +108,12 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
     "adapterId": "codex-app-server",
     "opaque": "encrypted-or-private-ref",
     "generation": 1
+  },
+  "delegatedSessionRef": {
+    "delegatedSessionId": "dgsess_abc",
+    "managerSessionId": "mgr_sess_123",
+    "containerGeneration": 3,
+    "runtimeStatus": "idle"
   },
   "createdAtMs": 1786400000000,
   "updatedAtMs": 1786400000000,
@@ -154,7 +163,46 @@ async def reserve_idempotency(key: str, request_hash: str) -> IdempotencyReserva
 
 `SessionRecord` 必须能无损投影为 ADK `Session`（`{id, appName, userId, state, events[], lastUpdateTime}`）；内部字段（tenantId 等）不进入 public 输出。
 
-### 6.4 State 合并语义
+### 6.4 Delegated Session Reference
+
+对 manager-delegated session，`SessionRecord.delegatedSessionRef` 把 HaaS session
+关联到 [Manager Delegation](../manager-delegation/README.zh-CN.md) 中定义的持久
+delegated-session contract。Session Runtime 只存 HaaS 侧 reference 与 runtime
+generation。完整 mount manifest、policy snapshot、manager session id、image digest
+和 provider credential reference 由 delegated-session store contract 持久化，不得进入
+ADK `Session` 投影。
+
+存在 `delegatedSessionRef` 表示：
+
+- continuation 在启动新 turn 前使用 HaaS delegated-session restore 路径；
+- TTL 清理可以销毁容器，但不得使 HaaS session 过期；
+- `session_expired` 只表示 HaaS session 保留期过期，不表示 idle container TTL；
+- restore 失败时，invocation 进入 failed/non-resumable 证据，不回退本地执行。
+
+### 6.5 ApprovalRecord
+
+```json
+{
+  "id": "appr_abc",
+  "sessionId": "hsess_abc",
+  "invocationId": "inv_abc",
+  "turnId": "turn_abc",
+  "status": "waiting",
+  "request": {
+    "kind": "tool",
+    "safeSummary": "Run shell command in /workspace",
+    "policyReason": "tool_requires_approval"
+  },
+  "decision": null,
+  "createdAtMs": 1786400000000,
+  "resolvedAtMs": null
+}
+```
+
+审批记录必须持久化，确保 SSE 断线或 sidecar restart 不会丢失等待中的决策。记录只保存
+安全摘要和 policy reason，不保存完整 tool argument 或 raw prompt。
+
+### 6.6 State 合并语义
 
 session `state` 有两个写入源，串行化于同一 sessionKey 写队列，合并规则一致：
 
@@ -163,7 +211,7 @@ session `state` 有两个写入源，串行化于同一 sessionKey 写队列，�
 
 约束：不允许删除操作（删除需显式扩展字段）；冲突时标量「后到覆盖」；合并是幂等的纯函数，便于恢复重放。
 
-### 6.5 幂等 replay 语义
+### 6.7 幂等 replay 语义
 
 `IdempotencyStore.reserve(key_hash, request_hash)` 记录首个 `request_hash`（见
 [Stores](../stores/README.zh-CN.md) §5）。后续同一 key 的请求：
@@ -206,6 +254,11 @@ new -> active -> non_resumable
 - 同一 session 内一次只运行一个 invocation；并发返回 `409 session_busy`。
 - `model` 可在同一 session 内逐 run 变化。
 - Session delete 先取消 active work，再使 history/artifacts 不可达。
+- manager-delegated session 可在 `active` 与 `idle` 之间切换，同时其容器在
+  `running`、`ttl_destroyed`、`restoring` 等状态间变化。容器 TTL 本身不使 HaaS
+  session 过期，也不解除 delegated binding。
+- `/run_sse` 必须在 invocation 运行中消费 Session Runtime 的 live event stream
+  并实时发送事件；不得等待 `run()` 完成后再把全部事件作为完成批次 replay。
 
 ## 8. 安全与权限
 
@@ -252,12 +305,18 @@ Adapter 调用（`prepare_session`、`start_turn`、`stream_events`、`finalize_
 | cancel 后断线 | cancel intent 持久化；最终状态仍必须可读 |
 | session lease 续租失败或被 fencing out | stale holder 停止写入；仅在 fencing 仍允许时写失败终态，并走现有 adapter-error 路径 |
 | event log 写失败 | 不能宣称 run 成功；已接受任务必须生成 terminal failure evidence |
+| delegated container 被 idle TTL 销毁 | 启动下一 turn 前，按 delegated-session contract 恢复运行资源 |
+| delegated restore 失败 | 返回 `haas_delegation_restore_failed` 或更具体的 delegation 错误；不本地执行 |
+| approval bridge 正在等待 | 持久化 `ApprovalRecord`；只有 manager 解析后才恢复 adapter |
 
 ## 11. 测试计划与验收
 
 - Unit：id 生成、三元组解析、scope、state transition、terminal immutability、request hash、idempotency replay。
 - Integration：`/run` 非流式与 `/run_sse` 流式 parity、read back session、PATCH stateDelta、cancel、DELETE。
 - Concurrency：同 session 并发返回 `session_busy`；不同 session 可并发；超过一个 lease TTL 的长 turn 仍必须因续租受到保护。
-- Recovery：模拟 sidecar restart、adapter reconnect、missing native ref、expired session。
+- Integration：`/run_sse` 在 invocation 终态前渐进输出事件，native event replay 可在 turn 运行中重连。
+- Integration：delegated session 在容器 TTL restore 后继续使用 HaaS session，并在可恢复时复用 native Codex reference。
+- Approval：pending approval 在 SSE 断线后仍保留，并通过 HaaS native approval API 解析。
+- Recovery：模拟 sidecar restart、adapter reconnect、missing native ref、expired session、stale holder fencing rejection 和 adapter timeout terminalization。
 - Compatibility：ADK client session GET/PATCH/DELETE 行为对齐。
 - Security：跨 principal 访问全部返回 404；secret-shaped input 不落默认日志。

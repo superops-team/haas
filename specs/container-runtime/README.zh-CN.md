@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-03
-Related specs: [Startup](../startup/README.zh-CN.md), [Runtime Trim](../runtime-trim/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.zh-CN.md), [Observability](../observability/README.zh-CN.md)
+Related specs: [Startup](../startup/README.zh-CN.md), [Runtime Trim](../runtime-trim/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Observability](../observability/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -56,6 +56,9 @@ Container Runtime 定义 HaaS 镜像、进程拓扑、端口、volume、health/r
 - 定义 base image digest pin 和升级验证。
 - 在 runtime ENV 层落地 [Runtime Trim](../runtime-trim/README.zh-CN.md) 定义的 AIO 服务裁剪变量，
   保证 CUA/BUA、sandbox 与 Codex readiness 不受影响。
+- 对 manager-delegated execution，支持每个 delegated session 一个 HaaS runtime
+  container、同 session 复用、idle TTL 清理、最大容器存活时间，以及从持久
+  delegated-session contract restore。
 
 不负责：
 
@@ -64,6 +67,8 @@ Container Runtime 定义 HaaS 镜像、进程拓扑、端口、volume、health/r
 - 不保存 provider secret。
 - 不用 Docker privileged 或 root 身份直接放宽 agent 工具权限。
 - 不在启动 critical path 执行模型请求、MCP 全量探测、skill 远端下载或长时间恢复。
+- 不决定哪些 host path 可挂载；只接收 manager 已授权且由 Policy Controller 与
+  Sandbox Runtime 校验过的 mount manifest。
 
 ## 5. 核心接口
 
@@ -178,6 +183,16 @@ Startup rules:
 - `/ready?scope=execution` may use the same Codex gate for the P0 adapter; model provider, MCP discovery or browser startup remain outside the default gate unless declared a Codex execution-safety dependency.
 - AIO readiness and HaaS readiness are reported separately.
 
+Delegated-session container rules:
+
+- 每个 manager delegated session 同时最多拥有一个 active HaaS runtime container。
+- 同一 session 的后续 turn 在容器健康且未超过策略限制时复用 live container。
+- idle TTL 默认 30 分钟，通过 delegated policy snapshot 可配置。
+- 最大容器存活时间默认 8 小时，可配置。active turn 可以完成，但达到最大存活时间后 runtime 拒绝新 turn。
+- TTL 清理只销毁运行资源，不删除 HaaS session、event log、delegated-session contract、manager authorization snapshot 或 host file。
+- Restore 从持久 delegated-session contract 创建新的 container generation，并在启动工作前重新校验 mounts。
+- 所有 delegated HaaS runtime container 都必须按 `linux/amd64` 构建和运行，符合仓库级硬平台合同。
+
 ## 8. 安全与权限
 
 - Container root or privileged mode is not a substitute for harness sandbox policy.
@@ -209,6 +224,9 @@ Logs must go to stdout/stderr or configured log files with redaction.
 | AIO service not ready | HaaS control ready may be true; execution ready false with safe reason |
 | HaaS sidecar not listening | container health fails |
 | Codex app-server not ready | execution ready false; session create can be pending only if API contract allows |
+| delegated container image unavailable | 返回 `haas_delegation_image_unavailable`；不得静默切换 image 或 platform |
+| delegated container idle TTL reached | drain idle runtime，销毁 container，保留 delegated-session contract |
+| delegated container max lifetime reached | 允许 active turn 完成，随后拒绝新 turn，直到 restore 创建新 generation |
 | SIGTERM | enter draining, reject new tasks, flush event log, cancel/settle active turns |
 | base image unavailable | build fails; do not silently switch image |
 | digest mismatch | release blocked |
@@ -225,6 +243,7 @@ Logs must go to stdout/stderr or configured log files with redaction.
   sidecar 被杀后容器以非零码退出。AIO 启动慢于 sidecar，就绪判定需轮询。
 - Health/ready tests verify `/health` is not gated by optional warmups.
 - Shutdown test sends SIGTERM and asserts drain events/status.
+- Delegated lifecycle test verifies same-session reuse, idle TTL cleanup, max-lifetime refusal of new turns, and restore with a new container generation.
 - Secret scan verifies build args, env, logs and image metadata do not contain provider credentials.
 - Service-trim check (§5.1.1 / [Runtime Trim](../runtime-trim/README.zh-CN.md))：静态断言 Dockerfile
   设置 `DISABLE_CODE_SERVER`、`DISABLE_JUPYTER`、`DISABLE_NODEJS_REPL`；build/smoke 断言

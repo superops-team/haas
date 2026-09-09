@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-07
-Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
+Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -38,6 +38,7 @@ SSE 是 delivery channel，不是唯一事实源。断线、客户端超时或�
 - 为每个 invocation 维护从 0 开始的 gapless `sequenceNumber`（内部字段）。
 - 为 HaaS native stream 维护 session-scoped `eventId`。
 - 将 canonical event 投影为 ADK `Event` 或 HaaS event。
+- 持久化并流式输出 manager-delegation lifecycle event，包括 restore、workspace-lock queue、approval request 和 approval resolution。
 - 支持 replay missed events 后进入 live stream（`Last-Event-ID` / `after_event_id`）。
 - 发送 heartbeat 且不产生事件、不推进 cursor。
 - 对慢客户端执行 bounded queue、delta drop 或断开；terminal state 通过 read-back 保证可得。
@@ -139,7 +140,23 @@ epoch；未经 `redact()` 的 raw event 不得落库（fail closed）。
 
 内部 `sequenceNumber`/`sessionId`/`adapterId` 等字段不进入 ADK 投影；HaaS native stream 可额外输出 `haas` 元数据。
 
-### 6.3 SSE Frame
+### 6.3 Manager Delegation Events
+
+Manager-delegation event 是 canonical HaaS event。ADK projection 可以把它们表达为安全 status part 或 `actions.requestedAuthConfigs`，但 HaaS native stream 必须保留结构化 `haas` metadata：
+
+| Event type | 必填安全 metadata |
+|------------|-------------------|
+| `haas.delegation.restore_started` | delegatedSessionId, containerGeneration |
+| `haas.delegation.restore_failed` | delegatedSessionId, safeReason, retryable |
+| `haas.delegation.workspace_lock_queued` | delegatedSessionId, canonicalWorkspaceHash, queuePosition |
+| `haas.delegation.workspace_lock_acquired` | delegatedSessionId, canonicalWorkspaceHash |
+| `haas.delegation.container_ttl_destroyed` | delegatedSessionId, containerGeneration |
+| `haas.approval.required` | approvalId, kind, safeSummary, policyReason |
+| `haas.approval.resolved` | approvalId, status |
+
+这些事件不得包含 host path、完整 tool argument、raw prompt、credential、provider response body 或内部 container address。
+
+### 6.4 SSE Frame
 
 ```text
 data: {"id":"evt_...","invocationId":"inv_abc","author":"codex","timestamp":1743712220.385936,"content":{...},"actions":{...},"longRunningToolIds":[]}
@@ -175,6 +192,7 @@ Ordering invariants:
 - invocation 内事件按产生顺序、无空洞输出。
 - 同一 item 的事件顺序稳定。
 - 非流式 `/run` 返回的事件数组必须等于 `/run_sse` 流式聚合结果（parity）。
+- `/run_sse` 必须在 invocation 运行中发布事件，不得等到 invocation 终态后再 replay 完成批次。
 - stream 关闭本身即 invocation 完成信号。
 
 ## 8. 安全与权限
@@ -220,11 +238,14 @@ Logs：
 | append 持久化失败 | 当前 invocation 不得宣称 completed；Session Runtime 生成 terminal failure evidence |
 | proxy buffering | response 设置 `Cache-Control: no-cache`；测试验证 progressive flush |
 | adapter 重复 terminal | 保留第一条 terminal，后续写 diagnostic warning |
+| delegated approval pending | stream 保持打开并发送 heartbeat；只有 approval resolution、cancel 或 timeout 后写 terminal state |
 
 ## 11. 测试计划与验收
 
 - Unit：sequence 分配、terminal 唯一、heartbeat 不推进 cursor、ADK 投影映射。
 - Integration：`/run` vs `/run_sse` parity、断线后 `GET session` read-back、reconnect replay。
+- Integration：`/run_sse` 在 terminal state 前渐进 flush 输出。
+- Integration：manager-delegation restore、queue 与 approval event 以脱敏 metadata 出现在 native stream 中。
 - Backpressure：慢客户端不阻塞 adapter terminal 写入。
 - Security：raw prompt、Authorization、cookie、完整 tool args/result 不进入 event log。
 - Security：不同 user 或 app 使用同一裸 `sessionId` 时事件互不混读；跨 user

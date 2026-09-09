@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-08-30
-Related specs: [Security Boundary](../security-boundary/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md)
+Related specs: [Security Boundary](../security-boundary/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -36,6 +36,8 @@ Policy Controller 负责把 caller、tenant、workspace、configured harness、r
 负责：
 
 - 合并组织级、workspace 级、harness 级、session 级和 turn 级 policy。
+- 对 manager-delegated session，合并 delegation policy 层，并在 delegated session
+  创建时冻结 effective delegation policy snapshot。
 - 校验 policy 只收窄权限；放宽必须有显式授权来源。
 - 输出 `EffectivePolicy` 并冻结到 session/turn。
 - 将通用 policy 投影为 adapter-specific 配置。
@@ -48,6 +50,7 @@ Policy Controller 负责把 caller、tenant、workspace、configured harness、r
 - 不保存 credential value。
 - 不根据 harness 文本输出动态放权。
 - 不把 adapter 不支持的 hard block 默认为已 enforce。
+- 不决定 manager 侧意图路由；manager 授权后只校验 policy 与 mount contract。
 
 ## 5. 核心接口
 
@@ -57,6 +60,7 @@ async def authorize_request(ctx: RequestContext, action: str, resource: str) -> 
 async def authorize_tool(policy: EffectivePolicy, tool: ToolRequest) -> PolicyDecision: ...
 async def authorize_network(policy: EffectivePolicy, url: str) -> PolicyDecision: ...
 async def authorize_workspace_path(policy: EffectivePolicy, path: str, access: str) -> PolicyDecision: ...
+async def authorize_mount_manifest(policy: EffectivePolicy, manifest: MountManifest) -> PolicyDecision: ...
 async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> AdapterPolicyProjection: ...
 ```
 
@@ -90,6 +94,15 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
   "model": {
     "allowedModels": ["gpt-5.6-terra"],
     "fallbackModel": "gpt-5.6-terra"
+  },
+  "delegation": {
+    "idleTtlSeconds": 1800,
+    "maxContainerLifetimeSeconds": 28800,
+    "rwWorkspaceConcurrency": "single_writer",
+    "queuePolicy": "fifo",
+    "restorePolicy": "fail_closed",
+    "policyChangeMode": "snapshot_per_session",
+    "mountPolicy": "project_rw_extra_ro"
   }
 }
 ```
@@ -106,6 +119,7 @@ async def project_for_adapter(policy: EffectivePolicy, adapter_id: str) -> Adapt
       "network": {"defaultAction": "deny", "allow": ["https://api.openai.com"]},
       "tools": {"disabled": ["web_search"], "approvalMode": "never"},
       "model": {"allowedModels": ["gpt-5.6-terra"], "fallbackModel": "gpt-5.6-terra"},
+      "delegationPolicy": {"idleTtlSeconds": 1800, "maxContainerLifetimeSeconds": 28800},
       "delegation": false
     }
   ]
@@ -152,6 +166,14 @@ Policy precedence:
 
 Lower levels may only narrow unless a higher level explicitly grants delegation.
 
+Delegation policy 使用相同的宽到窄顺序。编译后的 delegation policy 会快照进
+delegated session。后续全局/workspace 配置变更不会改变已有 delegated session，
+除非 HaaS native policy update/rebind 请求被显式授权并记录。
+
+Workspace 写入准入属于 delegation policy：同一 canonical workspace 同时只允许一个
+active `rw` delegated session。其他 `rw` turn 按 `queuePolicy=fifo` 排队；`ro`
+session 可以并发。
+
 ## 8. 安全与权限
 
 - Unknown policy fields fail closed when they would affect security.
@@ -191,6 +213,9 @@ Metrics:
 | unknown security-affecting field | reject with `haas_policy_invalid` |
 | adapter cannot enforce hard requirement | reject with `haas_policy_unsupported` |
 | requested wider workspace root | reject unless higher-level delegation allows |
+| delegated mount manifest widens access | reject with `haas_delegation_mount_invalid` |
+| existing delegated session receives implicit policy drift | reject; require explicit policy update/rebind |
+| same canonical workspace already has active `rw` delegated session | queue or return `haas_workspace_lock_busy` / `haas_workspace_lock_timeout` according to policy |
 | network URL fails allowlist | reject before outbound connection |
 | approval required but no approval bridge | reject or mark task blocked; do not auto-approve |
 
@@ -200,4 +225,6 @@ Metrics:
 - Adapter projection：Codex/Pi/OpenCode fixtures verify hard/advisory/unsupported declarations。
 - Security：SSRF cases、private IP、metadata endpoint、Unix socket and Docker socket denial。
 - Integration：session snapshot freezes policy and later harness update does not alter active session。
+- Integration：delegated-session policy snapshot 不受后续全局/workspace 配置变更影响，直到显式 policy update/rebind。
+- Concurrency：每个 canonical workspace 一个 active `rw` delegated session；`ro` delegated session 仍可并发。
 - Review：any policy expansion requires spec review and security-boundary update。

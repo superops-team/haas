@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-08-26
-Related specs: [Security Boundary](../security-boundary/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Observability](../observability/README.zh-CN.md)
+Related specs: [Security Boundary](../security-boundary/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Observability](../observability/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -37,6 +37,8 @@ Model Proxy 是 HaaS 的模型访问边界。它让 harness 使用 OpenAI-compat
 - 接收 harness 发往模型 provider 的请求。
 - 验证短期 runtime token 的 session、audience、expiry 和 revocation。
 - 根据 configured harness 和 request model 解析 provider endpoint。
+- 对 manager-delegated session，只解析 delegated-session contract 中存在且被
+  frozen policy snapshot 允许的 manager-supplied `credentialRef`。
 - 注入真实 provider credential 到 outbound request。
 - 对 provider URL 做 allowlist 和 SSRF 防护。
 - 转发 streaming response，不缓冲到完成。
@@ -151,6 +153,8 @@ Provider compatibility:
 
 - Real provider key is read only by Model Proxy or secret resolver.
 - Harness sees only loopback base URL and short TTL token.
+- Delegated HaaS container 不得在 env、config、startup command、mount、event、log
+  或 artifact metadata 中看到真实 provider key。
 - Caller-provided provider base URL is accepted only through registry allowlist.
 - Request/response logging redacts Authorization, API keys, cookies, raw messages and tool args.
 - Proxy token must be session scoped, audience restricted and revocable.
@@ -182,6 +186,7 @@ Log fields must use safe route ids, fingerprints and status codes, never prompt 
 |------|------|
 | runtime token missing/invalid | 401 `invalid_credential` |
 | runtime token expired | 401, adapter may refresh once |
+| delegated session credentialRef 缺失或未授权 | fail closed，返回 `invalid_credential` 或 `haas_provider_source_invalid`；不得要求 harness 提供 key |
 | provider unreachable | task failed with `haas_provider_error` or request 502 before task accepted |
 | stream idle timeout | retry according to provider policy; exhaust -> `timeout` |
 | unsupported tool schema | fail with safe `haas_tool_schema_unsupported`, do not drop tool silently |
@@ -192,6 +197,7 @@ Log fields must use safe route ids, fingerprints and status codes, never prompt 
 
 - Unit：token validation、route resolution、URL allowlist、usage normalization、tool transform。
 - Integration：loopback proxy receives harness request and injects provider credential only outbound。
+- Integration：delegated Codex container 只使用 loopback model proxy，无法观察 manager/provider raw key。
 - Streaming：SSE/chunked upstream relay is progressive and handles idle timeout。
 - Security：provider key never appears in harness env/config/log/event/artifact/report。
 - Negative：unsupported provider, missing key, expired token, disallowed URL and malformed upstream response。

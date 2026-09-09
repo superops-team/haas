@@ -1,0 +1,91 @@
+// The Slack detail page (M3.6, UX-DECISIONS §21): one group per workspace with
+// People / Waiting / Listening rows, add-workspace via the header-button MODAL
+// (One click | Manual), per-workspace disconnect (stop-relaying-only), and the
+// manual Socket-Mode card so neither connect path regresses.
+import { expect } from "@playwright/test";
+import { test } from "./fixtures";
+
+async function openSlackPage(page) {
+  await page.goto("/");
+  await page.getByTestId("account-row").click();
+  await page.getByRole("button", { name: "Connectors", exact: true }).click();
+  await page.getByTestId("connector-slack").click();
+}
+
+test("lists every connected workspace as its own group", async ({ page }) => {
+  await openSlackPage(page);
+  await expect(page.getByTestId("slack-workspace-T1DL")).toContainText("deeplearning.ai");
+  await expect(page.getByTestId("slack-workspace-T2AC")).toContainText("acme-partners");
+  // The workspace domain is the visible differentiator (ids demote to hover).
+  await expect(page.getByTestId("slack-workspace-T1DL")).toContainText("· dlaiteam");
+  await expect(page.getByTestId("slack-workspace-T2AC")).toContainText("· acmehq");
+  // the workspace with people/parked shows the People row; the quiet one shows the hint
+  await expect(page.getByTestId("slack-workspace-T1DL")).toContainText("People");
+  await expect(page.getByTestId("slack-workspace-T2AC")).toContainText("No one allowed yet");
+});
+
+test("Add workspace opens the modal with manual setup available", async ({
+  page,
+}) => {
+  await openSlackPage(page);
+  await page.getByTestId("add-workspace-btn").click();
+  const modal = page.getByTestId("add-connection-modal");
+  await expect(modal).toContainText("one-click setup is not available");
+  // Manual pane is right there too — both modes, one entry point
+  await modal.getByTestId("modal-pane-manual").click();
+  await expect(modal.getByPlaceholder("Bot token · xoxb-…")).toBeVisible();
+  await page.keyboard.press("Escape");
+});
+
+test("disconnect removes one workspace and keeps the rest relaying", async ({ page }) => {
+  await openSlackPage(page);
+  await page.getByTestId("disconnect-workspace-T2AC").click();
+  await expect(page.getByTestId("slack-workspace-T2AC")).toHaveCount(0);
+  await expect(page.getByTestId("slack-workspace-T1DL")).toBeVisible();
+});
+
+test("manual Socket Mode: one card with the flat allow-list (no regression)", async ({
+  page,
+}) => {
+  let owners: string[] = [];
+  // Override the connectors payload AFTER mockApi so this test sees a manual-mode Slack
+  // (routes registered later match first).
+  await page.route("**/v1/connectors", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        connectors: [
+          {
+            name: "slack", title: "Slack", icon: "#", blurb: "Two-way Slack messaging.",
+            auth: "bot_token", two_way: true, available: true, brand_color: "#611f69",
+            logo: "slack", fields: [], instructions: [], connected: true, account: "acme",
+            enabled: true, allowed_users: ["U0OK"], allowed_user_names: { U0OK: "Rohit" },
+            approval_owner_ids: [...owners],
+            approval_owner_names: Object.fromEntries(owners.map((u) => [u, u === "U9MAYA" ? "Maya Chen" : u])),
+            tools: [], managed: true, managed_profile: false, mode: "", workspaces: [],
+            unauthorized: [],
+          },
+        ],
+      }),
+    }),
+  );
+  await page.route("**/v1/connectors/slack/approval-owners/add", async (route) => {
+    const body = route.request().postDataJSON();
+    owners = [...new Set([...owners, body.user_id])];
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, approval_owner_ids: owners }),
+    });
+  });
+  await openSlackPage(page);
+  await expect(page.getByTestId("slack-mode-badge")).toContainText("Socket Mode");
+  const card = page.getByTestId("slack-manual-card");
+  await expect(card).toContainText("acme");
+  await expect(card).toContainText("Rohit"); // flat allow-list chip, named
+  await expect(card).toContainText("Choose at least one owner");
+  await page.getByTestId("add-approval-owner").click();
+  await page.getByTestId("pick-person-U9MAYA").click();
+  await expect(page.getByTestId("approval-owner-U9MAYA")).toContainText("Maya Chen");
+});

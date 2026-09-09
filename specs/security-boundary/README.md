@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-08-30
-Related specs: [HaaS Protocol](../haas-protocol/README.md), [Model Proxy](../model-proxy/README.md), [MCP / Tool / Skill Runtime](../mcp-tool-skill-runtime/README.md), [Container Runtime](../container-runtime/README.md)
+Related specs: [HaaS Protocol](../haas-protocol/README.md), [Model Proxy](../model-proxy/README.md), [MCP / Tool / Skill Runtime](../mcp-tool-skill-runtime/README.md), [Manager Delegation](../manager-delegation/README.md), [Container Runtime](../container-runtime/README.md)
 
 ## 1. Component Role
 
@@ -54,6 +54,7 @@ Non-responsibilities:
 def redact(value: object, *, context: RedactionContext) -> object: ...
 def validate_scope(principal: Principal, obj: ScopedObject, action: str) -> ScopeDecision: ...
 def validate_url(url: str, policy: UrlPolicy) -> UrlDecision: ...
+def validate_mount_manifest(manifest: MountManifest, policy: EffectivePolicy) -> MountDecision: ...
 def issue_runtime_token(scope: RuntimeTokenScope, ttl_seconds: int) -> RuntimeToken: ...
 def resolve_secret(ref: str, audience: str) -> SecretValue: ...
 def validate_artifact_path(container_root: str, requested: str) -> SafePath: ...
@@ -170,7 +171,20 @@ The following MUST NOT appear in public responses, SSE, logs, metrics, artifact 
 - Responses MUST include `X-Content-Type-Options: nosniff`.
 - Active content such as HTML/JS/SVG SHOULD use a separate origin or attachment.
 
-### 8.5 Redaction Taxonomy
+### 8.5 Delegated Mount Safety
+
+Manager-delegated execution may mount a user-authorized project root into the HaaS
+container, but the mount contract is still subject to the Security Boundary:
+
+- primary project mount is `/workspace:rw` only after explicit manager authorization;
+- extra mounts default to `ro` and require explicit authorization to become `rw`;
+- user HOME, parent directories beyond the project grant, Docker socket, SSH
+  directories, credential stores, and unrequested paths are denied;
+- restore MUST revalidate path existence, canonical path, type, symlink boundaries,
+  and access mode before creating a container;
+- failures return structured safe errors and never fall back to local execution.
+
+### 8.6 Redaction Taxonomy
 
 `redact(value, context)` applies the following classifications consistently. Detection uses field-level rules plus a regex table. The regex table and the commit gate `scripts/quality/secret-scan.py` share the same pattern list as a single source of truth, driven by the same fixture in code.
 
@@ -216,6 +230,7 @@ They MUST NOT record secret values, raw request bodies, raw prompts, or full too
 | Runtime token expired | Proxy returns 401; the adapter MAY refresh once, and task fails if refresh fails |
 | Redaction pipeline fails | Fail closed; do not write an unredacted payload |
 | Artifact path traversal | Deny access and record a security event |
+| Delegated mount validation fails | Deny with `haas_delegation_mount_invalid`; require reauthorization or policy rebind |
 
 ## 11. Test Plan and Acceptance Criteria
 
@@ -224,3 +239,4 @@ They MUST NOT record secret values, raw request bodies, raw prompts, or full too
 - Proxy: the real provider key does not enter harness env/config; short-lived token expiry and revocation take effect.
 - Event/log: construct input containing a key/header/raw prompt/tool args and assert that all public surfaces are redacted.
 - Container: the AIO container contains no publicly exposed secret by default; `/health` and `/ready` do not output sensitive environment data.
+- Delegation: HOME, Docker socket, SSH paths, symlink escapes, parent-directory widening, and mount drift are denied during create and restore.

@@ -12,6 +12,7 @@ semantics, security constraints, and compatibility promises.
 - `architecture/README.md`
 - `architecture/WALKTHROUGH.md`
 - `architecture/VISUAL-STORYTELLING.md`
+- `architecture/BRAND-AND-REPOSITORY-METRICS.md`
 - `config/README.md`
 - `identity/README.md`
 - `stores/README.md`
@@ -26,6 +27,8 @@ semantics, security constraints, and compatibility promises.
 - `event-log-sse/README.md`
 - `policy-controller/README.md`
 - `model-proxy/README.md`
+- `manager-delegation/README.md`
+- `manager-product-identity/README.md`
 - `mcp-tool-skill-runtime/README.md`
 - `artifact-store/README.md`
 - `sandbox-runtime/README.md`

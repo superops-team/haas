@@ -39,12 +39,14 @@ testpaths = ["tests"]
 markers = [
   "integration: requires a running HaaS + harness (off by default)",
   "e2e: requires HAAS_E2E=1 explicit environment switches (off by default)",
+  "docker: requires HAAS_E2E_DOCKER_DELEGATION=1 and a local Docker daemon/image",
   "adk: ADK 2.0 protocol-surface compatibility checks (make adk-compat)",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+exclude = ["manager"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

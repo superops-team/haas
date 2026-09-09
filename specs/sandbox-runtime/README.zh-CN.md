@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-08-26
-Related specs: [Architecture](../architecture/README.zh-CN.md), [Policy Controller](../policy-controller/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
+Related specs: [Architecture](../architecture/README.zh-CN.md), [Policy Controller](../policy-controller/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -39,6 +39,7 @@ Sandbox Runtime 是 HaaS 多 harness 运行环境标准化的承载体。它把 
 负责：
 
 - 把 `EffectivePolicy` 编译为 `SandboxSpec`（workspace mounts、writable roots、network egress、resource limit）。
+- 校验并投影 delegated session 中 manager 已授权的 mount manifest。
 - 为每个 session/invocation 创建并跟踪 OpenSandbox sandbox 实例生命周期。
 - 把 harness adapter 的 sandbox 声明收窄投影（只允许小于等于 policy 的范围，不允许扩大）。
 - 把 provider/key 密钥写入 credential vault，adapter 只拿 vault 引用或短 token。
@@ -48,6 +49,7 @@ Sandbox Runtime 是 HaaS 多 harness 运行环境标准化的承载体。它把 
 不负责：
 
 - 不决定 workspace/network/tool policy（只消费 Policy Controller 输出）。
+- 不接受 harness 或 adapter 任意传入的 host path；delegated-session host path 必须已由 manager 授权并经 Policy Controller 校验。
 - 不执行 harness 的原生协议（那是 adapter 职责）。
 - 不替代 HaaS protocol 的 public API。
 - 不保存长期 provider credential 明文；vault 内容是引用。
@@ -60,6 +62,7 @@ async def create_sandbox(session_id: str, spec: SandboxSpec) -> SandboxHandle: .
 async def run(sandbox_id: str, command: list[str], cwd: str, env: dict) -> ExecStream: ...
 async def write_secret(session_id: str, audience: str, ref: str, ttl: int) -> VaultRef: ...
 async def project_egress(spec: SandboxSpec) -> EgressPolicy: ...
+async def validate_mount_manifest(manifest: MountManifest, policy: EffectivePolicy) -> MountValidation: ...
 async def destroy_sandbox(sandbox_id: str) -> None: ...
 async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 ```
@@ -73,7 +76,20 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
   "sessionId": "hsess_abc",
   "workspaceRoot": "/workspace",
   "writableRoots": ["/workspace"],
-  "readOnlyRoots": ["/repo"],
+  "readOnlyRoots": ["/mnt/extra/shared"],
+  "mounts": [
+    {
+      "hostPathCanonical": "/Users/example/workspace/project",
+      "containerPath": "/workspace",
+      "access": "rw"
+    },
+    {
+      "hostPathCanonical": "/Users/example/workspace/shared",
+      "containerPath": "/mnt/extra/shared",
+      "access": "ro"
+    }
+  ],
+  "isolatedWritableRoots": ["/home/haas", "/tmp", "/data/haas/cache"],
   "network": {
     "defaultAction": "deny",
     "allow": ["https://api.openai.com"]
@@ -106,7 +122,20 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 
 `compile_sandbox_spec` 首期只消费 `cwd`、`writableRoots`、`approvalMode`；`base` 与 `nativeSandbox` 是 adapter 能力声明，供后续 OpenSandbox 投影（S5.3）使用。
 
-### 6.3 SandboxHandle
+### 6.3 Delegated Mount Manifest
+
+Manager-delegated session 使用
+[Manager Delegation](../manager-delegation/README.zh-CN.md) 定义的 mount manifest。
+Sandbox Runtime 在容器创建前和每次 restore 前校验 manifest：
+
+- primary project mount 必须严格是 `/workspace:rw`；
+- extra mount 默认 `ro`，并使用 `/mnt/extra/*` 下的确定性路径；
+- host path canonicalize 后与授权快照比较；
+- symlink escape、路径消失、路径类型变化、Docker socket、用户 HOME、SSH 目录、
+  credential store 和父目录扩大均 fail closed；
+- sandbox 提供独立可写 HOME、cache 与 `/tmp`，不挂载 host HOME。
+
+### 6.4 SandboxHandle
 
 ```json
 {
@@ -179,13 +208,14 @@ Metrics：
 | sandbox 创建失败 | invocation failed；不 fallback 到无 sandbox 执行 |
 | adapter 声明超出 policy | `haas_sandbox_widening_rejected`，fail closed |
 | sandbox 重启 | generation 增加；adapter inspect 判定 thread 是否可恢复 |
+| delegated mount manifest 漂移 | 返回 `haas_delegation_mount_invalid`；要求 manager 重新授权或 policy rebind |
 | vault 写入失败 | turn 不启动，返回 `haas_vault_unavailable` |
 | egress 阻断网络 | 按 deny 处理；安全事件记录 host（脱敏） |
 | 销毁失败 | 保留清理队列，重试；不阻塞 session 状态收敛 |
 
 ## 11. 测试计划与验收
 
-- Unit：SandboxSpec 编译、narrow-only 投影拒绝、路径 canonicalization、egress 编译。
+- Unit：SandboxSpec 编译、delegated mount 校验、narrow-only 投影拒绝、路径 canonicalization、egress 编译。
 - Integration：OpenSandbox sandbox create/run/destroy、execd SSE result、credential vault 写入与短 token 撤销。
 - Security：provider key 不进 sandbox env/启动命令/日志；widening 全部拒绝。
 - E2E：Codex turn 在 sandbox 内完成文件读写并产出 artifact，verify 路径受限。

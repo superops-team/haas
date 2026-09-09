@@ -3,13 +3,13 @@
 #
 # Production builds MUST pin the base image digest. HAAS_BASE_IMAGE is an
 # explicit trusted mirror/cache override; release values must be digest-pinned.
-ARG HAAS_BASE_IMAGE=ghcr.io/agent-infra/sandbox@sha256:5ca2cd5619ee1e18c5479301e740c1e35307ce85d4142a145aec65d459655eee
+ARG HAAS_BASE_IMAGE=ghcr.io/agent-infra/sandbox@sha256:9a597aaa3716aca2fd42a517ceedc41063e5ceedcef43eb68bf7c059c0128b7a
 FROM ${HAAS_BASE_IMAGE}
 
 # --- Codex CLI (P0 harness runtime) ---
 # Bump CODEX_NPM_VERSION together with specs/codex-app-server-adapter schema
 # fixture and re-run `make adk-compat` / schema drift check.
-ARG CODEX_NPM_VERSION=0.150.1
+ARG CODEX_NPM_VERSION=0.151.0
 RUN --mount=type=cache,target=/root/.npm npm install -g "@openai/codex@${CODEX_NPM_VERSION}" \
     && codex --version \
     && npm cache clean --force
