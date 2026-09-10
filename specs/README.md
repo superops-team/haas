@@ -146,6 +146,7 @@ Sandbox Runtime uniformly projects the Policy Controller's workspace/network/too
 | P0 | Security Boundary | `specs/security-boundary/README.md` | Secretless operation, object scope, SSRF, artifact paths, redaction, and audit |
 | P0 | Policy Controller | `specs/policy-controller/README.md` | Workspace, network, tool, approval, and model policy compilation and admission |
 | P0 | Manager Delegation | `specs/manager-delegation/README.md` | Manager-facing delegated-session binding, mount manifest, restore, workspace single-writer policy, approval relay, and provider delegation contract |
+| P0 | Manager HaaS Sidecar Backend | `specs/manager-haas-sidecar-backend/README.md` | OpenHarness local-managed and remote HaaS sidecar backend selection, unified HaaS client protocol, session binding, and MCP/skill/model materialization handoff |
 | P0 | Manager Product Identity | `specs/manager-product-identity/README.md` | OpenHarness product identity, no-login desktop behavior, and local-only account/connector boundaries |
 | P0 | Stores | `specs/stores/README.md` | Persistent source of truth: registry/session/event/idempotency/admission interfaces, schemas, and migrations |
 | P0 | Identity | `specs/identity/README.md` | Bearer -> principal, tenant/workspace/userId scope, and `IdentityProvider` interface |

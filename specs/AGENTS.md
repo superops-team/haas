@@ -28,6 +28,7 @@ semantics, security constraints, and compatibility promises.
 - `policy-controller/README.md`
 - `model-proxy/README.md`
 - `manager-delegation/README.md`
+- `manager-haas-sidecar-backend/README.md`
 - `manager-product-identity/README.md`
 - `mcp-tool-skill-runtime/README.md`
 - `artifact-store/README.md`
