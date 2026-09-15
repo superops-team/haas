@@ -2,8 +2,8 @@
 
 **English** | [简体中文](VISUAL-STORYTELLING.zh-CN.md)
 
-Status: script and visual direction approved; first cut rendered and automated media checks passed; listening/voice rights, publication, and README integration pending
-Last reviewed: 2026-09-12
+Status: option A approved; bilingual film rendered and automated media checks passed; public use of the local synthesized narration authorized; complete listening review, Release publication, and README integration pending
+Last reviewed: 2026-09-15
 Change ID: `readme-explainer-video` (supersedes homepage presentation from `readme-guided-trace-gifs`)
 
 Sections 1–12 document the existing GIF baseline. Section 13 defines the replacement video and takes precedence for new video production and homepage integration.
@@ -239,35 +239,41 @@ The goal is not to build one more agent. It is to stop every product from rebuil
 ### 13.4 Media and narration contract
 
 - Master: 1920×1080, 16:9, constant 30 fps, H.264/yuv420p MP4 with fast-start metadata; AAC English audio, 48 kHz. Final file must decode without errors.
-- Deliver the bilingual-burned-in film and a clean picture version with the same English narration; separate `en.srt` and `zh-CN.srt` files allow YouTube caption selection without burning duplicate captions onto the clean upload.
-- English voice: clear, neutral and unhurried, approximately 145–160 words per minute, without impersonating any real person. Start with available local synthesis for the draft. If it sounds unsuitable for public use or usage rights are unclear, mark the track as a draft and obtain a publishable replacement before calling it YouTube-ready. Do not silently send text to paid/external speech services.
+- Deliver the bilingual-burned-in film and a clean picture version with the same English narration; retain separate `en.srt` and `zh-CN.srt` files for future platforms that support selectable captions, without burning duplicate captions onto the clean upload.
+- English voice: clear, neutral and unhurried, approximately 145–160 words per minute, without impersonating any real person. The user authorized public use of the existing local synthesized narration on 2026-09-15. That authorization resolves the publication-rights gate, but it does not replace the required complete real-time listening review for intelligibility, pronunciation, clipping, silence, and naturalness. Do not silently send text to paid/external speech services.
 - Narration revision requested on 2026-09-12: pronounce HaaS as one syllable, “Hass”, not individual letters. Do not insert commas between acronym letters. Use “web API with live event streaming” in speech instead of laboriously spelling HTTP; retain HTTP/SSE in technical diagrams. Speak AIO as “all-in-one”, while captions retain AIO. Each synthesized cue should be a complete sentence rather than half a sentence with an artificial reset; naturalness still requires listening review.
 - Show `github.com/superops-team/haas` prominently throughout the final scene, including a closing spoken invitation to explore the code and documentation. The URL is verified against the Git remote and README. Include the HTTPS link in the local player and upload description; do not read URL punctuation aloud.
 - No background music in the initial cut; this avoids unlicensed assets and competing speech. No platform voice imitation, downloaded fonts, or unlicensed stock media.
 - Dialogue target: approximately -16 LUFS integrated, true peak no higher than -1.5 dBTP. Check both measurements and actual listening; no clipped words or unexplained long silence.
-- Subtitle cues should generally last 2–7 seconds, follow clauses, and remain within the 5% picture safe area. At 1080p target Chinese 34–40 px and English 28–32 px, with up to two lines per language. Split long cues rather than shrinking text. Balance wrapped Chinese lines at word boundaries; do not orphan punctuation or leave a one-word final line. Reserve at least 90 px below burned-in captions for desktop player controls, and keep diagram content outside the caption band. Review every cue at 1280×720 and a reduced YouTube player size; phone viewing may require landscape/fullscreen.
+- Subtitle cues should generally last 2–7 seconds, follow clauses, and remain within the 5% picture safe area. At 1080p target Chinese 34–40 px and English 28–32 px, with up to two lines per language. Split long cues rather than shrinking text. Balance wrapped Chinese lines at word boundaries; do not orphan punctuation or leave a one-word final line. Reserve at least 90 px below burned-in captions for desktop player controls, and keep diagram content outside the caption band. Review every cue at 1280×720 and at a reduced web-player size; phone viewing may require landscape/fullscreen.
 - Reproducible authored sources belong under `scripts/` and `docs/architecture/`; generated MP4/WAV, intermediate frames, contact sheets, and render receipts belong in ignored `dist/` or temporary storage. Keep only the small cover and authored content in Git, not video binaries.
 
-### 13.5 README and YouTube handoff
+### 13.5 README and GitHub Release handoff
 
-1. Produce a 16:9 cover using the approved visual language and a clear play affordance, without fake views, runtime screenshots, or performance claims.
-2. Keep the existing README links intact until a real accessible YouTube video URL is supplied or an explicitly authorized upload succeeds. Never invent a video ID or insert a broken placeholder link.
-3. Replace the three introductory GIF embeds with a single local cover image linked to the real video in both READMEs; retain detailed static architecture and sequence links. English label: “Watch the HaaS explainer”; Chinese: “观看 HaaS 项目讲解”. Mention English narration and Chinese/English subtitles in both.
-4. GitHub README does not support arbitrary iframe players. The cover opens YouTube; no autoplay, tracking script, or claim that the video plays inline on GitHub.
-5. Deliver upload files and bilingual title/description/chapter text. YouTube upload, publication, repository push, and any third-party service charge require user authorization. The user currently requested a future upload, not an immediate public publication.
+The user selected option A and authorized public publication of the existing narration on 2026-09-15. The publication target is the public GitHub Release `v0.2.1`, not an unconfirmed YouTube destination.
+
+1. Use the approved 16:9 cover with a clear play affordance, without fake views, runtime screenshots, or performance claims. Commit it as `docs/architecture/haas-explainer-cover.png`; keep the MP4 out of Git history.
+2. After the complete listening gate passes, upload `haas-explainer-bilingual.mp4` as a public asset on `https://github.com/superops-team/haas/releases/tag/v0.2.1`. The canonical click target is `https://github.com/superops-team/haas/releases/download/v0.2.1/haas-explainer-bilingual.mp4`. Do not update either README until this exact URL returns the media successfully.
+3. Replace the three introductory GIF embeds in both READMEs with the single local cover linked to that canonical asset URL. Remove only the homepage embeds: retain the six GIF files for history and deep links, and retain the detailed static and interactive architecture destinations.
+4. English label: “Watch the HaaS explainer”; Chinese: “观看 HaaS 项目讲解”. Both README summaries state the same facts: approximately 2:57, English narration, and burned-in Simplified Chinese/English subtitles. Keep chapter summaries semantically equivalent in both languages.
+5. GitHub README does not provide a reliable inline MP4 player. The cover opens the public Release asset directly; do not use an iframe, autoplay, JavaScript, tracking, or wording that claims playback is embedded in the README.
+6. Publish bilingual title, description, and these factual chapter anchors alongside the asset where the release surface permits: 00:00, 00:20, 00:38, 01:04, 01:30, 01:54, and 02:28. Do not invent platform-specific behavior if the Release UI does not render chapters.
+7. Publication is authorized only for the reviewed local explainer assets and repository documentation in this change. It does not authorize unrelated third-party uploads, paid services, or disclosure of private runtime evidence.
 
 ### 13.6 Impact, acceptance, and task sequence
 
 Architecture communication and the README are the only changed product surfaces. HaaS native/ADK API, events, sessions, models, identity, registry/profile, stores, policy, proxies, MCP/skills, artifacts, container runtime, observability, startup, and compatibility contracts have no behavior or schema changes; their specs are used to check claims, not modified to fit a marketing story. Preserve unrelated working-tree edits.
 
-1. Approve visual direction and English voice language; review the full narration before production.
-2. Review this delta for claim accuracy, security, bilingual equivalence, readable pacing, and publication scope; clear blockers.
-3. Implement a deterministic timeline and render pipeline with subtitle timing validation, then produce narration, visuals, clean/bilingual videos, caption files, and cover.
-4. Verify the isolated execution chain or explicitly use labeled illustrative footage under §13.3.
-5. Decode the entire MP4; validate audio/video duration, frame rate, format, loudness, positive ordered non-overlapping cues, matching language cue boundaries, and last-cue alignment.
-6. Inspect representative frames from every scene, both language captions, transitions, first/last frames, and the browser preview's play/pause/seek/fullscreen behavior. Perform complete real-time audiovisual review; automated checks alone do not establish speech naturalness or intelligibility.
-7. Run two-round code review, architecture/maintainability review, and test-quality review for any renderer changes. If a named reviewer tool is unavailable, report a manual equivalent and remaining limits; do not claim it ran.
-8. Validate scoped diffs and links plus `make pre-commit`/`make secret-scan`. The scanner may only cover staged changes, so explicitly scan delivery text sources as well. Document baseline failures without modifying unrelated changes or bypassing hooks. Full runtime/container release verification is not required for documentation-only changes and MUST be reported `not_run` rather than passed.
-9. Give the user the local finished assets and exact limitations. Add the README video entry after the real video URL exists.
+1. Record the approved option A visual direction, English narration choice, and 2026-09-15 public-use authorization in this contract.
+2. Review this delta for claim accuracy, security, bilingual equivalence, readable pacing, publication scope, and rollback; clear all blockers before publication.
+3. Revalidate the existing deterministic render outputs: bilingual/clean videos, caption files, cover, and the labeled illustrative execution treatment required by §13.3. Regenerate only if a gate fails.
+4. Decode the entire bilingual MP4; validate audio/video duration, frame rate, codec/pixel format, audio sample rate, loudness, true peak, positive ordered non-overlapping cues, matching language cue boundaries, and last-cue alignment.
+5. Inspect the cover and representative frames from every scene, both language captions, transitions, and first/last frames. Perform the complete 2:57 real-time audiovisual review; automated checks alone do not establish speech naturalness or intelligibility.
+6. Upload the verified MP4 to Release `v0.2.1`, then verify an unauthenticated redirect-aware `HEAD` or bounded `GET` returns HTTP success, an MP4-compatible content type, and the expected byte size. Confirm the downloaded checksum matches the reviewed local file.
+7. Copy the reviewed cover to `docs/architecture/haas-explainer-cover.png`; verify it decodes, is 16:9, is reasonably sized for README delivery, and contains no secret or misleading claim.
+8. Update both READMEs only after step 6 passes. Verify the local image path, the public video click target, removal of all six homepage GIF embeds, preservation of detailed static/interactive links, and factual bilingual equivalence. Render or inspect the resulting GitHub Markdown at desktop and narrow widths.
+9. Run the repository-required review gates for changed authored sources. If a named reviewer tool is unavailable, report the manual equivalent and remaining limits; do not claim it ran.
+10. Validate scoped diffs and links plus `git diff --check`, `make pre-commit`, and `make secret-scan`. The scanner may only cover staged changes, so explicitly scan delivery text sources as well. Document baseline failures without modifying unrelated changes or bypassing hooks. Full runtime/container release verification is not required for documentation-only changes and MUST be reported `not_run`, not passed.
+11. If upload succeeds but README verification fails, leave the valid Release asset in place and keep or restore the prior README embeds until the documentation fix passes. If the uploaded bytes fail integrity review, remove or replace that exact asset before linking it.
 
-Ready-for-production requires user approval of the full script and no blocking spec findings. Ready-for-upload requires a complete film, subtitle/format checks, audiovisual review, publishable audio/assets, and an honest capability boundary. README integration remains pending until a real video URL is available.
+Ready-for-publication requires no blocking spec findings, a complete film, format/subtitle checks, the complete listening review, authorized and publishable assets, and an honest capability boundary. README integration requires the canonical public asset URL and all link/render checks to pass.
