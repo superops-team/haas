@@ -65,6 +65,7 @@ JsonObject = dict[str, Any]
 DEFAULT_CWD = "/workspace"
 DEFAULT_APPROVAL_POLICY = "on-request"
 DEFAULT_TIMEOUT_SECONDS = 900.0
+BUILTIN_COWORK_RECALL_MCP_NAME = "manager-cowork-recall"
 
 # Codex notification methods that terminate a turn, mapped to canonical status.
 _TERMINAL_METHODS: dict[str, str] = {
@@ -411,7 +412,7 @@ class CodexAdapter:
             "approval": "human_bridge",
             "input": "human_bridge",
             "toolRestriction": "advisory",
-            "mcp": "unsupported",
+            "mcp": "builtin_recall_only",
             "skills": "unsupported",
             "files": "unsupported",
             "usage": "native",
@@ -538,7 +539,12 @@ class CodexAdapter:
             turnId=request.turnId,
             sessionId=request.sessionId,
             invocationId=request.invocationId,
-            opaque={"threadId": thread_id, "codexTurnId": codex_turn_id},
+            opaque={
+                "adapterId": self.adapter_id,
+                "threadId": thread_id,
+                "codexTurnId": codex_turn_id,
+                "generation": self._generation,
+            },
         )
 
     async def stream_events(self, handle: TurnHandle) -> AsyncIterator[HarnessEvent]:
@@ -824,6 +830,11 @@ class CodexAdapter:
         if request.model:
             thread_params["model"] = request.model
         thread_params.update(self._model_overrides(request))
+        mcp_servers = self._mcp_server_overrides(request)
+        if mcp_servers:
+            config = thread_params.setdefault("config", {})
+            if isinstance(config, dict):
+                config["mcp_servers"] = mcp_servers
         thread_result = await self._rpc.request("thread/start", thread_params)
         thread = thread_result.get("thread", {})
         thread_id = str(thread.get("id", "")) if isinstance(thread, dict) else ""
@@ -875,6 +886,46 @@ class CodexAdapter:
             },
         }
 
+    @staticmethod
+    def _mcp_server_overrides(request: StartTurnRequest) -> JsonObject:
+        servers: JsonObject = {}
+        for server in request.mcpServers:
+            if not isinstance(server, dict):
+                continue
+            if (
+                server.get("name") != BUILTIN_COWORK_RECALL_MCP_NAME
+                or server.get("haas_builtin") is not True
+                or server.get("transport") != "http"
+            ):
+                continue
+            url = server.get("url")
+            if not isinstance(url, str) or not url.startswith("http://127.0.0.1:"):
+                continue
+            raw_headers = server.get("headers")
+            if not isinstance(raw_headers, dict):
+                continue
+            headers: dict[str, Any] = raw_headers
+            if not (
+                isinstance(headers.get("X-HaaS-Session-ID"), str)
+                and headers["X-HaaS-Session-ID"]
+                and isinstance(headers.get("X-HaaS-Recall-Token"), str)
+                and headers["X-HaaS-Recall-Token"]
+            ):
+                continue
+            servers[BUILTIN_COWORK_RECALL_MCP_NAME] = {
+                "url": url,
+                "http_headers": {
+                    key: value
+                    for key, value in headers.items()
+                    if isinstance(key, str) and isinstance(value, str)
+                },
+                "enabled": bool(server.get("enabled", True)),
+                "required": bool(server.get("required", False)),
+                "tool_timeout_sec": float(server.get("timeoutSeconds") or 10),
+                "enabled_tools": ["recall"],
+            }
+        return servers
+
     async def _resume_thread(
         self,
         thread_id: str,
@@ -891,6 +942,11 @@ class CodexAdapter:
             if request.credentials:
                 await self._rpc.request("thread/unsubscribe", {"threadId": thread_id})
             resume_params.update(self._model_overrides(request))
+            mcp_servers = self._mcp_server_overrides(request)
+            if mcp_servers:
+                config = resume_params.setdefault("config", {})
+                if isinstance(config, dict):
+                    config["mcp_servers"] = mcp_servers
         resume_result = await self._rpc.request("thread/resume", resume_params)
         thread = resume_result.get("thread", {})
         resumed = str(thread.get("id", "")) if isinstance(thread, dict) else ""

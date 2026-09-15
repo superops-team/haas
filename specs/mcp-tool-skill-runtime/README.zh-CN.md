@@ -104,6 +104,44 @@ async def relay_mcp_request(route: McpRoute, request: McpWireRequest) -> McpWire
 }
 ```
 
+### 6.1.1 内置 Manager Cowork Recall Source
+
+本地 Manager-backed Codex session 会包含一个保留的内置 source：
+
+```json
+{
+  "name": "manager-cowork-recall",
+  "url": "http://127.0.0.1:<manager-port>/mcp/cowork-recall",
+  "transport": "http",
+  "enabled": true,
+  "required": false,
+  "haas_builtin": true,
+  "headers": {
+    "X-HaaS-Session-ID": "hsess_abc",
+    "X-HaaS-Recall-Token": "<session-scoped-random-token>"
+  },
+  "tools": {
+    "recall": {
+      "description": "Recall scoped Cowork memories and recent session history."
+    }
+  }
+}
+```
+
+`manager-cowork-recall` 不是 caller 传入的外部 MCP server，而是 supervising
+Manager 拥有的 loopback source，通过 binding-local 随机 recall token 限定在当前
+HaaS session 范围内。它只暴露
+`recall(query?: string, limit?: int)` 一个工具，返回 Cowork memory 数据库和保留
+session transcript 中的有界结构化结果。它是 HaaS/Codex 中断或重启后的模型侧恢复
+路径：Codex 可按任务需要主动查询相关历史，而不是由 Manager 改写用户 prompt 或依赖
+特定语言关键词。
+
+该 source 是 optional。URL 不视为 secret，但 recall token 是 scoped bearer capability，
+不得写入日志、投影或 Manager binding 与 active HaaS profile 之外的持久位置。返回值不得
+包含 raw tool arguments、host path、credential、完整 command output 或隐藏 prompt。Local Codex 可在通用外部 MCP
+materialization 完成前先 materialize 这一内置 source；其它 caller-provided MCP source
+仍遵循既有验证与支持门禁。
+
 ### 6.2 SkillBundle
 
 ```json

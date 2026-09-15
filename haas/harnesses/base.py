@@ -47,6 +47,7 @@ class StartTurnRequest:
     sandbox: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)
     credentials: dict[str, Any] = field(default_factory=dict)
+    mcpServers: list[dict[str, Any]] = field(default_factory=list)
     principalId: str = ""
     userId: str = ""
 

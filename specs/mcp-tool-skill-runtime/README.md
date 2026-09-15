@@ -105,6 +105,47 @@ async def relay_mcp_request(route: McpRoute, request: McpWireRequest) -> McpWire
 }
 ```
 
+### 6.1.1 Built-In Manager Cowork Recall Source
+
+Local Manager-backed Codex sessions include one reserved built-in source:
+
+```json
+{
+  "name": "manager-cowork-recall",
+  "url": "http://127.0.0.1:<manager-port>/mcp/cowork-recall",
+  "transport": "http",
+  "enabled": true,
+  "required": false,
+  "haas_builtin": true,
+  "headers": {
+    "X-HaaS-Session-ID": "hsess_abc",
+    "X-HaaS-Recall-Token": "<session-scoped-random-token>"
+  },
+  "tools": {
+    "recall": {
+      "description": "Recall scoped Cowork memories and recent session history."
+    }
+  }
+}
+```
+
+`manager-cowork-recall` is not a caller-supplied external MCP server. It is a
+loopback source owned by the supervising Manager and scoped to the active HaaS session
+with a random binding-local recall token.
+The only exposed tool is `recall(query?: string, limit?: int)`, which returns bounded
+structured results from Cowork's memory database and retained session transcript. It is
+the model-facing recovery path for interrupted or restarted HaaS/Codex work: Codex can
+ask for relevant prior context instead of Manager rewriting user prompts or relying on
+language-specific trigger words.
+
+The source is optional. Its URL is non-secret, but the recall token is a scoped bearer
+capability and MUST NOT be logged, projected, or persisted outside the Manager binding and
+active HaaS profile. It must not return raw tool arguments, host paths,
+credentials, full command output, or hidden prompts. For local Codex, HaaS may materialize
+this one built-in source before the general external MCP materialization work is complete;
+all other caller-provided MCP sources continue to follow the existing validation and
+support gates.
+
 ### 6.2 SkillBundle
 
 ```json

@@ -6,7 +6,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from haas.api import build_app
+from haas.api import HaasError, _validate_local_materialization, build_app
 from haas.harnesses import FakeAdapter
 from haas.harnesses.base import StartTurnRequest
 from haas.identity import Principal
@@ -58,6 +58,42 @@ def test_capabilities_advertise_interaction_as_an_atomic_pair() -> None:
         ("human_bridge", "human_bridge"),
         ("none", "none"),
     }
+
+
+def test_codex_local_materialization_allows_only_builtin_recall_mcp() -> None:
+    class Runtime:
+        adapter = type("Adapter", (), {"base": "codex"})()
+
+    _validate_local_materialization(
+        Runtime(),
+        {
+            "mcpServers": [
+                {
+                    "name": "manager-cowork-recall",
+                    "url": "http://127.0.0.1:8765/mcp/cowork-recall",
+                    "transport": "http",
+                    "haas_builtin": True,
+                    "headers": {
+                        "X-HaaS-Session-ID": "hsess_builtin",
+                        "X-HaaS-Recall-Token": "fixture_recall_token",
+                    },
+                }
+            ]
+        },
+    )
+    with pytest.raises(HaasError):
+        _validate_local_materialization(
+            Runtime(),
+            {
+                "mcpServers": [
+                    {
+                        "name": "external",
+                        "url": "https://mcp.example.com/mcp",
+                        "transport": "http",
+                    }
+                ]
+            },
+        )
 
 
 def test_c2_list_apps_requires_auth() -> None:
@@ -560,3 +596,74 @@ def test_session_events_endpoint_rejects_cross_user_access() -> None:
     )
     assert denied.status_code == 404
     assert denied.json()["haasError"]["code"] == "session_not_found"
+
+
+@pytest.mark.integration
+async def test_sse_deadline_delivers_terminal_and_replays_cancelled_approval():
+    import httpx
+
+    from haas.harnesses.base import HarnessEvent
+    from haas.stores import ApprovalRecord
+
+    class WaitingAdapter(FakeAdapter):
+        async def stream_events(self, handle):
+            app.state.runtime.store.put_approval(
+                ApprovalRecord(
+                    id="appr_sse_deadline",
+                    sessionId=handle.sessionId,
+                    invocationId=handle.invocationId,
+                    turnId=handle.turnId,
+                )
+            )
+            yield HarnessEvent(
+                type="harness.turn.started",
+                invocationId=handle.invocationId,
+                sessionId=handle.sessionId,
+                turnId=handle.turnId,
+                author="fake",
+                content={"role": "model", "parts": []},
+                actions={},
+            )
+            await asyncio.Event().wait()
+
+    app = build_app(
+        adapter=WaitingAdapter(),
+        identity_tokens={
+            TOKEN: Principal(
+                principalId="p_1",
+                tenantId="t1",
+                userIds=frozenset({"u_1"}),
+            )
+        },
+        session_lease_ttl_ms=50,
+        session_lease_renew_interval_ms=10,
+        session_turn_timeout_s=0.15,
+    )
+    body = {
+        "appName": "chrn_codex_default",
+        "userId": "u_1",
+        "sessionId": "hsess_sse_deadline",
+        "newMessage": {"role": "user", "parts": []},
+    }
+    headers = {**HEADERS, "Idempotency-Key": "sse-deadline"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post("/run_sse", json=body, headers=headers)
+        assert response.status_code == 200
+        events = [
+            json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")
+        ]
+        assert events[-1]["actions"]["stateDelta"] == {"status": "failed", "reason": "timeout"}
+        replay = await client.post("/run_sse", json=body, headers=headers)
+        replay_events = [
+            json.loads(line[6:]) for line in replay.text.splitlines() if line.startswith("data: ")
+        ]
+        assert replay_events == events
+        assert replay.headers["X-HaaS-Invocation-ID"] == response.headers["X-HaaS-Invocation-ID"]
+        approvals = await client.get(
+            "/v1/haas/sessions/hsess_sse_deadline/approvals?status=waiting", headers=HEADERS
+        )
+        assert approvals.json()["data"] == []
+    assert app.state.runtime.store.get_approval("appr_sse_deadline").status == "cancelled"
+    assert app.state.runtime.store.quota_count("run:t1") == 0

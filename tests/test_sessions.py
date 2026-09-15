@@ -67,6 +67,47 @@ async def test_run_creates_session_invocation_events(runtime: SessionRuntime) ->
     assert result.session.id.startswith("hsess_")
 
 
+async def test_followup_resumes_from_persisted_native_session_ref() -> None:
+    store = MemoryStore()
+    registry = HarnessRegistry(store=store)
+    app = seed_codex(registry)
+    adapter = _NativeRefAdapter()
+    rt = SessionRuntime(
+        store=store,
+        registry=registry,
+        adapter=adapter,
+        event_log=EventLog(store=store),
+    )
+
+    first = await rt.run(
+        RunRequest(
+            app=app,
+            user_id="u_1",
+            session_id="hsess_native",
+            message={"role": "user", "parts": [{"text": "first"}]},
+        )
+    )
+    assert first.session.nativeSessionRef == {
+        "adapterId": "fake-adapter",
+        "threadId": "thr_persisted",
+    }
+    assert first.invocation.nativeTurnRef is not None
+    assert first.invocation.nativeTurnRef["threadId"] == "thr_persisted"
+
+    second = await rt.run(
+        RunRequest(
+            app=app,
+            user_id="u_1",
+            session_id="hsess_native",
+            message={"role": "user", "parts": [{"text": "follow up"}]},
+        )
+    )
+    assert adapter.prepares == 1
+    assert adapter.resumes == [{"adapterId": "fake-adapter", "threadId": "thr_persisted"}]
+    assert second.invocation.nativeTurnRef is not None
+    assert second.invocation.nativeTurnRef["threadId"] == "thr_persisted"
+
+
 async def test_terminal_state_is_persisted_before_terminal_event_append() -> None:
     class ObservingEventLog(EventLog):
         def append(self, **kwargs: Any):
@@ -258,6 +299,34 @@ class _TerminalThenFinalizeFailureAdapter(_StreamingTerminalAdapter):
     async def finalize_turn(self, handle: TurnHandle) -> AdapterTurnResult:
         del handle
         raise RuntimeError("finalize failed after terminal")
+
+
+class _NativeRefAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        self.prepares = 0
+        self.resumes: list[dict[str, Any]] = []
+
+    async def prepare_session(self, request):
+        self.prepares += 1
+        return PreparedSession(
+            sessionId=request.sessionId,
+            nativeRef={"adapterId": self.adapter_id, "threadId": "thr_persisted"},
+        )
+
+    async def resume_session(self, request: ResumeSessionRequest) -> PreparedSession:
+        self.resumes.append(dict(request.opaque))
+        return PreparedSession(sessionId=request.sessionId, nativeRef=dict(request.opaque))
+
+    async def start_turn(self, request: StartTurnRequest) -> TurnHandle:
+        thread_id = "thr_persisted"
+        if self.resumes:
+            thread_id = str(self.resumes[-1]["threadId"])
+        return TurnHandle(
+            turnId=request.turnId,
+            sessionId=request.sessionId,
+            invocationId=request.invocationId,
+            opaque={"threadId": thread_id, "codexTurnId": f"codex_{request.turnId}"},
+        )
 
 
 class _DuplicateTerminalAdapter(_StreamingTerminalAdapter):
@@ -918,3 +987,75 @@ async def test_renew_task_is_cancelled_after_normal_turn() -> None:
         if task not in before and "_renew_lease_until_done" in repr(task.get_coro())
     ]
     assert leaked == []
+
+
+async def test_stream_deadline_survives_consumer_task_handoff() -> None:
+    """The HTTP first read and producer reads must share a deadline, not a task."""
+
+    class WaitingApprovalAdapter(FakeAdapter):
+        async def stream_events(self, handle: TurnHandle) -> AsyncIterator[HarnessEvent]:
+            store.put_approval(
+                ApprovalRecord(
+                    id="appr_deadline",
+                    sessionId=handle.sessionId,
+                    invocationId=handle.invocationId,
+                    turnId=handle.turnId,
+                )
+            )
+            yield HarnessEvent(
+                type="harness.turn.started",
+                invocationId=handle.invocationId,
+                sessionId=handle.sessionId,
+                turnId=handle.turnId,
+                author="fake",
+                content={"role": "model", "parts": []},
+                actions={},
+            )
+            await asyncio.Event().wait()
+
+    store = MemoryStore()
+    registry = HarnessRegistry(store=store)
+    app = seed_codex(registry)
+    runtime = SessionRuntime(
+        store=store,
+        registry=registry,
+        adapter=WaitingApprovalAdapter(),
+        event_log=EventLog(store=store),
+        lease_ttl_ms=50,
+        lease_renew_interval_ms=10,
+        turn_timeout_s=0.15,
+    )
+    stream = runtime.run_stream(
+        RunRequest(
+            app=app,
+            user_id="u_1",
+            session_id="hsess_deadline",
+            message={"parts": []},
+        )
+    )
+    owner = asyncio.current_task()
+    initial_cancels = owner.cancelling()
+    first = await anext(stream)
+
+    async def consume():
+        events = []
+        try:
+            async for event in stream:
+                events.append(event)
+        except AdapterTurnError:
+            pass
+        return events
+
+    task = asyncio.create_task(consume())
+    try:
+        events = await asyncio.wait_for(asyncio.shield(task), 1)
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await stream.aclose()
+    assert owner.cancelling() == initial_cancels, "execution deadline cancelled HTTP owner"
+    assert [event.type for event in events] == ["haas.turn.failed"]
+    assert store.get_invocation(first.invocationId).status == "failed"
+    assert store.get_approval("appr_deadline").status == "cancelled"
+    assert events[0].haas["safeReason"] == "timeout"

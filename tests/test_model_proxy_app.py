@@ -7,6 +7,8 @@ secretless assertion that a real provider key never reaches the harness.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -180,6 +182,90 @@ def test_responses_streams_sse_and_sanitizes_errors() -> None:
     assert '"delta":"hello"' in response.text
     assert REAL_KEY not in response.text
     assert seen["authorization"] == f"Bearer {REAL_KEY}"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_volcengine_ark_flattens_namespace_tools_for_responses(stream: bool) -> None:
+    def handler(request):
+        outbound = json.loads(request.content)
+        tools = outbound["tools"]
+        assert not any(tool.get("type") == "namespace" for tool in tools)
+        assert tools == [
+            {
+                "type": "function",
+                "name": "mcp__manager_cowork_recall__recall",
+                "description": "Cowork memory\n\nRecall scoped context",
+                "parameters": {"type": "object"},
+            }
+        ]
+        assert outbound["input"][0]["name"] == "mcp__manager_cowork_recall__recall"
+        assert "namespace" not in outbound["input"][0]
+        if stream:
+            return httpx.Response(
+                200,
+                text=(
+                    'data: {"type":"response.output_item.added",'
+                    '"item":{"type":"function_call",'
+                    '"name":"mcp__manager_cowork_recall__recall"}}\n\n'
+                    "data: [DONE]\n\n"
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "mcp__manager_cowork_recall__recall",
+                    }
+                ]
+            },
+        )
+
+    harness = _harness()
+    harness.provider.providerId = "volcengine-ark"
+    client, tokens, _ = _build(handler, harness=harness)
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1", harnessId="chrn_codex_default"))
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.6-terra",
+            "stream": stream,
+            "input": [
+                {
+                    "type": "function_call",
+                    "namespace": "mcp__manager_cowork_recall",
+                    "name": "recall",
+                }
+            ],
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__manager_cowork_recall",
+                    "description": "Cowork memory",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "recall",
+                            "description": "Recall scoped context",
+                            "parameters": {"type": "object"},
+                        }
+                    ],
+                }
+            ],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    if stream:
+        assert '"namespace":"mcp__manager_cowork_recall"' in response.text
+        assert '"name":"recall"' in response.text
+    else:
+        output = response.json()["output"][0]
+        assert output["namespace"] == "mcp__manager_cowork_recall"
+        assert output["name"] == "recall"
 
 
 def test_unknown_frozen_route_does_not_use_registry() -> None:

@@ -906,6 +906,100 @@ async def test_start_turn_defaults_writable_roots_when_malformed() -> None:
     assert turn_start["params"]["sandboxPolicy"]["writableRoots"] == ["/workspace"]
 
 
+async def test_start_thread_includes_builtin_cowork_recall_mcp_only() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_1",
+            sessionId="hsess_1",
+            turnId="turn_1",
+            appName="chrn_1",
+            input=[{"text": "hi"}],
+            mcpServers=[
+                {
+                    "name": "manager-cowork-recall",
+                    "url": "http://127.0.0.1:8765/mcp/cowork-recall",
+                    "transport": "http",
+                    "enabled": True,
+                    "required": False,
+                    "haas_builtin": True,
+                    "headers": {
+                        "X-HaaS-Session-ID": "hsess_1",
+                        "X-HaaS-Recall-Token": "fixture_recall_token",
+                    },
+                    "timeoutSeconds": 10,
+                },
+                {
+                    "name": "external",
+                    "url": "https://mcp.example.com/mcp",
+                    "transport": "http",
+                    "enabled": True,
+                    "haas_builtin": False,
+                },
+            ],
+        )
+    )
+
+    thread_start = next(m for m in transport.sent if m.get("method") == "thread/start")
+    mcp_servers = thread_start["params"]["config"]["mcp_servers"]
+    assert set(mcp_servers) == {"manager-cowork-recall"}
+    recall = mcp_servers["manager-cowork-recall"]
+    assert recall["url"] == "http://127.0.0.1:8765/mcp/cowork-recall"
+    assert recall["http_headers"] == {
+        "X-HaaS-Session-ID": "hsess_1",
+        "X-HaaS-Recall-Token": "fixture_recall_token",
+    }
+    assert recall["enabled_tools"] == ["recall"]
+    handle = await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_2",
+            sessionId="hsess_1",
+            turnId="turn_2",
+            appName="chrn_1",
+            input=[{"text": "hi"}],
+        )
+    )
+    assert handle.opaque["adapterId"] == "codex-app-server"
+    assert handle.opaque["generation"] >= 1
+
+
+async def test_resume_thread_refreshes_builtin_cowork_recall_mcp() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.resume_session(
+        ResumeSessionRequest(sessionId="hsess_1", opaque={"threadId": "thr_1"})
+    )
+    await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_1",
+            sessionId="hsess_1",
+            turnId="turn_1",
+            appName="chrn_1",
+            input=[{"text": "hi"}],
+            mcpServers=[
+                {
+                    "name": "manager-cowork-recall",
+                    "url": "http://127.0.0.1:8765/mcp/cowork-recall",
+                    "transport": "http",
+                    "enabled": True,
+                    "required": False,
+                    "haas_builtin": True,
+                    "headers": {
+                        "X-HaaS-Session-ID": "hsess_1",
+                        "X-HaaS-Recall-Token": "fixture_recall_token",
+                    },
+                }
+            ],
+        )
+    )
+
+    resumes = [m for m in transport.sent if m.get("method") == "thread/resume"]
+    assert resumes[-1]["params"]["config"]["mcp_servers"]["manager-cowork-recall"][
+        "enabled_tools"
+    ] == ["recall"]
+
+
 # --- session inspection / resume -------------------------------------------
 
 
@@ -970,4 +1064,4 @@ def test_sandbox_declaration_and_capabilities_are_honest() -> None:
     caps = adapter._capabilities()
     # spec §4: advisory tool restriction must not be advertised as hard block.
     assert caps["toolRestriction"] == "advisory"
-    assert caps["mcp"] == "unsupported"
+    assert caps["mcp"] == "builtin_recall_only"

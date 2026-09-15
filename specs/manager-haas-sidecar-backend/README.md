@@ -631,3 +631,30 @@ This evidence makes the following release blockers, not optional polish:
 - Backward replay covers stored/public tool events that predate optional activity fields: they remain ordinary `tool` activities, preserve canonical ordering/status, and never gain guessed command/read/search/edit semantics.
 - Desktop screenshots at 1440/1100 CSS pixels and narrow screenshots at 1099/390 verify the Inspector/drawer breakpoint, completion collapse, no overlap, bounded text, focus return, and failure/recovery visibility.
 - Command evidence tests cover start-to-terminal lifecycle merging, exact command/cwd, credential masking, ordinary and signed authorization links, expiry, 404 scope hiding, 410 expiry, no-store headers, combined-output labeling and absence from persisted transcript.
+
+## stream-timeout-approval-recovery
+
+ADK EOF or stream read failure is delivery evidence only. After acceptance, continue canonical polling for the same invocation while status is accepted/running/cancelling, with a bounded recovery deadline and non-busy polling interval. Empty pages do not imply terminal loss. Preserve attempt and cursors; never resubmit work. A terminal status without its canonical event remains an integrity error. Tests cover EOF/read failure, empty pages, delayed failure during approval, exactly one terminal projection and no second submission. Implementation order: deadline regression/fix, Manager recovery regression/fix, integration/smoke and review. All HTTP/SSE schemas and error codes remain unchanged; registry, profile, policy, credential, MCP, artifact and container contracts are unaffected.
+
+A non-success terminal also closes unresolved HaaS approval cards in the current turn. Historical cards and non-HaaS approvals remain unchanged. Closing a card is a cancelled interaction, never an approval decision sent to the server. Regression tests must assert this projection so stale cards cannot issue post-timeout mutations.
+
+## haas-context-recovery-and-recall
+
+Manager transcript and Cowork memory are recovery sources for HaaS-backed chats, but
+Manager MUST NOT infer continuation intent from keywords or rewrite a user's prompt with
+hand-built historical context. The visible user message is submitted to HaaS as-is. Before
+submitting an accepted HaaS turn, Manager still persists the visible user message locally so
+a browser refresh, WebSocket disconnect, Manager restart, or HaaS timeout cannot leave only
+the HaaS binding without the user's intent.
+
+For model-facing recall, Manager injects a scoped built-in MCP source named
+`manager-cowork-recall` into the active local HaaS profile. The source exposes a single
+`recall` tool that returns bounded structured data from Cowork's database: global memories,
+workspace memories, and recent redacted session transcript facts for the HaaS session
+identified by `X-HaaS-Session-ID`. Codex decides when to call this tool based on the task,
+so history recovery is not coupled to language-specific trigger words. The tool response
+MUST exclude raw tool arguments, host paths, credentials, complete command output, and raw
+prompts beyond the retained visible transcript. The MCP source is optional: if unavailable,
+the turn may continue, but Manager records the degraded capability through the HaaS profile
+and ordinary task outcome path. External arbitrary MCP materialization remains unsupported
+for the local Codex path until the full MCP runtime contract is implemented.

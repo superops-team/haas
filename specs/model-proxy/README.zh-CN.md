@@ -16,7 +16,7 @@ HaaS lifespan 管理仅 loopback 的 proxy listener，退出时关闭上游连�
 
 Responses 支持 JSON 和增量 SSE，有界上游读取超时且取消时清理连接。错误不透传原始 provider body、credential 或原始异常文本。上游拒绝请求时，proxy 仅可从结构化 `error.code`、`error.type`、`error.param`、`error.message` 字段组装经过脱敏、限长的诊断摘要；未知字段与非 JSON 正文必须丢弃。JSON 请求和 SSE 建连失败使用同一规则；规范化 SSE error frame，但不丢合法 text/tool frame。此 Codex 路径明确不支持 Chat Completions，不能静默替换。Control ready 独立；execution ready 除 Codex 外要求已配置 profile 和可用 resolver/proxy。每次提交校验实际选择的 profile，不能仅信全局 ready。
 
-仅对显式选择的 `volcengine-ark` provider，出站 Responses 历史输入中的 reasoning 项和 assistant message 在缺失 `status` 时补 `completed`，满足方舟标准接口要求。出站顶层 `reasoning.summary` 选项会被移除，因为方舟拒绝这个 OpenAI 专有字段；其他 reasoning 选项保持不变。已有状态、内容、ID 和工具 payload 不变，且不修改调用方原始输入。其他 provider ID 不变，不按 URL 或展示名称启用该兼容规则。JSON 与 SSE 请求共用转换；离线反向断言与真实多轮 provider smoke 验证此规则。
+仅对显式选择的 `volcengine-ark` provider，出站 Responses 历史输入中的 reasoning 项和 assistant message 在缺失 `status` 时补 `completed`，满足方舟标准接口要求。出站顶层 `reasoning.summary` 选项会被移除，因为方舟拒绝这个 OpenAI 专有字段；其他 reasoning 选项保持不变。Codex namespace tool（`{"type":"namespace","name":"mcp__...","tools":[...]}`）在上游调用前展平成普通 Responses `function` tool，名称使用 `<namespace>__<tool>`，同一 bridge 中的历史 input/output `function_call` 再恢复为 namespace/name 形态。这样保留 Codex MCP 语义，同时避免 provider 侧 `unknown tool type: namespace` 失败。已有状态、内容、ID 和非 namespace tool payload 不变，且不修改调用方原始输入。其他 provider ID 不变，不按 URL 或展示名称启用该兼容规则。JSON 与 SSE 请求共用转换；离线反向断言与真实多轮 provider smoke 验证此规则。
 
 ## 2. 来源与依据
 

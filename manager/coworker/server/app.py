@@ -190,6 +190,7 @@ def create_app(manager: SessionManager) -> FastAPI:
     tokenless_paths = {
         "/v1/health",
         "/auth/callback",
+        "/mcp/cowork-recall",
         "/mcp/oauth/callback",
         "/oauth/callback",
     }
@@ -247,6 +248,77 @@ def create_app(manager: SessionManager) -> FastAPI:
             "default_workspace": manager.default_workspace,
             "model": manager.model,
         }
+
+    @app.post("/mcp/cowork-recall")
+    async def cowork_recall_mcp(request: Request) -> JSONResponse:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                }
+            )
+        request_id = body.get("id")
+        method = body.get("method")
+        if method == "initialize":
+            result = {
+                "protocolVersion": "2025-06-18",
+                "serverInfo": {"name": "manager-cowork-recall", "version": "0.1.0"},
+                "capabilities": {"tools": {}},
+            }
+        elif method == "tools/list":
+            result = {
+                "tools": [
+                    {
+                        "name": "recall",
+                        "description": "Recall scoped Cowork memories and recent session history.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                            },
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        elif method == "tools/call":
+            params = body.get("params") if isinstance(body.get("params"), dict) else {}
+            if params.get("name") != "recall":
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32602, "message": "Unknown tool"},
+                    }
+                )
+            args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+            recall = manager.cowork_recall(
+                haas_session_id=request.headers.get("x-haas-session-id", ""),
+                token=request.headers.get("x-haas-recall-token", ""),
+                query=str(args.get("query") or ""),
+                limit=int(args.get("limit") or 8),
+            )
+            result = {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(recall, ensure_ascii=False, separators=(",", ":")),
+                    }
+                ],
+                "structuredContent": recall,
+            }
+        else:
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32601, "message": "Method not found"},
+                }
+            )
+        return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
 
     @app.get("/v1/agents")
     def agents() -> dict[str, Any]:

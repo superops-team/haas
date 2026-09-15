@@ -447,3 +447,7 @@ Logs:
 - Security: same bare `sessionId` in different users or apps never mixes events;
   cross-user native event replay returns 404.
 - Compatibility: an ADK client successfully parses each `/run_sse` event, with correct stream-close semantics.
+
+## stream-timeout-approval-recovery
+
+SSE delivery and execution have independent task ownership. A deadline after the first event must persist and deliver the terminal before EOF, including while waiting for approval. A disconnected subscriber must not cancel execution. Acceptance covers a short configured deadline, real HTTP streaming, terminal readback and identical idempotent replay.

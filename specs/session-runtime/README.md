@@ -180,6 +180,12 @@ adapter-native configuration.
   "terminalEventId": null,
   "continuedFromInvocationId": null,
   "continuedFromTurnId": null,
+  "nativeTurnRef": {
+    "adapterId": "codex-app-server",
+    "threadId": "codex_thread_abc",
+    "turnId": "codex_turn_abc",
+    "generation": 1
+  },
   "executionContext": {
     "sandbox": {"mode": "workspace-write"},
     "policy": {"approvalPolicy": "on-request", "network": {"defaultAction": "allow"}},
@@ -195,7 +201,7 @@ adapter-native configuration.
 }
 ```
 
-In the initial release, `turnId` and invocation are one-to-one, with distinct IDs and a persisted mapping in `InvocationRecord.turnId`. `acceptedAtMs` is written atomically with the initial `status=accepted` record and is the durable execution-acceptance boundary. `startedAtMs` remains null until adapter-owned execution begins. In a future one-to-many model, an invocation aggregates events from multiple turns, grouped by `turnId`. Internal timestamps uniformly use epoch milliseconds; the public surface is converted to ADK float seconds by the projection layer. `executionContext` is a private, deep-copied, non-credential snapshot of the effective sandbox, policy, and principal identity used for the native turn. It MUST NOT enter public invocation, ADK, event, log, or GUI projections.
+In the initial release, `turnId` and invocation are one-to-one, with distinct IDs and a persisted mapping in `InvocationRecord.turnId`. `acceptedAtMs` is written atomically with the initial `status=accepted` record and is the durable execution-acceptance boundary. `startedAtMs` remains null until adapter-owned execution begins. In a future one-to-many model, an invocation aggregates events from multiple turns, grouped by `turnId`. Internal timestamps uniformly use epoch milliseconds; the public surface is converted to ADK float seconds by the projection layer. `executionContext` is a private, deep-copied, non-credential snapshot of the effective sandbox, policy, and principal identity used for the native turn. `nativeTurnRef` is an adapter-owned private recovery reference. For Codex it includes the native app-server `threadId` and `turnId` needed to compensate an interrupted or restarted same-session execution. It MUST NOT enter public invocation, ADK, event, log, or GUI projections.
 
 A fresh session starts at policy revision 1 with `workspace-write`, public network allow, and
 `on-request` approval unless an authorized higher-level policy narrows it. Each invocation stores
@@ -216,11 +222,27 @@ increments policy revision.
   "status": "running",
   "continuedFromTurnId": null,
   "startedAtMs": 1786400000000,
-  "completedAtMs": null
+  "completedAtMs": null,
+  "nativeTurnRef": {
+    "adapterId": "codex-app-server",
+    "threadId": "codex_thread_abc",
+    "turnId": "codex_turn_abc",
+    "generation": 1
+  }
 }
 ```
 
 `SessionRecord` MUST project losslessly to an ADK `Session` (`{id, appName, userId, state, events[], lastUpdateTime}`) only when the complete projection stays within 1000 events and 8 MiB serialized. Larger reads return `413 haas_session_read_too_large` without truncation; clients use native `events-page`. Internal fields such as tenantId MUST NOT enter public output.
+
+`nativeSessionRef` and `nativeTurnRef` are the durable compensation boundary for
+harness-native conversation state. Session Runtime MUST persist `PreparedSession.nativeRef`
+after prepare or resume, persist `TurnHandle.opaque` on both the invocation and turn after
+`start_turn`, and update `nativeSessionRef` when the turn handle carries a stronger native
+session key such as Codex `threadId`. A later invocation on the same logical HaaS session
+MUST pass the stored native session reference to `ResumeSessionRequest` before starting the
+next native turn. If the adapter reports `nonResumable`, the runtime keeps the logical HaaS
+session and starts a new native conversation only with an explicit non-resumable marker in
+the private state; it does not pretend that the old native context was restored.
 
 ### 6.4 Delegated Session Reference
 
@@ -518,3 +540,7 @@ Adapter calls (`prepare_session`, `start_turn`, `stream_events`, and `finalize_t
 - Long turn: a turn longer than the stream-idle timeout and a tool-heavy turn both retain lease, model capability, and exactly one terminal event.
 - Compatibility: align ADK client behavior for bounded session GET/PATCH/DELETE; over-budget session GET returns explicit 413 and native pagination never silently truncates.
 - Security: all cross-principal access returns 404; secret-shaped input does not enter default logs.
+
+## stream-timeout-approval-recovery
+
+The invocation deadline must apply to the task currently awaiting adapter work. A task-bound timeout context must never span an async-generator yield: the first event and subsequent events may be consumed by different tasks. Preparation, start, each event wait and finalization share one monotonic deadline. Timeout persists one failed terminal, closes waiting interactions and releases resources. Test silent execution and approval waits after the first streamed event.

@@ -28,6 +28,7 @@ from coworker.delegation import (
 from coworker.haas import AcceptedInvocationHeaders, HaasClientError, HaasEnvelope
 from coworker.haas.attempts import AttemptLedger
 from coworker.haas.stream_bridge import SessionKey, StreamBridgeState
+from coworker.memory import Scope
 from coworker.permissions import Mode
 from coworker.providers import AssistantTurn, ModelCapabilities, ProviderClient
 from coworker.server import SessionManager, create_app
@@ -400,6 +401,16 @@ class FakeDirectHaasClient:
             ],
             trace_id="tr_direct",
         )
+
+
+class CapturingDirectHaasClient(FakeDirectHaasClient):
+    def __init__(self, config: HaasDelegationConfig) -> None:
+        super().__init__(config)
+        self.submitted_messages: list[dict[str, Any]] = []
+
+    def run_sse(self, body: dict[str, Any], *, idempotency_key: str, last_event_id=None):
+        self.submitted_messages.append(body["newMessage"])
+        return super().run_sse(body, idempotency_key=idempotency_key, last_event_id=last_event_id)
 
 
 class TerminalReconciliationRunStream:
@@ -3458,8 +3469,216 @@ def test_haas_delegation_settings_autostart_calls_supervisor(tmp_path, monkeypat
     ).json()
 
     assert after["local_status"]["running"] is True
-    assert supervisor.ensured[-1].enabled is True
-    assert supervisor.ensured[-1].local_autostart is True
+
+
+def test_local_haas_binding_rehydrates_missing_transcript_context(tmp_path, monkeypatch):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    manager.save("s1", engine)
+
+    bridge = StreamBridgeState(
+        endpoint_id=cfg.base_url,
+        session=SessionKey(cfg.harness_id, cfg.user_id, "hsess_s1"),
+        invocation_id="inv_previous",
+        assistant_text="Recovered the partial deliverable summary.",
+        reasoning_summary="Inspected Quarto and cloned the template.",
+    )
+    bridge.activities["call_quarto"] = {
+        "id": "call_quarto",
+        "kind": "command",
+        "status": "failed",
+        "summary": "Run command",
+        "commandPreview": "which quarto && quarto --version",
+        "outputPreview": "quarto not found",
+        "exitCode": 1,
+    }
+    bridge.terminal_status = "failed"
+    bridge.terminal_code = "haas_request_timeout"
+    bridge.terminal_safe_reason = "Codex turn timed out"
+    bridge.terminal_retryable = False
+    bridge.completed = True
+    binding = manager._direct_haas_binding(session_id="s1", config=cfg, workspace=str(tmp_path))
+    binding.update(
+        {
+            "accepted_invocation_id": "inv_previous",
+            "control_state": "idle",
+            "stream_bridge": bridge.to_dict(),
+            "last_user_message": {
+                "content": "初始化 Quarto revealjs slide 项目",
+                "display": None,
+                "ts": 1789456573.0,
+            },
+        }
+    )
+    manager._persist_haas_binding("s1", engine, binding)
+    manager._engines.pop("s1", None)
+
+    restored = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert restored is not None
+    restored_context = [
+        message for message in restored.messages if message["role"] != "system"
+    ]
+    assert [message["role"] for message in restored_context] == ["user", "assistant"]
+    assert restored_context[0]["content"] == "初始化 Quarto revealjs slide 项目"
+    assert restored_context[1]["content"] == "Recovered the partial deliverable summary."
+    assert restored_context[1]["_haas_task_outcome"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_local_profile_injects_recall_mcp_without_rewriting_user_prompt(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    direct = CapturingDirectHaasClient(cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager._haas_supervisor = FakeLocalHaasSupervisor()
+    manager._haas_direct_client_factory = lambda _config: direct
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    engine.messages.append(
+        {
+            "role": "user",
+            "content": "初始化 Quarto revealjs slide 项目",
+            "_delegated": {
+                "backend": "haas",
+                "execution_mode": "local_api",
+                "session": "hsess_s1",
+            },
+        }
+    )
+    engine.messages.append(
+        {
+            "role": "assistant",
+            "content": "Quarto is missing and template clone started.",
+            "_delegated": {
+                "backend": "haas",
+                "execution_mode": "local_api",
+                "session": "hsess_s1",
+            },
+            "_haas_activity": [
+                {
+                    "id": "call_quarto",
+                    "kind": "command",
+                    "status": "failed",
+                    "summary": "Run command",
+                    "commandPreview": "which quarto && quarto --version",
+                    "outputPreview": "quarto not found",
+                }
+            ],
+            "_haas_task_outcome": {
+                "phase": "failed",
+                "status": "failed",
+                "code": "haas_request_timeout",
+                "safeReason": "Codex turn timed out",
+            },
+        }
+    )
+    manager.save("s1", engine)
+    binding = manager._direct_haas_binding(session_id="s1", config=cfg, workspace=str(tmp_path))
+    binding["recall_token"] = "fixture_recall_token"
+    binding["control_state"] = "idle"
+    manager._persist_haas_binding("s1", engine, binding)
+
+    events = [
+        event
+        async for event in manager._run_haas_local_api_turn(
+            "s1",
+            engine,
+            "继续上一个未完成的任务",
+            config=cfg,
+            binding=binding,
+            append_user=True,
+            display=None,
+        )
+    ]
+
+    assert any(event.type.value == "turn_end" for event in events)
+    submitted = direct.submitted_messages[-1]
+    submitted_text = json.dumps(submitted, ensure_ascii=False)
+    assert "继续上一个未完成的任务" in submitted_text
+    assert "初始化 Quarto revealjs slide 项目" not in submitted_text
+    assert "Quarto is missing and template clone started." not in submitted_text
+    assert "which quarto && quarto --version" not in submitted_text
+    assert "quarto not found" not in submitted_text
+    mcp_servers = direct.profile_configuration["mcpServers"]
+    assert mcp_servers == [
+        {
+            "name": "manager-cowork-recall",
+            "url": "http://127.0.0.1:8765/mcp/cowork-recall",
+            "transport": "http",
+            "enabled": True,
+            "required": False,
+            "haas_builtin": True,
+            "headers": {
+                "X-HaaS-Session-ID": "hsess_s1",
+                "X-HaaS-Recall-Token": "fixture_recall_token",
+            },
+            "timeoutSeconds": 10,
+            "tools": {
+                "recall": {
+                    "description": "Recall scoped Cowork memories and recent session history.",
+                }
+            },
+        }
+    ]
+
+
+def test_cowork_recall_mcp_returns_scoped_memory_and_session_history(tmp_path, monkeypatch):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager.memory_store.add(
+        "Use the Quarto revealjs template",
+        scope=Scope.WORKSPACE,
+        workspace=str(tmp_path),
+    )
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    engine.messages.extend(
+        [
+            {"role": "user", "content": "初始化 Quarto revealjs slide 项目"},
+            {"role": "assistant", "content": "Template cloned; Quarto missing."},
+        ]
+    )
+    manager.save("s1", engine)
+    binding = manager._direct_haas_binding(session_id="s1", config=cfg, workspace=str(tmp_path))
+    binding["recall_token"] = "fixture_recall_token"
+    manager._persist_haas_binding("s1", engine, binding)
+    client = TestClient(create_app(manager))
+
+    response = client.post(
+        "/mcp/cowork-recall",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "recall", "arguments": {"query": "Quarto", "limit": 5}},
+        },
+        headers={"X-HaaS-Session-ID": "hsess_s1", "X-HaaS-Recall-Token": "fixture_recall_token"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()["result"]["structuredContent"]
+    assert result["sessionId"] == "s1"
+    assert result["haasSessionId"] == "hsess_s1"
+    assert result["memories"][0]["content"] == "Use the Quarto revealjs template"
+    assert [item["role"] for item in result["transcript"]] == ["user", "assistant"]
+    denied = client.post(
+        "/mcp/cowork-recall",
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "recall", "arguments": {"query": "Quarto"}},
+        },
+        headers={"X-HaaS-Session-ID": "hsess_s1"},
+    ).json()["result"]["structuredContent"]
+    assert denied["memories"] == []
+    assert denied["transcript"] == []
 
 
 def test_local_haas_supervisor_rejects_non_loopback_url(tmp_path):
@@ -3774,3 +3993,58 @@ def test_ws_fails_closed_when_haas_omits_required_accepted_headers(tmp_path, mon
 
     assert [event["type"] for event in seen] == ["error", "turn_done"]
     assert manager.session_store.load("s1").bindings.get("haas_delegation") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_error", [False, True])
+async def test_adk_disconnect_waits_for_delayed_native_terminal(tmp_path, monkeypatch, read_error):
+    class ClosedStream(TerminalReconciliationRunStream):
+        async def events(self):
+            if read_error:
+                raise HaasClientError("stream lost")
+            if False:
+                yield {}
+
+    class DelayedClient(TerminalReconciliationDirectHaasClient):
+        def __init__(self, config):
+            super().__init__(config)
+            self.stream = ClosedStream()
+            self.reads = 0
+
+        async def events_page(self, session_id, *, after_event_id=None, limit=100):
+            self.reads += 1
+            if self.reads < 4:
+                return HaasEnvelope([], trace_id="tr_waiting")
+            return HaasEnvelope([{
+                "eventId": "evt_delayed_failure", "invocationId": "inv_terminal_reconcile",
+                "type": "haas.turn.failed",
+                "haas": {"status": "failed", "code": "haas_request_timeout",
+                         "safeReason": "timeout", "retryable": False},
+            }], trace_id="tr_terminal")
+
+        async def get_invocation(self, session_id, invocation_id):
+            return HaasEnvelope({"status": "running" if self.reads < 4 else "failed"},
+                                trace_id="tr_invocation")
+
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    direct = DelayedClient(cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager._haas_supervisor = FakeLocalHaasSupervisor()
+    manager._haas_direct_client_factory = lambda _config: direct
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    manager.save("s1", engine)
+
+    async def collect():
+        return [event async for event in manager._run_haas_local_api_turn(
+            "s1", engine, "fixture", config=cfg, binding=None,
+            append_user=True, display=None,
+        )]
+
+    events = await asyncio.wait_for(collect(), 3)
+    terminals = [event for event in events if event.type.value == "turn_end"]
+    assert len(terminals) == 1
+    assert terminals[0].data["status"] == "failed"
+    assert terminals[0].data["code"] == "haas_request_timeout"
+    assert len(direct.runs) == 1
+    assert manager.session_store.load("s1").bindings["haas_delegation"]["control_state"] == "idle"

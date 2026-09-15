@@ -423,3 +423,7 @@ Logs：
 - Security：不同 user 或 app 使用同一裸 `sessionId` 时事件互不混读；跨 user
   native event replay 返回 404。
 - Compatibility：ADK client 对 `/run_sse` 输出逐条解析成功，stream 关闭语义正确。
+
+## stream-timeout-approval-recovery
+
+SSE 交付与执行具有独立任务归属。首事件后到达 deadline 时，即使等待审批，也必须先持久化并交付终态再结束流。订阅者断开不得取消执行。验收覆盖短 deadline、真实 HTTP 流、终态回读与相同幂等回放。

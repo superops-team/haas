@@ -131,12 +131,7 @@ export interface Attachment {
 
 export type ActivityKind = "command" | "read" | "search" | "edit" | "tool";
 export type ActivityStatus =
-  | "pending"
-  | "running"
-  | "waiting"
-  | "succeeded"
-  | "failed"
-  | "cancelled";
+  "pending" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
 
 export interface TaskOutcome {
   phase: string;
@@ -155,8 +150,18 @@ export interface ModelCallUsage {
 }
 
 export type ModelCallStep =
-  | { stepId: string; kind: "output_pending" | "commentary" | "result"; text: string }
-  | { stepId: string; kind: "reasoning_summary"; text: string; previewText?: string; previewFrozen?: boolean }
+  | {
+      stepId: string;
+      kind: "output_pending" | "commentary" | "result";
+      text: string;
+    }
+  | {
+      stepId: string;
+      kind: "reasoning_summary";
+      text: string;
+      previewText?: string;
+      previewFrozen?: boolean;
+    }
   | { stepId: string; kind: "tool"; activityId: string };
 
 export interface ModelCallStage {
@@ -194,7 +199,16 @@ export type Item =
   // (ConnectorMessageCard) instead of a plain user bubble. Generalizes to any connector via the
   // registry — no per-connector special-casing.
   | { kind: "connector"; source: MessageSource }
-  | { kind: "assistant"; text: string; ts?: number; reasoning?: string; source?: "manager" | "haas"; activities?: PersistedActivity[]; modelStages?: ModelCallStage[]; taskOutcome?: TaskOutcome }
+  | {
+      kind: "assistant";
+      text: string;
+      ts?: number;
+      reasoning?: string;
+      source?: "manager" | "haas";
+      activities?: PersistedActivity[];
+      modelStages?: ModelCallStage[];
+      taskOutcome?: TaskOutcome;
+    }
   // `hidden` = results the user's privacy filters removed before the agent saw them
   // (from the tool message's `_display` sidecar; the agent-visible content has no trace).
   // `standingRule` = the task-scoped rule that auto-allowed this call ("tool → target").
@@ -263,7 +277,7 @@ export type Item =
       // "leaves this computer → host" (http) / "runs a local program" (stdio).
       mcpDestination?: { transport: string; host?: string };
       haasApprovalId?: string;
-      resolved?: ApprovalDecision;
+      resolved?: ApprovalDecision | "cancelled";
     }
   | {
       kind: "dirreq";
@@ -291,7 +305,12 @@ export type Item =
   | {
       // The staffing gate (agent teams): a lead proposes its worker roster.
       kind: "teamreq";
-      members: { persona: string; name?: string; model?: string; reason?: string }[];
+      members: {
+        persona: string;
+        name?: string;
+        model?: string;
+        reason?: string;
+      }[];
       enable_chat?: boolean;
       note?: string;
       resolved?: "approved" | "rejected";
@@ -334,7 +353,13 @@ export type Item =
   // owner-hit 2026-07-28). Stays put. `previous` is set when an existing memory was
   // EDITED rather than a new one added (the update-don't-duplicate rule sends many
   // saves that way) — Undo restores that text instead of deleting the memory.
-  | { kind: "memory"; id: number; text: string; previous?: string; undone?: boolean };
+  | {
+      kind: "memory";
+      id: number;
+      text: string;
+      previous?: string;
+      undone?: boolean;
+    };
 
 // -- ask_user question metadata (OPE-51) --------------------------------------
 // An option is a plain string (renders as today's pill) or a rich object: `label` is the answer
@@ -342,7 +367,12 @@ export type Item =
 // text shown in the side pane (≥1 preview switches the card to the two-pane layout).
 export type QuestionOption =
   | string
-  | { label: string; description?: string; recommended?: boolean; preview?: string };
+  | {
+      label: string;
+      description?: string;
+      recommended?: boolean;
+      preview?: string;
+    };
 
 // One step of a grouped ask_user call (up to 4, rendered as a stepper). The answer map is keyed
 // by `header` (falling back to `question`).

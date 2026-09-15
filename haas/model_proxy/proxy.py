@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -22,10 +23,23 @@ from haas.policy import EffectivePolicy, PolicyController, PolicyDecision
 from haas.security.redact import safe_upstream_body
 
 _PROVIDER_ERROR_FIELDS = ("code", "type", "param", "message")
+_NAMESPACE_TOOL_CONFLICT = "namespace_tool_bridge_conflict"
 
 
 class ModelProxyError(Exception):
     """Raised when a model proxy request is rejected or fails."""
+
+
+@dataclass
+class _NamespacedToolName:
+    namespace: str
+    name: str
+
+
+@dataclass
+class _NamespaceToolBridge:
+    flat_to_namespaced: dict[str, _NamespacedToolName] = field(default_factory=dict)
+    reserved_tool_names: set[str] = field(default_factory=set)
 
 
 def _provider_http_error(response: httpx.Response, credential: str) -> ModelProxyError:
@@ -102,13 +116,16 @@ class ModelProxy:
 
         client = await self._client_ctx()
         try:
+            json_body, bridge = self._responses_body(route, body)
             resp = await client.post(
                 f"{route.baseUrl.rstrip('/')}/responses",
-                json=self._responses_body(route, body),
+                json=json_body,
                 headers=headers,
                 follow_redirects=False,
                 timeout=route.timeoutMs / 1000,
             )
+        except ValueError as exc:
+            raise ModelProxyError(str(exc)) from exc
         except httpx.HTTPError as exc:
             raise ModelProxyError("provider_unavailable") from exc
         if resp.status_code >= 300:
@@ -119,13 +136,24 @@ class ModelProxy:
             raise ModelProxyError("provider returned non-JSON response") from exc
         if not isinstance(data, dict):
             raise ModelProxyError("provider returned invalid JSON object")
+        data = _restore_namespace_tool_calls(data, bridge)
         data = json.loads(json.dumps(data).replace(credential, "[REDACTED]"))
         usage = normalize_usage(route.provider, data)
         return data, usage
 
     @staticmethod
-    def _responses_body(route: ModelRoute, body: dict[str, Any]) -> dict[str, Any]:
+    def _responses_body(
+        route: ModelRoute, body: dict[str, Any]
+    ) -> tuple[dict[str, Any], _NamespaceToolBridge]:
         payload = {**body, "model": route.model}
+        bridge = _NamespaceToolBridge()
+        if route.providerId == "volcengine-ark":
+            tools = payload.get("tools")
+            if isinstance(tools, list):
+                payload["tools"] = _flatten_namespace_tools(tools, bridge)
+            items = payload.get("input")
+            if isinstance(items, list):
+                payload["input"] = _flatten_input_function_calls(items, bridge)
         if route.providerId == "volcengine-ark":
             reasoning = payload.get("reasoning")
             if isinstance(reasoning, dict) and "summary" in reasoning:
@@ -145,7 +173,7 @@ class ModelProxy:
                 else item
                 for item in items
             ]
-        return payload
+        return payload, bridge
 
     async def _credential(self, route: ModelRoute, scope: RuntimeTokenScope) -> str:
         resolve_for = getattr(self._resolver, "resolve_for", None)
@@ -166,13 +194,23 @@ class ModelProxy:
         self._authorize_url(policy, route.baseUrl)
         credential = await self._credential(route, scope)
         client = await self._client_ctx()
-        request = client.build_request(
-            "POST",
-            f"{route.baseUrl.rstrip('/')}/responses",
-            json=self._responses_body(route, body),
-            headers={"Authorization": f"Bearer {credential}", "Accept": "text/event-stream"},
-            timeout=httpx.Timeout(route.timeoutMs / 1000, read=route.streamIdleTimeoutMs / 1000),
-        )
+        try:
+            json_body, bridge = self._responses_body(route, body)
+            request = client.build_request(
+                "POST",
+                f"{route.baseUrl.rstrip('/')}/responses",
+                json=json_body,
+                headers={
+                    "Authorization": f"Bearer {credential}",
+                    "Accept": "text/event-stream",
+                },
+                timeout=httpx.Timeout(
+                    route.timeoutMs / 1000,
+                    read=route.streamIdleTimeoutMs / 1000,
+                ),
+            )
+        except ValueError as exc:
+            raise ModelProxyError(str(exc)) from exc
         try:
             response = await client.send(request, stream=True, follow_redirects=False)
         except httpx.HTTPError as exc:
@@ -186,10 +224,12 @@ class ModelProxy:
             await response.aclose()
             raise ModelProxyError("provider_stream_invalid")
         response.extensions["haas_credential"] = credential
+        response.extensions["haas_namespace_bridge"] = bridge
         return response
 
     async def relay_stream(self, response: httpx.Response) -> AsyncIterator[str]:
         credential = response.extensions.pop("haas_credential", "")
+        bridge = response.extensions.pop("haas_namespace_bridge", _NamespaceToolBridge())
         try:
             async for line in response.aiter_lines():
                 if len(line) > 4 * 1024 * 1024:
@@ -215,6 +255,8 @@ class ModelProxy:
                                 },
                             },
                         }
+                    else:
+                        payload = _restore_namespace_tool_calls(payload, bridge)
                     line = "data: " + json.dumps(payload, separators=(",", ":"))
                 if credential:
                     line = line.replace(credential, "[REDACTED]")
@@ -258,3 +300,116 @@ class ModelProxy:
         decision: PolicyDecision = self._policy.authorize_network(policy, url)
         if not decision.allowed:
             raise ModelProxyError(f"provider_url_not_allowed: {decision.safeReason}")
+
+
+def _flatten_namespace_tools(
+    tools: list[Any], bridge: _NamespaceToolBridge
+) -> list[Any]:
+    flattened: list[Any] = []
+    used_names: set[str] = set()
+
+    def reserve(name: Any) -> None:
+        if isinstance(name, str) and name:
+            if name in bridge.flat_to_namespaced:
+                raise ValueError(_NAMESPACE_TOOL_CONFLICT)
+            bridge.reserved_tool_names.add(name)
+            used_names.add(name)
+
+    for tool in tools:
+        if not isinstance(tool, dict):
+            flattened.append(tool)
+            continue
+        if tool.get("type") != "namespace":
+            reserve(tool.get("name"))
+            flattened.append(tool)
+            continue
+        namespace = tool.get("name")
+        child_tools = tool.get("tools")
+        if not isinstance(namespace, str) or not isinstance(child_tools, list):
+            continue
+        namespace_description = str(tool.get("description") or "").strip()
+        for child in child_tools:
+            if not isinstance(child, dict) or child.get("type") != "function":
+                continue
+            child_name = child.get("name")
+            if not isinstance(child_name, str) or not child_name:
+                continue
+            flat_name = f"{namespace}__{child_name}"
+            if flat_name in used_names or flat_name in bridge.flat_to_namespaced:
+                raise ValueError(_NAMESPACE_TOOL_CONFLICT)
+            flat_tool = dict(child)
+            flat_tool["name"] = flat_name
+            child_description = str(child.get("description") or "").strip()
+            description = "\n\n".join(
+                part for part in (namespace_description, child_description) if part
+            )
+            if description:
+                flat_tool["description"] = description
+            bridge.flat_to_namespaced[flat_name] = _NamespacedToolName(
+                namespace=namespace,
+                name=child_name,
+            )
+            used_names.add(flat_name)
+            flattened.append(flat_tool)
+    return flattened
+
+
+def _flatten_input_function_calls(
+    items: list[Any], bridge: _NamespaceToolBridge
+) -> list[Any]:
+    return [_flatten_input_function_call_value(item, bridge) for item in items]
+
+
+def _flatten_input_function_call_value(value: Any, bridge: _NamespaceToolBridge) -> Any:
+    if isinstance(value, dict):
+        if value.get("type") == "function_call":
+            namespace = value.get("namespace")
+            name = value.get("name")
+            if isinstance(namespace, str) and isinstance(name, str):
+                flat_name = f"{namespace}__{name}"
+                flattened = {
+                    str(key): _flatten_input_function_call_value(child, bridge)
+                    for key, child in value.items()
+                    if key != "namespace"
+                }
+                flattened["name"] = flat_name
+                target = _NamespacedToolName(namespace=namespace, name=name)
+                existing = bridge.flat_to_namespaced.get(flat_name)
+                if existing is not None and existing != target:
+                    raise ValueError(_NAMESPACE_TOOL_CONFLICT)
+                if existing is None and flat_name in bridge.reserved_tool_names:
+                    raise ValueError(_NAMESPACE_TOOL_CONFLICT)
+                return flattened
+        return {
+            str(key): _flatten_input_function_call_value(child, bridge)
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_flatten_input_function_call_value(item, bridge) for item in value]
+    return value
+
+
+def _restore_namespace_tool_calls(
+    payload: dict[str, Any], bridge: _NamespaceToolBridge
+) -> dict[str, Any]:
+    restored = _restore_namespace_tool_call_value(payload, bridge)
+    return restored if isinstance(restored, dict) else payload
+
+
+def _restore_namespace_tool_call_value(value: Any, bridge: _NamespaceToolBridge) -> Any:
+    if isinstance(value, dict):
+        if value.get("type") == "function_call":
+            name = value.get("name")
+            if isinstance(name, str) and name in bridge.flat_to_namespaced:
+                target = bridge.flat_to_namespaced[name]
+                restored = dict(value)
+                restored["namespace"] = target.namespace
+                restored["name"] = target.name
+                return restored
+        return {
+            str(key): _restore_namespace_tool_call_value(child, bridge)
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_restore_namespace_tool_call_value(item, bridge) for item in value]
+    return value

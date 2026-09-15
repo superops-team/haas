@@ -374,12 +374,28 @@ class SessionRuntime:
         completed_cleanly = False
         streamed_terminal: CanonicalEventRecord | None = None
         credentials: dict[str, str] = {}
+        deadline = asyncio.get_running_loop().time() + self.turn_timeout_s
         try:
-            async with asyncio.timeout(self.turn_timeout_s):
+            async with asyncio.timeout_at(deadline):
                 if self.model_proxy is not None:
                     credentials = await self.model_proxy.begin(app, invocation, effective)
-                if req.continued_from_invocation_id is None:
-                    await self._guarded_adapter_call(
+                if (
+                    req.continued_from_invocation_id is None
+                    and self._has_native_resume_ref(session.nativeSessionRef)
+                ):
+                    prepared = await self._guarded_adapter_call(
+                        key,
+                        holder,
+                        token,
+                        lambda: self.adapter.resume_session(
+                            ResumeSessionRequest(
+                                sessionId=session_id,
+                                opaque=deepcopy(session.nativeSessionRef or {}),
+                            )
+                        ),
+                    )
+                elif req.continued_from_invocation_id is None:
+                    prepared = await self._guarded_adapter_call(
                         key,
                         holder,
                         token,
@@ -388,14 +404,20 @@ class SessionRuntime:
                         ),
                     )
                 else:
-                    await self._guarded_adapter_call(
+                    prepared = await self._guarded_adapter_call(
                         key,
                         holder,
                         token,
                         lambda: self.adapter.resume_session(
-                            ResumeSessionRequest(sessionId=session_id)
+                            ResumeSessionRequest(
+                                sessionId=session_id,
+                                opaque=deepcopy(session.nativeSessionRef or {}),
+                            )
                         ),
                     )
+                session = self._store_native_session_ref(
+                    session, prepared.nativeRef, key, holder, token
+                )
                 handle = await self._guarded_adapter_call(
                     key,
                     holder,
@@ -413,70 +435,69 @@ class SessionRuntime:
                             sandbox=deepcopy(effective_sandbox),
                             policy=deepcopy(adapter_policy),
                             credentials=credentials,
+                            mcpServers=deepcopy(effective.get("mcpServers") or []),
                             principalId=req.principal_id,
                             userId=req.user_id,
                         )
                     ),
                 )
-                self._active[invocation.id] = _ActiveTurn(
-                    turn_id=turn.id,
-                    session_id=session_id,
-                    terminal_status=asyncio.get_running_loop().create_future(),
+                invocation.nativeTurnRef = deepcopy(handle.opaque)
+                turn.nativeTurnRef = deepcopy(handle.opaque)
+                thread_id = (
+                    handle.opaque.get("threadId") if isinstance(handle.opaque, dict) else None
                 )
-
-                async for harness_event in self.adapter.stream_events(handle):
-                    self.store.assert_lease(key, holder, token)
-                    status = harness_event.type.removeprefix("harness.turn.")
-                    if harness_event.type.startswith("harness.turn.") and status in {
-                        "completed",
-                        "failed",
-                        "incomplete",
-                        "interrupted",
-                        "cancelled",
-                    }:
-                        # Native transports may replay a terminal while closing. The
-                        # canonical invocation contract permits exactly one terminal.
-                        if streamed_terminal is not None:
-                            continue
-                        active = self._active.get(invocation.id)
-                        if (
-                            status == "interrupted"
-                            and active is not None
-                            and active.control_intent == "cancel"
-                        ):
-                            status = "cancelled"
-                            harness_event = self._terminal_event(
-                                status, app, invocation, turn
-                            )
-                        event, session = self._persist_terminal_event(
-                            harness_event,
-                            status,
-                            app,
-                            invocation,
-                            turn,
-                            session,
-                            key,
-                            holder,
-                            token,
-                        )
-                        streamed_terminal = event
-                    else:
-                        event = self._append_harness_event(
-                            harness_event, app, invocation, turn, key, holder, token
-                        )
-                        session = self._merge_actions(session, event, key, holder, token)
-                    yield event
-
-                result = await self._guarded_adapter_call(
-                    key, holder, token, lambda: self.adapter.finalize_turn(handle)
-                )
-                if streamed_terminal is None:
-                    terminal = result.terminalEvent or self._terminal_event(
-                        result.status, app, invocation, turn
+                if isinstance(thread_id, str) and thread_id:
+                    prior_native_ref = deepcopy(session.nativeSessionRef) or {}
+                    prior_native_ref.pop("nonResumable", None)
+                    native_ref = {
+                        **prior_native_ref,
+                        "threadId": thread_id,
+                        "adapterId": self.adapter.adapter_id,
+                    }
+                    session = self._store_native_session_ref(
+                        session, native_ref, key, holder, token
                     )
+                self.store.put_invocation(invocation)
+                self.store.put_turn(turn)
+            self._active[invocation.id] = _ActiveTurn(
+                turn_id=turn.id,
+                session_id=session_id,
+                terminal_status=asyncio.get_running_loop().create_future(),
+            )
+
+            # Each timeout belongs to the task advancing this generator. Never
+            # keep a task-bound timeout open across yield (HTTP -> SSE producer).
+            adapter_events = self.adapter.stream_events(handle)
+            while True:
+                try:
+                    async with asyncio.timeout_at(deadline):
+                        harness_event = await anext(adapter_events)
+                except StopAsyncIteration:
+                    break
+                self.store.assert_lease(key, holder, token)
+                status = harness_event.type.removeprefix("harness.turn.")
+                if harness_event.type.startswith("harness.turn.") and status in {
+                    "completed",
+                    "failed",
+                    "incomplete",
+                    "interrupted",
+                    "cancelled",
+                }:
+                    # Native transports may replay a terminal while closing. The
+                    # canonical invocation contract permits exactly one terminal.
+                    if streamed_terminal is not None:
+                        continue
+                    active = self._active.get(invocation.id)
+                    if (
+                        status == "interrupted"
+                        and active is not None
+                        and active.control_intent == "cancel"
+                    ):
+                        status = "cancelled"
+                        harness_event = self._terminal_event(status, app, invocation, turn)
                     event, session = self._persist_terminal_event(
-                        terminal,
-                        result.status,
+                        harness_event,
+                        status,
                         app,
                         invocation,
                         turn,
@@ -485,8 +506,35 @@ class SessionRuntime:
                         holder,
                         token,
                     )
-                    yield event
-                completed_cleanly = True
+                    streamed_terminal = event
+                else:
+                    event = self._append_harness_event(
+                        harness_event, app, invocation, turn, key, holder, token
+                    )
+                    session = self._merge_actions(session, event, key, holder, token)
+                yield event
+
+            async with asyncio.timeout_at(deadline):
+                result = await self._guarded_adapter_call(
+                    key, holder, token, lambda: self.adapter.finalize_turn(handle)
+                )
+            if streamed_terminal is None:
+                terminal = result.terminalEvent or self._terminal_event(
+                    result.status, app, invocation, turn
+                )
+                event, session = self._persist_terminal_event(
+                    terminal,
+                    result.status,
+                    app,
+                    invocation,
+                    turn,
+                    session,
+                    key,
+                    holder,
+                    token,
+                )
+                yield event
+            completed_cleanly = True
         except TimeoutError as exc:
             if streamed_terminal is not None:
                 # Cleanup/finalization cannot rewrite an already committed
@@ -720,6 +768,30 @@ class SessionRuntime:
             session = self._refresh_policy_state(session, key)
             session = self.store.put_session(session)
         return session
+
+    def _store_native_session_ref(
+        self,
+        session: SessionRecord,
+        native_ref: dict[str, Any],
+        key: tuple[str, str, str],
+        holder: str,
+        token: int,
+    ) -> SessionRecord:
+        if native_ref:
+            self.store.assert_lease(key, holder, token)
+            session.nativeSessionRef = deepcopy(native_ref)
+            session = self._refresh_policy_state(session, key)
+            session = self.store.put_session(session)
+        return session
+
+    @staticmethod
+    def _has_native_resume_ref(native_ref: dict[str, Any] | None) -> bool:
+        if not native_ref or native_ref.get("nonResumable") is True:
+            return False
+        return any(
+            isinstance(native_ref.get(key), str) and native_ref[key]
+            for key in ("threadId",)
+        )
 
     def _persist_failure_terminal(
         self,

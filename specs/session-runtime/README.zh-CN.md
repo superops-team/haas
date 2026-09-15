@@ -176,6 +176,12 @@ adapter-native config。
   "terminalEventId": null,
   "continuedFromInvocationId": null,
   "continuedFromTurnId": null,
+  "nativeTurnRef": {
+    "adapterId": "codex-app-server",
+    "threadId": "codex_thread_abc",
+    "turnId": "codex_turn_abc",
+    "generation": 1
+  },
   "executionContext": {
     "sandbox": {"mode": "workspace-write"},
     "policy": {"approvalPolicy": "on-request", "network": {"defaultAction": "allow"}},
@@ -196,8 +202,10 @@ adapter-native config。
 边界；adapter-owned execution 开始前 `startedAtMs` 保持 null。未来 1:N 时 invocation
 聚合多个 turn 的事件（按 `turnId` 分组）。内部时间戳统一毫秒 epoch，公开面由投影层
 转为 ADK float 秒。`executionContext` 是私有、深拷贝且不含 credential 的执行快照，
-记录 native turn 实际使用的 sandbox、policy 与 principal identity；不得进入公开
-invocation、ADK、event、log 或 GUI 投影。
+记录 native turn 实际使用的 sandbox、policy 与 principal identity。`nativeTurnRef`
+是 adapter 私有恢复引用；对 Codex，它保存 app-server 原生 `threadId` 与 `turnId`，
+用于同一 session 中断或重启后的补偿续接。二者都不得进入公开 invocation、ADK、
+event、log 或 GUI 投影。
 
 Fresh session 的 policy revision 1 默认使用 `workspace-write`、公网 allow 与
 `on-request` approval，除非授权的更高层 policy 进一步收窄。每个 invocation 在私有
@@ -217,11 +225,26 @@ API，不递增 policy revision。
   "status": "running",
   "continuedFromTurnId": null,
   "startedAtMs": 1786400000000,
-  "completedAtMs": null
+  "completedAtMs": null,
+  "nativeTurnRef": {
+    "adapterId": "codex-app-server",
+    "threadId": "codex_thread_abc",
+    "turnId": "codex_turn_abc",
+    "generation": 1
+  }
 }
 ```
 
 `SessionRecord` 只有在完整 projection 不超过 1000 events 与序列化 8 MiB 时才能无损投影为 ADK `Session`（`{id, appName, userId, state, events[], lastUpdateTime}`）。更大读取返回 `413 haas_session_read_too_large`，禁止截断；client 使用 native `events-page`。内部字段（tenantId 等）不进入 public 输出。
+
+`nativeSessionRef` 与 `nativeTurnRef` 是 harness 原生会话状态的持久补偿边界。
+Session Runtime 必须在 prepare 或 resume 后持久化 `PreparedSession.nativeRef`，
+在 `start_turn` 后把 `TurnHandle.opaque` 同时持久化到 invocation 与 turn；当
+turn handle 携带更强的原生 session key（例如 Codex `threadId`）时，还必须更新
+`nativeSessionRef`。同一逻辑 HaaS session 的后续 invocation 必须先把持久化的
+native session reference 传入 `ResumeSessionRequest`，再启动下一次 native turn。
+如果 adapter 返回 `nonResumable`，runtime 保留逻辑 HaaS session，并只在私有状态
+记录不可恢复；不得伪装旧 native 上下文已恢复。
 
 ### 6.4 Delegated Session Reference
 
@@ -491,3 +514,7 @@ Adapter 调用（`prepare_session`、`start_turn`、`stream_events`、`finalize_
 - Recovery：模拟 sidecar restart、adapter reconnect、missing native ref、expired session、stale holder fencing rejection、adapter timeout terminalization，以及发起进程的本地 adapter handle 已不存在时取消持久化 `running` invocation。后者 read-back 必须为 `cancelled`，仅有一个匹配终态事件，重试仍保持幂等。
 - Compatibility：ADK client bounded session GET/PATCH/DELETE 行为对齐；超预算 session GET 明确返回 413，native pagination 不静默截断。
 - Security：跨 principal 访问全部返回 404；secret-shaped input 不落默认日志。
+
+## stream-timeout-approval-recovery
+
+invocation deadline 必须作用于当前等待 adapter 的任务。绑定任务的 timeout 上下文不得跨越异步生成器 yield：首事件与后续事件可能由不同任务消费。prepare、start、每次事件等待与 finalize 共用单调时钟 deadline。超时持久化唯一 failed 终态，关闭等待交互并释放资源。测试首事件后的静默执行与审批等待。

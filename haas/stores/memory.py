@@ -108,6 +108,7 @@ class SessionRecord:
     userId: str
     status: str = "active"
     state: dict[str, Any] = field(default_factory=dict)
+    nativeSessionRef: dict[str, Any] | None = None
     delegatedSessionRef: dict[str, Any] | None = None
     effectiveProfile: dict[str, Any] | None = None
     desiredPolicy: dict[str, Any] = field(default_factory=default_session_policy)
@@ -143,6 +144,7 @@ class InvocationRecord:
     continuedFromInvocationId: str | None = None
     continuedFromTurnId: str | None = None
     executionContext: dict[str, Any] = field(default_factory=dict)
+    nativeTurnRef: dict[str, Any] | None = None
 
 
 @dataclass
@@ -156,6 +158,7 @@ class TurnRecord:
     completedAtMs: int | None = None
     continuedFromInvocationId: str | None = None
     continuedFromTurnId: str | None = None
+    nativeTurnRef: dict[str, Any] | None = None
 
 
 @dataclass

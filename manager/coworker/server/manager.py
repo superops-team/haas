@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -139,6 +140,7 @@ from ..unrouted import UnroutedStore
 from ..workspace_trust import WorkspaceTrustStore
 
 _SCOPES = {s.value for s in Scope}
+HAAS_COWORK_RECALL_MCP_NAME = "manager-cowork-recall"
 
 logger = logging.getLogger("coworker.manager")
 
@@ -1105,6 +1107,8 @@ class SessionManager:
             "model": model,
             "baseUrl": base_url,
         }
+        if not isinstance(binding.get("recall_token"), str) or not binding["recall_token"]:
+            binding["recall_token"] = secrets.token_urlsafe(32)
         authoritative_profile_id = binding.get("profile_id")
         authoritative_profile_version = binding.get("profile_version")
         if binding.get("accepted_invocation_id"):
@@ -1136,6 +1140,17 @@ class SessionManager:
                     "apiType": "responses",
                     "credentialRef": credential_ref,
                 },
+                "mcpServers": [
+                    self._haas_cowork_recall_mcp_server(
+                        session_id=str(scope["sessionId"]),
+                        workspace=(
+                            engine.roots[0].path
+                            if getattr(engine, "roots", None)
+                            else self.default_workspace
+                        ),
+                        token=str(binding["recall_token"]),
+                    )
+                ],
             },
             profile_id=authoritative_profile_id,
         )
@@ -1150,6 +1165,30 @@ class SessionManager:
             "profile_id": profile["id"],
             "profile_version": profile["version"],
             "profile_fingerprint": profile["profileFingerprint"],
+        }
+
+    @staticmethod
+    def _haas_cowork_recall_mcp_server(
+        *, session_id: str, workspace: str | Path | None, token: str
+    ) -> dict[str, Any]:
+        port = os.environ.get("COWORKER_PORT") or str(load_config(workspace).port)
+        return {
+            "name": HAAS_COWORK_RECALL_MCP_NAME,
+            "url": f"http://127.0.0.1:{port}/mcp/cowork-recall",
+            "transport": "http",
+            "enabled": True,
+            "required": False,
+            "haas_builtin": True,
+            "headers": {
+                "X-HaaS-Session-ID": session_id,
+                "X-HaaS-Recall-Token": token,
+            },
+            "timeoutSeconds": 10,
+            "tools": {
+                "recall": {
+                    "description": "Recall scoped Cowork memories and recent session history.",
+                }
+            },
         }
 
     @staticmethod
@@ -1250,6 +1289,71 @@ class SessionManager:
                     merged[key] = current[key]
         bindings[HAAS_DELEGATION_BINDING_KEY] = merged
         self.session_store.set_bindings(session_id, bindings)
+
+    @staticmethod
+    def _haas_assistant_message_from_bridge(bridge: StreamBridgeState) -> dict[str, Any] | None:
+        if not (bridge.assistant_text or bridge.activities or bridge.model_stages):
+            return None
+        return {
+            "role": "assistant",
+            "content": bridge.assistant_text,
+            **({"reasoning": bridge.reasoning_summary} if bridge.reasoning_summary else {}),
+            "_delegated": {
+                "backend": "haas",
+                "execution_mode": "local_api",
+                "session": bridge.session.session_id,
+            },
+            "_haas_activity": [dict(activity) for activity in bridge.activities.values()],
+            "_haas_model_stages": bridge.public_model_stages(),
+            "_haas_task_outcome": {
+                **bridge.task.to_dict(),
+                "status": bridge.terminal_status,
+                "retryable": bridge.terminal_retryable,
+            },
+        }
+
+    @classmethod
+    def _haas_rehydrated_messages(cls, binding: dict[str, Any]) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        last_user = binding.get("last_user_message")
+        if isinstance(last_user, dict):
+            content = last_user.get("content")
+            if isinstance(content, (str, list)):
+                message: dict[str, Any] = {
+                    "role": "user",
+                    "content": content,
+                    "_delegated": {
+                        "backend": "haas",
+                        "execution_mode": binding.get("execution_mode") or "local_api",
+                        "session": binding.get("haas_session_id"),
+                    },
+                }
+                if isinstance(last_user.get("display"), str):
+                    message["_display"] = last_user["display"]
+                if isinstance(last_user.get("ts"), (int, float)):
+                    message["ts"] = last_user["ts"]
+                messages.append(message)
+        bridge_data = binding.get("stream_bridge")
+        if isinstance(bridge_data, dict):
+            assistant = cls._haas_assistant_message_from_bridge(
+                StreamBridgeState.from_dict(bridge_data)
+            )
+            if assistant is not None:
+                messages.append(assistant)
+        return messages
+
+    @classmethod
+    def _recover_haas_messages(
+        cls, messages: list[dict[str, Any]] | None, binding: dict[str, Any] | None
+    ) -> list[dict[str, Any]] | None:
+        if messages and any(message.get("role") != "system" for message in messages):
+            return messages
+        if not binding:
+            return messages
+        recovered = cls._haas_rehydrated_messages(binding)
+        if not recovered:
+            return messages
+        return [*(message for message in (messages or []) if message.get("role") == "system"), *recovered]
 
     async def _wait_for_delegated_policy(
         self, client: HaasDelegationClient, binding: dict[str, Any]
@@ -1471,6 +1575,7 @@ class SessionManager:
             "harness_id": config.harness_id,
             "harness_base": config.harness_base,
             "workspace": workspace,
+            "recall_token": secrets.token_urlsafe(32),
             "runtime": {"status": "local_api"},
             "bound_at": int(time.time()),
         }
@@ -1599,26 +1704,10 @@ class SessionManager:
         )
         self._persist_haas_binding(session_id, engine, binding)
         if bridge.assistant_text or bridge.activities or bridge.model_stages:
-            engine.messages.append(
-                {
-                    "role": "assistant",
-                    "content": bridge.assistant_text,
-                    **({"reasoning": bridge.reasoning_summary} if bridge.reasoning_summary else {}),
-                    "ts": time.time(),
-                    "_delegated": {
-                        "backend": "haas",
-                        "execution_mode": "local_api",
-                        "session": bridge.session.session_id,
-                    },
-                    "_haas_activity": [dict(activity) for activity in bridge.activities.values()],
-                    "_haas_model_stages": bridge.public_model_stages(),
-                    "_haas_task_outcome": {
-                        **bridge.task.to_dict(),
-                        "status": bridge.terminal_status,
-                        "retryable": bridge.terminal_retryable,
-                    },
-                }
-            )
+            message = self._haas_assistant_message_from_bridge(bridge)
+            if message is not None:
+                message["ts"] = time.time()
+                engine.messages.append(message)
 
     async def _run_haas_local_api_turn(
         self,
@@ -1697,6 +1786,12 @@ class SessionManager:
             if display is not None:
                 user_message["_display"] = display
             engine.messages.append(user_message)
+            binding["last_user_message"] = {
+                "content": content,
+                "display": display,
+                "ts": user_message["ts"],
+            }
+            self.save(session_id, engine, touch=False)
 
         ledger = AttemptLedger.from_dict(binding.get("attempt_ledger") or {})
         current_attempt_id = binding.get("current_attempt_id")
@@ -1749,7 +1844,7 @@ class SessionManager:
             "appName": harness_id,
             "userId": haas_user_id,
             "sessionId": haas_session_id,
-            "newMessage": message,
+            "newMessage": adk_message_from_content(content),
             "streaming": True,
             "policy": {
                 "approvalPolicy": (
@@ -1863,12 +1958,20 @@ class SessionManager:
                     try:
                         async for event in stream.events():
                             await queue.put(("adk", event))
+                    except HaasClientError:
+                        # Acceptance is durable; recover through canonical events.
+                        pass
                     finally:
                         adk_finished.set()
                         await queue.put(("adk_done", None))
 
                 async def poll_native() -> None:
                     cursor = bridge.native_cursor
+                    timeouts = getattr(client, "timeouts", None)
+                    recovery_deadline = time.monotonic() + (
+                        getattr(timeouts, "turn", 900.0)
+                        + getattr(timeouts, "response_header", 30.0)
+                    )
                     try:
                         while not bridge.completed:
                             page = await client.events_page(
@@ -1892,7 +1995,13 @@ class SessionManager:
                                 await queue.put(("native_checkpoint", cursor))
                                 continue
                             if adk_finished.is_set():
-                                return
+                                invocation = await client.get_invocation(
+                                    bridge.session.session_id, bridge.invocation_id
+                                )
+                                if invocation.data.get("status") not in {
+                                    "accepted", "running", "cancelling"
+                                } or time.monotonic() >= recovery_deadline:
+                                    return
                             await asyncio.sleep(0.05)
                     finally:
                         await queue.put(("native_done", None))
@@ -2124,32 +2233,10 @@ class SessionManager:
         self._persist_haas_binding(session_id, engine, binding)
         assistant_text = bridge.assistant_text
         if assistant_text or bridge.activities or bridge.model_stages:
-            engine.messages.append(
-                {
-                    "role": "assistant",
-                    "content": assistant_text,
-                    **(
-                        {"reasoning": bridge.reasoning_summary}
-                        if bridge.reasoning_summary
-                        else {}
-                    ),
-                    "ts": time.time(),
-                    "_delegated": {
-                        "backend": "haas",
-                        "execution_mode": "local_api",
-                        "session": bridge.session.session_id,
-                    },
-                    "_haas_activity": [
-                        dict(activity) for activity in bridge.activities.values()
-                    ],
-                    "_haas_model_stages": bridge.public_model_stages(),
-                    "_haas_task_outcome": {
-                        **bridge.task.to_dict(),
-                        "status": bridge.terminal_status,
-                        "retryable": bridge.terminal_retryable,
-                    },
-                }
-            )
+            message = self._haas_assistant_message_from_bridge(bridge)
+            if message is not None:
+                message["ts"] = time.time()
+                engine.messages.append(message)
         if bridge.task.phase == "verifying":
             if bridge.task.claim_continuation(replay_safe=True):
                 binding["stream_bridge"] = bridge.to_dict()
@@ -2626,7 +2713,9 @@ class SessionManager:
 
         if record:
             ws = record.workspace or None
-            model, mode, messages = record.model, Mode(record.mode), record.messages
+            binding = binding_from_record(record)
+            messages = self._recover_haas_messages(record.messages, binding)
+            model, mode = record.model, Mode(record.mode)
         else:
             ws = self.resolve_workspace(workspace)
             model, mode, messages = self.model, self.mode, None
@@ -7760,7 +7849,113 @@ class SessionManager:
         if engine is not None:
             return list(engine.messages)
         record = self.session_store.load(session_id)
-        return record.messages if record else []
+        if not record:
+            return []
+        return self._recover_haas_messages(
+            record.messages, binding_from_record(record)
+        ) or []
+
+    def cowork_recall(
+        self,
+        *,
+        haas_session_id: str = "",
+        token: str = "",
+        query: str = "",
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        manager_session_id = self._manager_session_id_from_haas(haas_session_id)
+        record = self.session_store.load(manager_session_id) if manager_session_id else None
+        binding = binding_from_record(record) if record else {}
+        expected_token = binding.get("recall_token") if isinstance(binding, dict) else None
+        if (
+            record is None
+            or not isinstance(expected_token, str)
+            or not expected_token
+            or not secrets.compare_digest(expected_token, token)
+        ):
+            return {
+                "sessionId": "",
+                "haasSessionId": haas_session_id,
+                "workspace": "",
+                "memories": [],
+                "transcript": [],
+            }
+        workspace = record.workspace if record else self.default_workspace
+        bounded_limit = max(1, min(int(limit or 8), 20))
+        memories = [
+            self._memory_recall_item(item)
+            for item in self._scoped_recall_memories(workspace=workspace, limit=bounded_limit)
+        ]
+        messages = self._recover_haas_messages(
+            record.messages, binding
+        ) or []
+        transcript = self._recall_transcript_items(messages, query=query, limit=bounded_limit)
+        return {
+            "sessionId": manager_session_id,
+            "haasSessionId": haas_session_id,
+            "workspace": workspace,
+            "memories": memories,
+            "transcript": transcript,
+        }
+
+    def _manager_session_id_from_haas(self, haas_session_id: str) -> str:
+        if haas_session_id.startswith("hsess_"):
+            candidate = haas_session_id.removeprefix("hsess_")
+            if self.session_store.load(candidate) is not None:
+                return candidate
+        for record in self.session_store.list():
+            binding = binding_from_record(record)
+            if binding.get("haas_session_id") == haas_session_id:
+                return record.session_id
+        return ""
+
+    def _scoped_recall_memories(
+        self, *, workspace: str | None, limit: int
+    ) -> list[Any]:
+        items = [
+            *self.memory_store.list(scope=Scope.GLOBAL),
+            *self.memory_store.list(scope=Scope.WORKSPACE, workspace=workspace),
+        ]
+        items.sort(key=lambda item: item.id, reverse=True)
+        return items[:limit]
+
+    @staticmethod
+    def _memory_recall_item(item: Any) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "scope": item.scope.value,
+            "summary": item.summary or "",
+            "content": str(item.content)[:2000],
+        }
+
+    @staticmethod
+    def _recall_transcript_items(
+        messages: list[dict[str, Any]], *, query: str, limit: int
+    ) -> list[dict[str, Any]]:
+        terms = [part.lower() for part in query.split() if part.strip()]
+        rows: list[dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role") or "")
+            if role not in {"user", "assistant"}:
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if terms and not any(term in content.lower() for term in terms):
+                continue
+            item: dict[str, Any] = {
+                "role": role,
+                "content": content.strip()[:2000],
+            }
+            outcome = message.get("_haas_task_outcome")
+            if isinstance(outcome, dict):
+                item["taskOutcome"] = {
+                    key: outcome.get(key)
+                    for key in ("status", "phase", "code", "safeReason")
+                    if outcome.get(key)
+                }
+            rows.append(item)
+        return rows[-limit:]
 
     def rename_session(self, session_id: str, title: str) -> dict[str, Any]:
         if session_id.startswith("__"):

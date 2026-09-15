@@ -2341,11 +2341,42 @@ def _local_effective_profile(
     return effective
 
 
+def _codex_builtin_mcp_only(servers: Any) -> bool:
+    if not isinstance(servers, list):
+        return False
+    for server in servers:
+        if not isinstance(server, dict):
+            return False
+        if (
+            server.get("name") != "manager-cowork-recall"
+            or server.get("haas_builtin") is not True
+            or server.get("transport") != "http"
+        ):
+            return False
+        url = server.get("url")
+        if not isinstance(url, str) or not url.startswith("http://127.0.0.1:"):
+            return False
+        headers = server.get("headers")
+        if not isinstance(headers, dict):
+            return False
+        if not (
+            isinstance(headers.get("X-HaaS-Session-ID"), str)
+            and headers["X-HaaS-Session-ID"]
+            and isinstance(headers.get("X-HaaS-Recall-Token"), str)
+            and headers["X-HaaS-Recall-Token"]
+        ):
+            return False
+    return True
+
+
 def _validate_local_materialization(runtime: _Runtime, effective: dict[str, Any]) -> None:
-    if runtime.adapter.base == "codex" and any(
-        effective.get(field)
-        for field in ("mcpServers", "skills", "agentsMd", "policy", "workspace", "budget")
-    ):
+    unsupported = any(
+        effective.get(field) for field in ("skills", "agentsMd", "policy", "workspace", "budget")
+    )
+    mcp_servers = effective.get("mcpServers")
+    if mcp_servers and not _codex_builtin_mcp_only(mcp_servers):
+        unsupported = True
+    if runtime.adapter.base == "codex" and unsupported:
         raise HaasError(
             409,
             "invalid_request_error",

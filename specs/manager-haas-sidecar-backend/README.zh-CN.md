@@ -510,3 +510,27 @@ Acceptance 前展示未启动错误；之后保留 binding/partial output 并核
 - 向后 replay 覆盖缺少可选 activity 字段的历史/公共 tool event：保持普通 `tool` activity、canonical 顺序与状态，不猜测 command/read/search/edit 语义。
 - 1440/1100 CSS pixel 桌面截图及 1099/390 窄屏截图验证 Inspector/抽屉 breakpoint、完成态收敛、无重叠、有界文本、焦点返回和失败/恢复可见性。
 - Command evidence 测试覆盖 start-to-terminal lifecycle 合并、准确 command/cwd、credential 遮蔽、普通与 signed authorization link、expiry、scope 隐藏 404、过期 410、no-store header、合并输出标签及不进入持久 transcript。
+
+## stream-timeout-approval-recovery
+
+ADK EOF 或读取异常仅代表交付状态。已接受请求在状态为 accepted/running/cancelling 时，继续对同一 invocation 轮询 canonical 事件，设置有界恢复 deadline 和非忙等间隔。空页不代表终态丢失。保留 attempt 与 cursor，不重新提交任务。已终态但缺少 canonical 事件仍为完整性错误。测试覆盖 EOF/读取失败、空页、审批期间延迟失败、唯一终态投影及无第二次提交。实施顺序：deadline 回归与修复、Manager 恢复回归与修复、集成/smoke 与审查。HTTP/SSE schema 与错误码保持不变；registry、profile、policy、credential、MCP、artifact、container 合同不受影响。
+
+非成功终态还必须关闭当前 turn 未解决的 HaaS 审批卡。历史卡片与非 HaaS 审批不受影响。关闭卡片表示交互已取消，不得向服务端发送批准决定。回归测试必须断言此投影，避免旧卡在超时后继续发起变更。
+
+## haas-context-recovery-and-recall
+
+Manager transcript 与 Cowork memory 是 HaaS-backed chat 的恢复来源，但 Manager
+不得根据关键词推断 continuation intent，也不得把手工拼装的历史上下文改写进用户
+prompt。可见 user message 必须原样提交给 HaaS。提交已 accepted 的 HaaS turn 前，
+Manager 仍必须先把可见 user message 持久化到本地，确保浏览器刷新、WebSocket
+断线、Manager 重启或 HaaS timeout 后不会只剩 HaaS binding 而丢失用户意图。
+
+模型侧 recall 通过 Manager 注入 active local HaaS profile 的内置 MCP source 实现，
+名称固定为 `manager-cowork-recall`。该 source 暴露单个 `recall` tool，按
+`X-HaaS-Session-ID` 识别的 HaaS session 返回 Cowork 数据库中的有界结构化数据：
+global memory、workspace memory，以及近期脱敏 session transcript facts。是否调用
+该工具由 Codex 根据任务自行决定，历史恢复不得绑定到某种语言的触发词。Tool response
+不得包含 raw tool arguments、host path、credential、完整 command output，也不得包含
+超过已保留可见 transcript 范围的 raw prompt。该 MCP source 是 optional；不可用时
+turn 可以继续，但 Manager 必须通过 HaaS profile 和普通 task outcome 路径记录降级。
+Local Codex 路径在完整 MCP runtime contract 实现前仍不支持任意外部 MCP materialization。
