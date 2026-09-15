@@ -36,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/superops-team/haas/v0.2.1/scripts/i
 
 ### 观看 HaaS 项目讲解
 
-[![观看 HaaS 项目讲解：把 Agent 执行变成服务](docs/architecture/haas-explainer-cover.png)](https://github.com/superops-team/haas/releases/download/v0.2.1/haas-explainer-bilingual.mp4)
+[![观看 HaaS 项目讲解：把 Agent 执行变成服务](docs/architecture/haas-explainer-cover.png)](https://www.youtube.com/watch?v=rmMq4Dpu-js)
 
 这部约 2:57 的讲解视频说明 HaaS 为什么存在、服务边界如何工作、一次执行如何从
 能力发现走到可回读的明确终态，以及部署与安全边界为什么必须保持清晰。视频采用
@@ -45,6 +45,9 @@ curl -fsSL https://raw.githubusercontent.com/superops-team/haas/v0.2.1/scripts/i
 章节：**00:00** 真正的问题 · **00:20** Harness as a Service ·
 **00:38** 一个服务边界 · **01:04** 跟随一次执行 · **01:30** 超越理想路径 ·
 **01:54** 部署与真实边界 · **02:28** 构建真正的产品。
+
+[在 YouTube 观看](https://www.youtube.com/watch?v=rmMq4Dpu-js) ·
+[下载 MP4](https://github.com/superops-team/haas/releases/download/v0.2.1/haas-explainer-bilingual.mp4)
 
 [探索交互式系统架构](docs/architecture/haas-system.zh-CN.html) ·
 [跟随交互式 `/run_sse` 时序](docs/architecture/run-sse.zh-CN.html) ·

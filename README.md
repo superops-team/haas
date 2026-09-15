@@ -41,7 +41,7 @@ replacement fails. The installer does not launch the app automatically.
 
 ### Watch the HaaS explainer
 
-[![Watch the HaaS explainer: Make agent execution a service](docs/architecture/haas-explainer-cover.png)](https://github.com/superops-team/haas/releases/download/v0.2.1/haas-explainer-bilingual.mp4)
+[![Watch the HaaS explainer: Make agent execution a service](docs/architecture/haas-explainer-cover.png)](https://www.youtube.com/watch?v=rmMq4Dpu-js)
 
 In about 2:57, see why HaaS exists, how its service boundary works, how one
 execution moves from discovery to a recorded terminal result, and where its
@@ -52,6 +52,9 @@ Chapters: **00:00** The real problem · **00:20** Harness as a Service ·
 **00:38** One service boundary · **01:04** Follow one execution ·
 **01:30** Beyond the happy path · **01:54** Deployment and honest boundaries ·
 **02:28** The product you get to build.
+
+[Watch on YouTube](https://www.youtube.com/watch?v=rmMq4Dpu-js) ·
+[Download the MP4](https://github.com/superops-team/haas/releases/download/v0.2.1/haas-explainer-bilingual.mp4)
 
 [Explore the interactive system architecture](docs/architecture/haas-system.html) ·
 [Follow the interactive `/run_sse` sequence](docs/architecture/run-sse.html) ·

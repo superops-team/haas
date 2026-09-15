@@ -40,13 +40,15 @@ def test_readme_mastheads_are_bilingual_and_structurally_equivalent() -> None:
         assert "repository-metrics.yml/badge.svg?branch=main" in readme
         for badge in ("commits.svg", "lines.svg", "coverage.svg"):
             assert f"/metrics/badges/{badge}" in readme
-    video_url = (
+    download_url = (
         "https://github.com/superops-team/haas/releases/download/"
         "v0.2.1/haas-explainer-bilingual.mp4"
     )
+    watch_url = "https://www.youtube.com/watch?v=rmMq4Dpu-js"
     for readme in (english, chinese):
         assert "docs/architecture/haas-explainer-cover.png" in readme
-        assert video_url in readme
+        assert watch_url in readme
+        assert download_url in readme
 
     assert english.index("haas-logo.svg") < english.index("## HaaS in 3 minutes")
     assert chinese.index("haas-logo.svg") < chinese.index("## 3 分钟了解 HaaS")

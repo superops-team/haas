@@ -2,7 +2,7 @@
 
 [English](VISUAL-STORYTELLING.md) | **简体中文**
 
-Status: 方案 A 已发布到 GitHub Release 并接入两份 README；本地合成旁白已获公开使用授权；自动媒体、完整性与视觉检查通过；人工可听听审仍未执行
+Status: 方案 A 已发布到 YouTube 与 GitHub Release 并接入两份 README；在线播放与下载链接已验证；本地合成旁白已获公开使用授权；自动媒体、完整性与视觉检查通过；人工可听听审仍未执行
 Last reviewed: 2026-09-15
 Change ID: `readme-explainer-video`（替代 `readme-guided-trace-gifs` 的首页展示方式）
 
@@ -248,16 +248,16 @@ HaaS 是 Harness as a Service 的缩写。Harness 是完整的 Agent Runtime。�
 - 单条字幕通常停留 2–7 秒，按短句切分，位于画面 5% 安全区内。1080p 下中文目标 34–40 px、英文 28–32 px，每种语言最多两行。超长字幕应拆句，不缩小字体。中文换行应按词边界均衡分配，不让标点独立行首或末行只剩一个词。烧录字幕下方至少保留 90 px 的桌面播放器控件空间，架构图不得进入字幕区。逐条检查 1280×720 和缩小 Web 播放器下的可读性；手机观看可要求横屏/全屏。
 - 可复现的制作源放在 `scripts/` 与 `docs/architecture/`；生成的 MP4/WAV、中间帧、contact sheet 和渲染凭据放在已忽略的 `dist/` 或临时目录。Git 仅保存小尺寸封面和创作源，不保存视频大文件。
 
-### 13.5 README 与 GitHub Release 交接
+### 13.5 README、YouTube 与 GitHub Release 交接
 
-用户已于 2026-09-15 选择方案 A，并授权公开发布现有旁白。发布目标是公开 GitHub Release `v0.2.1`，不是尚未确认的 YouTube 地址。
+用户已于 2026-09-15 选择方案 A，并授权公开发布现有旁白。GitHub Release `v0.2.1` 资产继续作为稳定下载备份；用户同日进一步确认公开上传 YouTube，并选择 YouTube 观看页作为 README 的主播放入口。
 
 1. 使用已确认的 16:9 封面和清晰播放提示，不伪造播放量、runtime 截图或性能声明。封面提交为 `docs/architecture/haas-explainer-cover.png`；MP4 不进入 Git 历史。
-2. 完整听审通过后，把 `haas-explainer-bilingual.mp4` 作为公开资产上传至 `https://github.com/superops-team/haas/releases/tag/v0.2.1`。标准点击地址为 `https://github.com/superops-team/haas/releases/download/v0.2.1/haas-explainer-bilingual.mp4`。该精确地址成功返回媒体前，不修改任一 README。
-3. 在两份 README 中用同一张本地封面链接上述标准资产 URL，替换开头的三张 GIF。只移除首页嵌入：保留六个 GIF 文件供历史记录和深链接使用，并保留详细静态图与交互式架构入口。
+2. 保留 `haas-explainer-bilingual.mp4` 在 `https://github.com/superops-team/haas/releases/tag/v0.2.1` 的公开下载资产。用户已把审阅后的成片上传到授权 YouTube 频道，视频 ID 为 `rmMq4Dpu-js`；匿名观看页与 oEmbed 请求均成功。
+3. 两份 README 的同一本地封面链接标准 `https://www.youtube.com/watch?v=rmMq4Dpu-js` 观看地址，并保留明确标注的 GitHub Release 下载链接。只移除首页 GIF 嵌入：保留六个 GIF 文件供历史记录和深链接使用，并保留详细静态图与交互式架构入口。
 4. 将已过时的“30 秒”章节标题分别替换为英文“HaaS in 3 minutes”和中文“3 分钟了解 HaaS”。英文标题为“Watch the HaaS explainer”，中文标题为“观看 HaaS 项目讲解”。两份 README 摘要保持相同事实：约 2:57、英语旁白、烧录简体中文/英文字幕；双语章节摘要语义一致。
-5. GitHub README 不提供可靠的 MP4 内嵌播放器。封面直接打开公开 Release 资产；不使用 iframe、自动播放、JavaScript 或跟踪，也不声称视频在 README 内嵌播放。
-6. 在 Release 展示面允许的范围内，随资产发布双语标题、说明及事实章节锚点：00:00、00:20、00:38、01:04、01:30、01:54、02:28。若 Release UI 不渲染章节，不得编造平台能力。
+5. GitHub README 不提供可靠的内嵌视频播放器。封面打开可在线播放的 YouTube 观看页；不使用 iframe、自动播放、JavaScript 或跟踪，也不声称视频在 GitHub README 内部播放。
+6. 发布双语标题、说明及 YouTube 事实章节锚点：00:00、00:20、00:38、01:04、01:30、01:54、02:28。只有频道能力允许时才把已审阅封面上传为自定义缩略图；否则保留 YouTube 自动缩略图，README 仍使用本地封面。
 7. 本次公开授权只覆盖经过审阅的本地讲解视频资产与仓库文档，不授权无关第三方上传、付费服务或披露私有运行证据。
 
 ### 13.6 影响、验收与任务顺序
@@ -269,11 +269,11 @@ HaaS 是 Harness as a Service 的缩写。Harness 是完整的 Agent Runtime。�
 3. 重新核验已有确定性渲染产物：双语/无烧录字幕视频、字幕文件、封面，以及 §13.3 要求的带标记示意执行画面；只有门禁失败时才重新生成。
 4. 完整解码双语 MP4；检查音视频时长、帧率、codec/pixel format、音频采样率、响度、true peak、字幕正时长/顺序/无重叠、双语时间边界一致和末条对齐。
 5. 检查封面、每幕代表帧、两种语言字幕、转场和首尾帧。完成整段 2:57 实时视听审查；自动检查不能证明声音自然或易懂。
-6. 把核验通过的 MP4 上传至 Release `v0.2.1`，再通过匿名、跟随重定向的 `HEAD` 或有界 `GET` 验证 HTTP 成功、MP4 兼容 Content-Type 和预期字节数；确认下载文件校验和与已审阅本地文件一致。
+6. 保留 Release `v0.2.1` 中核验通过的 MP4，并使用用户授权频道把同一文件上传到 YouTube。确认 YouTube 处理完成、可见性为公开、时长约 2:57，且匿名请求可以解析观看页和公开播放器元数据。记录平台返回的 video ID，禁止自行构造或猜测。
 7. 把已审阅封面复制到 `docs/architecture/haas-explainer-cover.png`；验证可解码、16:9、大小适合 README 交付，且无秘密或误导性声明。
-8. 仅在第 6 步通过后更新两份 README。验证本地图片路径、公开视频点击地址、六处首页 GIF 嵌入均已移除、详细静态/交互链接仍保留，以及双语事实一致；在桌面和窄宽度下渲染或检查最终 GitHub Markdown。
+8. 仅在第 6 步通过后更新两份 README。验证本地图片路径、YouTube 观看地址、明确的 GitHub Release 下载备份、六处首页 GIF 嵌入均已移除、详细静态/交互链接仍保留，以及双语事实一致；在桌面和窄宽度下渲染或检查最终 GitHub Markdown。
 9. 对本次变更的创作源执行仓库要求的 review 门禁。指定 reviewer 工具不可用时，记录人工等价审查及局限，不声称已运行该工具。
 10. 校验限定范围 diff 和链接，并执行 `git diff --check`、`make pre-commit`、`make secret-scan`。Scanner 可能仅扫描暂存变更，须额外显式扫描交付文本源。记录基线失败，不修改无关变更或绕过 hook。纯文档变更不要求完整 runtime/container 发布验证，未执行必须记录为 `not_run` 而非通过。
 11. 若上传成功但 README 验证失败，保留有效 Release 资产，并维持或恢复旧 README 嵌入，直到文档修复通过。若上传字节未通过完整性复验，在建立链接前删除或替换该精确资产。
 
-正常公开发布准入要求：无阻塞 spec finding、成片完整、格式/字幕检查通过、完成人工整段听审、音频与素材已授权可发布、能力边界如实。对于 2026-09-15 本次发布，用户明确授权公开使用并要求在以下自动检查通过后完成发布：完整音轨解码、响度/静音分析、制作源到旁白的合同测试、浏览器全时长播放和代表帧审查；人工可听听审仍为 `not_run`，是明确记录的残余质量风险，不得声称已通过。README 接入还要求标准公开视频 URL 与全部链接/渲染检查通过。
+正常公开发布准入要求：无阻塞 spec finding、成片完整、格式/字幕检查通过、完成人工整段听审、音频与素材已授权可发布、能力边界如实。对于 2026-09-15 本次发布，用户明确授权公开使用并要求在以下自动检查通过后完成发布：完整音轨解码、响度/静音分析、制作源到旁白的合同测试、浏览器全时长播放和代表帧审查；人工可听听审仍为 `not_run`，是明确记录的残余质量风险，不得声称已通过。YouTube README 接入还要求真实的公开观看 URL、匿名播放检查和全部 README 链接/渲染检查通过。
