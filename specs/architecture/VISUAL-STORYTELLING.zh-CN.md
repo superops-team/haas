@@ -2,7 +2,7 @@
 
 [English](VISUAL-STORYTELLING.md) | **简体中文**
 
-Status: 方案 A 已确认；双语成片已渲染并通过自动媒体检查；本地合成旁白已获公开使用授权；完整听审、Release 发布与 README 接入待完成
+Status: 方案 A 已发布到 GitHub Release 并接入两份 README；本地合成旁白已获公开使用授权；自动媒体、完整性与视觉检查通过；人工可听听审仍未执行
 Last reviewed: 2026-09-15
 Change ID: `readme-explainer-video`（替代 `readme-guided-trace-gifs` 的首页展示方式）
 
@@ -255,7 +255,7 @@ HaaS 是 Harness as a Service 的缩写。Harness 是完整的 Agent Runtime。�
 1. 使用已确认的 16:9 封面和清晰播放提示，不伪造播放量、runtime 截图或性能声明。封面提交为 `docs/architecture/haas-explainer-cover.png`；MP4 不进入 Git 历史。
 2. 完整听审通过后，把 `haas-explainer-bilingual.mp4` 作为公开资产上传至 `https://github.com/superops-team/haas/releases/tag/v0.2.1`。标准点击地址为 `https://github.com/superops-team/haas/releases/download/v0.2.1/haas-explainer-bilingual.mp4`。该精确地址成功返回媒体前，不修改任一 README。
 3. 在两份 README 中用同一张本地封面链接上述标准资产 URL，替换开头的三张 GIF。只移除首页嵌入：保留六个 GIF 文件供历史记录和深链接使用，并保留详细静态图与交互式架构入口。
-4. 英文标题为“Watch the HaaS explainer”，中文标题为“观看 HaaS 项目讲解”。两份 README 摘要保持相同事实：约 2:57、英语旁白、烧录简体中文/英文字幕；双语章节摘要语义一致。
+4. 将已过时的“30 秒”章节标题分别替换为英文“HaaS in 3 minutes”和中文“3 分钟了解 HaaS”。英文标题为“Watch the HaaS explainer”，中文标题为“观看 HaaS 项目讲解”。两份 README 摘要保持相同事实：约 2:57、英语旁白、烧录简体中文/英文字幕；双语章节摘要语义一致。
 5. GitHub README 不提供可靠的 MP4 内嵌播放器。封面直接打开公开 Release 资产；不使用 iframe、自动播放、JavaScript 或跟踪，也不声称视频在 README 内嵌播放。
 6. 在 Release 展示面允许的范围内，随资产发布双语标题、说明及事实章节锚点：00:00、00:20、00:38、01:04、01:30、01:54、02:28。若 Release UI 不渲染章节，不得编造平台能力。
 7. 本次公开授权只覆盖经过审阅的本地讲解视频资产与仓库文档，不授权无关第三方上传、付费服务或披露私有运行证据。
@@ -276,4 +276,4 @@ HaaS 是 Harness as a Service 的缩写。Harness 是完整的 Agent Runtime。�
 10. 校验限定范围 diff 和链接，并执行 `git diff --check`、`make pre-commit`、`make secret-scan`。Scanner 可能仅扫描暂存变更，须额外显式扫描交付文本源。记录基线失败，不修改无关变更或绕过 hook。纯文档变更不要求完整 runtime/container 发布验证，未执行必须记录为 `not_run` 而非通过。
 11. 若上传成功但 README 验证失败，保留有效 Release 资产，并维持或恢复旧 README 嵌入，直到文档修复通过。若上传字节未通过完整性复验，在建立链接前删除或替换该精确资产。
 
-公开发布准入要求：无阻塞 spec finding、成片完整、格式/字幕检查通过、完成整段听审、音频与素材已授权可发布、能力边界如实。README 接入还要求标准公开视频 URL 与全部链接/渲染检查通过。
+正常公开发布准入要求：无阻塞 spec finding、成片完整、格式/字幕检查通过、完成人工整段听审、音频与素材已授权可发布、能力边界如实。对于 2026-09-15 本次发布，用户明确授权公开使用并要求在以下自动检查通过后完成发布：完整音轨解码、响度/静音分析、制作源到旁白的合同测试、浏览器全时长播放和代表帧审查；人工可听听审仍为 `not_run`，是明确记录的残余质量风险，不得声称已通过。README 接入还要求标准公开视频 URL 与全部链接/渲染检查通过。

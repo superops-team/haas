@@ -25,6 +25,7 @@ secrets/
 ## 治理：临时产物不得提交（见 AGENTS.md 铁律） ##
 /prd-spec/
 /docs/verification/
+/.superpowers/
 
 ## Python ##
 __pycache__/

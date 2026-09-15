@@ -32,28 +32,23 @@ curl -fsSL https://raw.githubusercontent.com/superops-team/haas/v0.2.1/scripts/i
 `com.apple.quarantine`。当前构建未签名；如果你的环境要求签名或公证，请先审阅脚本
 再执行。替换失败时会恢复已有安装，安装完成后不会自动启动 App。
 
-## 30 秒了解 HaaS
+## 3 分钟了解 HaaS
 
-### 一套协议，隔离多种 runtime
+### 观看 HaaS 项目讲解
 
-[![HaaS 核心概念：用一套稳定协议纳管相互隔离的 agent runtime](docs/architecture/haas-concept.zh-CN.gif)](docs/architecture/haas-system.zh-CN.html)
+[![观看 HaaS 项目讲解：把 Agent 执行变成服务](docs/architecture/haas-explainer-cover.png)](https://github.com/superops-team/haas/releases/download/v0.2.1/haas-explainer-bilingual.mp4)
 
-Client 只依赖 ADK-compatible 接口；HaaS 在 adapter 后隔离 policy、session、
-harness 原生协议、credential 与 sandbox execution。
+这部约 2:57 的讲解视频说明 HaaS 为什么存在、服务边界如何工作、一次执行如何从
+能力发现走到可回读的明确终态，以及部署与安全边界为什么必须保持清晰。视频采用
+英语旁白，并烧录简体中文与英文字幕。
 
-### 从 `POST /run_sse` 到终态
+章节：**00:00** 真正的问题 · **00:20** Harness as a Service ·
+**00:38** 一个服务边界 · **01:04** 跟随一次执行 · **01:30** 超越理想路径 ·
+**01:54** 部署与真实边界 · **02:28** 构建真正的产品。
 
-[![POST /run_sse 引导式请求链路](docs/architecture/run-sse-flow.zh-CN.gif)](docs/architecture/run-sse.zh-CN.html)
-
-Admission、idempotency、lease、Codex 执行、canonical event 与 terminal state
-组成一条有序的请求链路。
-
-### 安全进入，标准加工，可恢复输出
-
-[![安全请求加工流水线](docs/architecture/request-processing.zh-CN.gif)](docs/architecture/request-processing.zh-CN.html)
-
-请求先治理再执行，输出先归一化和脱敏再持久化，最终投影为 live 或 replayed
-ADK Event。点击任一动画可打开对应的 Archify 交互式讲解。
+[探索交互式系统架构](docs/architecture/haas-system.zh-CN.html) ·
+[跟随交互式 `/run_sse` 时序](docs/architecture/run-sse.zh-CN.html) ·
+[查看安全请求加工过程](docs/architecture/request-processing.zh-CN.html)
 
 ## 为什么需要 HaaS
 

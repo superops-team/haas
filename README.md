@@ -37,29 +37,25 @@ unsigned, so review the script before running it if your environment requires a
 signed or notarized application. An existing installation is restored if the
 replacement fails. The installer does not launch the app automatically.
 
-## HaaS in 30 seconds
+## HaaS in 3 minutes
 
-### One protocol, isolated runtimes
+### Watch the HaaS explainer
 
-[![HaaS concept: one stable protocol across isolated agent runtimes](docs/architecture/haas-concept.gif)](docs/architecture/haas-system.html)
+[![Watch the HaaS explainer: Make agent execution a service](docs/architecture/haas-explainer-cover.png)](https://github.com/superops-team/haas/releases/download/v0.2.1/haas-explainer-bilingual.mp4)
 
-Clients use one ADK-compatible surface while HaaS isolates policy, sessions,
-native harness protocols, credentials, and sandbox execution behind adapters.
+In about 2:57, see why HaaS exists, how its service boundary works, how one
+execution moves from discovery to a recorded terminal result, and where its
+deployment and security boundaries remain explicit. The film uses English
+narration with burned-in Simplified Chinese and English subtitles.
 
-### From `POST /run_sse` to terminal state
+Chapters: **00:00** The real problem · **00:20** Harness as a Service ·
+**00:38** One service boundary · **01:04** Follow one execution ·
+**01:30** Beyond the happy path · **01:54** Deployment and honest boundaries ·
+**02:28** The product you get to build.
 
-[![POST /run_sse guided request flow](docs/architecture/run-sse-flow.gif)](docs/architecture/run-sse.html)
-
-Admission, idempotency, leases, Codex execution, canonical events, and terminal
-state form one ordered request path.
-
-### Safe in, canonical through, recoverable out
-
-[![Secure request-processing pipeline](docs/architecture/request-processing.gif)](docs/architecture/request-processing.html)
-
-Every request is governed before execution, normalized and redacted before
-persistence, then projected as live or replayed ADK Events. Click any animation
-to open its interactive Archify walkthrough.
+[Explore the interactive system architecture](docs/architecture/haas-system.html) ·
+[Follow the interactive `/run_sse` sequence](docs/architecture/run-sse.html) ·
+[Walk through secure request processing](docs/architecture/request-processing.html)
 
 ## Why HaaS
 
