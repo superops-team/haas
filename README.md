@@ -24,10 +24,10 @@ models, tools, and credentials share one service boundary.
 
 ## Install OpenHarness on macOS
 
-OpenHarness v0.2.1 is an Apple Silicon macOS release. Copy and run this command:
+OpenHarness v0.2.2 is an Apple Silicon macOS release. Copy and run this command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/superops-team/haas/v0.2.1/scripts/install.sh | VERSION=v0.2.1 sh
+curl -fsSL https://raw.githubusercontent.com/superops-team/haas/v0.2.2/scripts/install.sh | VERSION=v0.2.2 sh
 ```
 
 The versioned installer downloads the DMG and its SHA-256 file from the same

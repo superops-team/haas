@@ -21,10 +21,10 @@ runtime，并统一处理 session、事件、策略、sandbox、模型与工具�
 
 ## 在 macOS 安装 OpenHarness
 
-OpenHarness v0.2.1 当前提供 Apple Silicon macOS 版本。复制并执行以下命令即可安装：
+OpenHarness v0.2.2 当前提供 Apple Silicon macOS 版本。复制并执行以下命令即可安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/superops-team/haas/v0.2.1/scripts/install.sh | VERSION=v0.2.1 sh
+curl -fsSL https://raw.githubusercontent.com/superops-team/haas/v0.2.2/scripts/install.sh | VERSION=v0.2.2 sh
 ```
 
 带版本的安装器会从同一个 GitHub Release 下载 DMG 和 SHA-256 文件，在挂载前完成
