@@ -1,4 +1,5 @@
 """Model Proxy data models (specs/model-proxy/README.md §6)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -9,7 +10,10 @@ class ModelRoute:
     provider: str
     baseUrl: str
     model: str
+    providerId: str = ""
+    name: str = ""
     wireApi: str = "responses"
+    apiType: str = "responses"
     credentialRef: str = ""
     credentialFingerprint: str = ""
     allowlistRuleId: str = ""

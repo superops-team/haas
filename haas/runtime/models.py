@@ -1,4 +1,5 @@
 """Sandbox Runtime data models (specs/sandbox-runtime/README.md §6)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,7 +7,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class SandboxNetwork:
-    defaultAction: str = "deny"
+    defaultAction: str = "allow"
     allow: list[str] = field(default_factory=list)
 
 

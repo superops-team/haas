@@ -228,9 +228,7 @@ class JournalStore:
             elif not include_raw:
                 where.append("kind != 'raw'")
             rows = self._conn.execute(
-                "SELECT * FROM journal_entries WHERE "
-                + " AND ".join(where)
-                + " ORDER BY seq",
+                "SELECT * FROM journal_entries WHERE " + " AND ".join(where) + " ORDER BY seq",
                 params,
             ).fetchall()
         out = []
@@ -319,8 +317,7 @@ class JournalStore:
         with self._lock:
             if not self._case_exists(case):
                 self._conn.execute(
-                    "INSERT INTO journal_meta (case_id, head_hash, created_ts)"
-                    " VALUES (?, ?, ?)",
+                    "INSERT INTO journal_meta (case_id, head_hash, created_ts) VALUES (?, ?, ?)",
                     (case, GENESIS, datetime.now(timezone.utc).isoformat()),
                 )
                 self._grant_locked(case, creator, source="creator")
@@ -347,9 +344,7 @@ class JournalStore:
                     " AND source = 'assignment' AND space = ? AND item_id = ?",
                     (case, previous, space, item_id),
                 )
-            self._grant_locked(
-                case, assignee, source="assignment", space=space, item_id=item_id
-            )
+            self._grant_locked(case, assignee, source="assignment", space=space, item_id=item_id)
             self._conn.commit()
 
     # ----------------------------------------------------------------- integrity
@@ -382,8 +377,7 @@ class JournalStore:
         if actor.role == Role.USER:
             return
         row = self._conn.execute(
-            "SELECT 1 FROM journal_grants WHERE case_id = ? AND principal = ?"
-            " LIMIT 1",
+            "SELECT 1 FROM journal_grants WHERE case_id = ? AND principal = ? LIMIT 1",
             (case, actor.id),
         ).fetchone()
         if row is None:
@@ -406,9 +400,7 @@ class JournalStore:
 
     def _case_exists(self, case: str) -> bool:
         return (
-            self._conn.execute(
-                "SELECT 1 FROM journal_meta WHERE case_id = ?", (case,)
-            ).fetchone()
+            self._conn.execute("SELECT 1 FROM journal_meta WHERE case_id = ?", (case,)).fetchone()
             is not None
         )
 

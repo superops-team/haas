@@ -1,28 +1,58 @@
 """ModelRoute resolution + usage normalization (specs/model-proxy §5.2)."""
+
 from __future__ import annotations
 
 from typing import Any
 
 from haas.model_proxy.models import ModelRoute, Usage
-from haas.stores import HarnessRecord
+from haas.registry import validate_provider_config
+from haas.stores import HarnessRecord, ProviderConfig
 
 
 class ModelRouteError(Exception):
     """Raised when no usable provider route exists for a harness/model."""
 
 
-def resolve_model_route(harness: HarnessRecord, model: str | None = None) -> ModelRoute:
-    provider = harness.provider
+def resolve_model_route(
+    harness: HarnessRecord,
+    model: str | None = None,
+    *,
+    frozen_route: dict[str, Any] | None = None,
+) -> ModelRoute:
+    provider = _provider_from_frozen(frozen_route) if frozen_route is not None else harness.provider
     if provider is None or not provider.baseUrl:
         raise ModelRouteError(f"no model provider configured for harness {harness.id}")
+    try:
+        validate_provider_config(provider)
+    except ValueError as exc:
+        raise ModelRouteError(str(exc)) from exc
     return ModelRoute(
         provider=provider.name,
+        providerId=provider.providerId,
+        name=provider.name,
         baseUrl=provider.baseUrl,
-        model=model or harness.defaultModel or "",
+        model=model
+        or (str(frozen_route.get("model")) if frozen_route else None)
+        or harness.defaultModel
+        or "",
         wireApi=provider.wireApi,
+        apiType=provider.apiType,
         credentialRef=provider.credentialRef,
         credentialFingerprint=provider.credentialFingerprint,
         allowlistRuleId=provider.allowlistRuleId,
+    )
+
+
+def _provider_from_frozen(route: dict[str, Any]) -> ProviderConfig:
+    return ProviderConfig(
+        providerId=str(route.get("providerId") or ""),
+        name=str(route.get("name") or ""),
+        baseUrl=str(route.get("baseUrl") or ""),
+        wireApi=str(route.get("wireApi") or ""),
+        apiType=str(route.get("apiType") or ""),
+        credentialRef=str(route.get("credentialRef") or ""),
+        credentialFingerprint=str(route.get("credentialFingerprint") or ""),
+        allowlistRuleId=str(route.get("allowlistRuleId") or ""),
     )
 
 

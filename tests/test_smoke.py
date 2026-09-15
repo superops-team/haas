@@ -1,4 +1,5 @@
 """S1 smoke tests: package import, app factory startup, config defaults."""
+
 from fastapi.testclient import TestClient
 
 from haas.config import AppConfig, create_app, load_config
@@ -56,7 +57,8 @@ def test_ready_is_not_published_when_adapter_is_unavailable() -> None:
 
     runtime.adapter.probe = unavailable_probe  # type: ignore[method-assign]
     client = TestClient(app)
-    response = client.get("/v1/haas/ready")
+    assert client.get("/v1/haas/ready?scope=control").status_code == 200
+    response = client.get("/v1/haas/ready?scope=execution")
 
     assert response.status_code == 503
     assert response.json()["haasError"]["code"] == "haas_adapter_unavailable"
@@ -83,8 +85,7 @@ def test_static_token_file_overrides_default_dev_token(tmp_path) -> None:
         == 200
     )
     assert (
-        client.get("/list-apps", headers={"Authorization": "Bearer dev-token"}).status_code
-        == 401
+        client.get("/list-apps", headers={"Authorization": "Bearer dev-token"}).status_code == 401
     )
 
 
@@ -95,6 +96,5 @@ def test_missing_static_token_file_does_not_fall_back_to_dev_token(tmp_path) -> 
     client = TestClient(create_app(config))
 
     assert (
-        client.get("/list-apps", headers={"Authorization": "Bearer dev-token"}).status_code
-        == 401
+        client.get("/list-apps", headers={"Authorization": "Bearer dev-token"}).status_code == 401
     )

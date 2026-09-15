@@ -3,7 +3,7 @@
 **English** | [简体中文](WALKTHROUGH.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-10
 
 This document connects the complete request flow for a `/run_sse` call and a session read, identifying the owner and transferred objects at each step. It eliminates gaps between component specs that would otherwise require AI inference. The numbering matches the request flow in `specs/architecture`.
 
@@ -24,23 +24,29 @@ Client
        b. SessionStore.get_session((appName,userId,sessionId))
           -> create, or default sessionId=hsess_<rand>
        c. SessionStore.acquire_lease(sessionKey, holder)  // session_busy if held
-       d. Create InvocationRecord (inv_...)
-       e. HarnessRegistry.snapshot_for_session -> freeze EffectiveHarnessConfig
-       f. PolicyController.compile_policy -> EffectivePolicy
-       g. SandboxRuntime.create_sandbox(sessionId, SandboxSpec)
-       h. HarnessAdapter.prepare_session -> native session ref
-       i. Create TurnRecord (1:1 with invocation)
-       j. HarnessAdapter.start_turn -> TurnHandle
+       d. HarnessRegistry.snapshot_for_session -> resolve active profile, freeze EffectiveHarnessProfile
+       e. PolicyController.compile_policy -> EffectivePolicy
+       f. Run side-effect-free adapter/runtime/provider/MCP preflight
+          -> validate readiness, compatibility, references, routes, and sandbox projection
+       g. Persist InvocationRecord(status=accepted, acceptedAtMs, inv_...)
+          // durable acceptance boundary; no native turn/provider/tool/workspace side effect before this write
+       h. SandboxRuntime.create_sandbox(sessionId, SandboxSpec)
+       i. HarnessAdapter.prepare_session -> native session ref
+       j. Create TurnRecord (1:1 with invocation)
+       k. HarnessAdapter.start_turn -> TurnHandle
   7. for event in adapter.stream_events(turn):
        -> normalize + redact
+       -> map normalized harness type -> stable haas.* type + typed safe metadata
        -> EventLogStore.append(CanonicalEventRecord)
-       -> Event projection project_adk -> ADK Event
-       -> write SSE frame to response (progressive flush)
+       -> project_adk -> ADK Event for /run_sse
+       -> project_haas -> CanonicalHaasEvent for native replay/live subscribers
+       -> write SSE frame(s) progressively; correlate projections by eventId
   8. adapter finalize -> SessionRuntime.mark_turn_terminal
        -> invocation=completed|failed|incomplete|cancelled
-       -> persist terminal state to SessionStore + update Invocation/turn
+       -> merge terminal session state and persist Session/Invocation/Turn under the lease/fencing guard
+       -> append and publish the terminal event only after state commit, or commit both atomically
+       -> complete the idempotency result and release the active-turn lease/admission slot
        -> close SSE stream (closure is the completion signal)
-  9. Merge session state (event actions.stateDelta + state updates) and persist to SessionStore
 ```
 
 Key object transfers:
@@ -48,11 +54,12 @@ Key object transfers:
 | Step | Input object | Output object |
 |------|----------|----------|
 | 6b | `(appName,userId,sessionId)` | `SessionRecord` |
-| 6e | `HarnessConfig` | `EffectiveHarnessConfig` |
-| 6f | `EffectiveHarnessConfig` + request overrides | `EffectivePolicy` |
-| 6g | `EffectivePolicy` + `HarnessSandboxDecl` | `SandboxSpec`/`SandboxHandle` |
-| 6j | `StartTurnRequest` | `TurnHandle` |
-| 7 | `HarnessEvent` | `CanonicalEventRecord` -> ADK `Event` |
+| 6d | `HarnessConfig` + active `HarnessProfile` | `EffectiveHarnessProfile` |
+| 6e | `EffectiveHarnessProfile` + request overrides | `EffectivePolicy` |
+| 6f | `EffectiveHarnessProfile` + adapter/runtime declarations | validated side-effect-free preflight |
+| 6h | `EffectivePolicy` + `HarnessSandboxDecl` | `SandboxSpec`/`SandboxHandle` |
+| 6k | `StartTurnRequest` | `TurnHandle` |
+| 7 | `HarnessEvent` | stable `CanonicalEventRecord` -> ADK `Event` + native `CanonicalHaasEvent` |
 
 ## 2. `POST /run` (Non-Streaming)
 
@@ -105,7 +112,7 @@ ADK-side resumption (/run_sse + Last-Event-ID):
 HaaS native reconnection (after_event_id):
   -> GET /v1/haas/sessions/{sid}/invocations/{invId}/events?after_event_id=evt_...
   -> EventLogStore.read_invocation(invId, after) replays events after the cursor
-  -> if there is no gap -> resume live stream; if cursor has expired -> 410 haas_offset_expired or reconcile event
+  -> if there is no gap -> resume live stream; if cursor has expired -> 410 haas_offset_expired; implicit reconcile is prohibited
   -> if invocation is not terminal, continue through finalization; if terminal, replay terminal and close
 ```
 
@@ -115,14 +122,17 @@ HaaS native reconnection (after_event_id):
 adapter.start_turn or stream_events raises an error
   -> SessionRuntime converges on a terminal state
        -> failed (readable error) / incomplete (budget/timeout truncation)
-  -> EventLogStore writes terminal failure evidence
-  -> persist InvocationRecord.status
+  -> persist InvocationRecord/TurnRecord/SessionRecord failure state first
+  -> EventLogStore appends terminal failure evidence after state commit, or both commit atomically
+  -> if Event Log persistence itself failed, retain failed state + safe idempotency envelope and emit fallback diagnostics without claiming a terminal event was stored
 
-POST /run non-streaming: produces no SSE; returns the event JSON array once terminal
-  -> on failure: return event array (including error event) + public-readable error; HTTP 200 (array semantics)
-  -> on pre-request failure (auth/schema/admission): return structured haasError (4xx/5xx)
+POST /run non-streaming: produces no SSE; returns the ADK event array once terminal
+  -> accepted failure/incomplete/cancel: return HTTP 200 with partial events plus terminal ADK event
+  -> pre-acceptance failure (auth/schema/app/admission/policy/preflight): return structured haasError (4xx/5xx), with no invocation or terminal event
+  -> terminal-event store integrity failure: before headers return 503 with accepted=true/invocationId; never convert a normal accepted adapter failure to 502
 ```
 
 ## ADK Compatibility Scope (Critical Clarification)
 
 HaaS supports only the **REST API protocol layer** of ADK 2.0: HTTP paths, request/response shapes, `Event` shape, SSE framing, and camelCase fields. It does **not** include the ADK execution engine, graph workflows, `BaseAgent/WorkflowGraph`, ADK Web UI, or the Python SDK's snake_case server implementation. The compatibility target is any HTTP client that conforms to the ADK 2.0 REST protocol.
+l.

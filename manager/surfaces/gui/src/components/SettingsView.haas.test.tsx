@@ -22,6 +22,11 @@ const haasSettings = {
   max_container_lifetime_seconds: 28800,
   request_timeout_seconds: 30,
   local_autostart: true,
+  network_access: true,
+  workspace_mode: "workspace-write",
+  approval_mode: "on-request",
+  policy_defaults_revision: 1,
+  allow_unpinned_local_image: false,
   local_status: {
     enabled: true,
     status: "running",
@@ -91,6 +96,10 @@ describe("SettingsView HaaS delegation settings", () => {
       target: { value: "haas, remote run,delegate" },
     });
     fireEvent.click(screen.getByTestId("haas-local-autostart"));
+    fireEvent.click(screen.getByTestId("haas-network-access"));
+    fireEvent.change(screen.getByTestId("haas-workspace-mode"), {
+      target: { value: "read-only" },
+    });
     fireEvent.click(screen.getByTestId("haas-save"));
 
     await waitFor(() => {
@@ -100,6 +109,9 @@ describe("SettingsView HaaS delegation settings", () => {
         base_url: "http://127.0.0.1:8099",
         api_token: "new-secret-token",
         local_autostart: false,
+        network_access: false,
+        workspace_mode: "read-only",
+        approval_mode: "on-request",
         trigger_keywords: ["haas", "remote run", "delegate"],
       });
     });

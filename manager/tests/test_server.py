@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-
+from coworker.delegation import HaasDelegationError
 from coworker.providers import (
     AssistantTurn,
     ModelCapabilities,
@@ -13,6 +12,7 @@ from coworker.providers import (
 )
 from coworker.server import SessionManager, create_app
 from coworker.sessions import SessionRecord
+from fastapi.testclient import TestClient
 
 
 class ScriptedProvider(ProviderClient):
@@ -908,6 +908,31 @@ def test_ws_set_mode_auto_skips_approval(tmp_path):
     assert (proj / "a.py").read_text() == "x"
 
 
+def test_ws_set_mode_keeps_previous_mode_when_haas_policy_update_fails(
+    tmp_path, monkeypatch
+):
+    manager = SessionManager(
+        workspace=tmp_path, provider=ScriptedProvider([_text("unused")])
+    )
+
+    async def reject_policy_update(*args, **kwargs):
+        del args, kwargs
+        raise HaasDelegationError("stale policy revision")
+
+    monkeypatch.setattr(manager, "update_haas_approval_mode", reject_policy_update)
+    client = TestClient(create_app(manager))
+    with client.websocket_connect("/ws/session/mode-policy-failure") as ws:
+        assert ws.receive_json()["data"]["mode"] == "interactive"
+        ws.send_json({"type": "set_mode", "mode": "bypass-approvals"})
+        rejected = ws.receive_json()
+
+    assert rejected == {
+        "type": "input_rejected",
+        "data": {"error": "stale policy revision"},
+    }
+    assert manager._engines["mode-policy-failure"].permissions.mode.value == "interactive"
+
+
 def test_ws_session_resume_via_store(tmp_path):
     # First connection runs a turn and persists the session.
     client = _client(tmp_path, [_text("first answer")])
@@ -1162,12 +1187,19 @@ def test_set_mode_persists_notice_once_then_markers(tmp_path):
         ev = ws.receive_json()
         assert ev["type"] == "mode_notice"
         assert ev["data"]["title"] == "Auto-approve is on."
+        assert ev["data"]["mode"] == "auto-approve"
         assert "uses a model" in ev["data"]["text"]
         ws.send_json({"type": "set_mode", "mode": "interactive"})
-        assert ws.receive_json()["data"] == {"text": "Ask for approval is on."}
+        assert ws.receive_json()["data"] == {
+            "text": "Ask for approval is on.",
+            "mode": "interactive",
+        }
         # Re-entering auto-approve: marker, never the banner again.
         ws.send_json({"type": "set_mode", "mode": "auto-approve"})
-        assert ws.receive_json()["data"] == {"text": "Auto-approve is on."}
+        assert ws.receive_json()["data"] == {
+            "text": "Auto-approve is on.",
+            "mode": "auto-approve",
+        }
 
     engine = manager._engines["modes1"]
     kinds = [m.get("kind") for m in engine.messages if m.get("role") == "notice"]
@@ -1187,13 +1219,17 @@ def test_connect_banners_a_session_already_in_auto_approve(tmp_path):
     with client.websocket_connect("/ws/session/modes2") as ws:
         assert ws.receive_json()["type"] == "ready"
         ev = ws.receive_json()
-        assert ev["type"] == "mode_notice" and ev["data"]["title"] == "Auto-approve is on."
+        assert ev["type"] == "mode_notice"
+        assert ev["data"]["title"] == "Auto-approve is on."
     # A reconnect stays quiet: the banner is persisted (asserted below), not re-announced —
     # a set_mode echo of the SAME mode also stays silent (previous is new_mode).
     with client.websocket_connect("/ws/session/modes2") as ws:
         assert ws.receive_json()["type"] == "ready"
         ws.send_json({"type": "set_mode", "mode": "interactive"})
-        assert ws.receive_json()["data"] == {"text": "Ask for approval is on."}
+        assert ws.receive_json()["data"] == {
+            "text": "Ask for approval is on.",
+            "mode": "interactive",
+        }
     engine = manager._engines["modes2"]
     kinds = [m.get("kind") for m in engine.messages if m.get("role") == "notice"]
     assert kinds.count("mode_notice") == 1

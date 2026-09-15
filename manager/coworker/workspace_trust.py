@@ -18,9 +18,7 @@ from .secrets import state_dir
 
 class WorkspaceTrustStore:
     def __init__(self, path: Optional[str | Path] = None) -> None:
-        self.path = (
-            Path(path) if path is not None else state_dir() / "workspace_trust.json"
-        )
+        self.path = Path(path) if path is not None else state_dir() / "workspace_trust.json"
 
     @staticmethod
     def canonical(path: str | Path) -> str:

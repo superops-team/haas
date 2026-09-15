@@ -3,10 +3,10 @@
 **English** | [简体中文](ERROR-CODES.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-12
 
 This file is the sole catalog of all stable HaaS error codes. Errors from `POST /run`,
-`/run_sse`, session paths, `/v1/haas/*`, and the legacy shim MUST map to this table.
+`/run_sse`, session paths, and `/v1/haas/*` MUST map to this table.
 OpenAPI `haasError.code` values MUST have a one-to-one correspondence with this table.
 `ADK` semantic codes have no prefix; HaaS extensions use the `haas_` prefix. The only
 unprefixed ADK semantic codes are `missing_credential`, `invalid_credential`,
@@ -24,6 +24,7 @@ ADK/FastAPI style, and `code` is a stable contract.
 | `haas_harness_not_found` | 404 | no | harness_not_found | harness-registry (`/v1/haas/harnesses/{id}`) |
 | `session_not_found` | 404 | no | session_not_found | session-runtime |
 | `haas_invocation_not_found` | 404 | no | invocation_not_found | session-runtime |
+| `haas_execution_evidence_not_found` | 404 | no | execution_evidence_not_found | security-boundary / session-runtime |
 | `haas_delegated_session_not_found` | 404 | no | delegated_session_not_found | manager-delegation |
 | `haas_file_not_found` | 404 | no | file_not_found | artifact-store |
 
@@ -32,9 +33,12 @@ ADK/FastAPI style, and `code` is a stable contract.
 | code | HTTP | retryable | safeReason | Source component |
 |------|------|-----------|------------|----------|
 | `invalid_input` | 400 | no | invalid_input | haas-protocol (schema validation) |
-| `haas_legacy_request_invalid` | 400 | no | legacy_request_invalid | haas-protocol (shim cannot map the request) |
 | `haas_unsupported_base` | 422 | no | unsupported_base | harness-registry |
 | `haas_tool_schema_unsupported` | 422 | no | tool_schema_unsupported | model-proxy |
+| `haas_profile_not_found` | 404 | no | profile_not_found | harness-profile |
+| `haas_profile_conflict` | 409 | no | profile_conflict | harness-profile |
+| `haas_profile_rebind_required` | 409 | no | profile_rebind_required | harness-profile / session-runtime |
+| `haas_agents_md_invalid` | 422 | no | agents_md_invalid | harness-profile / mcp-tool-skill-runtime |
 
 ## 3. Session / Invocation
 
@@ -42,11 +46,20 @@ ADK/FastAPI style, and `code` is a stable contract.
 |------|------|-----------|------------|----------|
 | `session_busy` | 409 | yes | session_busy | session-runtime (concurrent run in the same session) |
 | `session_expired` | 410 | no | session_expired | session-runtime |
+| `haas_session_read_too_large` | 413 | no | session_read_too_large | session-runtime / event-log-sse |
 | `haas_offset_expired` | 410 | no | offset_expired | event-log-sse (HaaS native replay cursor expired) |
+| `haas_execution_evidence_expired` | 410 | no | execution_evidence_expired | security-boundary / session-runtime |
 | `haas_cancel_unsupported` | 422 | no | cancel_unsupported | harness-adapter |
+| `haas_invocation_not_running` | 409 | no | invocation_not_running | session-runtime (Pause lost a race to a terminal state or targets a non-running invocation) |
+| `haas_resume_required` | 409 | no | resume_required | session-runtime (ordinary run attempted while the session has a resumable interrupted source) |
+| `haas_invocation_not_resumable` | 409 | no | invocation_not_resumable | session-runtime / harness-adapter (source is stale, not interrupted, already continued/cancelled, or native state is unavailable) |
+| `haas_profile_rebind_unsupported` | 409 | no | profile_rebind_unsupported | harness-profile / manager-delegation (delegated session uses the delegated policy update path) |
 | `haas_delegated_session_conflict` | 409 | no | delegated_session_binding_conflict | manager-delegation |
 | `haas_approval_not_found` | 404 | no | approval_not_found | manager-delegation / session-runtime |
 | `haas_approval_state_conflict` | 409 | no | approval_state_conflict | manager-delegation / session-runtime |
+| `haas_input_request_not_found` | 404 | no | input_request_not_found | session-runtime / harness-adapter |
+| `haas_input_request_state_conflict` | 409 | no | input_request_state_conflict | session-runtime / harness-adapter |
+| `haas_interaction_unsupported` | 422 | no | interaction_unsupported | harness-adapter / manager backend |
 
 ## 4. Policy and Security
 
@@ -55,6 +68,7 @@ ADK/FastAPI style, and `code` is a stable contract.
 | `haas_policy_denied` | 403 | no | policy_denied | policy-controller |
 | `haas_policy_invalid` | 400 | no | policy_invalid | policy-controller |
 | `haas_policy_unsupported` | 422 | no | policy_unsupported | policy-controller |
+| `haas_policy_revision_conflict` | 409 | no | policy_revision_conflict | session-runtime / policy-controller |
 | `haas_url_not_allowed` | 403 | no | network_host_not_allowed | security-boundary (SSRF/egress) |
 | `haas_secret_input_invalid` | 400 | no | secret_input_invalid | security-boundary |
 | `haas_provider_source_invalid` | 422 | no | provider_source_invalid | harness-registry / security-boundary |
@@ -68,7 +82,7 @@ ADK/FastAPI style, and `code` is a stable contract.
 | `haas_adapter_unavailable` | 503 | yes | adapter_unavailable | harness-adapter |
 | `haas_adapter_incompatible` | 503 | no | adapter_incompatible | harness-adapter (schema drift) |
 | `haas_adapter_overloaded` | 429 | yes | adapter_overloaded | harness-adapter |
-| `haas_adapter_error` | 502 | yes | adapter_error | harness-adapter (generic native error) |
+| `haas_adapter_error` | 502 | yes | adapter_error | harness-adapter (pre-acceptance probe/preflight failure only; accepted invocation failures use terminal events) |
 
 ## 6. Model / MCP / Provider
 
@@ -77,6 +91,8 @@ ADK/FastAPI style, and `code` is a stable contract.
 | `haas_model_unavailable` | 422 | no | model_unavailable | harness-registry |
 | `haas_provider_error` | 502 | yes | provider_error | model-proxy |
 | `haas_provider_timeout` | 504 | yes | provider_timeout | model-proxy (stream idle timeout exhausted) |
+| `haas_model_proxy_token_invalid` | 502 before acceptance; 200 terminal after acceptance | yes | model_proxy_token_invalid | model-proxy (active invocation capability rejected and refresh failed) |
+| `haas_model_proxy_token_expired` | 502 before acceptance; 200 terminal after acceptance | yes | model_proxy_token_expired | model-proxy (active invocation capability expired and refresh failed) |
 | `haas_mcp_unavailable` | 503 | yes | mcp_unavailable | mcp-tool-skill-runtime (required MCP unavailable) |
 
 ## 7. Sandbox / Runtime
@@ -106,6 +122,8 @@ ADK/FastAPI style, and `code` is a stable contract.
 | `haas_idempotency_conflict` | 409 | no | idempotency_conflict | session-runtime / stores (same key, different request hash) |
 | `haas_identity_unavailable` | 503 | yes | identity_unavailable | identity |
 
+| `haas_idempotency_expired` | 410 | no | idempotency_expired | session-runtime / stores (confirmed execution replay expiry; Manager creates a fresh attempt on next use, not on a background timer) |
+
 ## 9. Artifact
 
 | code | HTTP | retryable | safeReason | Source component |
@@ -122,3 +140,4 @@ ADK/FastAPI style, and `code` is a stable contract.
    NOT introduce stable codes independently.
 3. `safeReason` and `detail` MUST NOT contain secrets, internal hosts, absolute paths,
    or stack traces.
+4. Normal accepted execution failure is not an HTTP error-code response. It is represented by an HTTP 200 ADK terminal event and a typed native terminal event. `haasError.accepted=true` is reserved for post-acceptance integrity failures such as inability to persist required terminal evidence; it MUST include safe `invocationId`. For such an accepted integrity error, `retryable=true` authorizes readback or replay with the same idempotency key; it never authorizes automatic submission with a new key.

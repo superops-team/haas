@@ -124,11 +124,7 @@ def classify(
     scoping AND the read-only gate at once, so it is refused here. Precedence otherwise:
     the by-name base table, then aisuite metadata (`requires_approval` → external),
     else read."""
-    base = (
-        _BASE.get(tool_name)
-        or _catalog_floor(tool_name)
-        or _mcp_floor(tool_name, metadata)
-    )
+    base = _BASE.get(tool_name) or _catalog_floor(tool_name) or _mcp_floor(tool_name, metadata)
     if overrides is not None:
         ov = overrides(tool_name)
         if ov is not None:

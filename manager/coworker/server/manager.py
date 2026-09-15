@@ -18,6 +18,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ from ..agents import get_agent
 from ..agents import list_agents as _list_agents
 from ..audit import AuditStore
 from ..automation import Schedule, ScheduledTask, Scheduler, TaskRun, TaskStore
-from ..config import load_config, workspace_allowed_commands
+from ..config import _apply_haas_delegation_env, load_config, workspace_allowed_commands
 from ..connections import (
     PersonaConnectionStore,
     SessionConnectionStore,
@@ -66,14 +67,22 @@ from ..delegation import (
     apply_config_snapshot,
     binding_from_haas_response,
     binding_from_record,
+    delegation_policy_snapshot,
     deterministic_decision,
+    extract_adk_artifact,
+    extract_adk_reasoning,
     extract_adk_status,
     extract_adk_text,
     make_delegated_session_body,
+    open_delegated_sse,
     require_binding_value,
 )
 from ..engine import ApprovalOutcome, Approver, TurnEngine
 from ..events import Event, EventType
+from ..haas import EndpointMode, HaasClient, HaasClientError, HaasEndpoint
+from ..haas.attempts import AttemptLedger, ExpiryEvidence
+from ..haas.stream_bridge import BridgeAction, SessionKey, StreamBridgeState
+from ..haas.task_completion import TaskCompletionState
 from ..inbox import InboxStore, args_preview
 from ..inbox_routing import InboxRouting
 from ..mcp import (
@@ -215,6 +224,26 @@ def _stable_error(error: str) -> str:
     return re.sub(r"\d{4,}", "N", stable)
 
 
+@dataclass
+class _ActiveHaasTurn:
+    """Manager-owned cancellation state for one in-flight HaaS turn.
+
+    The record is created when the Manager turn is claimed, before HaaS has
+    necessarily returned acceptance headers. This preserves a Stop intent across
+    the acceptance race without treating an SSE disconnect as cancellation.
+    """
+
+    client: Any | None = None
+    haas_session_id: str | None = None
+    invocation_id: str | None = None
+    cancel_requested: bool = False
+    cancel_dispatching: bool = False
+    cancel_sent: bool = False
+    pause_requested: bool = False
+    pause_dispatching: bool = False
+    pause_sent: bool = False
+
+
 class SessionManager:
     def __init__(
         self,
@@ -226,13 +255,14 @@ class SessionManager:
         provider: ProviderClient | None = None,
         haas_client_factory: Callable[[HaasDelegationConfig], Any] | None = None,
     ) -> None:
-        self.default_workspace = (
-            str(Path(workspace).expanduser().resolve()) if workspace else None
-        )
+        self.default_workspace = str(Path(workspace).expanduser().resolve()) if workspace else None
         self.model = model
         self.mode = mode
         self.provider = provider
         self._haas_client_factory = haas_client_factory or HaasDelegationClient
+        self._haas_direct_client_factory: Callable[[HaasDelegationConfig], HaasClient] = (
+            self._build_direct_haas_client
+        )
 
         if data_dir is not None:
             base = Path(data_dir).expanduser()
@@ -256,9 +286,8 @@ class SessionManager:
         # evicted from the engine cache at the next mark_idle so the following turn
         # rebuilds fully anchored on the new workspace.
         self._promotion_rebuild: set[str] = set()
-        self._running_sessions: set[str] = (
-            set()
-        )  # sessions with an in-flight turn (busy)
+        self._running_sessions: set[str] = set()  # sessions with an in-flight turn (busy)
+        self._active_haas_turns: dict[str, _ActiveHaasTurn] = {}
         # Sessions with an auto-title LLM call in flight (FB-010) — one call at a time.
         self._autotitle_inflight: set[str] = set()
         self._autotitle_tasks: set[asyncio.Task] = set()
@@ -295,9 +324,12 @@ class SessionManager:
         self._mcp_session_failures: dict[str, list[str]] = {}
         self.gateway: Gateway | None = None
         self._data_base = base
-        self._haas_supervisor = LocalHaasSupervisor(base)
+        self._haas_supervisor = LocalHaasSupervisor(
+            base, resolve_credential=self._resolve_haas_provider_credential
+        )
         # Desktop/UI prefs (default model, onboarding state) — not secrets; a plain JSON file.
         self._prefs = self._load_prefs()
+        self._migrate_haas_policy_defaults()
         if self._prefs.get("default_model"):
             self.model = self._prefs["default_model"]
         # Seed the PDF-fallback module global from prefs so engines see the user's
@@ -367,18 +399,12 @@ class SessionManager:
         # an old parked item still gets a named chip.
         for it in self.parked.list():
             if it.get("user_name"):
-                self._people.setdefault(
-                    f"{it['platform']}:{it['user_id']}", it["user_name"]
-                )
+                self._people.setdefault(f"{it['platform']}:{it['user_id']}", it["user_name"])
         # Connection hierarchy (UI-REFRESH §4): per-persona default connector on/off (seeded from the
         # manifest, then user-editable) + per-session overrides. Resolved into the session's effective
         # connector set, which gates inbound delivery and the engine's connector tools.
-        self.persona_connections = PersonaConnectionStore(
-            base / "persona_connections.json"
-        )
-        self.session_connections = SessionConnectionStore(
-            base / "session_connections.json"
-        )
+        self.persona_connections = PersonaConnectionStore(base / "persona_connections.json")
+        self.session_connections = SessionConnectionStore(base / "session_connections.json")
         # Skills (SKILLS-SPEC §4): folder-backed CRUD + per-session mutes. The effective menu
         # gates the engine's skill catalog the same way effective_connectors gates connector
         # tools — one resolver feeds the catalog injection, the rail, and the composer popup.
@@ -422,11 +448,7 @@ class SessionManager:
                 "required": False,
             }
         canonical = WorkspaceTrustStore.canonical(path)
-        commands = (
-            workspace_allowed_commands(canonical)
-            if Path(canonical).is_dir()
-            else []
-        )
+        commands = workspace_allowed_commands(canonical) if Path(canonical).is_dir() else []
         trusted = self.workspace_trust.is_trusted(canonical)
         return {
             "workspace": canonical,
@@ -443,26 +465,20 @@ class SessionManager:
         """
         return bool(workspace and self.workspace_trust.is_trusted(workspace))
 
-    def set_workspace_trust(
-        self, path: str | Path, *, trusted: bool
-    ) -> dict[str, Any]:
+    def set_workspace_trust(self, path: str | Path, *, trusted: bool) -> dict[str, Any]:
         if not str(path).strip():
             return {"ok": False, "error": "workspace path is required"}
         candidate = Path(path).expanduser()
         if trusted and not candidate.is_dir():
             return {"ok": False, "error": "workspace is not a directory"}
         canonical = self.workspace_trust.set_trusted(candidate, trusted)
-        effective = load_config(
-            canonical, workspace_trusted=trusted
-        ).allowed_commands
+        effective = load_config(canonical, workspace_trusted=trusted).allowed_commands
         # Apply trust/revocation immediately to live sessions rooted at this exact path.
         for engine in self._engines.values():
             engine_workspace = str(
                 (getattr(engine, "audit_context", {}) or {}).get("workspace", "")
             )
-            if engine_workspace and WorkspaceTrustStore.canonical(
-                engine_workspace
-            ) == canonical:
+            if engine_workspace and WorkspaceTrustStore.canonical(engine_workspace) == canonical:
                 engine.permissions.allowed_commands = list(effective)
         return {
             "ok": True,
@@ -522,9 +538,7 @@ class SessionManager:
         if not path:
             return False
         try:
-            return (
-                Path(path).expanduser().resolve().is_relative_to(self.scratch_base().resolve())
-            )
+            return Path(path).expanduser().resolve().is_relative_to(self.scratch_base().resolve())
         except OSError:
             return False
 
@@ -567,7 +581,10 @@ class SessionManager:
         d = Path(dest).expanduser()
         if d.exists():
             if not d.is_dir() or any(d.iterdir()):
-                return {"ok": False, "error": "destination must be a new or empty folder"}
+                return {
+                    "ok": False,
+                    "error": "destination must be a new or empty folder",
+                }
             d.rmdir()  # shutil.move into an existing dir would nest src inside it
         try:
             d.parent.mkdir(parents=True, exist_ok=True)
@@ -605,10 +622,19 @@ class SessionManager:
         prefs = self._prefs.get("haas_delegation")
         if isinstance(prefs, dict):
             base = self._haas_config_from_prefs(base, prefs)
+        # Launch-owned environment is the final authority for packaged desktop
+        # builds. Persisted user prefs must not override a local test build that
+        # intentionally disables HaaS delegation while the broker path is gated.
+        base = _apply_haas_delegation_env(base)
         secret = self.secrets.get("haas_delegation:default") or {}
         token = secret.get("api_token")
         if isinstance(token, str) and token:
             base.api_token = token
+        elif base.mode == "local_managed":
+            token_reader = getattr(self._haas_supervisor, "token", None)
+            local_token = token_reader() if callable(token_reader) else None
+            if local_token is not None:
+                base.api_token = local_token
         return base
 
     @staticmethod
@@ -644,6 +670,9 @@ class SessionManager:
 
         return HaasDelegationConfig(
             enabled=bool_value("enabled", base.enabled),
+            mode=str_value("mode", base.mode),
+            execution_mode=str_value("execution_mode", base.execution_mode),
+            backend_preference=str_value("backend_preference", base.backend_preference),
             base_url=str_value("base_url", base.base_url).rstrip("/"),
             api_token=base.api_token,
             user_id=str_value("user_id", base.user_id),
@@ -665,10 +694,490 @@ class SessionManager:
                 "request_timeout_seconds", base.request_timeout_seconds
             ),
             local_autostart=bool_value("local_autostart", base.local_autostart),
+            allow_unpinned_local_image=bool_value(
+                "allow_unpinned_local_image", base.allow_unpinned_local_image
+            ),
+            network_access=bool_value("network_access", base.network_access),
+            workspace_mode=str_value("workspace_mode", base.workspace_mode),
+            approval_mode=str_value("approval_mode", base.approval_mode),
         )
 
     def _haas_client(self, config: HaasDelegationConfig) -> Any:
         return self._haas_client_factory(config)
+
+    def _build_direct_haas_client(self, config: HaasDelegationConfig) -> HaasClient:
+        mode = EndpointMode.LOCAL_MANAGED if config.mode == "local_managed" else EndpointMode.REMOTE
+        endpoint = HaasEndpoint.create(
+            endpoint_id=f"{config.mode}:default",
+            mode=mode,
+            base_url=config.base_url,
+            token_ref="secret://manager/haas/default",
+            server_identity=config.base_url.rstrip("/"),
+            tls_verify=config.mode != "local_managed",
+            allow_insecure_development=config.mode == "local_managed",
+        )
+        return HaasClient(
+            endpoint,
+            token_resolver=lambda _ref: config.api_token,
+            reconnect_max_attempts=1,
+        )
+
+    def _haas_direct_client(self, config: HaasDelegationConfig) -> HaasClient:
+        return self._haas_direct_client_factory(config)
+
+    def _haas_interaction_client(self, session_id: str) -> tuple[Any, str]:
+        record = self.session_store.load(session_id)
+        binding = (record.bindings if record else {}).get("haas_delegation") or {}
+        haas_session_id = str(binding.get("haas_session_id") or "")
+        if not haas_session_id.startswith("hsess_"):
+            raise HaasDelegationError("Session is not bound to HaaS.")
+        config = self._haas_config(record.workspace if record else None)
+        config = apply_config_snapshot(config, binding)
+        client = (
+            self._haas_direct_client(config)
+            if binding.get("execution_mode") == "local_api"
+            else self._haas_client(config)
+        )
+        return client, haas_session_id
+
+    async def resolve_haas_approval(
+        self, session_id: str, approval_id: str, *, approved: bool
+    ) -> None:
+        client, haas_session_id = self._haas_interaction_client(session_id)
+        await client.resolve_approval(haas_session_id, approval_id, approved=approved)
+        self._resolve_haas_task_interaction(session_id, approval_id)
+
+    async def update_haas_approval_mode(
+        self, session_id: str, engine: TurnEngine, mode: Mode
+    ) -> dict[str, Any] | None:
+        record = self.session_store.load(session_id)
+        binding = (record.bindings if record else {}).get("haas_delegation") or {}
+        if not binding:
+            return None
+        config = self._haas_config(record.workspace if record else None)
+        approval_mode = (
+            "on-request"
+            if mode in {Mode.INTERACTIVE, Mode.AUTO_APPROVE, Mode.CUSTOM}
+            else "never"
+        )
+        expected_revision = int(binding.get("desired_revision") or 1)
+        if binding.get("execution_mode") == "local_api":
+            haas_session_id = require_binding_value(binding, "haas_session_id")
+            client = self._haas_direct_client(config)
+            result = await client.update_session_policy(
+                haas_session_id,
+                {"tools": {"disabled": [], "approvalMode": approval_mode}},
+                expected_revision=expected_revision,
+                idempotency_key=(
+                    f"manager-mode-policy:{haas_session_id}:"
+                    f"{expected_revision + 1}:{approval_mode}"
+                ),
+            )
+        else:
+            delegated_session_id = require_binding_value(binding, "delegated_session_id")
+            client = self._haas_client(apply_config_snapshot(config, binding))
+            policy = dict(binding.get("delegation_policy_snapshot") or {})
+            policy["tools"] = {"disabled": [], "approvalMode": approval_mode}
+            result = await client.update_delegated_policy(
+                delegated_session_id,
+                policy,
+                expected_revision=expected_revision,
+                idempotency_key=(
+                    f"manager-mode-policy:{delegated_session_id}:"
+                    f"{expected_revision + 1}:{approval_mode}"
+                ),
+            )
+        data = result.data if hasattr(result, "data") else result
+        updated = {
+            **binding,
+            "desired_revision": data.get("desiredRevision", expected_revision),
+            "applied_revision": data.get("appliedRevision", expected_revision),
+            "policy_status": data.get("status"),
+            "applied_policy": data.get("appliedPolicy"),
+        }
+        if data.get("delegationPolicySnapshot") is not None:
+            updated["delegation_policy_snapshot"] = data["delegationPolicySnapshot"]
+        self._persist_haas_binding(session_id, engine, updated)
+        return data
+
+    async def answer_haas_input(
+        self,
+        session_id: str,
+        input_request_id: str,
+        *,
+        answers: dict[str, dict[str, Any]],
+    ) -> None:
+        client, haas_session_id = self._haas_interaction_client(session_id)
+        await client.answer_input_request(haas_session_id, input_request_id, answers=answers)
+        self._resolve_haas_task_interaction(session_id, input_request_id)
+
+    async def get_haas_execution_evidence(
+        self, session_id: str, invocation_id: str, tool_call_id: str, evidence_ref: str
+    ) -> dict[str, Any]:
+        client, haas_session_id = self._haas_interaction_client(session_id)
+        result = await client.get_execution_evidence(
+            haas_session_id, invocation_id, tool_call_id, evidence_ref
+        )
+        return result.data if hasattr(result, "data") else result
+
+    def _resolve_haas_task_interaction(self, session_id: str, request_id: str) -> None:
+        record = self.session_store.load(session_id)
+        if record is None:
+            return
+        bindings = dict(record.bindings)
+        binding = dict(bindings.get(HAAS_DELEGATION_BINDING_KEY) or {})
+        bridge_data = binding.get("stream_bridge")
+        if not isinstance(bridge_data, dict):
+            return
+        bridge = StreamBridgeState.from_dict(bridge_data)
+        bridge.task.resolve_interaction(request_id)
+        binding["stream_bridge"] = bridge.to_dict()
+        bindings[HAAS_DELEGATION_BINDING_KEY] = binding
+        self.session_store.set_bindings(session_id, bindings)
+
+    async def pending_haas_interactions(self, session_id: str) -> list[Event]:
+        record = self.session_store.load(session_id)
+        binding = binding_from_record(record)
+        if binding is None:
+            return []
+        bridge_data = binding.get("stream_bridge")
+        try:
+            client, haas_session_id = self._haas_interaction_client(session_id)
+            invocation_id = (
+                str(bridge_data.get("invocationId") or "")
+                if isinstance(bridge_data, dict)
+                else ""
+            )
+            get_invocation = getattr(client, "get_invocation", None)
+            if invocation_id and callable(get_invocation):
+                invocation_result = await get_invocation(haas_session_id, invocation_id)
+                invocation = (
+                    invocation_result.data
+                    if hasattr(invocation_result, "data")
+                    else invocation_result
+                )
+                status = str((invocation or {}).get("status") or "")
+                if status in {
+                    "completed",
+                    "failed",
+                    "incomplete",
+                    "cancelled",
+                    "interrupted",
+                }:
+                    assert isinstance(bridge_data, dict)
+                    bridge = StreamBridgeState.from_dict(bridge_data)
+                    cursor: str | None = None
+                    for _ in range(100):
+                        page = await client.events_page(
+                            haas_session_id, after_event_id=cursor, limit=1000
+                        )
+                        batch = page.data if hasattr(page, "data") else page.get("events", [])
+                        for native in batch if isinstance(batch, list) else []:
+                            event_id = str(native.get("eventId") or native.get("id") or "")
+                            if not event_id or native.get("invocationId") != invocation_id:
+                                continue
+                            event_type = str(native.get("type") or "")
+                            if event_type.startswith("haas.turn."):
+                                event_type = (
+                                    "invocation." + event_type.removeprefix("haas.turn.")
+                                )
+                            metadata = native.get("haas") or {}
+                            bridge.consume_native(
+                                event_id=event_id,
+                                cursor=event_id,
+                                event_type=event_type,
+                                code=metadata.get("code"),
+                                safe_reason=metadata.get("safeReason"),
+                                retryable=metadata.get("retryable"),
+                                payload=metadata,
+                                content=native.get("content"),
+                            )
+                        next_cursor = (
+                            page.next_cursor
+                            if hasattr(page, "next_cursor")
+                            else page.get("next_cursor")
+                        )
+                        if not next_cursor or next_cursor == cursor:
+                            break
+                        cursor = str(next_cursor)
+                    bridge.reconcile_authoritative_terminal(
+                        status=status, terminal_event_id=(invocation or {}).get("terminalEventId")
+                    )
+                    reconciled_status = status
+                    if not bridge.completed:
+                        reconciled_status = "incomplete"
+                        bridge.task.observe_terminal(
+                            "incomplete",
+                            code="haas_terminal_integrity_error",
+                            safe_reason=(
+                                "HaaS invocation is terminal but its canonical terminal "
+                                "event could not be reconciled. Retry readback."
+                            ),
+                        )
+                        # The invocation is authoritatively terminal, so reconnect must
+                        # release the local busy state.  Keep terminal_status untouched:
+                        # absent/mismatched canonical evidence must not be fabricated.
+                        bridge.completed = True
+                    ledger = AttemptLedger.from_dict(binding.get("attempt_ledger") or {})
+                    current_attempt_id = binding.get("current_attempt_id")
+                    current_attempt = (
+                        ledger.attempts.get(current_attempt_id)
+                        if isinstance(current_attempt_id, str)
+                        else None
+                    )
+                    if (
+                        current_attempt is not None
+                        and current_attempt.invocation_id == invocation_id
+                    ):
+                        current_attempt.terminal = True
+                    binding["stream_bridge"] = bridge.to_dict()
+                    binding["attempt_ledger"] = ledger.to_dict()
+                    binding["control_state"] = (
+                        "paused" if reconciled_status == "interrupted" else "idle"
+                    )
+                    binding["supports_resume"] = reconciled_status == "interrupted"
+                    binding["resumable_invocation_id"] = (
+                        invocation_id if reconciled_status == "interrupted" else None
+                    )
+                    bindings = dict(record.bindings)
+                    bindings[HAAS_DELEGATION_BINDING_KEY] = binding
+                    self.session_store.set_bindings(session_id, bindings)
+                    return []
+            list_approvals = getattr(client, "list_approvals", None)
+            list_inputs = getattr(client, "list_input_requests", None)
+            if list_approvals is None or list_inputs is None:
+                return []
+            approvals_result = await list_approvals(haas_session_id, status="waiting")
+            inputs_result = await list_inputs(haas_session_id, status="waiting")
+        except (HaasClientError, HaasDelegationError, ValueError, AttributeError):
+            return []
+        approvals = approvals_result.data if hasattr(approvals_result, "data") else approvals_result
+        inputs = inputs_result.data if hasattr(inputs_result, "data") else inputs_result
+        events: list[Event] = []
+        for approval in approvals if isinstance(approvals, list) else []:
+            request = approval.get("request") or {}
+            events.append(
+                Event(
+                    EventType.PERMISSION_REQUIRED,
+                    {"approvalId": approval.get("approvalId"), **request},
+                )
+            )
+        for item in inputs if isinstance(inputs, list) else []:
+            events.append(
+                Event(
+                    EventType.QUESTION_REQUESTED,
+                    {
+                        "inputRequestId": item.get("inputRequestId"),
+                        "questions": item.get("questions") or [],
+                        "blocking": item.get("blocking", True),
+                        "expiresAtMs": item.get("expiresAtMs"),
+                    },
+                )
+            )
+        return events
+
+    async def replay_haas_process_events(self, session_id: str) -> list[Event]:
+        record = self.session_store.load(session_id)
+        binding = binding_from_record(record)
+        bridge_data = (binding or {}).get("stream_bridge")
+        if not isinstance(binding, dict) or not isinstance(bridge_data, dict):
+            return []
+        try:
+            client, haas_session_id = self._haas_interaction_client(session_id)
+            native_events: list[dict[str, Any]] = []
+            cursor: str | None = None
+            for _ in range(100):
+                page = await client.events_page(haas_session_id, after_event_id=cursor, limit=1000)
+                batch = page.data if hasattr(page, "data") else page.get("events", [])
+                if isinstance(batch, list):
+                    native_events.extend(batch)
+                next_cursor = (
+                    page.next_cursor if hasattr(page, "next_cursor") else page.get("next_cursor")
+                )
+                if not next_cursor or next_cursor == cursor:
+                    break
+                cursor = str(next_cursor)
+        except (HaasClientError, HaasDelegationError, ValueError, AttributeError):
+            return []
+        replay = StreamBridgeState(
+            endpoint_id=str(bridge_data.get("endpointId") or "replay"),
+            session=SessionKey.from_dict(bridge_data["session"]),
+            invocation_id=str(bridge_data["invocationId"]),
+        )
+        projected: list[Event] = []
+        for native in native_events if isinstance(native_events, list) else []:
+            event_id = str(native.get("eventId") or native.get("id") or "")
+            if not event_id or native.get("invocationId") != replay.invocation_id:
+                continue
+            event_type = str(native.get("type") or "")
+            if event_type.startswith("haas.turn.") or event_type in {
+                "haas.approval.required",
+                "haas.approval.resolved",
+                "haas.input.required",
+                "haas.input.resolved",
+            }:
+                continue
+            metadata = native.get("haas") or {}
+            for action in replay.consume_native(
+                event_id=event_id,
+                cursor=event_id,
+                event_type=event_type,
+                payload=metadata,
+                content=native.get("content"),
+            ):
+                event = self._haas_bridge_event(action, binding)
+                if event is not None:
+                    event.data["haasEventId"] = event_id
+                    event.data["replayed"] = True
+                    projected.append(event)
+        return projected
+
+    async def haas_interaction_supported(self, session_id: str, workspace: str | None) -> bool:
+        del workspace
+        record = self.session_store.load(session_id)
+        binding = binding_from_record(record)
+        if binding is None:
+            return False
+        return binding.get("interaction_capability") == "human_bridge"
+
+    def haas_task_outcome(self, session_id: str) -> dict[str, Any] | None:
+        record = self.session_store.load(session_id)
+        binding = binding_from_record(record)
+        if binding is None:
+            return None
+        task = (binding.get("stream_bridge") or {}).get("task") or {}
+        bridge = binding.get("stream_bridge") or {}
+        phase = str(task.get("phase") or "")
+        if not phase:
+            return None
+        return {
+            "phase": phase,
+            **({"code": str(task["code"])} if task.get("code") else {}),
+            **(
+                {"safeReason": str(task["safeReason"])}
+                if task.get("safeReason")
+                else {}
+            ),
+            **(
+                {"retryable": bridge["terminalRetryable"]}
+                if isinstance(bridge.get("terminalRetryable"), bool)
+                else {}
+            ),
+        }
+
+    def _resolve_haas_provider_credential(self, provider: str) -> str | None:
+        descriptor = get_descriptor(provider)
+        if descriptor is None:
+            return None
+        profile = self.secrets.get(f"provider:{provider}") or {}
+        return profile.get("api_key") or (
+            os.environ.get(descriptor.env_key) if descriptor.env_key else None
+        )
+
+    async def _sync_local_haas_profile(
+        self,
+        client: HaasClient,
+        engine: TurnEngine,
+        binding: dict[str, Any],
+    ) -> dict[str, Any]:
+        provider_id, _, model = engine.model.partition(":")
+        if not model:
+            provider_id, model = "openai", engine.model
+        descriptor = get_descriptor(provider_id)
+        if (
+            descriptor is None
+            or descriptor.auth
+            or not self._resolve_haas_provider_credential(provider_id)
+        ):
+            raise HaasDelegationError("configured provider credential unavailable")
+        settings = self.secrets.get(f"provider:{provider_id}") or {}
+        base_url = str(
+            settings.get("base_url")
+            or next((field.default for field in descriptor.fields if field.key == "base_url"), "")
+            or ("https://api.openai.com/v1" if provider_id == "openai" else "")
+        ).rstrip("/")
+        api_type = settings.get("api_type") or descriptor.haas_api_type
+        if api_type != "responses":
+            raise HaasDelegationError("HaaS Codex requires a Responses provider")
+        scope = {
+            "harnessId": binding["harness_id"],
+            "sessionId": binding["haas_session_id"],
+            "model": model,
+            "baseUrl": base_url,
+        }
+        authoritative_profile_id = binding.get("profile_id")
+        authoritative_profile_version = binding.get("profile_version")
+        if binding.get("accepted_invocation_id"):
+            applied = await client.get_session_profile(binding["haas_session_id"])
+            applied_data = applied.data if hasattr(applied, "data") else applied
+            if (
+                not isinstance(applied_data, dict)
+                or applied_data.get("harnessId") != binding["harness_id"]
+                or applied_data.get("base") != binding["harness_base"]
+            ):
+                raise HaasDelegationError("HaaS session profile does not match its binding")
+            authoritative_profile_id = applied_data.get("profileId")
+            authoritative_profile_version = applied_data.get("profileVersion")
+
+        try:
+            credential_ref = self._haas_supervisor.grant_credential(provider_id, scope)
+        except ValueError as exc:
+            raise HaasDelegationError("provider URL is not allowed") from exc
+        profile = await client.sync_profile(
+            {
+                "harnessId": binding["harness_id"],
+                "base": binding["harness_base"],
+                "provider": {
+                    "providerId": provider_id,
+                    "name": descriptor.title,
+                    "model": model,
+                    "baseUrl": base_url,
+                    "wireApi": "openai-compatible",
+                    "apiType": "responses",
+                    "credentialRef": credential_ref,
+                },
+            },
+            profile_id=authoritative_profile_id,
+        )
+        if binding.get("accepted_invocation_id") and authoritative_profile_id != profile["id"]:
+            await client.rebind_profile(
+                binding["haas_session_id"],
+                profile["id"],
+                expected_version=authoritative_profile_version,
+            )
+        return {
+            **binding,
+            "profile_id": profile["id"],
+            "profile_version": profile["version"],
+            "profile_fingerprint": profile["profileFingerprint"],
+        }
+
+    @staticmethod
+    async def _require_haas_interaction_capability(
+        client: Any, harness_id: str, mode: Mode
+    ) -> bool:
+        capability_reader = getattr(client, "capabilities", None)
+        if capability_reader is None:
+            if mode in {Mode.INTERACTIVE, Mode.AUTO_APPROVE, Mode.CUSTOM}:
+                raise HaasDelegationError("HaaS interaction capability is unavailable.")
+            return False
+        result = await capability_reader()
+        data = result.data if hasattr(result, "data") else result
+        harnesses = data.get("harnesses") if isinstance(data, dict) else None
+        selected = next((item for item in harnesses or [] if item.get("id") == harness_id), None)
+        capabilities = selected.get("capabilities") if isinstance(selected, dict) else {}
+        interaction_supported = (
+            isinstance(capabilities, dict)
+            and (capabilities.get("approval") or {}).get("mode") == "human_bridge"
+            and (capabilities.get("input") or {}).get("mode") == "human_bridge"
+        )
+        if mode in {Mode.INTERACTIVE, Mode.AUTO_APPROVE, Mode.CUSTOM} and not interaction_supported:
+            raise HaasDelegationError("HaaS interaction capability is unavailable.")
+        pausing = capabilities.get("pausing") if isinstance(capabilities, dict) else {}
+        return isinstance(pausing, dict) and pausing.get("status") in {
+            "available",
+            "degraded",
+        }
 
     def _ensure_local_haas(self, config: HaasDelegationConfig) -> dict[str, Any]:
         return self._haas_supervisor.ensure(config)
@@ -706,8 +1215,69 @@ class SessionManager:
             self.save(session_id, engine, touch=False)
             record = self.session_store.load(session_id)
         bindings = dict(record.bindings if record is not None else {})
-        bindings[HAAS_DELEGATION_BINDING_KEY] = binding
+        current = dict(bindings.get(HAAS_DELEGATION_BINDING_KEY) or {})
+        merged = {**current, **binding}
+        # Lifecycle controls are persisted asynchronously by the WebSocket control
+        # path while the stream loop persists its own older binding snapshot.  Do
+        # not let that snapshot erase the authoritative Pause/Continue readback.
+        for key in (
+            "control_state",
+            "supports_resume",
+            "resumable_invocation_id",
+        ):
+            if key in current and key not in binding:
+                merged[key] = current[key]
+        current_invocation = current.get("accepted_invocation_id")
+        incoming_invocation = binding.get("accepted_invocation_id")
+        current_control_state = str(current.get("control_state") or "")
+        incoming_control_state = str(binding.get("control_state") or "")
+        if (
+            current_invocation
+            and current_invocation == incoming_invocation
+            and current_control_state in {"idle", "cancelled"}
+            and incoming_control_state
+            in {"running", "pausing", "paused", "resuming", "stopping"}
+        ):
+            # A stream-local snapshot can finish persisting after a concurrent
+            # control mutation. Terminal control for the same invocation is
+            # monotonic; only acceptance of a new invocation may reopen it.
+            for key in (
+                "control_state",
+                "supports_resume",
+                "resumable_invocation_id",
+            ):
+                if key in current:
+                    merged[key] = current[key]
+        bindings[HAAS_DELEGATION_BINDING_KEY] = merged
         self.session_store.set_bindings(session_id, bindings)
+
+    async def _wait_for_delegated_policy(
+        self, client: HaasDelegationClient, binding: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Gate a new invocation until an accepted policy revision is applied."""
+        getter = getattr(client, "get_delegated_session", None)
+        if getter is None:
+            return binding
+        delegated_session_id = require_binding_value(binding, "delegated_session_id")
+        deadline = time.monotonic() + min(client.config.request_timeout_seconds, 5.0)
+        while True:
+            delegated = await getter(delegated_session_id)
+            desired = int(delegated.get("desiredRevision", 1))
+            applied = int(delegated.get("appliedRevision", 1))
+            binding = {
+                **binding,
+                "desired_revision": desired,
+                "applied_revision": applied,
+            }
+            if applied >= desired:
+                return binding
+            result = delegated.get("lastPolicyUpdateResult") or {}
+            if result.get("status") == "failed":
+                reason = result.get("safeReason") or result.get("code")
+                raise HaasDelegationError(f"delegated policy update failed: {reason or 'unknown'}")
+            if time.monotonic() >= deadline:
+                raise HaasDelegationError("delegated policy update is still pending")
+            await asyncio.sleep(0.05)
 
     async def run_turn_events(
         self,
@@ -740,16 +1310,29 @@ class SessionManager:
                 return
 
         if existing_binding is not None:
-            async for event in self._run_haas_delegated_turn(
-                session_id,
-                engine,
-                content,
-                config=self._haas_config(self.engine_workspace(session_id, workspace=workspace)),
-                binding=existing_binding,
-                append_user=not retry,
-                display=display,
-            ):
-                yield event
+            config = self._haas_config(self.engine_workspace(session_id, workspace=workspace))
+            if existing_binding.get("execution_mode") == "local_api":
+                async for event in self._run_haas_local_api_turn(
+                    session_id,
+                    engine,
+                    content,
+                    config=config,
+                    binding=existing_binding,
+                    append_user=not retry,
+                    display=display,
+                ):
+                    yield event
+            else:
+                async for event in self._run_haas_delegated_turn(
+                    session_id,
+                    engine,
+                    content,
+                    config=config,
+                    binding=existing_binding,
+                    append_user=not retry,
+                    display=display,
+                ):
+                    yield event
             return
 
         if retry:
@@ -761,7 +1344,35 @@ class SessionManager:
             session_id, workspace=workspace, agent=agent, content=content
         )
         if not decision.use_haas:
+            if decision.backend == "blocked":
+                label = (
+                    "HaaS delegation"
+                    if decision.config
+                    and getattr(decision.config, "execution_mode", "local_api")
+                    == "delegated_session"
+                    else "HaaS local API"
+                )
+                message_text = f"{label} blocked: {decision.reason}"
+                engine._append_notice("error", message_text)
+                yield Event(
+                    EventType.ERROR,
+                    {"error": message_text, "error_type": "HaasDelegationError"},
+                )
+                return
             async for event in engine.run(content, display=display):
+                yield event
+            return
+
+        if decision.config and decision.config.execution_mode == "local_api":
+            async for event in self._run_haas_local_api_turn(
+                session_id,
+                engine,
+                content,
+                config=decision.config,
+                binding=decision.binding,
+                append_user=True,
+                display=display,
+            ):
                 yield event
             return
 
@@ -775,6 +1386,800 @@ class SessionManager:
             display=display,
         ):
             yield event
+
+    async def continue_haas_turn_events(
+        self,
+        session_id: str,
+        engine: TurnEngine,
+        *,
+        additional_instruction: str | None = None,
+    ) -> Any:
+        """Continue a paused HaaS session as a new linked invocation."""
+        record = self.session_store.load(session_id)
+        binding = binding_from_record(record)
+        if binding is None:
+            raise HaasDelegationError("Session is not bound to HaaS.")
+        source_invocation_id = str(binding.get("resumable_invocation_id") or "")
+        if (
+            binding.get("control_state") != "paused"
+            or not binding.get("supports_resume")
+            or not source_invocation_id.startswith("inv_")
+        ):
+            raise HaasDelegationError("This HaaS session is not resumable.")
+        binding = {
+            **binding,
+            "control_state": "resuming",
+            "supports_resume": False,
+        }
+        self._persist_haas_binding(session_id, engine, binding)
+        config = self._haas_config(self.engine_workspace(session_id))
+        try:
+            if binding.get("execution_mode") == "local_api":
+                async for event in self._run_haas_local_api_turn(
+                    session_id,
+                    engine,
+                    additional_instruction or "",
+                    config=config,
+                    binding=binding,
+                    append_user=False,
+                    display=None,
+                    continue_from_invocation_id=source_invocation_id,
+                ):
+                    yield event
+            else:
+                async for event in self._run_haas_delegated_turn(
+                    session_id,
+                    engine,
+                    additional_instruction or "",
+                    config=config,
+                    binding=binding,
+                    append_user=False,
+                    display=None,
+                    continue_from_invocation_id=source_invocation_id,
+                ):
+                    yield event
+        finally:
+            # A pre-acceptance Continue failure leaves no new invocation to own the
+            # lifecycle. Restore the immutable source as the resumable authority;
+            # accepted paths have already advanced this state to running/terminal.
+            current = binding_from_record(self.session_store.load(session_id)) or {}
+            if current.get("control_state") == "resuming":
+                self._persist_haas_binding(
+                    session_id,
+                    engine,
+                    {
+                        **current,
+                        "control_state": "paused",
+                        "supports_resume": True,
+                        "resumable_invocation_id": source_invocation_id,
+                    },
+                )
+
+    def _direct_haas_binding(
+        self,
+        *,
+        session_id: str,
+        config: HaasDelegationConfig,
+        workspace: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "backend": "haas",
+            "execution_mode": "local_api",
+            "haas_base_url": config.base_url.rstrip("/"),
+            "haas_session_id": f"hsess_{session_id}",
+            "haas_user_id": config.user_id,
+            "harness_id": config.harness_id,
+            "harness_base": config.harness_base,
+            "workspace": workspace,
+            "runtime": {"status": "local_api"},
+            "bound_at": int(time.time()),
+        }
+
+    async def _recover_accepted_local_attempt(
+        self,
+        session_id: str,
+        engine: TurnEngine,
+        *,
+        config: HaasDelegationConfig,
+        binding: dict[str, Any],
+        ledger: AttemptLedger,
+        attempt: Any,
+        content: str | list[Any],
+    ):
+        """Follow an already accepted invocation without resubmitting its request."""
+        bridge_data = binding.get("stream_bridge")
+        if not isinstance(bridge_data, dict):
+            raise HaasDelegationError(
+                "Accepted HaaS invocation is missing its recovery checkpoint."
+            )
+        bridge = StreamBridgeState.from_dict(bridge_data)
+        if bridge.invocation_id != attempt.invocation_id:
+            raise HaasDelegationError(
+                "Accepted HaaS invocation does not match its recovery checkpoint."
+            )
+        client = self._haas_direct_client(config)
+        await self._bind_active_haas_turn(
+            session_id,
+            client=client,
+            haas_session_id=bridge.session.session_id,
+            invocation_id=bridge.invocation_id,
+        )
+        yield Event(
+            EventType.TURN_START,
+            {
+                "input": content,
+                "recovered": True,
+                "delegated": {
+                    "backend": "haas",
+                    "execution_mode": "local_api",
+                    "session": bridge.session.session_id,
+                    "invocation": bridge.invocation_id,
+                },
+            },
+        )
+        terminal_statuses = {
+            "completed",
+            "failed",
+            "incomplete",
+            "cancelled",
+            "interrupted",
+        }
+        while not bridge.completed:
+            page_cursor = bridge.native_cursor
+            try:
+                page = await client.events_page(
+                    bridge.session.session_id, after_event_id=page_cursor
+                )
+                for native_event in page.data:
+                    event_id = str(native_event.get("eventId") or native_event.get("id") or "")
+                    if not event_id or native_event.get("invocationId") != bridge.invocation_id:
+                        continue
+                    event_type = str(native_event.get("type") or "")
+                    if event_type.startswith("haas.turn."):
+                        event_type = "invocation." + event_type.removeprefix("haas.turn.")
+                    metadata = native_event.get("haas") or {}
+                    actions = bridge.consume_native(
+                        event_id=event_id,
+                        cursor=event_id,
+                        event_type=event_type,
+                        code=metadata.get("code"),
+                        safe_reason=metadata.get("safeReason"),
+                        retryable=metadata.get("retryable"),
+                        payload=metadata,
+                        content=native_event.get("content"),
+                    )
+                    for action in actions:
+                        event = self._haas_bridge_event(action, binding)
+                        if event is not None:
+                            event.data["haasEventId"] = event_id
+                            yield event
+                page_checkpoint = (
+                    str(page.data[-1].get("eventId") or page.data[-1].get("id") or "") or None
+                    if page.data
+                    else None
+                )
+                next_cursor = page.next_cursor or page_checkpoint
+                if next_cursor is not None:
+                    bridge.native_cursor = next_cursor
+
+                invocation = await client.get_invocation(
+                    bridge.session.session_id, bridge.invocation_id
+                )
+                invocation_status = str(invocation.data.get("status") or "unknown")
+                if invocation_status in terminal_statuses:
+                    actions = bridge.reconcile_authoritative_terminal(
+                        status=invocation_status,
+                        terminal_event_id=invocation.data.get("terminalEventId"),
+                    )
+                    for action in actions:
+                        event = self._haas_bridge_event(action, binding)
+                        if event is not None:
+                            yield event
+            except HaasClientError as exc:
+                message_text = f"HaaS local API recovery unavailable: {exc}"
+                engine._append_notice("error", message_text)
+                yield Event(
+                    EventType.ERROR,
+                    {"error": message_text, "error_type": "HaasDelegationError"},
+                )
+                return
+
+            binding["stream_bridge"] = bridge.to_dict()
+            self._persist_haas_binding(session_id, engine, binding)
+            if not bridge.completed:
+                await asyncio.sleep(0.05)
+
+        attempt.terminal = True
+        binding["attempt_ledger"] = ledger.to_dict()
+        binding["stream_bridge"] = bridge.to_dict()
+        binding["control_state"] = "paused" if bridge.terminal_status == "interrupted" else "idle"
+        binding["supports_resume"] = bridge.terminal_status == "interrupted"
+        binding["resumable_invocation_id"] = (
+            bridge.invocation_id if bridge.terminal_status == "interrupted" else None
+        )
+        self._persist_haas_binding(session_id, engine, binding)
+        if bridge.assistant_text or bridge.activities or bridge.model_stages:
+            engine.messages.append(
+                {
+                    "role": "assistant",
+                    "content": bridge.assistant_text,
+                    **({"reasoning": bridge.reasoning_summary} if bridge.reasoning_summary else {}),
+                    "ts": time.time(),
+                    "_delegated": {
+                        "backend": "haas",
+                        "execution_mode": "local_api",
+                        "session": bridge.session.session_id,
+                    },
+                    "_haas_activity": [dict(activity) for activity in bridge.activities.values()],
+                    "_haas_model_stages": bridge.public_model_stages(),
+                    "_haas_task_outcome": {
+                        **bridge.task.to_dict(),
+                        "status": bridge.terminal_status,
+                        "retryable": bridge.terminal_retryable,
+                    },
+                }
+            )
+
+    async def _run_haas_local_api_turn(
+        self,
+        session_id: str,
+        engine: TurnEngine,
+        content: str | list[Any],
+        *,
+        config: HaasDelegationConfig | None,
+        binding: dict[str, Any] | None,
+        append_user: bool,
+        display: str | None,
+        continue_from_invocation_id: str | None = None,
+    ):
+        record = self.session_store.load(session_id)
+        workspace = (
+            record.workspace
+            if record is not None and record.workspace
+            else str(engine.executor.cwd)
+        )
+        config = config or self._haas_config(workspace)
+        if binding is not None:
+            config = apply_config_snapshot(config, binding)
+        if config.mode == "local_managed":
+            local_status = self._ensure_local_haas(config)
+            if not local_status.get("running"):
+                reason = local_status.get("reason") or local_status.get("status")
+                raise HaasDelegationError(f"local HaaS sidecar unavailable: {reason}")
+            config = self._haas_config(workspace)
+            if binding is not None:
+                config = apply_config_snapshot(config, binding)
+        try:
+            message = (
+                adk_message_from_content(content)
+                if continue_from_invocation_id is None
+                else None
+            )
+        except HaasDelegationError as exc:
+            message_text = f"HaaS local API unavailable: {exc}"
+            engine._append_notice("error", message_text)
+            yield Event(
+                EventType.ERROR,
+                {"error": message_text, "error_type": "HaasDelegationError"},
+            )
+            return
+
+        if binding is None or binding.get("execution_mode") != "local_api":
+            binding = self._direct_haas_binding(
+                session_id=session_id,
+                config=config,
+                workspace=workspace,
+            )
+        binding = {
+            **binding,
+            "execution_mode": "local_api",
+            "haas_base_url": config.base_url.rstrip("/"),
+            "haas_user_id": config.user_id,
+            "harness_id": config.harness_id,
+            "harness_base": config.harness_base,
+            "workspace": workspace,
+        }
+        haas_session_id = require_binding_value(binding, "haas_session_id")
+        harness_id = require_binding_value(binding, "harness_id")
+        haas_user_id = require_binding_value(binding, "haas_user_id")
+
+        if append_user:
+            user_message: dict[str, Any] = {
+                "role": "user",
+                "content": content,
+                "ts": time.time(),
+                "_delegated": {
+                    "backend": "haas",
+                    "execution_mode": "local_api",
+                    "session": haas_session_id,
+                },
+            }
+            if display is not None:
+                user_message["_display"] = display
+            engine.messages.append(user_message)
+
+        ledger = AttemptLedger.from_dict(binding.get("attempt_ledger") or {})
+        current_attempt_id = binding.get("current_attempt_id")
+        attempt = (
+            ledger.attempts.get(current_attempt_id) if isinstance(current_attempt_id, str) else None
+        )
+        if attempt is None or attempt.terminal:
+            attempt_id = f"attempt_{uuid.uuid4().hex[:16]}"
+            manager_turn_id = f"turn_{uuid.uuid4().hex[:16]}"
+            idempotency_key = f"manager-turn:{session_id}:{manager_turn_id}:{attempt_id}"
+            attempt = ledger.add(
+                manager_turn_id=manager_turn_id,
+                attempt_id=attempt_id,
+                idempotency_key=idempotency_key,
+            )
+        else:
+            attempt_id = attempt.attempt_id
+            manager_turn_id = attempt.manager_turn_id
+            idempotency_key = attempt.idempotency_key
+        binding = {
+            **binding,
+            "attempt_ledger": ledger.to_dict(),
+            "current_attempt_id": attempt_id,
+        }
+        if attempt.invocation_id is not None and not attempt.terminal:
+            if not append_user and continue_from_invocation_id is None:
+                async for event in self._recover_accepted_local_attempt(
+                    session_id,
+                    engine,
+                    config=config,
+                    binding=binding,
+                    ledger=ledger,
+                    attempt=attempt,
+                    content=content,
+                ):
+                    yield event
+                return
+            message_text = (
+                "The previous HaaS invocation is still active; retry to reconnect "
+                "or stop it before starting new work."
+            )
+            engine._append_notice("error", message_text)
+            yield Event(
+                EventType.ERROR,
+                {"error": message_text, "error_type": "HaasDelegationError"},
+            )
+            return
+
+        body: dict[str, Any] = {
+            "appName": harness_id,
+            "userId": haas_user_id,
+            "sessionId": haas_session_id,
+            "newMessage": message,
+            "streaming": True,
+            "policy": {
+                "approvalPolicy": (
+                    "on-request"
+                    if engine.permissions.mode
+                    in {Mode.INTERACTIVE, Mode.AUTO_APPROVE, Mode.CUSTOM}
+                    else "never"
+                ),
+                "network": {
+                    "defaultAction": "allow" if config.network_access else "deny",
+                    "allow": [],
+                },
+            },
+        }
+        if workspace:
+            body["sandbox"] = {
+                "mode": config.workspace_mode,
+                "workspaceRoot": str(Path(workspace).expanduser().resolve()),
+                "writableRoots": [str(Path(workspace).expanduser().resolve())],
+            }
+
+        client = self._haas_direct_client(config)
+        await self._bind_active_haas_turn(
+            session_id, client=client, haas_session_id=haas_session_id
+        )
+        bridge: StreamBridgeState | None = None
+        try:
+            if config.mode != "local_managed":
+                raise HaasDelegationError("local API requires the managed local endpoint")
+            binding = await self._sync_local_haas_profile(client, engine, binding)
+            self._persist_haas_binding(session_id, engine, binding)
+            binding["pause_supported"] = await self._require_haas_interaction_capability(
+                client, harness_id, engine.permissions.mode
+            )
+            binding["interaction_capability"] = "human_bridge"
+            body["haas"] = {
+                "profileId": binding["profile_id"],
+                "profileVersion": binding["profile_version"],
+            }
+            stream_context = (
+                client.run_sse(body, idempotency_key=idempotency_key)
+                if continue_from_invocation_id is None
+                else client.continue_invocation(
+                    haas_session_id,
+                    continue_from_invocation_id,
+                    additional_instruction=(
+                        str(content) if isinstance(content, str) and content else None
+                    ),
+                )
+            )
+            async with stream_context as stream:
+                accepted = stream.accepted
+                binding = {
+                    **binding,
+                    "binding": "haas_bound",
+                    "accepted_invocation_id": accepted.invocation_id,
+                    "binding_accepted_at_ms": int(time.time() * 1000),
+                    "idempotency_expires_at_ms": accepted.idempotency_expires_at_ms,
+                    "runtime": {"status": "local_api"},
+                    "control_state": "running",
+                    "supports_resume": False,
+                    "resumable_invocation_id": None,
+                    "desired_revision": binding.get("desired_revision", 1),
+                    "applied_revision": binding.get("applied_revision", 1),
+                }
+                attempt.invocation_id = accepted.invocation_id
+                attempt.server_expires_at_ms = accepted.idempotency_expires_at_ms
+                await self._bind_active_haas_turn(
+                    session_id,
+                    client=client,
+                    haas_session_id=accepted.session_id,
+                    invocation_id=accepted.invocation_id,
+                )
+                prior_task = (
+                    TaskCompletionState.from_dict(
+                        (binding.get("stream_bridge") or {}).get("task")
+                    )
+                    if not append_user and continue_from_invocation_id is None
+                    else TaskCompletionState()
+                )
+                bridge = StreamBridgeState(
+                    endpoint_id=config.base_url.rstrip("/"),
+                    session=SessionKey(harness_id, haas_user_id, accepted.session_id),
+                    invocation_id=accepted.invocation_id,
+                    task=prior_task,
+                )
+                binding["attempt_ledger"] = ledger.to_dict()
+                binding["stream_bridge"] = bridge.to_dict()
+                self._persist_haas_binding(session_id, engine, binding)
+                turn_start_data: dict[str, Any] = {
+                    "input": content,
+                    "delegated": {
+                        "backend": "haas",
+                        "execution_mode": "local_api",
+                        "session": accepted.session_id,
+                        "invocation": accepted.invocation_id,
+                    },
+                }
+                if continue_from_invocation_id is not None:
+                    turn_start_data["continuedFromInvocationId"] = (
+                        continue_from_invocation_id
+                    )
+                yield Event(
+                    EventType.TURN_START,
+                    turn_start_data,
+                )
+                queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(100)
+                adk_finished = asyncio.Event()
+
+                async def drain_adk() -> None:
+                    try:
+                        async for event in stream.events():
+                            await queue.put(("adk", event))
+                    finally:
+                        adk_finished.set()
+                        await queue.put(("adk_done", None))
+
+                async def poll_native() -> None:
+                    cursor = bridge.native_cursor
+                    try:
+                        while not bridge.completed:
+                            page = await client.events_page(
+                                bridge.session.session_id, after_event_id=cursor
+                            )
+                            events = [
+                                item
+                                for item in page.data
+                                if item.get("invocationId") == bridge.invocation_id
+                            ]
+                            for event in events:
+                                await queue.put(("native", event))
+                            page_checkpoint = (
+                                str(page.data[-1].get("eventId") or "") or None
+                                if page.data
+                                else None
+                            )
+                            next_cursor = page.next_cursor or page_checkpoint
+                            if next_cursor is not None and next_cursor != cursor:
+                                cursor = next_cursor
+                                await queue.put(("native_checkpoint", cursor))
+                                continue
+                            if adk_finished.is_set():
+                                return
+                            await asyncio.sleep(0.05)
+                    finally:
+                        await queue.put(("native_done", None))
+
+                adk_task = asyncio.create_task(drain_adk())
+                native_task = asyncio.create_task(poll_native())
+                adk_done = False
+                native_done = False
+                try:
+                    while not bridge.completed and not (adk_done and native_done):
+                        source, item = await queue.get()
+                        if source == "adk_done":
+                            adk_done = True
+                            continue
+                        if source == "native_done":
+                            native_done = True
+                            continue
+                        if source == "native_checkpoint":
+                            bridge.native_cursor = str(item)
+                            binding["stream_bridge"] = bridge.to_dict()
+                            self._persist_haas_binding(session_id, engine, binding)
+                            continue
+                        assert item is not None
+                        event_id = str(
+                            item.get("eventId") or item.get("id") or f"evt_adk_{uuid.uuid4().hex}"
+                        )
+                        if source == "adk":
+                            status = extract_adk_status(item)
+                            actions = bridge.consume_adk(
+                                event_id=event_id,
+                                cursor=event_id,
+                                text=extract_adk_text(item) or None,
+                                reasoning=extract_adk_reasoning(item) or None,
+                                artifact=extract_adk_artifact(item) or None,
+                                terminal=status
+                                in {
+                                    "completed",
+                                    "failed",
+                                    "cancelled",
+                                    "incomplete",
+                                    "interrupted",
+                                },
+                            )
+                        else:
+                            event_type = str(item.get("type") or "")
+                            if event_type.startswith("haas.turn."):
+                                event_type = "invocation." + event_type.removeprefix("haas.turn.")
+                            metadata = item.get("haas") or {}
+                            actions = bridge.consume_native(
+                                event_id=event_id,
+                                cursor=event_id,
+                                event_type=event_type,
+                                code=metadata.get("code"),
+                                safe_reason=metadata.get("safeReason"),
+                                retryable=metadata.get("retryable"),
+                                payload=metadata,
+                                content=item.get("content"),
+                            )
+                            if bridge.terminal_status is not None and not bridge.completed:
+                                invocation_status = bridge.terminal_status
+                                terminal_event_id = None
+                                try:
+                                    invocation = await client.get_invocation(
+                                        bridge.session.session_id, bridge.invocation_id
+                                    )
+                                except HaasClientError:
+                                    pass
+                                else:
+                                    invocation_status = str(
+                                        invocation.data.get("status") or "unknown"
+                                    )
+                                    terminal_event_id = invocation.data.get("terminalEventId")
+                                actions.extend(
+                                    bridge.reconcile_authoritative_terminal(
+                                        status=invocation_status,
+                                        terminal_event_id=terminal_event_id,
+                                    )
+                                )
+                        binding["stream_bridge"] = bridge.to_dict()
+                        self._persist_haas_binding(session_id, engine, binding)
+                        for action in actions:
+                            event = self._haas_bridge_event(action, binding)
+                            if event is not None:
+                                event.data["haasEventId"] = event_id
+                                yield event
+                finally:
+                    for task in (adk_task, native_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(adk_task, native_task, return_exceptions=True)
+        except (HaasClientError, HaasDelegationError) as exc:
+            if (
+                getattr(exc, "status_code", None) == 410
+                and getattr(exc, "code", None) == "haas_idempotency_expired"
+            ):
+                attempt.terminal = True
+                ledger.observe_failure(attempt_id, ExpiryEvidence.SERVER_CONFIRMED)
+                linked = ledger.linked_attempt_for_use(
+                    attempt_id,
+                    new_attempt_id=f"attempt_{uuid.uuid4().hex[:16]}",
+                    new_idempotency_key=f"manager-turn:{session_id}:{manager_turn_id}:linked",
+                )
+                binding["attempt_ledger"] = ledger.to_dict()
+                if linked is not None:
+                    binding["current_attempt_id"] = linked.attempt_id
+                self._persist_haas_binding(session_id, engine, binding)
+            message_text = f"HaaS local API unavailable: {exc}"
+            engine._append_notice("error", message_text)
+            yield Event(
+                EventType.ERROR,
+                {"error": message_text, "error_type": "HaasDelegationError"},
+            )
+            return
+
+        if bridge is None:
+            raise HaasDelegationError("HaaS did not accept the local API invocation.")
+        while not bridge.completed:
+            page_cursor = bridge.native_cursor
+            try:
+                page = await client.events_page(
+                    bridge.session.session_id,
+                    after_event_id=page_cursor,
+                )
+            except HaasClientError:
+                yield Event(
+                    EventType.ERROR,
+                    {
+                        "error": "HaaS terminal events unavailable; retry to read back.",
+                        "error_type": "HaasDelegationError",
+                    },
+                )
+                return
+            for native_event in page.data:
+                event_id = str(native_event.get("eventId") or native_event.get("id") or "")
+                if native_event.get("invocationId") != bridge.invocation_id:
+                    continue
+                if not event_id:
+                    continue
+                event_type = str(native_event.get("type") or "")
+                if event_type.startswith("haas.turn."):
+                    event_type = "invocation." + event_type.removeprefix("haas.turn.")
+                metadata = native_event.get("haas") or {}
+                actions = bridge.consume_native(
+                    event_id=event_id,
+                    cursor=event_id,
+                    event_type=event_type,
+                    code=metadata.get("code"),
+                    safe_reason=metadata.get("safeReason"),
+                    retryable=metadata.get("retryable"),
+                    payload=metadata,
+                    content=native_event.get("content"),
+                )
+                if bridge.terminal_status is not None and not bridge.completed:
+                    invocation_status = bridge.terminal_status
+                    terminal_event_id = None
+                    try:
+                        invocation = await client.get_invocation(
+                            bridge.session.session_id, bridge.invocation_id
+                        )
+                    except HaasClientError:
+                        pass
+                    else:
+                        invocation_status = str(
+                            invocation.data.get("status") or "unknown"
+                        )
+                        terminal_event_id = invocation.data.get("terminalEventId")
+                    actions.extend(
+                        bridge.reconcile_authoritative_terminal(
+                            status=invocation_status,
+                            terminal_event_id=terminal_event_id,
+                        )
+                    )
+                for action in actions:
+                    event = self._haas_bridge_event(action, binding)
+                    if event is not None:
+                        event.data["haasEventId"] = event_id
+                        yield event
+            page_checkpoint = (
+                str(page.data[-1].get("eventId") or page.data[-1].get("id") or "")
+                or None
+                if page.data
+                else None
+            )
+            next_cursor = page.next_cursor or page_checkpoint
+            if next_cursor is not None:
+                bridge.native_cursor = next_cursor
+            binding["stream_bridge"] = bridge.to_dict()
+            self._persist_haas_binding(session_id, engine, binding)
+            if next_cursor is None:
+                break
+            if next_cursor == page_cursor:
+                yield Event(
+                    EventType.ERROR,
+                    {
+                        "error": "HaaS event pagination did not advance.",
+                        "error_type": "HaasDelegationError",
+                    },
+                )
+                return
+        if not bridge.completed:
+            try:
+                invocation = await client.get_invocation(
+                    bridge.session.session_id, attempt.invocation_id
+                )
+                invocation_status = invocation.data.get("status", "unknown")
+            except HaasClientError:
+                invocation_status = "unknown"
+            yield Event(
+                EventType.ERROR,
+                {
+                    "error": (
+                        f"HaaS terminal event missing (invocation={invocation_status}); "
+                        "retry to read back."
+                    ),
+                    "error_type": "HaasDelegationError",
+                },
+            )
+            return
+        attempt.terminal = True
+        binding["attempt_ledger"] = ledger.to_dict()
+        binding["stream_bridge"] = bridge.to_dict()
+        binding["control_state"] = (
+            "paused" if bridge.terminal_status == "interrupted" else "idle"
+        )
+        binding["supports_resume"] = bridge.terminal_status == "interrupted"
+        binding["resumable_invocation_id"] = (
+            bridge.invocation_id if bridge.terminal_status == "interrupted" else None
+        )
+        self._persist_haas_binding(session_id, engine, binding)
+        assistant_text = bridge.assistant_text
+        if assistant_text or bridge.activities or bridge.model_stages:
+            engine.messages.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_text,
+                    **(
+                        {"reasoning": bridge.reasoning_summary}
+                        if bridge.reasoning_summary
+                        else {}
+                    ),
+                    "ts": time.time(),
+                    "_delegated": {
+                        "backend": "haas",
+                        "execution_mode": "local_api",
+                        "session": bridge.session.session_id,
+                    },
+                    "_haas_activity": [
+                        dict(activity) for activity in bridge.activities.values()
+                    ],
+                    "_haas_model_stages": bridge.public_model_stages(),
+                    "_haas_task_outcome": {
+                        **bridge.task.to_dict(),
+                        "status": bridge.terminal_status,
+                        "retryable": bridge.terminal_retryable,
+                    },
+                }
+            )
+        if bridge.task.phase == "verifying":
+            if bridge.task.claim_continuation(replay_safe=True):
+                binding["stream_bridge"] = bridge.to_dict()
+                self._persist_haas_binding(session_id, engine, binding)
+                continuation = (
+                    "Continue the remaining structured plan steps in this same task. "
+                    "Inspect current workspace state before acting, do not repeat completed "
+                    "work or external side effects, then verify the requested outcome."
+                )
+                async for event in self._run_haas_local_api_turn(
+                    session_id,
+                    engine,
+                    continuation,
+                    config=config,
+                    binding=binding,
+                    append_user=False,
+                    display=None,
+                ):
+                    yield event
+            else:
+                binding["stream_bridge"] = bridge.to_dict()
+                self._persist_haas_binding(session_id, engine, binding)
+                yield Event(
+                    EventType.ERROR,
+                    {
+                        "error": bridge.task.safe_reason,
+                        "error_type": bridge.task.code,
+                        "taskPhase": bridge.task.phase,
+                    },
+                )
 
     @staticmethod
     def _last_user_content(engine: TurnEngine) -> str | list[Any] | None:
@@ -795,6 +2200,7 @@ class SessionManager:
         binding: dict[str, Any] | None,
         append_user: bool,
         display: str | None,
+        continue_from_invocation_id: str | None = None,
     ):
         record = self.session_store.load(session_id)
         workspace = (
@@ -803,8 +2209,17 @@ class SessionManager:
             else str(engine.executor.cwd)
         )
         config = config or self._haas_config(workspace)
+        binding_was_persisted = binding is not None
         if binding is not None:
             config = apply_config_snapshot(config, binding)
+        config = replace(
+            config,
+            approval_mode=(
+                "on-request"
+                if engine.permissions.mode in {Mode.INTERACTIVE, Mode.AUTO_APPROVE, Mode.CUSTOM}
+                else "never"
+            ),
+        )
         client = self._haas_client(config)
         try:
             message = adk_message_from_content(content)
@@ -835,17 +2250,6 @@ class SessionManager:
             if display is not None:
                 user_message["_display"] = display
             engine.messages.append(user_message)
-        yield Event(
-            EventType.TURN_START,
-            {
-                "input": content,
-                "delegated": {
-                    "backend": "haas",
-                    "session": delegated_session_id or None,
-                },
-            },
-        )
-
         try:
             if binding is None:
                 body = make_delegated_session_body(
@@ -857,14 +2261,35 @@ class SessionManager:
                 )
                 delegated = await client.create_delegated_session(body)
                 binding = binding_from_haas_response(delegated, config)
-                self._persist_haas_binding(session_id, engine, binding)
             delegated_session_id = require_binding_value(binding, "delegated_session_id")
             haas_session_id = require_binding_value(binding, "haas_session_id")
             harness_id = require_binding_value(binding, "harness_id")
             haas_user_id = require_binding_value(binding, "haas_user_id")
+            desired_policy = delegation_policy_snapshot(config)
+            if binding.get("delegation_policy_snapshot") != desired_policy:
+                update = await client.update_delegated_policy(
+                    delegated_session_id,
+                    desired_policy,
+                    expected_revision=int(binding.get("desired_revision") or 1),
+                )
+                binding = {
+                    **binding,
+                    "delegation_policy_snapshot": update.get(
+                        "delegationPolicySnapshot",
+                        binding.get("delegation_policy_snapshot"),
+                    ),
+                    "desired_revision": update.get("desiredRevision"),
+                    "applied_revision": update.get("appliedRevision"),
+                }
             restored = await client.restore(delegated_session_id)
             binding = {**binding, "runtime": restored.get("runtime", {})}
-            self._persist_haas_binding(session_id, engine, binding)
+            binding = await self._wait_for_delegated_policy(client, binding)
+            binding["pause_supported"] = await self._require_haas_interaction_capability(
+                client, harness_id, engine.permissions.mode
+            )
+            binding["interaction_capability"] = "human_bridge"
+            if binding_was_persisted:
+                self._persist_haas_binding(session_id, engine, binding)
             self.audit_store.append(
                 {
                     "session_id": session_id,
@@ -884,33 +2309,141 @@ class SessionManager:
             )
             return
 
-        text_parts: list[str] = []
-        terminal_status = "completed"
+        ledger = AttemptLedger.from_dict(binding.get("attempt_ledger") or {})
+        current_attempt_id = binding.get("current_attempt_id")
+        attempt = (
+            ledger.attempts.get(current_attempt_id) if isinstance(current_attempt_id, str) else None
+        )
+        if attempt is None or attempt.terminal:
+            attempt_id = f"attempt_{uuid.uuid4().hex[:16]}"
+            manager_turn_id = f"turn_{uuid.uuid4().hex[:16]}"
+            idempotency_key = f"manager-turn:{session_id}:{manager_turn_id}:{attempt_id}"
+            attempt = ledger.add(
+                manager_turn_id=manager_turn_id,
+                attempt_id=attempt_id,
+                idempotency_key=idempotency_key,
+            )
+        else:
+            attempt_id = attempt.attempt_id
+            manager_turn_id = attempt.manager_turn_id
+            idempotency_key = attempt.idempotency_key
+        binding = {
+            **binding,
+            "attempt_ledger": ledger.to_dict(),
+            "current_attempt_id": attempt_id,
+        }
+        if binding_was_persisted:
+            self._persist_haas_binding(session_id, engine, binding)
+        bridge: StreamBridgeState | None = None
+        await self._bind_active_haas_turn(
+            session_id, client=client, haas_session_id=haas_session_id
+        )
         try:
-            async for adk_event in client.run_sse(
-                haas_session_id=haas_session_id,
-                message=message,
-                harness_id=harness_id,
-                user_id=haas_user_id,
-            ):
-                text = extract_adk_text(adk_event)
-                status = extract_adk_status(adk_event)
-                if text:
-                    text_parts.append(text)
-                    yield Event(
-                        EventType.ASSISTANT_DELTA,
-                        {
-                            "text": text,
-                            "delegated": {
-                                "backend": "haas",
-                                "session": binding["delegated_session_id"],
-                            },
+            stream_context = (
+                open_delegated_sse(
+                    client,
+                    haas_session_id=haas_session_id,
+                    message=message,
+                    harness_id=harness_id,
+                    user_id=haas_user_id,
+                    idempotency_key=idempotency_key,
+                    approval_policy=(
+                        "on-request"
+                        if engine.permissions.mode
+                        in {Mode.INTERACTIVE, Mode.AUTO_APPROVE, Mode.CUSTOM}
+                        else "never"
+                    ),
+                )
+                if continue_from_invocation_id is None
+                else client.continue_invocation(
+                    haas_session_id,
+                    continue_from_invocation_id,
+                    additional_instruction=(
+                        str(content) if isinstance(content, str) and content else None
+                    ),
+                )
+            )
+            async with stream_context as (accepted, adk_events):
+                binding = {
+                    **binding,
+                    "binding": "haas_bound",
+                    "accepted_invocation_id": accepted.invocation_id,
+                    "binding_accepted_at_ms": int(time.time() * 1000),
+                    "idempotency_expires_at_ms": accepted.idempotency_expires_at_ms,
+                    "control_state": "running",
+                    "supports_resume": False,
+                    "resumable_invocation_id": None,
+                }
+                attempt.invocation_id = accepted.invocation_id
+                attempt.server_expires_at_ms = accepted.idempotency_expires_at_ms
+                await self._bind_active_haas_turn(
+                    session_id,
+                    client=client,
+                    haas_session_id=haas_session_id,
+                    invocation_id=accepted.invocation_id,
+                )
+                bridge = StreamBridgeState(
+                    endpoint_id=config.base_url.rstrip("/"),
+                    session=SessionKey(harness_id, haas_user_id, haas_session_id),
+                    invocation_id=accepted.invocation_id,
+                )
+                binding["attempt_ledger"] = ledger.to_dict()
+                binding["stream_bridge"] = bridge.to_dict()
+                self._persist_haas_binding(session_id, engine, binding)
+                turn_start_data: dict[str, Any] = {
+                    "input": content,
+                    "delegated": {
+                        "backend": "haas",
+                        "session": delegated_session_id,
+                        "invocation": accepted.invocation_id,
+                    },
+                }
+                if continue_from_invocation_id is not None:
+                    turn_start_data["continuedFromInvocationId"] = (
+                        continue_from_invocation_id
+                    )
+                yield Event(
+                    EventType.TURN_START,
+                    turn_start_data,
+                )
+                async for adk_event in adk_events:
+                    binding["attempt_ledger"] = ledger.to_dict()
+                    event_id = str(adk_event.get("id") or f"evt_adk_{uuid.uuid4().hex}")
+                    text = extract_adk_text(adk_event)
+                    status = extract_adk_status(adk_event)
+                    actions = bridge.consume_adk(
+                        event_id=event_id,
+                        cursor=event_id,
+                        text=text or None,
+                        terminal=status
+                        in {
+                            "completed",
+                            "failed",
+                            "cancelled",
+                            "incomplete",
+                            "interrupted",
                         },
                     )
-                if status in {"completed", "failed", "cancelled", "incomplete"}:
-                    terminal_status = status
-                    break
+                    binding["stream_bridge"] = bridge.to_dict()
+                    self._persist_haas_binding(session_id, engine, binding)
+                    for action in actions:
+                        event = self._haas_bridge_event(action, binding)
+                        if event is not None:
+                            event.data["haasEventId"] = event_id
+                            yield event
         except HaasDelegationError as exc:
+            if exc.status_code == 410 and exc.code == "haas_idempotency_expired":
+                attempt.terminal = True
+                ledger.observe_failure(attempt_id, ExpiryEvidence.SERVER_CONFIRMED)
+                linked = ledger.linked_attempt_for_use(
+                    attempt_id,
+                    new_attempt_id=f"attempt_{uuid.uuid4().hex[:16]}",
+                    new_idempotency_key=f"manager-turn:{session_id}:{manager_turn_id}:linked",
+                )
+                binding["attempt_ledger"] = ledger.to_dict()
+                if linked is not None:
+                    binding["current_attempt_id"] = linked.attempt_id
+                self._persist_haas_binding(session_id, engine, binding)
             message_text = f"HaaS delegated backend unavailable: {exc}"
             engine._append_notice("error", message_text)
             yield Event(
@@ -919,35 +2452,139 @@ class SessionManager:
             )
             return
 
-        assistant_text = "".join(text_parts)
-        if assistant_text:
+        if bridge is None:
+            raise HaasDelegationError("HaaS did not accept the delegated invocation.")
+        invocation_events = getattr(client, "invocation_events", None)
+        events_page = getattr(client, "events_page", None)
+        native_events: list[dict[str, Any]] = []
+        if invocation_events is not None:
+            native_events = [
+                item async for item in invocation_events(haas_session_id, attempt.invocation_id)
+            ]
+        elif events_page is not None:
+            page = await events_page(haas_session_id, after_event_id=bridge.native_cursor)
+            native_events = page.get("events", [])
+        if native_events:
+            for native_event in native_events:
+                event_id = str(native_event.get("eventId") or native_event.get("id") or "")
+                if not event_id:
+                    continue
+                event_type = str(native_event.get("type") or "")
+                if event_type.startswith("haas.turn."):
+                    event_type = "invocation." + event_type.removeprefix("haas.turn.")
+                metadata = native_event.get("haas") or {}
+                actions = bridge.consume_native(
+                    event_id=event_id,
+                    cursor=event_id,
+                    event_type=event_type,
+                    code=metadata.get("code"),
+                    safe_reason=metadata.get("safeReason"),
+                    retryable=metadata.get("retryable"),
+                    payload=metadata,
+                )
+                for action in actions:
+                    event = self._haas_bridge_event(action, binding)
+                    if event is not None:
+                        yield event
+        elif invocation_events is None and events_page is None and not bridge.completed:
+            # Compatibility for pre-DL-06c fakes: ADK terminal is authoritative only
+            # when no native readback surface exists.
+            terminal_id = bridge.adk_cursor or f"evt_terminal_{uuid.uuid4().hex}"
+            status = extract_adk_status(adk_event) or "completed"
+            for action in bridge.consume_native(
+                event_id=terminal_id, cursor=terminal_id, event_type=f"invocation.{status}"
+            ):
+                event = self._haas_bridge_event(action, binding)
+                if event is not None:
+                    yield event
+        if not bridge.completed:
+            invocation = await client.get_invocation(haas_session_id, attempt.invocation_id)
+            invocation_status = invocation.get("status", "unknown")
+            raise HaasDelegationError(
+                f"HaaS completion barrier is open (invocation={invocation_status})."
+            )
+        attempt.terminal = True
+        binding["attempt_ledger"] = ledger.to_dict()
+        binding["stream_bridge"] = bridge.to_dict()
+        binding["control_state"] = (
+            "paused" if bridge.terminal_status == "interrupted" else "idle"
+        )
+        binding["supports_resume"] = bridge.terminal_status == "interrupted"
+        binding["resumable_invocation_id"] = (
+            bridge.invocation_id if bridge.terminal_status == "interrupted" else None
+        )
+        self._persist_haas_binding(session_id, engine, binding)
+        assistant_text = bridge.assistant_text
+        if assistant_text or bridge.activities or bridge.model_stages:
             engine.messages.append(
                 {
                     "role": "assistant",
                     "content": assistant_text,
+                    **(
+                        {"reasoning": bridge.reasoning_summary}
+                        if bridge.reasoning_summary
+                        else {}
+                    ),
                     "ts": time.time(),
                     "_delegated": {"backend": "haas", "session": delegated_session_id},
+                    "_haas_activity": [
+                        dict(activity) for activity in bridge.activities.values()
+                    ],
+                    "_haas_model_stages": bridge.public_model_stages(),
+                    "_haas_task_outcome": {
+                        **bridge.task.to_dict(),
+                        "status": bridge.terminal_status,
+                        "retryable": bridge.terminal_retryable,
+                    },
                 }
             )
-            yield Event(
+
+    @staticmethod
+    def _haas_bridge_event(action: BridgeAction, binding: dict[str, Any]) -> Event | None:
+        delegated = {
+            "backend": "haas",
+            "session": binding.get("delegated_session_id") or binding.get("haas_session_id"),
+            "haas_session_id": binding.get("haas_session_id"),
+            "execution_mode": binding.get("execution_mode") or "delegated_session",
+        }
+        if action.kind == "assistant_delta":
+            return Event(EventType.ASSISTANT_DELTA, {**action.payload, "delegated": delegated})
+        if action.kind == "reasoning_delta":
+            return Event(EventType.REASONING_DELTA, {**action.payload, "delegated": delegated})
+        if action.kind == "model_stage_updated":
+            return Event(
+                EventType.MODEL_STAGE_UPDATED,
+                {**action.payload, "delegated": delegated},
+            )
+        if action.kind == "assistant_message":
+            return Event(
                 EventType.ASSISTANT_MESSAGE,
+                {**action.payload, "tool_calls": [], "delegated": delegated},
+            )
+        if action.kind == "turn_end":
+            return Event(
+                EventType.TURN_END,
                 {
-                    "text": assistant_text,
-                    "tool_calls": [],
-                    "delegated": {
-                        "backend": "haas",
-                        "session": delegated_session_id,
-                    },
+                    **action.payload,
+                    "iterations": 1,
+                    "delegated": delegated,
                 },
             )
-        yield Event(
-            EventType.TURN_END,
-            {
-                "status": terminal_status,
-                "iterations": 1,
-                "delegated": {"backend": "haas"},
-            },
-        )
+        if action.kind == "tool_proposed":
+            return Event(EventType.TOOL_PROPOSED, {**action.payload, "delegated": delegated})
+        if action.kind == "tool_started":
+            return Event(EventType.TOOL_STARTED, {**action.payload, "delegated": delegated})
+        if action.kind == "tool_output_delta":
+            return Event(EventType.TOOL_OUTPUT_DELTA, {**action.payload, "delegated": delegated})
+        if action.kind == "tool_finished":
+            return Event(EventType.TOOL_FINISHED, {**action.payload, "delegated": delegated})
+        if action.kind == "permission_required":
+            return Event(EventType.PERMISSION_REQUIRED, {**action.payload, "delegated": delegated})
+        if action.kind == "question_requested":
+            return Event(EventType.QUESTION_REQUESTED, {**action.payload, "delegated": delegated})
+        if action.kind == "task_state":
+            return Event(EventType.TASK_STATE, {**action.payload, "delegated": delegated})
+        return None
 
     def get_engine(
         self,
@@ -1021,7 +2658,10 @@ class SessionManager:
             ]
             if self.is_temp_workspace(ws):
                 roots = [{"path": ws, "writable": True, "label": "scratch"}, *extra]
-            elif self._SESSION_ID_RE.match(session_id or "") and session_id not in {".", ".."}:
+            elif self._SESSION_ID_RE.match(session_id or "") and session_id not in {
+                ".",
+                "..",
+            }:
                 roots = [
                     {"path": ws, "writable": True, "label": "workspace"},
                     {
@@ -1073,8 +2713,7 @@ class SessionManager:
             directory_requester=directory_requester
             or self.inbox_directory_requester(session_id, agent),
             plan_approver=plan_approver or self.inbox_plan_approver(session_id, agent),
-            question_asker=question_asker
-            or self.inbox_question_asker(session_id, agent),
+            question_asker=question_asker or self.inbox_question_asker(session_id, agent),
             tool_requester=tool_requester,
             team_approver=team_approver,
             items_approver=items_approver,
@@ -1085,8 +2724,8 @@ class SessionManager:
             connector_filter=self.effective_connectors(session_id, agent_name),
             # Per-session skill menu, LIVE (SKILLS-SPEC §3): a callable so load_skill sees
             # disables/new skills immediately; the catalog snapshot is taken at build.
-            skill_filter=lambda sid=session_id, w=ws, a=agent_name: (
-                self.effective_skill_names(sid, w, agent=a)
+            skill_filter=lambda sid=session_id, w=ws, a=agent_name: self.effective_skill_names(
+                sid, w, agent=a
             ),
             # Persona-carried skills (OPE-58): the bundle's skills/ dir joins the loader
             # so its skills are readable, not just listed.
@@ -1106,9 +2745,7 @@ class SessionManager:
         # A mention-spawned session (§31) keeps its in-thread reply pre-approved across
         # rebuilds/restarts — the grant is re-derived from the durable thread map.
         for thread_target in self.mention_sessions.targets_for(session_id):
-            engine.permissions.task_rules.setdefault("send_message", set()).add(
-                thread_target
-            )
+            engine.permissions.task_rules.setdefault("send_message", set()).add(thread_target)
         if record is not None and record.grants:
             self._apply_grants(engine, record.grants)
         # Auto-compaction (OPE-27): restore the persisted view boundary and wire the live
@@ -1158,9 +2795,7 @@ class SessionManager:
         """The channel address(es) this session's Inbox routes OUT to — used to warn when a
         subscription (inbound) collides with Inbox routing (outbound) on the same channel.
         """
-        binding = self.inbox_routing.binding_for(
-            self.inbox_routing.route_for(session_id, agent)
-        )
+        binding = self.inbox_routing.binding_for(self.inbox_routing.route_for(session_id, agent))
         return [f"{binding.channel}:{binding.target}"] if binding.channel else []
 
     # -- connection hierarchy (UI-REFRESH §4) -----------------------------------
@@ -1191,9 +2826,7 @@ class SessionManager:
             return None
         return set(declared or ())
 
-    def effective_connectors(
-        self, session_id: str, persona_id: str | None = None
-    ) -> set[str]:
+    def effective_connectors(self, session_id: str, persona_id: str | None = None) -> set[str]:
         """The connectors effectively enabled for this session (§4.1): connected AND not muted by
         the session override / persona default AND within the persona's declared grant (OPE-93).
         Drives the engine's connector-tool gating and the inbound delivery gate; seeds the
@@ -1236,9 +2869,7 @@ class SessionManager:
         """The persona's default connector map (seeded from the manifest's connector recommends on
         first read, then user-editable) as a list, each annotated with account-connectedness.
         """
-        defaults = self.persona_connections.defaults_for(
-            persona_id, manifest, connected=connected
-        )
+        defaults = self.persona_connections.defaults_for(persona_id, manifest, connected=connected)
         return [
             {"connector": c, "enabled": bool(enabled), "connected": c in connected}
             for c, enabled in defaults.items()
@@ -1329,11 +2960,7 @@ class SessionManager:
         archived = 0
         if not enabled:
             for r in self.session_store.list():
-                if (
-                    r.agent == persona_id
-                    and not r.archived
-                    and not r.session_id.startswith("__")
-                ):
+                if r.agent == persona_id and not r.archived and not r.session_id.startswith("__"):
                     self.session_store.set_flags(r.session_id, archived=True)
                     archived += 1
         return {"ok": True, "archived_sessions": archived}
@@ -1413,9 +3040,7 @@ class SessionManager:
         Also the default for background/self-wake runs (no live socket). Mirrors to a bound channel
         like the approver does."""
 
-        async def ask(
-            args: dict[str, Any], tool_call_id: str | None = None
-        ) -> dict[str, Any]:
+        async def ask(args: dict[str, Any], tool_call_id: str | None = None) -> dict[str, Any]:
             from ..tools.ask import answer_result, question_item_fields
 
             fields = question_item_fields(args)
@@ -1428,9 +3053,7 @@ class SessionManager:
                 tool_call_id=tool_call_id,
                 **fields,
             )
-            if (
-                item.state != "pending"
-            ):  # durable resume re-raised an already-answered prompt
+            if item.state != "pending":  # durable resume re-raised an already-answered prompt
                 return answer_result(item.questions, item.resolution)
             self.persist_session(session_id)  # the pending tool call is now on disk
             await self.mirror_inbox_item(item)
@@ -1509,8 +3132,7 @@ class SessionManager:
                     "path": path,
                     "writable": writable,
                     "primary": False,
-                    "note": promo.get("error", "")
-                    + " — granted as an additional folder instead",
+                    "note": promo.get("error", "") + " — granted as an additional folder instead",
                 }
             res = self.add_root(session_id, path, writable)
             if not res.get("ok"):
@@ -1614,9 +3236,7 @@ class SessionManager:
         ):
             if not server.enabled:
                 continue
-            if server.auth == "oauth" and not mcp_oauth.has_tokens(
-                server.name, self.secrets
-            ):
+            if server.auth == "oauth" and not mcp_oauth.has_tokens(server.name, self.secrets):
                 # NEVER start an interactive OAuth flow from a turn: a token-less
                 # server here would open a browser and block every session for the
                 # full flow timeout (owner-hit 2026-07-20 — a failed one-click's
@@ -1658,9 +3278,7 @@ class SessionManager:
                     self._mcp_errors[server.name] = (
                         "sign-in required — reconnect this server from its page"
                     )
-                    logger.info(
-                        "mcp %s needs re-auth; skipped for this session", server.name
-                    )
+                    logger.info("mcp %s needs re-auth; skipped for this session", server.name)
                 else:
                     # Bad command / crashed child / unreachable url — the session
                     # still runs without the tools, but the failure must not be
@@ -1671,9 +3289,7 @@ class SessionManager:
                     if tail:
                         msg = f"{msg} — {tail}"
                     self._mcp_errors[server.name] = msg[:500]
-                    logger.warning(
-                        "mcp %s failed to connect: %s", server.name, msg[:500]
-                    )
+                    logger.warning("mcp %s failed to connect: %s", server.name, msg[:500])
                 # Transcript notice on state CHANGE, not state (owner ruling
                 # 2026-08-21): a continuously-broken server stamps only the first
                 # session after it breaks (or breaks differently) — the Connectors
@@ -1684,9 +3300,7 @@ class SessionManager:
                 if declared or self._should_notify_mcp_failure(
                     server.name, self._mcp_errors.get(server.name, "")
                 ):
-                    self._mcp_session_failures.setdefault(session_id, []).append(
-                        server.name
-                    )
+                    self._mcp_session_failures.setdefault(session_id, []).append(server.name)
                 continue
             callables = build_callables(
                 server,
@@ -1787,9 +3401,7 @@ class SessionManager:
                     "auth_hint": name in self._mcp_auth_hints,
                     "last_test_at": self._prefs.get("mcp_last_test", {}).get(name),
                     "last_error": self._mcp_errors.get(name),
-                    "tool_count": (
-                        len(self.mcp._conns[name].tools) if connected else None
-                    ),
+                    "tool_count": (len(self.mcp._conns[name].tools) if connected else None),
                     "config": _redact(raw),
                 }
             )
@@ -1879,9 +3491,7 @@ class SessionManager:
         result = await self.connect_mcp(name)
         if result.get("ok"):
             profile = self.secrets.get(f"{name}:default") or {}
-            self.secrets.put(
-                f"{name}:default", {**profile, "mode": "mcp", "enabled": True}
-            )
+            self.secrets.put(f"{name}:default", {**profile, "mode": "mcp", "enabled": True})
         else:
             # A failed connect must take its seeded config with it: an enabled
             # oauth entry with no tokens lingers forever (nothing owns it once
@@ -1997,7 +3607,7 @@ class SessionManager:
         legacy server-wide don't-ask flag is still present in its config."""
         prefix = f"mcp__{name}__"
         store = self._override_store()
-        tools = [p[len(prefix):] for p in store.trust_patterns() if p.startswith(prefix)]
+        tools = [p[len(prefix) :] for p in store.trust_patterns() if p.startswith(prefix)]
         raw = read_global().get(name) or {}
         return {
             "ok": True,
@@ -2067,8 +3677,7 @@ class SessionManager:
             # Per-workspace allow-lists (managed relay) — a sender is judged against
             # ITS workspace's list; the flat list only governs team-less (socket) events.
             team_allowed = {
-                w["team_id"]: set(w.get("allowed_users") or [])
-                for w in (c.get("workspaces") or [])
+                w["team_id"]: set(w.get("allowed_users") or []) for w in (c.get("workspaces") or [])
             }
             recent = self.gateway.recent_senders(c["name"]) if self.gateway else []
             for r in recent:
@@ -2084,17 +3693,14 @@ class SessionManager:
             c["unauthorized"] = self.parked.list(c["name"])
             # Allow-list display names from the people directory (ids stay the source of truth).
             c["allowed_user_names"] = {
-                u: self._people.get(f"{c['name']}:{u}")
-                for u in (c.get("allowed_users") or [])
+                u: self._people.get(f"{c['name']}:{u}") for u in (c.get("allowed_users") or [])
             }
             c["approval_owner_names"] = {
-                u: self._people.get(f"{c['name']}:{u}")
-                for u in (c.get("approval_owner_ids") or [])
+                u: self._people.get(f"{c['name']}:{u}") for u in (c.get("approval_owner_ids") or [])
             }
             for w in c.get("workspaces") or []:
                 w["allowed_user_names"] = {
-                    u: self._people.get(f"{c['name']}:{u}")
-                    for u in (w.get("allowed_users") or [])
+                    u: self._people.get(f"{c['name']}:{u}") for u in (w.get("allowed_users") or [])
                 }
                 w["approval_owner_names"] = {
                     u: self._people.get(f"{c['name']}:{u}")
@@ -2118,9 +3724,7 @@ class SessionManager:
             conn.shutdown.set()
         return disconnect_connector(self.secrets, name)
 
-    def update_connector_tools(
-        self, name: str, enabled: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_connector_tools(self, name: str, enabled: dict[str, Any]) -> dict[str, Any]:
         return update_connector_tools(self.secrets, name, enabled)
 
     def list_audit(
@@ -2181,9 +3785,7 @@ class SessionManager:
         space = self._board_space(session_id)
         if space is None:
             raise TeamsBoardError("attachment not found")
-        self.team_store.require_attachment_access(
-            space, self._user_actor(), stored
-        )
+        self.team_store.require_attachment_access(space, self._user_actor(), stored)
         path = self.attachment_store.path_for(stored)
         return path.read_bytes(), self.attachment_store.mime_for(stored)
 
@@ -2196,9 +3798,7 @@ class SessionManager:
         if space is None:
             return {"error": "no board for this session"}
         try:
-            item = self.team_store.get_item(
-                space, int(item_id), actor=self._user_actor()
-            )
+            item = self.team_store.get_item(space, int(item_id), actor=self._user_actor())
         except TeamsBoardError as error:
             return {"error": str(error)}
         timeline: list[dict[str, Any]] = []
@@ -2239,9 +3839,7 @@ class SessionManager:
         if space is None:
             return {"error": "no board for this session"}
         try:
-            event = self.team_store.comment(
-                space, self._user_actor(), int(item_id), body
-            )
+            event = self.team_store.comment(space, self._user_actor(), int(item_id), body)
         except (TeamsBoardError, ValueError) as error:
             return {"error": str(error)}
         self.kick_team_tick()  # the assignee's feed has news
@@ -2262,9 +3860,7 @@ class SessionManager:
         for item in items:
             if item["state"] != "blocked":
                 continue
-            for event in reversed(
-                self.team_store.events(space, item_id=item["id"])
-            ):
+            for event in reversed(self.team_store.events(space, item_id=item["id"])):
                 payload = event.get("payload") or {}
                 if event["kind"] == "item_transitioned" and payload.get("to") == "blocked":
                     if payload.get("comment"):
@@ -2285,9 +3881,7 @@ class SessionManager:
         except (TeamsBoardError, ValueError) as error:
             return {"error": str(error)}
 
-    def board_create_items(
-        self, session_id: str, items: list[dict[str, Any]]
-    ) -> dict[str, Any]:
+    def board_create_items(self, session_id: str, items: list[dict[str, Any]]) -> dict[str, Any]:
         """The decomposition gate's approved action: create the proposed items as
         the LEAD (its identity is the creator; the user's approval is the gate that
         let this run). Validates everything up front so a bad batch creates nothing."""
@@ -2302,9 +3896,10 @@ class SessionManager:
             session_id=session_id,
         )
         for entry in items:
-            if not str((entry or {}).get("title", "")).strip() or not str(
-                (entry or {}).get("criteria", "")
-            ).strip():
+            if (
+                not str((entry or {}).get("title", "")).strip()
+                or not str((entry or {}).get("criteria", "")).strip()
+            ):
                 return {
                     "approved": False,
                     "error": "every item needs a title and acceptance criteria",
@@ -2348,9 +3943,7 @@ class SessionManager:
         if team is None or not team.chat_enabled or not team.chat_group:
             return {"error": "chat is not enabled for this team"}
         try:
-            message = self.chat_store.post(
-                team.chat_group, "user", text, author_role="user"
-            )
+            message = self.chat_store.post(team.chat_group, "user", text, author_role="user")
         except (TeamsBoardError, ValueError) as error:
             return {"error": str(error)}
         # A user post wakes every member — kick the drain rather than waiting a tick.
@@ -2397,9 +3990,7 @@ class SessionManager:
             space=space,
             actor=actor,
             attachments=self.attachment_store,
-        ) + journal_tools(
-            self.journal_store, actor=actor, space=space
-        )
+        ) + journal_tools(self.journal_store, actor=actor, space=space)
         if role == "lead":
             tools.append(self._steer_tool(session_id))
             tools.append(self._team_options_tool())
@@ -2426,9 +4017,7 @@ class SessionManager:
             if not team.chat_enabled or not team.chat_group:
                 return {"error": "team chat is not enabled for this team"}
             try:
-                message = manager.chat_store.post(
-                    team.chat_group, handle, text, author_role=role
-                )
+                message = manager.chat_store.post(team.chat_group, handle, text, author_role=role)
             except (TeamsBoardError, ValueError) as error:
                 return {"error": str(error)}
             result: dict[str, Any] = {
@@ -2437,9 +4026,7 @@ class SessionManager:
             }
             if record_on_item is not None and actor is not None:
                 try:
-                    manager.team_store.comment(
-                        team.space, actor, int(record_on_item), text
-                    )
+                    manager.team_store.comment(team.space, actor, int(record_on_item), text)
                     result["recorded_on"] = int(record_on_item)
                 except (TeamsBoardError, ValueError) as error:
                     result["record_error"] = str(error)
@@ -2447,9 +4034,7 @@ class SessionManager:
 
         return ai.tool(
             post_chat,
-            metadata=ai.ToolMetadata(
-                category="team", risk_level="low", capabilities=["team"]
-            ),
+            metadata=ai.ToolMetadata(category="team", risk_level="low", capabilities=["team"]),
         )
 
     def _chat_identity(self, session_id: str, role: str):
@@ -2516,9 +4101,7 @@ class SessionManager:
 
         return ai.tool(
             team_options,
-            metadata=ai.ToolMetadata(
-                category="team", risk_level="low", capabilities=["team"]
-            ),
+            metadata=ai.ToolMetadata(category="team", risk_level="low", capabilities=["team"]),
         )
 
     def _steer_tool(self, lead_session_id: str) -> Any:
@@ -2545,22 +4128,22 @@ class SessionManager:
             if manager._loop is None:
                 return {"error": "steering is unavailable in this surface"}
             asyncio.run_coroutine_threadsafe(
-                manager.deliver_to_session(
-                    match.session_id, f"[Lead] {message}".strip()
-                ),
+                manager.deliver_to_session(match.session_id, f"[Lead] {message}".strip()),
                 manager._loop,
             )
             return {"ok": True, "delivered_to": worker}
 
         return ai.tool(
             steer_worker,
-            metadata=ai.ToolMetadata(
-                category="team", risk_level="medium", capabilities=["team"]
-            ),
+            metadata=ai.ToolMetadata(category="team", risk_level="medium", capabilities=["team"]),
         )
 
     def create_team(
-        self, session_id: str, members: list[dict[str, Any]], *, enable_chat: bool = False
+        self,
+        session_id: str,
+        members: list[dict[str, Any]],
+        *,
+        enable_chat: bool = False,
     ) -> dict[str, Any]:
         """The staffing gate's approved action: PRE-SPAWN worker sessions (state on
         disk, zero tokens — the first model turn fires when the first assignment
@@ -2639,10 +4222,7 @@ class SessionManager:
             group = self.chat_store.create_group(
                 "team chat",
                 [
-                    *(
-                        {"name": w.actor, "persona": w.persona, "role": "worker"}
-                        for w in workers
-                    ),
+                    *({"name": w.actor, "persona": w.persona, "role": "worker"} for w in workers),
                     {"name": "lead", "persona": record.agent, "role": "lead"},
                 ],
             )
@@ -2741,9 +4321,7 @@ class SessionManager:
             items = self.team_store.list_items(team.space, self._user_actor())
         except Exception:
             return False
-        return any(
-            i["state"] in ("in_progress", "blocked", "review") for i in items
-        )
+        return any(i["state"] in ("in_progress", "blocked", "review") for i in items)
 
     async def _maybe_backstop_lead(self, team) -> int:
         if not self._lead_backstop_due(team):
@@ -2772,16 +4350,12 @@ class SessionManager:
         asyncio.create_task(_deliver())
         return 1
 
-    async def _drain_team_member(
-        self, team, *, session_id: str, actor: str, is_lead: bool
-    ) -> int:
+    async def _drain_team_member(self, team, *, session_id: str, actor: str, is_lead: bool) -> int:
         # Interest follows the assignment relation: everyone's feed is the events
         # on their slice (assigned ∪ filed) — comments, moves, reassignments. The
         # lead additionally subscribes to the board-wide decision classes.
         directs = self.team_store.feed_for(team.space, actor)
-        subs = (
-            self.team_store.subscribed_events(team.space, actor) if is_lead else []
-        )
+        subs = self.team_store.subscribed_events(team.space, actor) if is_lead else []
         if subs:
             seen = {e["seq"] for e in subs}
             directs = [e for e in directs if e["seq"] not in seen]
@@ -2791,6 +4365,7 @@ class SessionManager:
             if team.chat_enabled and team.chat_group
             else []
         )
+
         # Cancel is top-priority: an in-flight worker gets interrupted NOW; the
         # queued notice (delivered when the turn dies) tells it why. Only for the
         # item's ASSIGNEE — a filer merely hears about it.
@@ -2821,9 +4396,7 @@ class SessionManager:
         if not self.teams.count_wake(team.team_id, cap=self.TEAM_WAKE_CAP_PER_HOUR):
             logger.warning("team %s paused for budget this hour", team.team_id)
             return 0
-        message, rows = self._team_digest(
-            team, directs, subs, chats, is_lead=is_lead, reader=actor
-        )
+        message, rows = self._team_digest(team, directs, subs, chats, is_lead=is_lead, reader=actor)
         self._team_inflight.add(session_id)
         source = self._board_source(team, message, rows=rows)
 
@@ -2838,13 +4411,9 @@ class SessionManager:
                 if delivered:
                     self.team_store.consume_feed(team.space, actor, max(delivered))
                 if subs:
-                    self.team_store.consume_subscription(
-                        team.space, actor, subs[-1]["seq"]
-                    )
+                    self.team_store.consume_subscription(team.space, actor, subs[-1]["seq"])
                 if chats:
-                    self.chat_store.consume(
-                        team.chat_group, chat_handle, chats[-1]["seq"]
-                    )
+                    self.chat_store.consume(team.chat_group, chat_handle, chats[-1]["seq"])
             finally:
                 self._team_inflight.discard(session_id)
 
@@ -2951,9 +4520,7 @@ class SessionManager:
                         **row,
                         "kind": "moved",
                         "to": to,
-                        "note": self._clamp(
-                            payload.get("comment") or "", self.DIGEST_CLAMP_UI
-                        ),
+                        "note": self._clamp(payload.get("comment") or "", self.DIGEST_CLAMP_UI),
                     }
                 )
             elif event["kind"] == "item_created":
@@ -2961,16 +4528,13 @@ class SessionManager:
                 rows.append({**row, "kind": "filed"})
             elif event["kind"] == "item_commented":
                 lines.append(
-                    f"Comment on {title} by {event['actor']}:"
-                    f" {clamp(payload.get('body', ''))}"
+                    f"Comment on {title} by {event['actor']}: {clamp(payload.get('body', ''))}"
                 )
                 rows.append(
                     {
                         **row,
                         "kind": "comment",
-                        "note": self._clamp(
-                            payload.get("body") or "", self.DIGEST_CLAMP_UI
-                        ),
+                        "note": self._clamp(payload.get("body") or "", self.DIGEST_CLAMP_UI),
                     }
                 )
         for chat in chats or []:
@@ -3023,9 +4587,7 @@ class SessionManager:
         return f"\n\nYour team: {mates}; lead (coordinator).{reach}"
 
     @staticmethod
-    def _board_source(
-        team, message: str, *, rows: list[dict] | None = None
-    ) -> dict[str, Any]:
+    def _board_source(team, message: str, *, rows: list[dict] | None = None) -> dict[str, Any]:
         """Display-only MessageSource sidecar for board deliveries — the same
         mechanism connector messages use, so the GUI renders a structured card
         instead of a fake user bubble (owner ask 2026-08-16). The framed message
@@ -3058,9 +4620,7 @@ class SessionManager:
         by_state: dict[str, int] = {}
         for item in items:
             by_state[item["state"]] = by_state.get(item["state"], 0) + 1
-        unassigned = sum(
-            1 for i in items if i["state"] == "open" and not i["assignee"]
-        )
+        unassigned = sum(1 for i in items if i["state"] == "open" and not i["assignee"])
         parts = [f"{n} {state}" for state, n in sorted(by_state.items())]
         lines = [f"Board: {', '.join(parts) or 'empty'}."]
         if unassigned:
@@ -3073,9 +4633,7 @@ class SessionManager:
             )
         blocked = [i for i in items if i["state"] == "blocked"]
         if blocked:
-            lines.append(
-                "Blocked: " + ", ".join(f"#{i['id']} {i['title']}" for i in blocked[:5])
-            )
+            lines.append("Blocked: " + ", ".join(f"#{i['id']} {i['title']}" for i in blocked[:5]))
         return "\n".join(lines)
 
     def _artifact_scan_root(self, session_id: str) -> Path | None:
@@ -3087,7 +4645,10 @@ class SessionManager:
         workspace = record.workspace if record else self.default_workspace
         if workspace and self.is_temp_workspace(workspace):
             return Path(workspace).expanduser().resolve()
-        if self._SESSION_ID_RE.match(session_id or "") and session_id not in {".", ".."}:
+        if self._SESSION_ID_RE.match(session_id or "") and session_id not in {
+            ".",
+            "..",
+        }:
             d = (self.scratch_base() / session_id).resolve()
             if d.is_dir():
                 return d
@@ -3182,7 +4743,10 @@ class SessionManager:
         candidates: list[Path] = []
         if workspace:
             candidates.append(Path(workspace).expanduser().resolve())
-        if self._SESSION_ID_RE.match(session_id or "") and session_id not in {".", ".."}:
+        if self._SESSION_ID_RE.match(session_id or "") and session_id not in {
+            ".",
+            "..",
+        }:
             scratch = (self.scratch_base() / session_id).resolve()
             if scratch.is_dir() and scratch not in candidates:
                 candidates.append(scratch)
@@ -3222,9 +4786,7 @@ class SessionManager:
         if target.is_dir():
             entries: list[dict[str, Any]] = []
             try:
-                children = sorted(
-                    target.iterdir(), key=lambda c: (c.is_file(), c.name.lower())
-                )
+                children = sorted(target.iterdir(), key=lambda c: (c.is_file(), c.name.lower()))
             except OSError as exc:
                 return {"ok": False, "error": str(exc)}
             for child in children[:500]:
@@ -3276,9 +4838,7 @@ class SessionManager:
             "truncated": len(text) > 500000,
         }
 
-    def reveal_artifact(
-        self, session_id: str, path: str, mode: str = "reveal"
-    ) -> dict[str, Any]:
+    def reveal_artifact(self, session_id: str, path: str, mode: str = "reveal") -> dict[str, Any]:
         """Show the file in the OS file manager (`reveal`) or open it with its default app
         (`open`). The server runs on the user's machine in both desktop and browser builds, so
         this is local. Cross-platform: macOS `open`, Windows Explorer/ShellExecute, Linux
@@ -3299,9 +4859,7 @@ class SessionManager:
                     if mode == "reveal" and not is_dir
                     else ["open", str(target)]
                 )
-                subprocess.Popen(
-                    args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
+                subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif sys.platform == "win32":
                 if mode == "reveal" and not is_dir:
                     # Explorer wants the path glued to the switch: /select,<path>
@@ -3325,18 +4883,14 @@ class SessionManager:
         from ..web import provider_names
 
         profile = self.secrets.get("web_search:default") or {}
-        provider = (
-            profile.get("provider") or load_config().web_search_provider or "duckduckgo"
-        )
+        provider = profile.get("provider") or load_config().web_search_provider or "duckduckgo"
         return {
             "provider": provider,
             "has_key": bool(profile.get("api_key")),
             "providers": provider_names(),
         }
 
-    def set_web_search(
-        self, provider: str, api_key: str | None = None
-    ) -> dict[str, Any]:
+    def set_web_search(self, provider: str, api_key: str | None = None) -> dict[str, Any]:
         from ..web import provider_names
 
         if provider not in provider_names():
@@ -3377,9 +4931,7 @@ class SessionManager:
                     source = "store"
             configured = descriptor_configured(d, profile)
             values = {
-                f.key: profile.get(f.key)
-                for f in d.fields
-                if not f.secret and profile.get(f.key)
+                f.key: profile.get(f.key) for f in d.fields if not f.secret and profile.get(f.key)
             }
             row = {
                 **d.to_dict(),
@@ -3391,17 +4943,13 @@ class SessionManager:
                 # by set_provider) and when the provider last served a completion (epoch,
                 # stamped by the router's on_use hook). Absent for env-only config.
                 "key_set_at": profile.get("key_set_at"),
-                "last_used_at": (self._prefs.get("provider_last_used") or {}).get(
-                    d.name
-                ),
+                "last_used_at": (self._prefs.get("provider_last_used") or {}).get(d.name),
             }
             if d.auth == "oauth":
                 # Sign-in state instead of key state; the token values themselves
                 # never leave the SecretStore.
                 row["signed_in"] = configured
-                row["account"] = profile.get("account_email") or profile.get(
-                    "account_id"
-                )
+                row["account"] = profile.get("account_email") or profile.get("account_id")
                 if d.name == "openai-codex":
                     row["authorizing"] = self._codex_authorizing
                     row["last_error"] = self._codex_error
@@ -3466,7 +5014,7 @@ class SessionManager:
     # Suggestions for the OpenAI-compatible vendor providers (checked against vendor docs
     # 2026-07-04; refresh alongside `recommended_model` in providers/registry.py).
     COMPAT_MODELS = {
-        "volcengine-ark": ["doubao-seed-2.1-turbo", "doubao-seed-1.6-250615"],
+        "volcengine-ark": ["doubao-seed-2-1-turbo-260628", "doubao-seed-1-6-250615"],
         "zai": ["glm-5.2", "glm-4.6"],
         "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro"],
         "kimi": ["kimi-k2.6", "kimi-k2.5"],
@@ -3484,15 +5032,9 @@ class SessionManager:
             return [m.split(":", 1)[-1] for m in self._ollama_models()]
         from ..providers.matrix import models_for_provider
 
-        return list(
-            dict.fromkeys(
-                [*models_for_provider(name), *self.COMPAT_MODELS.get(name, [])]
-            )
-        )
+        return list(dict.fromkeys([*models_for_provider(name), *self.COMPAT_MODELS.get(name, [])]))
 
-    def set_provider(
-        self, name: str, fields: dict[str, Any] | None
-    ) -> dict[str, Any]:
+    def set_provider(self, name: str, fields: dict[str, Any] | None) -> dict[str, Any]:
         """Store a provider's config in its `provider:<name>` SecretStore profile and rebuild
         its cached client. Merges provided fields into any existing profile."""
         d = get_descriptor(name)
@@ -3599,9 +5141,7 @@ class SessionManager:
         self._refresh_provider("openai-codex")
         return {"ok": True, "had_tokens": had_tokens}
 
-    def verify_provider(
-        self, name: str, fields: dict[str, Any] | None
-    ) -> dict[str, Any]:
+    def verify_provider(self, name: str, fields: dict[str, Any] | None) -> dict[str, Any]:
         """Test a provider's credentials with a live read-only call, WITHOUT persisting them, so
         onboarding can offer a "Test" button. Falls back to stored/env values when the form left
         a field blank (e.g. testing an already-configured provider)."""
@@ -3665,9 +5205,20 @@ class SessionManager:
             return {}
 
     def _save_prefs(self) -> None:
-        self._prefs_path().write_text(
-            json.dumps(self._prefs, indent=2), encoding="utf-8"
-        )
+        self._prefs_path().write_text(json.dumps(self._prefs, indent=2), encoding="utf-8")
+
+    def _migrate_haas_policy_defaults(self) -> None:
+        current = self._prefs.get("haas_delegation")
+        if not isinstance(current, dict):
+            current = {}
+        if int(current.get("policy_defaults_revision") or 0) >= 1:
+            return
+        current.setdefault("workspace_mode", "workspace-write")
+        current.setdefault("network_access", True)
+        current.setdefault("approval_mode", "on-request")
+        current["policy_defaults_revision"] = 1
+        self._prefs["haas_delegation"] = current
+        self._save_prefs()
 
     # -- direct-message routing -------------------------------------------------
     def dm_session(self) -> str | None:
@@ -3724,9 +5275,7 @@ class SessionManager:
             import httpx
 
             data = httpx.get(base + "/api/tags", timeout=2.0).json()
-            return [
-                f"ollama:{m['name']}" for m in data.get("models", []) if m.get("name")
-            ]
+            return [f"ollama:{m['name']}" for m in data.get("models", []) if m.get("name")]
         except Exception:
             return []
 
@@ -3789,6 +5338,7 @@ class SessionManager:
 
         env_key = bool(os.environ.get("OPENAI_API_KEY"))
         stored = bool((self.secrets.get("provider:openai") or {}).get("api_key"))
+
         # Only surface models whose provider is actually configured — the composer picker
         # reflects exactly what's connected. The active default is always kept selectable
         # (it's hidden behind the "No model" state until a provider is connected anyway).
@@ -3831,8 +5381,7 @@ class SessionManager:
             # Settings toggles and gate the composer's Auto-Approve mode entry.
             "auto_approve": self.auto_approve(),
             "auto_approve_shadow": self.auto_approve_shadow(),
-            "scratch_base": self._prefs.get("scratch_base")
-            or self.DEFAULT_SCRATCH_BASE,
+            "scratch_base": self._prefs.get("scratch_base") or self.DEFAULT_SCRATCH_BASE,
             "haas_delegation": self._haas_config(self.default_workspace).to_dict(),
             # Real on-disk secrets location, so the UI shows the OS-native path instead of a
             # hardcoded POSIX one (Windows -> %APPDATA%\coworker, macOS/Linux -> ~/.config).
@@ -3853,8 +5402,34 @@ class SessionManager:
         }
 
     def set_haas_delegation_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        if "network_access" in patch and not isinstance(patch["network_access"], bool):
+            return {
+                **self.get_haas_delegation_settings(),
+                "ok": False,
+                "error": "network_access must be a boolean",
+            }
+        if patch.get("workspace_mode") not in {
+            None,
+            "read-only",
+            "workspace-write",
+            "danger-full-access",
+        }:
+            return {
+                **self.get_haas_delegation_settings(),
+                "ok": False,
+                "error": "invalid workspace_mode",
+            }
+        if patch.get("approval_mode") not in {None, "never", "on-request", "always"}:
+            return {
+                **self.get_haas_delegation_settings(),
+                "ok": False,
+                "error": "invalid approval_mode",
+            }
         allowed = {
             "enabled",
+            "mode",
+            "backend_preference",
+            "execution_mode",
             "base_url",
             "user_id",
             "harness_id",
@@ -3869,6 +5444,10 @@ class SessionManager:
             "max_container_lifetime_seconds",
             "request_timeout_seconds",
             "local_autostart",
+            "allow_unpinned_local_image",
+            "network_access",
+            "workspace_mode",
+            "approval_mode",
         }
         current = dict(self._prefs.get("haas_delegation") or {})
         for key in allowed:
@@ -3902,9 +5481,7 @@ class SessionManager:
             "code": bool(self._prefs.get("show_code", False)),
         }
 
-    def set_surfaces(
-        self, chat: bool | None = None, code: bool | None = None
-    ) -> dict[str, Any]:
+    def set_surfaces(self, chat: bool | None = None, code: bool | None = None) -> dict[str, Any]:
         """Toggle Chat/Code visibility (Cowork is always shown). Persisted in prefs."""
         if chat is not None:
             self._prefs["show_chat"] = bool(chat)
@@ -4023,9 +5600,7 @@ class SessionManager:
             "threshold_pct": float(
                 self._prefs.get("compaction_threshold_pct") or DEFAULT_THRESHOLD_PCT
             ),
-            "cap_tokens": int(
-                self._prefs.get("compaction_cap_tokens") or DEFAULT_CAP_TOKENS
-            ),
+            "cap_tokens": int(self._prefs.get("compaction_cap_tokens") or DEFAULT_CAP_TOKENS),
             # "" → the session's own model (engine falls back to self.model).
             "model": str(self._prefs.get("compaction_model") or ""),
         }
@@ -4053,7 +5628,10 @@ class SessionManager:
             try:
                 pct = float(threshold_pct)
             except (TypeError, ValueError):
-                return {"ok": False, "error": "compaction_threshold_pct must be a number"}
+                return {
+                    "ok": False,
+                    "error": "compaction_threshold_pct must be a number",
+                }
             if not 0.10 <= pct <= 0.95:
                 return {
                     "ok": False,
@@ -4062,9 +5640,7 @@ class SessionManager:
             self._prefs["compaction_threshold_pct"] = pct
         if cap_tokens is not None:
             try:
-                self._prefs["compaction_cap_tokens"] = max(
-                    10_000, min(int(cap_tokens), 2_000_000)
-                )
+                self._prefs["compaction_cap_tokens"] = max(10_000, min(int(cap_tokens), 2_000_000))
             except (TypeError, ValueError):
                 return {"ok": False, "error": "compaction_cap_tokens must be a number"}
         if model is not None:
@@ -4160,9 +5736,7 @@ class SessionManager:
             self._note_person(name, user_id, display_name)
         return out
 
-    def disallow_user(
-        self, name: str, user_id: str, team_id: str | None = None
-    ) -> dict[str, Any]:
+    def disallow_user(self, name: str, user_id: str, team_id: str | None = None) -> dict[str, Any]:
         if name == "slack" and user_id in self.slack_approval_owner_ids(team_id):
             return {
                 "ok": False,
@@ -4231,9 +5805,7 @@ class SessionManager:
         if display_name:
             self._note_person("slack", user_id, display_name)
         if self.gateway is not None and "slack" in self.gateway.settings:
-            self.gateway.settings["slack"].allowed_users = set(
-                profile.get("allowed_users") or []
-            )
+            self.gateway.settings["slack"].allowed_users = set(profile.get("allowed_users") or [])
         return {
             "ok": True,
             "approval_owner_ids": sorted(owners),
@@ -4268,9 +5840,7 @@ class SessionManager:
                 return False
         return bool(actor_id) and actor_id in self.slack_approval_owner_ids(owner_team)
 
-    def set_inbox_binding(
-        self, name: str, *, channel: str | None, target: str
-    ) -> dict[str, Any]:
+    def set_inbox_binding(self, name: str, *, channel: str | None, target: str) -> dict[str, Any]:
         """Persist an Inbox transport after validating its approval identity."""
         channel = str(channel or "").strip() or None
         target = str(target or "").strip()
@@ -4316,9 +5886,7 @@ class SessionManager:
         if not profile:
             return {
                 "ok": False,
-                "error": (
-                    "workspace not connected" if team_id else "connector not connected"
-                ),
+                "error": ("workspace not connected" if team_id else "connector not connected"),
             }
         allowed = set(profile.get("allowed_users") or [])
         allowed.add(user_id) if add else allowed.discard(user_id)
@@ -4349,9 +5917,7 @@ class SessionManager:
         from ..config import load_config
 
         await asyncio.to_thread(
-            lambda: cloud.slack_disconnect_workspace(
-                self.secrets, load_config(), team_id
-            )
+            lambda: cloud.slack_disconnect_workspace(self.secrets, load_config(), team_id)
         )
         self.secrets.delete(profile_key)
         remaining = [
@@ -4399,12 +5965,8 @@ class SessionManager:
             "last_error": "",
         }
         teams: dict[str, Any] = {}
-        adapter = (
-            self.gateway._adapters.get("slack") if self.gateway is not None else None
-        )
-        snapshot = getattr(
-            adapter, "status", None
-        )  # relay adapter only; Socket Mode has none
+        adapter = self.gateway._adapters.get("slack") if self.gateway is not None else None
+        snapshot = getattr(adapter, "status", None)  # relay adapter only; Socket Mode has none
         if callable(snapshot):
             relay = snapshot()
             teams = relay.pop("teams", {})
@@ -4416,9 +5978,7 @@ class SessionManager:
             "teams": teams,
         }
 
-    async def disconnect_github_installation(
-        self, installation_id: str
-    ) -> dict[str, Any]:
+    async def disconnect_github_installation(self, installation_id: str) -> dict[str, Any]:
         """Stop relaying ONE GitHub installation: delete the cloud routing rows
         (best-effort), drop the local profile, hot-reload the gateway. The Slack
         per-workspace disconnect, GitHub flavour — a manual PAT stays untouched."""
@@ -4427,9 +5987,7 @@ class SessionManager:
         from ..config import load_config
         from ..connectors import github_installs
 
-        if not installation_id or not self.secrets.get(
-            github_installs.PREFIX + installation_id
-        ):
+        if not installation_id or not self.secrets.get(github_installs.PREFIX + installation_id):
             return {"ok": False, "error": "installation not connected"}
         await asyncio.to_thread(
             lambda: cloud.github_disconnect_installation(
@@ -4455,9 +6013,7 @@ class SessionManager:
         }
         installs: dict[str, Any] = {}
         missed: dict[str, Any] = {}
-        adapter = (
-            self.gateway._adapters.get("github") if self.gateway is not None else None
-        )
+        adapter = self.gateway._adapters.get("github") if self.gateway is not None else None
         snapshot = getattr(adapter, "status", None)
         if callable(snapshot):
             relay = snapshot()
@@ -4552,9 +6108,7 @@ class SessionManager:
             self.gateway = None
 
     # -- unauthorized inbound (parked, §19) --------------------------------------
-    def _note_person(
-        self, platform: str, user_id: str | None, name: str | None
-    ) -> None:
+    def _note_person(self, platform: str, user_id: str | None, name: str | None) -> None:
         """Remember a sender's display name (persisted) so ID-keyed surfaces — the allow-list
         chips above all — can show who a U07JK… actually is. Best-effort, newest name wins.
         """
@@ -4585,9 +6139,7 @@ class SessionManager:
             text=event.text or "",
         )
 
-    async def resolve_unauthorized(
-        self, name: str, item_id: str, action: str
-    ) -> dict[str, Any]:
+    async def resolve_unauthorized(self, name: str, item_id: str, action: str) -> dict[str, Any]:
         """Resolve one parked message: "dismiss" throws it away; "allow" adds the sender to the
         allow-list (future messages flow); "allow_deliver" also re-injects the parked message
         through the NORMAL inbound path — buffer + subscriptions — as if it just arrived.
@@ -4783,9 +6335,7 @@ class SessionManager:
             return ApprovalOutcome.ONCE
         return outcome
 
-    def audit_autonomy_change(
-        self, session_id: str, kind: str, before: Any, after: Any
-    ) -> None:
+    def audit_autonomy_change(self, session_id: str, kind: str, before: Any, after: Any) -> None:
         """Record a change to how much the agent may do unsupervised — the permission mode,
         or the attended/unattended toggle. Without this, "who turned on auto mode, and when"
         is unanswerable from the audit store, which is at odds with the per-call trail the
@@ -4973,10 +6523,7 @@ class SessionManager:
         if item is None:
             return
         protected_kinds = {"approval", "directory", "plan"}
-        if (
-            getattr(event, "platform", "") == "slack"
-            and item.kind in protected_kinds
-        ):
+        if getattr(event, "platform", "") == "slack" and item.kind in protected_kinds:
             actor_id = str(getattr(event, "user_id", "") or "")
             if not self._slack_actor_owns_item(
                 item,
@@ -5018,10 +6565,11 @@ class SessionManager:
             item = self.inbox.get(item_id)
             if item is None:
                 return False
-            if (
-                getattr(event.source, "platform", "") == "slack"
-                and item.kind in {"approval", "directory", "plan"}
-            ):
+            if getattr(event.source, "platform", "") == "slack" and item.kind in {
+                "approval",
+                "directory",
+                "plan",
+            }:
                 actor_id = str(getattr(event.source, "user_id", "") or "")
                 if not self._slack_actor_owns_item(
                     item,
@@ -5063,16 +6611,158 @@ class SessionManager:
 
     def mark_running(self, session_id: str) -> None:
         self._running_sessions.add(session_id)
+        self._active_haas_turns[session_id] = _ActiveHaasTurn()
 
     def try_mark_running(self, session_id: str) -> bool:
         """Atomically claim an idle session for one turn on the server event loop."""
         if session_id in self._running_sessions:
             return False
         self._running_sessions.add(session_id)
+        self._active_haas_turns[session_id] = _ActiveHaasTurn()
         return True
+
+    async def request_interrupt(
+        self, session_id: str, engine: TurnEngine
+    ) -> dict[str, Any] | None:
+        """Interrupt local work and propagate Stop to an accepted HaaS invocation."""
+        engine.request_interrupt()
+        control = self._active_haas_turns.get(session_id)
+        if control is None:
+            record = self.session_store.load(session_id)
+            binding = binding_from_record(record) or {}
+            resumable_invocation_id = str(
+                binding.get("resumable_invocation_id") or ""
+            )
+            if (
+                binding.get("control_state") != "paused"
+                or not binding.get("supports_resume")
+                or not resumable_invocation_id.startswith("inv_")
+            ):
+                return None
+            client, haas_session_id = self._haas_interaction_client(session_id)
+            result = await client.cancel_invocation(
+                haas_session_id, resumable_invocation_id
+            )
+            invocation = result.data if hasattr(result, "data") else result
+            if not isinstance(invocation, dict):
+                invocation = {}
+            session_control = invocation.get("sessionControl") or {
+                "controlState": "cancelled",
+                "supportsResume": False,
+                "resumableInvocationId": None,
+            }
+            self._persist_haas_control(
+                session_id, {"sessionControl": session_control}
+            )
+            return {"sessionControl": session_control}
+        control.cancel_requested = True
+        try:
+            result = await self._dispatch_haas_cancel(control)
+        except Exception:
+            control.cancel_requested = False
+            control.cancel_sent = False
+            raise
+        if result is not None and isinstance(result.get("sessionControl"), dict):
+            self._persist_haas_control(session_id, result)
+            return result
+        return None
+
+    async def request_pause(self, session_id: str) -> dict[str, Any]:
+        """Pause an accepted HaaS invocation and persist resumable readback."""
+        control = self._active_haas_turns.get(session_id)
+        if control is None:
+            raise HaasDelegationError("No running HaaS invocation can be paused.")
+        if control.cancel_requested:
+            raise HaasDelegationError("This invocation is already stopping.")
+        control.pause_requested = True
+        try:
+            result = await self._dispatch_haas_pause(control)
+        except Exception:
+            # The mutation was rejected before an authoritative paused readback.
+            # Keep the active invocation controllable and let the WebSocket restore
+            # the running projection instead of stranding the UI in `pausing`.
+            control.pause_requested = False
+            control.pause_sent = False
+            raise
+        if result is None:
+            raise HaasDelegationError("HaaS has not accepted the invocation yet.")
+        self._persist_haas_control(session_id, result)
+        return result
+
+    async def _bind_active_haas_turn(
+        self,
+        session_id: str,
+        *,
+        client: Any,
+        haas_session_id: str,
+        invocation_id: str | None = None,
+    ) -> None:
+        control = self._active_haas_turns.setdefault(session_id, _ActiveHaasTurn())
+        control.client = client
+        control.haas_session_id = haas_session_id
+        if invocation_id is not None:
+            control.invocation_id = invocation_id
+        await self._dispatch_haas_pause(control)
+        cancel_result = await self._dispatch_haas_cancel(control)
+        if cancel_result is not None and isinstance(
+            cancel_result.get("sessionControl"), dict
+        ):
+            self._persist_haas_control(session_id, cancel_result)
+
+    @staticmethod
+    async def _dispatch_haas_pause(control: _ActiveHaasTurn) -> dict[str, Any] | None:
+        if (
+            not control.pause_requested
+            or control.pause_dispatching
+            or control.pause_sent
+            or control.client is None
+            or control.haas_session_id is None
+            or control.invocation_id is None
+        ):
+            return None
+        pause = getattr(control.client, "pause_invocation", None)
+        if not callable(pause):
+            raise HaasDelegationError("HaaS backend does not support invocation pause.")
+        control.pause_dispatching = True
+        try:
+            response = await pause(control.haas_session_id, control.invocation_id)
+        except Exception:
+            control.pause_dispatching = False
+            raise
+        control.pause_dispatching = False
+        control.pause_sent = True
+        return response.data if hasattr(response, "data") else response
+
+    @staticmethod
+    async def _dispatch_haas_cancel(control: _ActiveHaasTurn) -> dict[str, Any] | None:
+        if (
+            not control.cancel_requested
+            or control.cancel_dispatching
+            or control.cancel_sent
+            or control.client is None
+            or control.haas_session_id is None
+            or control.invocation_id is None
+        ):
+            return None
+        cancel = getattr(control.client, "cancel_invocation", None)
+        if not callable(cancel):
+            raise HaasDelegationError("HaaS backend does not support invocation cancellation.")
+        control.cancel_dispatching = True
+        try:
+            response = await cancel(control.haas_session_id, control.invocation_id)
+        except Exception:
+            # The stable mgr-cancel:<invocation> key makes a later retry safe when
+            # transport failure leaves acknowledgement uncertain.
+            control.cancel_dispatching = False
+            raise
+        control.cancel_dispatching = False
+        control.cancel_sent = True
+        result = response.data if hasattr(response, "data") else response
+        return result if isinstance(result, dict) else None
 
     def mark_idle(self, session_id: str) -> None:
         self._running_sessions.discard(session_id)
+        self._active_haas_turns.pop(session_id, None)
         # Every turn path (WS, background delivery, durable resume) marks idle when it
         # finishes — the one shared post-turn moment, so auto-titling hooks in here and
         # can never add latency to the response itself.
@@ -5083,8 +6773,7 @@ class SessionManager:
         if self.teams.for_lead_session(session_id):
             self._team_last_alive[session_id] = time.time()
         if self._loop is not None and (
-            self.teams.for_lead_session(session_id)
-            or self.teams.for_worker_session(session_id)
+            self.teams.for_lead_session(session_id) or self.teams.for_worker_session(session_id)
         ):
             asyncio.run_coroutine_threadsafe(self.team_tick(), self._loop)
         if session_id in self._promotion_rebuild:
@@ -5092,6 +6781,71 @@ class SessionManager:
             # rebuilds with the new primary (relative anchoring, env snapshot, git).
             self._promotion_rebuild.discard(session_id)
             self._engines.pop(session_id, None)
+
+    def _persist_haas_control(self, session_id: str, invocation: dict[str, Any]) -> None:
+        record = self.session_store.load(session_id)
+        if record is None:
+            return
+        bindings = dict(record.bindings)
+        binding = dict(bindings.get(HAAS_DELEGATION_BINDING_KEY) or {})
+        session_control = invocation.get("sessionControl") or {}
+        binding["control_state"] = str(session_control.get("controlState") or "idle")
+        binding["supports_resume"] = bool(session_control.get("supportsResume", False))
+        binding["resumable_invocation_id"] = session_control.get("resumableInvocationId")
+        bindings[HAAS_DELEGATION_BINDING_KEY] = binding
+        self.session_store.set_bindings(session_id, bindings)
+
+    def haas_control_state(self, session_id: str) -> dict[str, Any]:
+        control = self._active_haas_turns.get(session_id)
+        if control is not None:
+            record = self.session_store.load(session_id)
+            binding = binding_from_record(record) or {}
+            # HaaS cancel acknowledgements can revoke resumability before the
+            # interrupted source stream reaches its local finally block. Once
+            # persisted, that authoritative terminal state wins over the
+            # in-memory active marker so the desktop cannot stick at stopping.
+            persisted_state = str(binding.get("control_state") or "")
+            if control.cancel_sent and persisted_state not in {
+                "",
+                "running",
+                "pausing",
+                "paused",
+                "resuming",
+                "stopping",
+            }:
+                return {
+                    "controlState": "idle",
+                    "supportsResume": False,
+                    "resumableInvocationId": None,
+                    "pauseSupported": bool(binding.get("pause_supported", False)),
+                }
+            state = "stopping" if control.cancel_requested else (
+                "pausing" if control.pause_requested else "running"
+            )
+            return {
+                "controlState": state,
+                "supportsResume": False,
+                "resumableInvocationId": None,
+                "pauseSupported": bool(binding.get("pause_supported", False)),
+            }
+        record = self.session_store.load(session_id)
+        binding = binding_from_record(record) or {}
+        persisted_state = str(binding.get("control_state") or "idle")
+        if persisted_state not in {
+            "idle",
+            "running",
+            "pausing",
+            "paused",
+            "resuming",
+            "stopping",
+        }:
+            persisted_state = "idle"
+        return {
+            "controlState": persisted_state,
+            "supportsResume": bool(binding.get("supports_resume", False)),
+            "resumableInvocationId": binding.get("resumable_invocation_id"),
+            "pauseSupported": bool(binding.get("pause_supported", False)),
+        }
 
     def is_running(self, session_id: str) -> bool:
         return session_id in self._running_sessions
@@ -5132,19 +6886,13 @@ class SessionManager:
                 # tool failure would otherwise vanish. Log it and park it in the dead-letter store.
                 if event.type.value == "error":
                     reason = (event.data or {}).get("error", "unknown error")
-                    logger.warning(
-                        "background turn failed for %s: %s", session_id, reason
-                    )
+                    logger.warning("background turn failed for %s: %s", session_id, reason)
                     self.unrouted.record(session_id, "-", message, reason=reason)
             self.save(session_id, engine)
-        except (
-            Exception
-        ) as exc:  # an unexpected raise out of the turn must not be swallowed
+        except Exception as exc:  # an unexpected raise out of the turn must not be swallowed
             logger.warning("background turn crashed for %s: %s", session_id, exc)
             self.unrouted.record(session_id, "-", message, reason=str(exc))
-            await self.broadcast_session(
-                session_id, {"type": "error", "data": {"error": str(exc)}}
-            )
+            await self.broadcast_session(session_id, {"type": "error", "data": {"error": str(exc)}})
         finally:
             self.mark_idle(session_id)
             await self.broadcast_session(session_id, {"type": "turn_done", "data": {}})
@@ -5196,14 +6944,10 @@ class SessionManager:
                 for sub in subs:
                     # Per-session connection hierarchy (§4.3): a session that has muted this
                     # connector skips delivery — the message is still buffered (above) for catch-up.
-                    if not self._inbound_connector_allowed(
-                        sub.session_id, src.platform
-                    ):
+                    if not self._inbound_connector_allowed(sub.session_id, src.platform):
                         continue
                     try:
-                        await self.deliver_to_session(
-                            sub.session_id, msg, source=ms.to_dict()
-                        )
+                        await self.deliver_to_session(sub.session_id, msg, source=ms.to_dict())
                     except Exception:
                         pass
                 return
@@ -5214,13 +6958,9 @@ class SessionManager:
             await self.deliver_to_session(dm, event.tagged_text(), source=ms.to_dict())
         elif dm:
             # Designated, but this session has muted the connector → park rather than deliver.
-            self.unrouted.record(
-                src.target, who, text, reason="connector muted for DM session"
-            )
+            self.unrouted.record(src.target, who, text, reason="connector muted for DM session")
         else:
-            self.unrouted.record(
-                src.target, who, text, reason="no DM session designated"
-            )
+            self.unrouted.record(src.target, who, text, reason="no DM session designated")
 
     # -- mention router (§31) ----------------------------------------------------
     async def _route_mention(self, event, ms: MessageSource, subs) -> None:
@@ -5248,9 +6988,7 @@ class SessionManager:
                 if not self._inbound_connector_allowed(sub.session_id, src.platform):
                     continue
                 try:
-                    await self.deliver_to_session(
-                        sub.session_id, msg, source=ms.to_dict()
-                    )
+                    await self.deliver_to_session(sub.session_id, msg, source=ms.to_dict())
                 except Exception:
                     pass
             return
@@ -5266,9 +7004,7 @@ class SessionManager:
             return
         await self._spawn_mention_session(event, ms, thread_target)
 
-    async def _spawn_mention_session(
-        self, event, ms: MessageSource, thread_target: str
-    ) -> None:
+    async def _spawn_mention_session(self, event, ms: MessageSource, thread_target: str) -> None:
         """First tag in a thread: a NEW visible coworker session that owns the thread. Its
         in-thread replies carry a standing grant (§25 shape, exact-target match) so the
         conversation never stalls on an approval nobody in Slack can see; everything else
@@ -5287,12 +7023,8 @@ class SessionManager:
             return
         # Durable mapping FIRST (a fast follow-up tag mid-turn dedupes into steering),
         # then the live grant; get_engine re-derives it from the store on any rebuild.
-        self.mention_sessions.set(
-            thread_target, sid, channel=f"{src.platform}:{src.chat_id}"
-        )
-        engine.permissions.task_rules.setdefault("send_message", set()).add(
-            thread_target
-        )
+        self.mention_sessions.set(thread_target, sid, channel=f"{src.platform}:{src.chat_id}")
+        engine.permissions.task_rules.setdefault("send_message", set()).add(thread_target)
         self.save(sid, engine)  # the sessions row must exist before rename/set_origin
         # Title = the ASK first, channel last (owner call 2026-07-14): the text is what
         # varies between sessions, so it gets the truncation budget; the mention token is
@@ -5311,8 +7043,7 @@ class SessionManager:
             f'with target "{thread_target}" — replies to this thread are pre-approved and '
             f"never prompt the user. Anything else (other channels, files, external "
             f"actions) asks for approval as usual. Keep replies concise and "
-            f"Slack-appropriate."
-            + (f"\n\nRecent channel context:\n{context}" if context else "")
+            f"Slack-appropriate." + (f"\n\nRecent channel context:\n{context}" if context else "")
         )
         try:
             await self.deliver_to_session(sid, opening, source=ms.to_dict())
@@ -5332,14 +7063,10 @@ class SessionManager:
                 f"⏰ Wake — the event `{wake.event_key}` you were waiting on has fired{note}. "
                 "Continue where you left off."
             )
-        return (
-            f"⏰ Wake — the timer you set has fired{note}. Continue where you left off."
-        )
+        return f"⏰ Wake — the timer you set has fired{note}. Continue where you left off."
 
     async def _run_scheduled_task(self, task, trigger: str) -> TaskRun:
-        run = TaskRun(
-            task_id=task.id, trigger=trigger
-        )  # __post_init__ sets run.session_id
+        run = TaskRun(task_id=task.id, trigger=trigger)  # __post_init__ sets run.session_id
         self.task_store.add_run(run)  # mark "running"
         # UX-026: tell every open app window a SCHEDULED run just started (the 5s
         # top-right toast). Manual runs never come through here — the user is
@@ -5435,9 +7162,7 @@ class SessionManager:
         # `unseen_failed` tints the badge when the NEWEST unseen run errored.
         tasks = []
         for t in self.task_store.list():
-            unseen = [
-                r for r in self.task_store.runs(t.id) if r.started_at > t.seen_runs_at
-            ]
+            unseen = [r for r in self.task_store.runs(t.id) if r.started_at > t.seen_runs_at]
             tasks.append(
                 {
                     **t.public(),
@@ -5512,9 +7237,7 @@ class SessionManager:
         self.task_store.save(task)
         return {"ok": True, "task": task.public()}
 
-    def update_automation(
-        self, task_id: str, changes: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_automation(self, task_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         task = self.task_store.get(task_id)
         if task is None:
             return {"ok": False, "error": "not found"}
@@ -5554,9 +7277,7 @@ class SessionManager:
         if task is None:
             return {"ok": False, "error": "not found"}
         Path(task.workspace).mkdir(parents=True, exist_ok=True)
-        run = TaskRun(
-            task_id=task.id, trigger="manual"
-        )  # status "running", session_id auto
+        run = TaskRun(task_id=task.id, trigger="manual")  # status "running", session_id auto
         self.task_store.add_run(run)
         return {
             "ok": True,
@@ -5577,9 +7298,7 @@ class SessionManager:
         """Mark a manual run complete once its first turn finished (the WS already saved the
         session). Pulls result text + artifacts from the persisted transcript/workspace.
         """
-        run = next(
-            (r for r in self.task_store.runs(task_id) if r.run_id == run_id), None
-        )
+        run = next((r for r in self.task_store.runs(task_id) if r.run_id == run_id), None)
         task = self.task_store.get(task_id)
         if run is None or task is None:
             return {"ok": False, "error": "not found"}
@@ -5587,10 +7306,39 @@ class SessionManager:
             record = self.session_store.load(run.session_id)
             run.result_text = _last_assistant_text(record.messages) if record else None
             run.artifacts = _recent_files(task.workspace, since=run.started_at)
-            run.status = "ok"
+            bridge = (
+                (record.bindings if record else {})
+                .get("haas_delegation", {})
+                .get("stream_bridge", {})
+            )
+            task_state = bridge.get("task") or {}
+            task_phase = str(task_state.get("phase") or "")
+            terminal_status = str(bridge.get("terminalStatus") or "")
+            failure_phase = (
+                task_phase
+                if task_phase in {"failed", "incomplete", "cancelled", "verifying"}
+                else terminal_status
+            )
+            if failure_phase in {"failed", "incomplete", "cancelled", "verifying"}:
+                run.status = "error"
+                safe_reason = (
+                    task_state.get("safeReason")
+                    or task_state.get("code")
+                    or bridge.get("terminalSafeReason")
+                    or bridge.get("terminalCode")
+                )
+                run.error = str(safe_reason) if safe_reason else f"HaaS invocation {failure_phase}"
+            elif task_phase in {"waiting_for_input", "waiting_for_approval", "running"}:
+                run.status = "error"
+                run.error = f"HaaS task {task_phase}"
+            else:
+                # Legacy/direct-engine runs do not have a HaaS bridge. A delegated
+                # run is successful only after its persisted completion barrier says
+                # completed; the failure states above must never be promoted to ok.
+                run.status = "ok"
             run.finished_at = _epoch()
             self.task_store.add_run(run)
-            task.last_run, task.last_status = run.finished_at, "ok"
+            task.last_run, task.last_status = run.finished_at, run.status
             task.run_count += 1
             self.task_store.save(task)
         return {"ok": True, "run": run.to_dict()}
@@ -5629,9 +7377,7 @@ class SessionManager:
         if grants.get("readonly"):
             engine.permissions.allow_readonly_for_session()
 
-    def _extra_roots_of(
-        self, engine: TurnEngine, session_id: str
-    ) -> list[dict[str, Any]]:
+    def _extra_roots_of(self, engine: TurnEngine, session_id: str) -> list[dict[str, Any]]:
         """User/agent-added folders = the engine's roots minus the primary (index 0) AND
         the session's provisioned scratch root. Persisting the scratch as an "extra"
         would re-add it as a plain folder on every rebuild (universal scratch made
@@ -5702,11 +7448,7 @@ class SessionManager:
                 text
                 for m in engine.messages
                 if m.get("role") == "assistant"
-                and (
-                    text := content_to_text(
-                        m.get("content"), image_placeholder=""
-                    ).strip()
-                )
+                and (text := content_to_text(m.get("content"), image_placeholder="").strip())
             ),
             "",
         )[:400]
@@ -5716,9 +7458,7 @@ class SessionManager:
         if self._autotitle_sig.get(session_id) == sig:
             return
         self._autotitle_sig[session_id] = sig
-        self._autotitle_attempts[session_id] = (
-            self._autotitle_attempts.get(session_id, 0) + 1
-        )
+        self._autotitle_attempts[session_id] = self._autotitle_attempts.get(session_id, 0) + 1
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -5726,9 +7466,7 @@ class SessionManager:
         self._autotitle_inflight.add(session_id)
         # Retain the task: the loop holds only a weak ref, and a GC'd task would both
         # kill the title mid-flight and strand the inflight guard.
-        task = loop.create_task(
-            self._generate_autotitle(session_id, engine, openers, assistant)
-        )
+        task = loop.create_task(self._generate_autotitle(session_id, engine, openers, assistant))
         self._autotitle_tasks.add(task)
         task.add_done_callback(self._autotitle_tasks.discard)
 
@@ -5752,11 +7490,7 @@ class SessionManager:
                     {
                         "role": "user",
                         "content": "\n\n".join(openers)
-                        + (
-                            f"\n\n[the assistant's first reply]\n{assistant}"
-                            if assistant
-                            else ""
-                        ),
+                        + (f"\n\n[the assistant's first reply]\n{assistant}" if assistant else ""),
                     },
                 ],
                 temperature=0.2,
@@ -5819,9 +7553,7 @@ class SessionManager:
             ]
         record = self.session_store.load(session_id)
         primary = (
-            record.workspace
-            if record and record.workspace
-            else self._provision_scratch(session_id)
+            record.workspace if record and record.workspace else self._provision_scratch(session_id)
         )
         extra = (record.extra_roots if record else []) or []
         primary_is_scratch = self.is_temp_workspace(primary)
@@ -5899,9 +7631,7 @@ class SessionManager:
         self._promotion_rebuild.add(session_id)
         return {"ok": True, "path": str(resolved), "roots": self.get_roots(session_id)}
 
-    def add_root(
-        self, session_id: str, path: str, writable: bool = False
-    ) -> dict[str, Any]:
+    def add_root(self, session_id: str, path: str, writable: bool = False) -> dict[str, Any]:
         """Grant the session access to another folder (read-only or read-write). Mutates the live
         engine in place when running (file tools + permissions + context see it immediately) and
         persists it so a later resume still has it."""
@@ -5918,9 +7648,7 @@ class SessionManager:
                         r.writable = bool(writable)
             else:
                 engine.roots.append(RootDir(path=resolved, writable=bool(writable)))
-            self.session_store.set_extra_roots(
-                session_id, self._extra_roots_of(engine, session_id)
-            )
+            self.session_store.set_extra_roots(session_id, self._extra_roots_of(engine, session_id))
         else:
             # A brand-new conversation has no record yet (it's only saved after the first turn) —
             # create one now so set_extra_roots has a row to update and the folder survives.
@@ -5973,9 +7701,7 @@ class SessionManager:
         """One-line presence pointer for a newly granted directory, or None."""
         try:
             key = project_key(path)
-            pres = project_presence(
-                key, memory_store=self.memory_store, team_store=self.team_store
-            )
+            pres = project_presence(key, memory_store=self.memory_store, team_store=self.team_store)
         except Exception:
             return None
         parts = []
@@ -5999,16 +7725,10 @@ class SessionManager:
                     "error": "cannot remove the primary scratch directory",
                 }
             engine.roots[:] = [r for r in engine.roots if r.path != resolved]
-            self.session_store.set_extra_roots(
-                session_id, self._extra_roots_of(engine, session_id)
-            )
+            self.session_store.set_extra_roots(session_id, self._extra_roots_of(engine, session_id))
         else:
             current = self.get_roots(session_id)
-            if (
-                current
-                and current[0]["primary"]
-                and Path(current[0]["path"]).resolve() == resolved
-            ):
+            if current and current[0]["primary"] and Path(current[0]["path"]).resolve() == resolved:
                 return {
                     "ok": False,
                     "error": "cannot remove the primary scratch directory",
@@ -6017,8 +7737,7 @@ class SessionManager:
             extra = [
                 r
                 for r in current
-                if not r["primary"]
-                and Path(r["path"]).resolve() not in (resolved, session_scratch)
+                if not r["primary"] and Path(r["path"]).resolve() not in (resolved, session_scratch)
             ]
             self.session_store.set_extra_roots(
                 session_id,
@@ -6096,11 +7815,7 @@ class SessionManager:
             ws = Path(record.workspace)
             try:
                 resolved = ws.resolve()
-                if (
-                    resolved.is_relative_to(scratch)
-                    and resolved != scratch
-                    and resolved.is_dir()
-                ):
+                if resolved.is_relative_to(scratch) and resolved != scratch and resolved.is_dir():
                     shutil.rmtree(resolved)
             except OSError:
                 pass  # a stale/foreign path must not fail the delete
@@ -6146,9 +7861,7 @@ class SessionManager:
                 "sleeping_until": self._sleeping_until(r.session_id),
                 # Channels this session listens to (inbound subscriptions) — drives the per-session
                 # "connections" indicator.
-                "subscriptions": [
-                    s.channel for s in self.subscriptions.for_session(r.session_id)
-                ],
+                "subscriptions": [s.channel for s in self.subscriptions.for_session(r.session_id)],
                 # Agent teams: {} for plain sessions. Workers carry role/lead_session
                 # (+ a computed current-item line); leads carry role/team_id — drives
                 # the sidebar's ONE expandable team entry.
@@ -6165,9 +7878,12 @@ class SessionManager:
             return {}
         runtime = binding.get("runtime")
         runtime = runtime if isinstance(runtime, dict) else {}
+        execution_mode = binding.get("execution_mode") or "delegated_session"
         return {
             "backend": "haas",
+            "execution_mode": execution_mode,
             "delegated_session_id": binding.get("delegated_session_id"),
+            "haas_session_id": binding.get("haas_session_id"),
             "runtime_status": runtime.get("status"),
             "container_generation": runtime.get("containerGeneration"),
         }
@@ -6185,9 +7901,7 @@ class SessionManager:
             team = self.teams.get(str(info.get("team_id", "")))
             if team is not None and team.chat_enabled and team.chat_group:
                 row["chat_enabled"] = True
-                row["chat_unread"] = self.chat_store.unread_count(
-                    team.chat_group, "user"
-                )
+                row["chat_unread"] = self.chat_store.unread_count(team.chat_group, "user")
         if info.get("role") == "worker" and info.get("space") and info.get("actor"):
             try:
                 items = self.team_store.list_items(
@@ -6213,9 +7927,7 @@ class SessionManager:
 
     def _sleeping_until(self, session_id: str) -> str | None:
         fires = [
-            w.fire_at
-            for w in self.wakes.pending(session_id)
-            if w.kind == "timer" and w.fire_at
+            w.fire_at for w in self.wakes.pending(session_id) if w.kind == "timer" and w.fire_at
         ]
         return min(fires) if fires else None
 
@@ -6235,9 +7947,7 @@ class SessionManager:
         adds that project's skills, with project copies shadowing same-named global ones."""
         return self.skill_store.rows(workspace or None)
 
-    def reveal_skill(
-        self, name: str, workspace: str | None = None
-    ) -> dict[str, Any]:
+    def reveal_skill(self, name: str, workspace: str | None = None) -> dict[str, Any]:
         """Open the skill's folder in the OS file manager (§6 "Show folder" — the power-user
         window into folder-is-truth). Same local-machine rationale as reveal_artifact."""
         import subprocess
@@ -6276,9 +7986,7 @@ class SessionManager:
         names = list((entry.manifest.mcp if entry and entry.manifest else []) or [])
         return {n for n in names if n} or None
 
-    def persona_skill_scope(
-        self, persona_id: str
-    ) -> tuple[Path | None, set[str] | None]:
+    def persona_skill_scope(self, persona_id: str) -> tuple[Path | None, set[str] | None]:
         """The persona's own skill folder + optional allowlist (OPE-58).
 
         A manifest-backed persona carries skills as a `skills/` dir next to its manifest —
@@ -6322,9 +8030,7 @@ class SessionManager:
             session_overrides=self.session_skills.get(session_id),
         )
 
-    def session_skills_view(
-        self, session_id: str, workspace: str | None = None
-    ) -> dict[str, Any]:
+    def session_skills_view(self, session_id: str, workspace: str | None = None) -> dict[str, Any]:
         """The rail payload: every in-scope, Settings-enabled skill with its mute state.
         Persona-carried skills (OPE-58) appear with scope "coworker" — mutable per session
         like any other, but owned by the persona bundle, not the Settings store."""
@@ -6481,9 +8187,7 @@ class SessionManager:
                 },
             }
             try:
-                asyncio.run_coroutine_threadsafe(
-                    self.broadcast_session(session_id, payload), loop
-                )
+                asyncio.run_coroutine_threadsafe(self.broadcast_session(session_id, payload), loop)
             except RuntimeError:
                 pass
 
@@ -6505,16 +8209,12 @@ class SessionManager:
             "kind": kind,
             "bound": bound,
             "derived": (
-                {**project_label(derived_key), "key": derived_key}
-                if derived_key
-                else None
+                {**project_label(derived_key), "key": derived_key} if derived_key else None
             ),
             "named": [{"name": n["name"], "key": n["key"]} for n in named],
         }
 
-    def set_binding(
-        self, session_id: str, kind: str, name: str | None
-    ) -> dict[str, Any]:
+    def set_binding(self, session_id: str, kind: str, name: str | None) -> dict[str, Any]:
         """Bind (or unbind, name=None) a named project for this session. Takes
         effect at the next engine build — the running engine keeps the knowledge
         it started with (same doctrine as memory deletions)."""
@@ -6538,18 +8238,14 @@ class SessionManager:
         self._engines.pop(session_id, None)
         return {"ok": True, "bindings": bindings}
 
-    def name_current_project(
-        self, session_id: str, kind: str, name: str
-    ) -> dict[str, Any]:
+    def name_current_project(self, session_id: str, kind: str, name: str) -> dict[str, Any]:
         """Give the session's derived project a user name (UX-044 'Name current…')."""
         record = self.session_store.load(session_id)
         ws = (record.workspace if record else None) or self.default_workspace
         if not ws:
             return {"ok": False, "error": "session has no workspace"}
         try:
-            entry = self.session_store.names().name_current(
-                kind, name, project_key(ws)
-            )
+            entry = self.session_store.names().name_current(kind, name, project_key(ws))
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         return {"ok": True, **entry}

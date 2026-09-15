@@ -1,4 +1,5 @@
 """Artifact Store core (specs/artifact-store/README.md §5.2)."""
+
 from __future__ import annotations
 
 import hashlib

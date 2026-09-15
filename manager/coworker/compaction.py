@@ -182,11 +182,7 @@ _ARTIFACT_HINTS = ("artifact", "publish", "deploy")
 
 def _iter_tool_calls(span: list[dict[str, Any]]):
     """(name, args, result_content) for every tool call in the span, in order."""
-    results = {
-        m.get("tool_call_id"): m.get("content")
-        for m in span
-        if m.get("role") == "tool"
-    }
+    results = {m.get("tool_call_id"): m.get("content") for m in span if m.get("role") == "tool"}
     for msg in span:
         if msg.get("role") != "assistant":
             continue
@@ -502,8 +498,7 @@ def compacted_block(state: CompactionState) -> str:
     """The single outbound message standing in for everything before the boundary."""
     parts = [
         "<compacted-history>",
-        "Earlier turns of this session were compacted. The summary below is your memory "
-        "of them.",
+        "Earlier turns of this session were compacted. The summary below is your memory of them.",
         "",
         state.summary_text,
     ]

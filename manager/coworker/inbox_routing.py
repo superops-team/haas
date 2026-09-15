@@ -36,9 +36,7 @@ class InboxRouting:
     def __init__(self, path: Optional[str | Path] = None) -> None:
         self.path = Path(path) if path else None
         self._lock = threading.Lock()
-        self._bindings: dict[str, InboxBinding] = {
-            DEFAULT_INBOX: InboxBinding(DEFAULT_INBOX)
-        }
+        self._bindings: dict[str, InboxBinding] = {DEFAULT_INBOX: InboxBinding(DEFAULT_INBOX)}
         self._persona_default: dict[str, str] = {}
         self._session_override: dict[str, str] = {}
         self._load()
@@ -69,9 +67,7 @@ class InboxRouting:
         )
 
     # -- config -----------------------------------------------------------------
-    def set_binding(
-        self, name: str, *, channel: Optional[str] = None, target: str = ""
-    ) -> None:
+    def set_binding(self, name: str, *, channel: Optional[str] = None, target: str = "") -> None:
         with self._lock:
             self._bindings[name] = InboxBinding(name, channel, target)
             self._save()
@@ -146,9 +142,7 @@ def _reply_intent(text: str) -> Optional[str]:
     return None
 
 
-def resolve_from_reply(
-    reply: str, resolve: Callable[[str, str], bool]
-) -> Optional[bool]:
+def resolve_from_reply(reply: str, resolve: Callable[[str, str], bool]) -> Optional[bool]:
     """Correlate an inbound channel reply to its item (by the embedded id) and resolve it.
 
     Looks for the ``[ow:<id>]`` token (or legacy ``[ocw:…]``) and an allow/deny intent in the

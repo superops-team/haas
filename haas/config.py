@@ -1,4 +1,5 @@
 """Config: HaaS configuration assembly contract (specs/config/README.md)."""
+
 from __future__ import annotations
 
 import os
@@ -48,7 +49,8 @@ class McpProxyConfig:
 class DelegationConfig:
     container_backend: str = "disabled"
     docker_bin: str = "docker"
-    docker_network: str = "none"
+    docker_network: str = "isolated"
+    default_image_variant: str = "lite"
     allow_unpinned_local_image: bool = False
     idle_ttl_seconds: int = 1_800
     max_container_lifetime_seconds: int = 28_800
@@ -134,9 +136,7 @@ def load_config(path: str | None = None) -> AppConfig:
             os.environ["HAAS_SESSION_TURN_TIMEOUT_SECONDS"]
         )
     if os.environ.get("HAAS_DELEGATION_IDLE_TTL_SECONDS"):
-        cfg.delegation.idle_ttl_seconds = int(
-            os.environ["HAAS_DELEGATION_IDLE_TTL_SECONDS"]
-        )
+        cfg.delegation.idle_ttl_seconds = int(os.environ["HAAS_DELEGATION_IDLE_TTL_SECONDS"])
     if os.environ.get("HAAS_DELEGATION_MAX_CONTAINER_LIFETIME_SECONDS"):
         cfg.delegation.max_container_lifetime_seconds = int(
             os.environ["HAAS_DELEGATION_MAX_CONTAINER_LIFETIME_SECONDS"]
@@ -146,13 +146,13 @@ def load_config(path: str | None = None) -> AppConfig:
             "HAAS_DELEGATION_RW_WORKSPACE_CONCURRENCY"
         ]
     if os.environ.get("HAAS_DELEGATION_CONTAINER_BACKEND"):
-        cfg.delegation.container_backend = os.environ[
-            "HAAS_DELEGATION_CONTAINER_BACKEND"
-        ]
+        cfg.delegation.container_backend = os.environ["HAAS_DELEGATION_CONTAINER_BACKEND"]
     if os.environ.get("HAAS_DELEGATION_DOCKER_BIN"):
         cfg.delegation.docker_bin = os.environ["HAAS_DELEGATION_DOCKER_BIN"]
     if os.environ.get("HAAS_DELEGATION_DOCKER_NETWORK"):
         cfg.delegation.docker_network = os.environ["HAAS_DELEGATION_DOCKER_NETWORK"]
+    if os.environ.get("HAAS_DEFAULT_IMAGE_VARIANT"):
+        cfg.delegation.default_image_variant = os.environ["HAAS_DEFAULT_IMAGE_VARIANT"]
     if os.environ.get("HAAS_DELEGATION_ALLOW_UNPINNED_LOCAL_IMAGE"):
         cfg.delegation.allow_unpinned_local_image = os.environ[
             "HAAS_DELEGATION_ALLOW_UNPINNED_LOCAL_IMAGE"
@@ -197,8 +197,15 @@ def _overlay_file(cfg: AppConfig, path: str) -> None:
         cfg.mcp_proxy.listen = str(mcp_proxy["listen"])
 
     adapters = data.get("adapters") or {}
-    if isinstance(adapters, dict) and "default_base" in adapters:
-        cfg.adapters.default_base = str(adapters["default_base"])
+    if isinstance(adapters, dict):
+        if "default_base" in adapters:
+            cfg.adapters.default_base = str(adapters["default_base"])
+        codex = adapters.get("codex") or {}
+        if isinstance(codex, dict):
+            if "transport" in codex:
+                cfg.adapters.codex.transport = str(codex["transport"])
+            if "socket_path" in codex:
+                cfg.adapters.codex.socket_path = str(codex["socket_path"])
     session_runtime = data.get("session_runtime") or {}
     if isinstance(session_runtime, dict):
         if "lease_ttl_ms" in session_runtime:
@@ -226,6 +233,8 @@ def _overlay_file(cfg: AppConfig, path: str) -> None:
             cfg.delegation.docker_bin = str(delegation["docker_bin"])
         if "docker_network" in delegation:
             cfg.delegation.docker_network = str(delegation["docker_network"])
+        if "default_image_variant" in delegation:
+            cfg.delegation.default_image_variant = str(delegation["default_image_variant"])
         if "allow_unpinned_local_image" in delegation:
             cfg.delegation.allow_unpinned_local_image = bool(
                 delegation["allow_unpinned_local_image"]
@@ -237,9 +246,7 @@ def _overlay_file(cfg: AppConfig, path: str) -> None:
                 delegation["max_container_lifetime_seconds"]
             )
         if "rw_workspace_concurrency" in delegation:
-            cfg.delegation.rw_workspace_concurrency = str(
-                delegation["rw_workspace_concurrency"]
-            )
+            cfg.delegation.rw_workspace_concurrency = str(delegation["rw_workspace_concurrency"])
         if "queue_policy" in delegation:
             cfg.delegation.queue_policy = str(delegation["queue_policy"])
         if "restore_policy" in delegation:
@@ -266,12 +273,39 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     from haas.api import build_app
 
     config = config if config is not None else load_config()
-    return build_app(
+    app = build_app(
         config,
+        store=build_store(config),
         adapter=build_adapter(config),
         identity_tokens=_identity_tokens(config),
         delegated_containers=build_delegated_container_runtime(config),
     )
+    credential_fd = os.environ.pop("HAAS_CREDENTIAL_FD", None)
+    if credential_fd is not None:
+        from haas.model_proxy.runtime import RuntimeModelProxy
+        from haas.model_proxy.secret import LocalCredentialResolver
+
+        proxy = RuntimeModelProxy(
+            app.state.runtime.registry,
+            LocalCredentialResolver(int(credential_fd)),
+            config.model_proxy.listen,
+        )
+        app.state.runtime.sessions.model_proxy = proxy
+        app.router.lifespan_context = proxy.lifespan
+    return app
+
+
+def build_store(config: AppConfig) -> Any:
+    """Build the configured durable store; memory requires explicit opt-in."""
+    if config.store.backend == "memory":
+        from haas.stores import MemoryStore
+
+        return MemoryStore()
+    if config.store.backend == "sqlite":
+        from haas.stores import SQLiteStore
+
+        return SQLiteStore(config.store.dsn or "haas.db")
+    raise ValueError(f"unsupported store backend: {config.store.backend}")
 
 
 def _identity_tokens(config: AppConfig) -> dict[str, Principal] | None:
@@ -310,9 +344,7 @@ def build_adapter(config: AppConfig) -> Any:
             listen_url = "stdio://"
         else:
             listen_url = codex.socket_path
-        return CodexAdapter(
-            CodexEndpoint(transport=transport, listen_url=listen_url)
-        )
+        return CodexAdapter(CodexEndpoint(transport=transport, listen_url=listen_url))
     raise ValueError(f"unsupported adapters.default_base: {base}")
 
 

@@ -3,6 +3,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { Transcript } from "./Transcript";
 import { humanizeTool } from "../humanize";
 import type { Item } from "../types";
+import type { ExecutionEvidence } from "../api";
+import type { ModelCallStage } from "../types";
 
 afterEach(cleanup);
 
@@ -19,6 +21,41 @@ const TURN: Item[] = [
 ];
 
 describe("TurnGroup (Transcript §33)", () => {
+  it("keeps hook order stable when restored history switches between HaaS and legacy projections", () => {
+    const legacy: Item[] = [
+      { kind: "user", text: "inspect the run" },
+      { kind: "tool", id: "call_restore", name: "exec_command", args: {}, status: "ok" },
+      { kind: "assistant", text: "Done." },
+    ];
+    const haas: Item[] = [
+      legacy[0],
+      {
+        ...legacy[1],
+        source: "haas",
+        activityKind: "command",
+        safeSummary: "Run verification",
+        commandPreview: "pytest -q",
+      } as Item,
+      {
+        ...legacy[2],
+        modelStages: [
+          {
+            modelCallId: "mcall_restore",
+            status: "completed",
+            steps: [{ stepId: "call_restore", kind: "tool", activityId: "call_restore" }],
+          },
+        ],
+      } as Item,
+    ];
+
+    const view = render(<Transcript items={haas} onApprove={vi.fn()} />);
+    expect(screen.getByText("pytest -q")).toBeTruthy();
+    view.rerender(<Transcript items={legacy} onApprove={vi.fn()} />);
+    expect(screen.getByText("Done.")).toBeTruthy();
+    view.rerender(<Transcript items={haas} onApprove={vi.fn()} />);
+    expect(screen.getByText("pytest -q")).toBeTruthy();
+  });
+
   it("groups the whole turn; answer stays outside; narration and humanized steps inside", () => {
     const { container } = render(<Transcript items={TURN} onApprove={vi.fn()} />);
 
@@ -80,6 +117,480 @@ describe("TurnGroup (Transcript §33)", () => {
     const { container } = render(<Transcript items={items} onApprove={vi.fn()} />);
     expect(container.querySelector("details.stepgroup")).toBeNull();
     expect(screen.getByText("Hello there.")).toBeTruthy();
+  });
+});
+
+describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
+  const HAAS_TURN: Item[] = [
+    { kind: "user", text: "verify the release" },
+    {
+      kind: "tool",
+      id: "call_1",
+      name: "exec_command",
+      args: {},
+      source: "haas",
+      activityKind: "command",
+      safeSummary: "Run the focused test suite",
+      status: "running",
+      durationMs: 820,
+      exitCode: 0,
+      outputPreview: "24 passed\n1 warning",
+    },
+    { kind: "assistant", text: "The release checks passed." },
+  ];
+  const MODEL_STAGES: ModelCallStage[] = [
+    {
+      modelCallId: "mcall_0001",
+      status: "completed",
+      steps: [
+        { stepId: "msg_1", kind: "commentary", text: "正在检查事件桥接。" },
+        { stepId: "reason_1:0", kind: "reasoning_summary", text: "关联字段已经存在。" },
+        { stepId: "call_1", kind: "tool", activityId: "call_1" },
+        { stepId: "msg_2", kind: "result", text: "已定位问题。" },
+      ],
+      usage: { inputTokens: 8100, outputTokens: 746, reasoningOutputTokens: 214, cacheReadTokens: 3600, totalTokens: 8846 },
+    },
+  ];
+
+  it("leads with the concrete command and keeps the generic category secondary", () => {
+    const { container } = render(
+      <Transcript
+        items={[
+          { kind: "user", text: "inspect the spec" },
+          {
+            kind: "tool", id: "call_specific", name: "exec_command", args: {}, source: "haas",
+            activityKind: "command", safeSummary: "Run command", status: "completed",
+            commandPreview: "cat specs/event-log-sse/README.md",
+          },
+        ]}
+        onApprove={vi.fn()}
+      />,
+    );
+
+    const row = container.querySelector(".activity-row")!;
+    expect(row.querySelector(".activity-row-title")?.textContent).toBe(
+      "cat specs/event-log-sse/README.md",
+    );
+    expect(row.querySelector(".activity-row-summary")?.textContent).toBe("Ran a command");
+  });
+
+  it("renders commentary, reasoning, actions and results as distinct ordered steps with measured usage", () => {
+    render(
+      <Transcript
+        items={HAAS_TURN.slice(0, 2)}
+        onApprove={vi.fn()}
+        running
+        taskPhase="running"
+        modelStages={MODEL_STAGES}
+      />,
+    );
+
+    const stage = screen.getByTestId("model-call-stage");
+    expect(stage.textContent).toContain("Stage 1");
+    expect(stage.textContent).toContain("4 steps");
+    expect(stage.textContent).toContain("↓ 8.1k");
+    expect(stage.textContent).toContain("↑ 746");
+    expect(stage.textContent).toContain("Reasoning 214");
+    expect(stage.textContent).toContain("Cache 3.6k");
+    expect(screen.getByText("Progress note")).toBeTruthy();
+    expect(screen.getByText("Reasoning summary")).toBeTruthy();
+    expect(screen.getByText("Action")).toBeTruthy();
+    expect(screen.getByText("Stage result")).toBeTruthy();
+    expect(screen.getAllByText("Included in stage 1").length).toBe(4);
+  });
+
+  it("renders a tool-free HaaS stage and does not duplicate its reasoning in the legacy panel", () => {
+    render(
+      <Transcript
+        items={[{ kind: "user", text: "explain" }]}
+        onApprove={vi.fn()}
+        running
+        reasoningText="legacy duplicate"
+        modelStages={[{
+          modelCallId: "mcall_0001",
+          status: "running",
+          steps: [{ stepId: "reason_1:0", kind: "reasoning_summary", text: "Measured summary" }],
+        }]}
+      />,
+    );
+
+    expect(screen.getByTestId("model-call-stage")).toBeTruthy();
+    expect(screen.getByText("Measured summary")).toBeTruthy();
+    expect(screen.queryByText("legacy duplicate")).toBeNull();
+  });
+
+  it("keeps a reasoning row bounded and puts the complete provider summary in details", () => {
+    const preview = "Inspecting the failing session and its event ordering.";
+    const complete = `${preview} The later provider summary remains available as evidence.`;
+    const { container } = render(
+      <Transcript
+        items={[{ kind: "user", text: "inspect" }]}
+        onApprove={vi.fn()}
+        running
+        modelStages={[{
+          modelCallId: "mcall_0001",
+          status: "running",
+          steps: [{
+            stepId: "reason_1:0",
+            kind: "reasoning_summary",
+            previewText: preview,
+            previewFrozen: true,
+            text: complete,
+          }],
+        }]}
+      />,
+    );
+
+    expect(screen.getByTestId("reasoning-preview").textContent).toBe(preview);
+    const detail = screen.getByTestId("reasoning-detail") as HTMLDetailsElement;
+    expect(detail.open).toBe(false);
+    expect(detail.textContent).toContain(complete);
+    expect(container.querySelector(".model-stage-reasoning-preview")).toBeTruthy();
+  });
+
+  it("defensively bounds an oversized or legacy reasoning preview", () => {
+    const complete = "界".repeat(300);
+    render(
+      <Transcript
+        items={[{ kind: "user", text: "inspect" }]}
+        onApprove={vi.fn()}
+        running
+        modelStages={[{
+          modelCallId: "mcall_0001",
+          status: "running",
+          steps: [{
+            stepId: "reason_1:0",
+            kind: "reasoning_summary",
+            previewText: complete,
+            text: complete,
+          }],
+        }]}
+      />,
+    );
+
+    expect(screen.getByTestId("reasoning-preview").textContent).toHaveLength(240);
+    expect(screen.getByTestId("reasoning-detail").textContent).toContain(complete);
+  });
+
+  it("shows an honest missing-usage state instead of fabricated zeros", () => {
+    render(
+      <Transcript
+        items={HAAS_TURN.slice(0, 2)}
+        onApprove={vi.fn()}
+        running
+        modelStages={[{ ...MODEL_STAGES[0], status: "running", usage: undefined }]}
+      />,
+    );
+    expect(screen.getByText("Tokens not reported yet")).toBeTruthy();
+    expect(screen.queryByText(/↓ 0/)).toBeNull();
+  });
+
+  it("keeps a user's completed-stage expansion across streaming rerenders", () => {
+    const view = render(
+      <Transcript
+        items={HAAS_TURN.slice(0, 2)}
+        onApprove={vi.fn()}
+        running
+        modelStages={MODEL_STAGES}
+      />,
+    );
+    const summary = screen.getByText(/Stage 1/).closest("summary")!;
+    fireEvent.click(summary);
+    expect(screen.getByTestId("model-call-stage").hasAttribute("open")).toBe(true);
+
+    view.rerender(
+      <Transcript
+        items={HAAS_TURN.slice(0, 2)}
+        onApprove={vi.fn()}
+        running
+        streamingText="next delta"
+        modelStages={MODEL_STAGES}
+      />,
+    );
+    expect(screen.getByTestId("model-call-stage").hasAttribute("open")).toBe(true);
+  });
+
+  it("opens execution evidence from an action inside the model stage", () => {
+    render(
+      <Transcript
+        items={HAAS_TURN.slice(0, 2)}
+        onApprove={vi.fn()}
+        running
+        modelStages={[{ ...MODEL_STAGES[0], status: "running" }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Run the focused test suite/ }));
+    expect(screen.getByTestId("activity-inspector")).toBeTruthy();
+    expect(screen.getByTestId("activity-inspector").textContent).toContain("24 passed");
+  });
+
+  it("shows live reasoning and semantic work together without machine fields", () => {
+    render(
+      <Transcript
+        items={HAAS_TURN.slice(0, 2)}
+        onApprove={vi.fn()}
+        running
+        taskPhase="running"
+        reasoningText="Checking the package and focused tests."
+      />,
+    );
+
+    expect(screen.getByTestId("activity-stream")).toBeTruthy();
+    expect(screen.getByText("Checking the package and focused tests.")).toBeTruthy();
+    expect(screen.getByText("Ran a command")).toBeTruthy();
+    expect(screen.getByText("Run the focused test suite")).toBeTruthy();
+    expect(screen.queryByText(/exec_command|summary=/)).toBeNull();
+  });
+
+  it("shows the concrete action, bounded key result, and status before details are opened", () => {
+    const items: Item[] = [
+      { kind: "user", text: "run the verification" },
+      {
+        kind: "tool", id: "call_first_screen", name: "exec_command", args: {},
+        source: "haas", activityKind: "command", safeSummary: "Run command",
+        commandPreview: "pytest tests/test_release.py -q", status: "completed",
+        outputPreview: "24 passed\n1 warning\nfull diagnostic detail", omittedLineCount: 7,
+        exitCode: 0, durationMs: 820,
+      },
+    ];
+
+    render(<Transcript items={items} onApprove={vi.fn()} taskPhase="completed" />);
+
+    const row = screen.getByRole("button", { name: /pytest tests\/test_release.py -q/ });
+    expect(row.textContent).toContain("24 passed");
+    expect(row.textContent).toContain("1 warning");
+    expect(row.textContent).not.toContain("full diagnostic detail");
+    expect(row.textContent).toContain("Succeeded");
+    expect(row.textContent).toContain("exit 0");
+    expect(screen.queryByTestId("activity-inspector")).toBeNull();
+  });
+
+  it("collapses a completed turn to a result summary and expands semantic activity", () => {
+    const completedTurn = HAAS_TURN.map((item) =>
+      item.kind === "tool" ? { ...item, status: "completed" as const } : item,
+    );
+    render(
+      <Transcript
+        items={completedTurn}
+        onApprove={vi.fn()}
+        taskPhase="completed"
+        modelStages={MODEL_STAGES}
+      />,
+    );
+
+    expect(screen.getByText("Completed · 1 activity")).toBeTruthy();
+    expect(screen.getByText("The release checks passed.")).toBeTruthy();
+    expect(screen.getByText("Run the focused test suite")).toBeTruthy();
+    expect(screen.getByText(/24 passed\s+1 warning/)).toBeTruthy();
+    expect(screen.queryByTestId("model-stage-list")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
+    expect(screen.getByTestId("model-stage-list")).toBeTruthy();
+  });
+
+  it("opens a read-only activity inspector with bounded details", () => {
+    render(
+      <Transcript items={HAAS_TURN} onApprove={vi.fn()} taskPhase="completed" />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
+    fireEvent.click(screen.getByRole("button", { name: /Ran a command/ }));
+
+    const inspector = screen.getByTestId("activity-inspector");
+    expect(inspector.textContent).toContain("Run the focused test suite");
+    expect(inspector.textContent).toContain("Exit code");
+    expect(inspector.textContent).toContain("0");
+    expect(inspector.textContent).toContain("820 ms");
+    expect(inspector.textContent).toContain("24 passed");
+    expect(screen.queryByText("raw")).toBeNull();
+  });
+
+  it("shows the command fact and loads complete short-lived execution evidence", async () => {
+    const ordinaryUrl = "https://docs.example.com/runbook?section=release";
+    const authorizationUrl =
+      "https://login.example.com/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&state=signed-state&sig=abc123";
+    const command = `curl '${authorizationUrl}' && open '${ordinaryUrl}'`;
+    const evidence: ExecutionEvidence = {
+      evidenceRef: "evd_1",
+      sessionId: "hsess_1",
+      invocationId: "inv_1",
+      toolCallId: "call_1",
+      command,
+      workingDirectory: "/workspace/project",
+      output: `Open ${ordinaryUrl}\nAuthorize at ${authorizationUrl}`,
+      outputStream: "combined",
+      links: [
+        { url: ordinaryUrl, kind: "ordinary", expiresAtMs: null },
+        { url: authorizationUrl, kind: "authorization", expiresAtMs: 1_900_000_000_000 },
+      ],
+      expiresAtMs: 1_900_000_000_000,
+    };
+    const loadExecutionEvidence = vi.fn().mockResolvedValue(evidence);
+    const items: Item[] = [
+      { kind: "user", text: "authorize the CLI" },
+      {
+        kind: "tool", id: "call_1", name: "exec_command", args: {}, source: "haas",
+        activityKind: "command", safeSummary: "Start CLI authorization", status: "completed",
+        commandPreview: "acme auth login --browser", workingDirectory: "/workspace/project",
+        invocationId: "inv_1", evidenceRef: "evd_1", evidenceExpiresAtMs: 1_900_000_000_000,
+      },
+      { kind: "assistant", text: "Authorization is waiting in the browser." },
+    ];
+
+    render(
+      <Transcript
+        items={items}
+        onApprove={vi.fn()}
+        taskPhase="completed"
+        loadExecutionEvidence={loadExecutionEvidence}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
+    expect(screen.getByText("acme auth login --browser")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Ran a command/ }));
+
+    await waitFor(() => expect(loadExecutionEvidence).toHaveBeenCalledWith("inv_1", "call_1", "evd_1"));
+    const inspector = screen.getByTestId("activity-inspector");
+    expect(inspector.textContent).toContain(command);
+    expect(inspector.textContent).toContain("/workspace/project");
+    expect(inspector.textContent).toContain("Open https://docs.example.com/runbook");
+    for (const url of [ordinaryUrl, authorizationUrl]) {
+      const links = screen.getAllByRole("link", { name: url });
+      expect(links.length).toBeGreaterThan(0);
+      for (const link of links) {
+        expect(link.getAttribute("href")).toBe(url);
+        expect(link.getAttribute("target")).toBe("_blank");
+        expect(link.getAttribute("rel")).toContain("noopener");
+        expect(link.getAttribute("rel")).toContain("noreferrer");
+        expect(link.getAttribute("referrerpolicy")).toBe("no-referrer");
+      }
+    }
+  });
+
+  it("explains when short-lived execution evidence has expired", async () => {
+    const loadExecutionEvidence = vi.fn().mockRejectedValue(
+      Object.assign(new Error("expired"), { status: 410, code: "haas_execution_evidence_expired" }),
+    );
+    const items: Item[] = [
+      { kind: "user", text: "run it" },
+      {
+        kind: "tool", id: "call_expired", name: "exec_command", args: {}, source: "haas",
+        activityKind: "command", safeSummary: "Run the command", status: "failed",
+        commandPreview: "make verify", invocationId: "inv_expired", evidenceRef: "evd_expired",
+      },
+    ];
+    render(<Transcript items={items} onApprove={vi.fn()} loadExecutionEvidence={loadExecutionEvidence} />);
+    fireEvent.click(screen.getByRole("button", { name: /Ran a command/ }));
+    expect(await screen.findByText("Execution evidence expired")).toBeTruthy();
+  });
+
+  it("moves focus for keyboard selection and restores it on Escape", async () => {
+    render(<Transcript items={HAAS_TURN} onApprove={vi.fn()} taskPhase="completed" />);
+    fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
+    const row = screen.getByRole("button", { name: /Ran a command/ });
+    row.focus();
+    fireEvent.click(row, { detail: 0 });
+    await waitFor(() => expect(document.activeElement?.textContent).toBe("Ran a command"));
+    fireEvent.keyDown(screen.getByTestId("activity-inspector"), { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(row));
+  });
+
+  it("closes from Escape after pointer selection without stealing row focus", async () => {
+    render(<Transcript items={HAAS_TURN} onApprove={vi.fn()} taskPhase="completed" />);
+    fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
+    const row = screen.getByRole("button", { name: /Ran a command/ });
+    row.focus();
+    fireEvent.click(row, { detail: 1 });
+    expect(document.activeElement).toBe(row);
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("activity-inspector")).toBeNull());
+    expect(document.activeElement).toBe(row);
+  });
+
+  it("keeps the saved reasoning summary available after completion", () => {
+    const items: Item[] = [
+      HAAS_TURN[0],
+      HAAS_TURN[1],
+      { kind: "assistant", text: "The release checks passed.", reasoning: "Checked package metadata and tests." },
+    ];
+    render(<Transcript items={items} onApprove={vi.fn()} taskPhase="completed" />);
+    expect(screen.queryByText("Checked package metadata and tests.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
+    expect(screen.getByText("Checked package metadata and tests.")).toBeTruthy();
+  });
+
+  it.each([
+    ["failed", "Failed · 1 activity"],
+    ["incomplete", "Incomplete · 1 activity"],
+    ["cancelled", "Cancelled · 1 activity"],
+    ["verifying", "Verifying · 1 activity"],
+  ])("never labels a %s task as completed", (phase, label) => {
+    render(
+      <Transcript
+        items={HAAS_TURN}
+        onApprove={vi.fn()}
+        taskPhase={phase}
+        taskOutcome={{ phase, code: "provider_failed", safeReason: "Provider unavailable" }}
+      />,
+    );
+    expect(screen.getByText(label)).toBeTruthy();
+    expect(screen.queryByText("Completed · 1 activity")).toBeNull();
+    if (phase !== "verifying") {
+      expect(screen.getByTestId("activity-task-error").textContent).toContain("Provider unavailable");
+    }
+  });
+
+  it("offers retry only when the structured HaaS outcome permits it", () => {
+    const onRetry = vi.fn();
+    const { rerender } = render(
+      <Transcript
+        items={HAAS_TURN}
+        onApprove={vi.fn()}
+        onRetry={onRetry}
+        taskPhase="failed"
+        taskOutcome={{ phase: "failed", safeReason: "Provider unavailable", retryable: false }}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    rerender(
+      <Transcript
+        items={HAAS_TURN}
+        onApprove={vi.fn()}
+        onRetry={onRetry}
+        taskPhase="failed"
+        taskOutcome={{ phase: "failed", safeReason: "Provider unavailable", retryable: true }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledOnce();
+  });
+
+  it("keeps historical turn outcomes and one shared Inspector owner", () => {
+    const items: Item[] = [
+      { kind: "user", text: "first" },
+      {
+        kind: "tool", id: "old", name: "haas_activity", args: {}, source: "haas",
+        activityKind: "command", safeSummary: "First attempt", status: "failed",
+        safeReason: "Command failed", taskOutcome: { phase: "failed", safeReason: "Command failed" },
+      },
+      { kind: "assistant", text: "First result", source: "haas" },
+      { kind: "user", text: "second" },
+      {
+        kind: "tool", id: "new", name: "haas_activity", args: {}, source: "haas",
+        activityKind: "read", safeSummary: "Read config", status: "completed",
+        taskOutcome: { phase: "completed" },
+      },
+      { kind: "assistant", text: "Second result", source: "haas" },
+    ];
+    render(<Transcript items={items} onApprove={vi.fn()} taskPhase="completed" />);
+
+    expect(screen.getByText("Failed · 1 activity")).toBeTruthy();
+    expect(screen.getByText("Completed · 1 activity")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Ran a command/ }));
+    expect(screen.getAllByTestId("activity-inspector")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Show activity" }));
+    fireEvent.click(screen.getByRole("button", { name: /Read files/ }));
+    expect(screen.getAllByTestId("activity-inspector")).toHaveLength(1);
+    expect(screen.getByTestId("activity-inspector").textContent).toContain("Read config");
   });
 });
 

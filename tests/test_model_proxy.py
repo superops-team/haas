@@ -1,4 +1,5 @@
 """Model Proxy core tests: route resolution, token lifecycle, usage normalization, secrets."""
+
 from __future__ import annotations
 
 import pytest
@@ -31,6 +32,7 @@ def _harness(provider: ProviderConfig | None) -> HarnessRecord:
 
 def test_resolve_model_route() -> None:
     provider = ProviderConfig(
+        providerId="openai",
         name="openai-compatible",
         baseUrl="http://127.0.0.1:18080/v1",
         wireApi="responses",
@@ -38,6 +40,9 @@ def test_resolve_model_route() -> None:
     )
     route = resolve_model_route(_harness(provider), model="gpt-x")
     assert route.provider == "openai-compatible"
+    assert route.providerId == "openai"
+    assert route.name == "openai-compatible"
+    assert route.apiType == "responses"
     assert route.baseUrl == "http://127.0.0.1:18080/v1"
     assert route.model == "gpt-x"
     assert route.credentialRef == "secret://tenant/provider"
@@ -57,6 +62,64 @@ def test_resolve_model_route_requires_provider() -> None:
 def test_resolve_model_route_requires_base_url() -> None:
     with pytest.raises(ModelRouteError):
         resolve_model_route(_harness(ProviderConfig(baseUrl="")))
+
+
+@pytest.mark.parametrize(
+    ("provider", "reason"),
+    [
+        (ProviderConfig(providerId="", baseUrl="https://example.com"), "providerId"),
+        (ProviderConfig(name="", baseUrl="https://example.com"), "name"),
+        (
+            ProviderConfig(providerId="openai", baseUrl="https://example.com", wireApi="unknown"),
+            "wireApi",
+        ),
+        (
+            ProviderConfig(
+                providerId="openai",
+                baseUrl="https://example.com",
+                wireApi="openai-compatible",
+                apiType="",
+            ),
+            "apiType",
+        ),
+        (
+            ProviderConfig(
+                providerId="openai",
+                baseUrl="https://example.com",
+                wireApi="responses",
+                apiType="chat_completions",
+            ),
+            "apiType",
+        ),
+    ],
+)
+def test_resolve_model_route_validates_contract(provider: ProviderConfig, reason: str) -> None:
+    with pytest.raises(ModelRouteError, match=reason):
+        resolve_model_route(_harness(provider))
+
+
+def test_resolve_model_route_prefers_frozen_session_route() -> None:
+    live = ProviderConfig(
+        providerId="live",
+        name="live",
+        baseUrl="https://live.example.com/v1",
+        wireApi="responses",
+        apiType="responses",
+        credentialRef="secret://live",
+    )
+    frozen = {
+        "providerId": "frozen",
+        "name": "frozen",
+        "baseUrl": "https://frozen.example.com/v1",
+        "model": "frozen-model",
+        "wireApi": "openai-compatible",
+        "apiType": "responses",
+        "credentialRef": "secret://frozen",
+    }
+    route = resolve_model_route(_harness(live), frozen_route=frozen)
+    assert route.providerId == "frozen"
+    assert route.model == "frozen-model"
+    assert route.credentialRef == "secret://frozen"
 
 
 # --- runtime token ----------------------------------------------------------

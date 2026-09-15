@@ -378,9 +378,7 @@ class Reviewer:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return self._count(
-                _fail_closed(f"reviewer error: {type(exc).__name__}", error=True)
-            )
+            return self._count(_fail_closed(f"reviewer error: {type(exc).__name__}", error=True))
 
         verdict = parse_verdict(getattr(turn, "text", "") or "")
         usage = getattr(turn, "usage", None)

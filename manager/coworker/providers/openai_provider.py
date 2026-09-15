@@ -303,9 +303,7 @@ class OpenAIProvider(ProviderClient):
                 arguments = json.loads(acc["args"]) if acc["args"] else {}
             except (TypeError, json.JSONDecodeError):
                 arguments = {"_raw": acc["args"]}
-            tool_calls.append(
-                ToolCall(id=acc["id"], name=acc["name"], arguments=arguments)
-            )
+            tool_calls.append(ToolCall(id=acc["id"], name=acc["name"], arguments=arguments))
 
         text, tool_calls = _maybe_salvage_tool_calls(
             "".join(text_parts) or None, tool_calls, tools=tools
@@ -332,9 +330,7 @@ def _parse_tool_calls(raw_tool_calls: Any) -> list[ToolCall]:
             # Surface unparseable arguments rather than dropping the call; the engine
             # can return a tool-error so the model corrects itself.
             arguments = {"_raw": raw_args}
-        calls.append(
-            ToolCall(id=getattr(tc, "id", ""), name=function.name, arguments=arguments)
-        )
+        calls.append(ToolCall(id=getattr(tc, "id", ""), name=function.name, arguments=arguments))
     return calls
 
 

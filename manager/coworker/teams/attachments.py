@@ -83,7 +83,7 @@ def stored_name(ref: str) -> Optional[str]:
     """`attachment://<hash>.<ext>#<name>` → `<hash>.<ext>`; None for other refs."""
     if not ref.startswith(ATTACHMENT_SCHEME):
         return None
-    return ref[len(ATTACHMENT_SCHEME):].split("#", 1)[0]
+    return ref[len(ATTACHMENT_SCHEME) :].split("#", 1)[0]
 
 
 def validate_stored_name(stored: str) -> str:
@@ -98,17 +98,13 @@ def _validate(data: bytes, filename: str) -> str:
     if not data:
         raise BoardError("attachment is empty")
     if len(data) > MAX_ATTACHMENT_BYTES:
-        raise BoardError(
-            f"attachment exceeds {MAX_ATTACHMENT_BYTES // (1024 * 1024)}MB"
-        )
+        raise BoardError(f"attachment exceeds {MAX_ATTACHMENT_BYTES // (1024 * 1024)}MB")
     ext = Path(filename).suffix.lstrip(".").lower()
     if ext not in _IMAGE_TYPES:
         raise BoardError(
             f"unsupported attachment type .{ext or '?'} — images only for now"
             f" ({', '.join(sorted(set(_IMAGE_TYPES)))})"
         )
-    if not data.startswith(_MAGIC[ext]) or (
-        ext == "webp" and data[8:12] != b"WEBP"
-    ):
+    if not data.startswith(_MAGIC[ext]) or (ext == "webp" and data[8:12] != b"WEBP"):
         raise BoardError(f"file content does not look like .{ext}")
     return "jpg" if ext == "jpeg" else ext

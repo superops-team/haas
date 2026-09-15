@@ -107,12 +107,8 @@ class GitHubRelayAdapter(BasePlatformAdapter):
         kind = frame.get("kind")
         if kind == "missed":
             repo = frame.get("channel", "")
-            self.missed[repo] = self.missed.get(repo, 0) + int(
-                frame.get("count", 0) or 1
-            )
-            logger.info(
-                "github relay: %s event(s) missed in %s", frame.get("count"), repo
-            )
+            self.missed[repo] = self.missed.get(repo, 0) + int(frame.get("count", 0) or 1)
+            logger.info("github relay: %s event(s) missed in %s", frame.get("count"), repo)
             return
         if kind == "revoked":
             self._installs.pop(str(frame.get("installation_id", "")), None)
@@ -155,16 +151,12 @@ class GitHubRelayAdapter(BasePlatformAdapter):
         await self.handle_message(event)
 
     # -- outbound --------------------------------------------------------------
-    async def send(
-        self, chat_id: str, text: str, *, thread_id: Optional[str] = None
-    ) -> SendResult:
+    async def send(self, chat_id: str, text: str, *, thread_id: Optional[str] = None) -> SendResult:
         """Comment on the issue/PR the event came from, as `ocw[bot]`."""
         owner_repo, number = split_thread(chat_id)
         if number is None:
             return SendResult(False, error=f"no issue/PR number in {chat_id!r}")
-        installation_id = self._repo_installs.get(owner_repo) or next(
-            iter(self._installs), ""
-        )
+        installation_id = self._repo_installs.get(owner_repo) or next(iter(self._installs), "")
         if not (self._token_client and installation_id):
             return SendResult(False, error="no installation token available")
         try:
@@ -195,8 +187,6 @@ class GitHubRelayAdapter(BasePlatformAdapter):
             self._note_token_health(installation_id, False)
             return SendResult(False, error="installation token rejected")
         if resp.status_code not in (200, 201):
-            return SendResult(
-                False, error=f"github comment failed ({resp.status_code})"
-            )
+            return SendResult(False, error=f"github comment failed ({resp.status_code})")
         self._note_token_health(installation_id, True)
         return SendResult(True, message_id=str((resp.json() or {}).get("id", "")))

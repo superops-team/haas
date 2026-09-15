@@ -69,9 +69,7 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "write",
         "Upload a local file through a file input.",
     ),
-    ConnectorToolDef(
-        "browser", "browser_wait", "Wait", "read", "Wait for time or an element."
-    ),
+    ConnectorToolDef("browser", "browser_wait", "Wait", "read", "Wait for time or an element."),
     ConnectorToolDef(
         "browser",
         # Writes an image file to a resolved path (creating parents) — a local write,
@@ -189,9 +187,7 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "read",
         "Search Gmail messages.",
     ),
-    ConnectorToolDef(
-        "gmail", "gmail_get_message", "Read message", "read", "Read a Gmail message."
-    ),
+    ConnectorToolDef("gmail", "gmail_get_message", "Read message", "read", "Read a Gmail message."),
     ConnectorToolDef(
         "gmail",
         "gmail_send_email",
@@ -285,15 +281,9 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "write",
         "Accept, decline, or tentatively accept a meeting invite.",
     ),
-    ConnectorToolDef(
-        "jira", "jira_search_issues", "Search issues", "read", "Search Jira issues."
-    ),
-    ConnectorToolDef(
-        "jira", "jira_get_issue", "Read issue", "read", "Read a Jira issue."
-    ),
-    ConnectorToolDef(
-        "jira", "jira_create_issue", "Create issue", "write", "Create a Jira issue."
-    ),
+    ConnectorToolDef("jira", "jira_search_issues", "Search issues", "read", "Search Jira issues."),
+    ConnectorToolDef("jira", "jira_get_issue", "Read issue", "read", "Read a Jira issue."),
+    ConnectorToolDef("jira", "jira_create_issue", "Create issue", "write", "Create a Jira issue."),
     # -- jira via the Atlassian hosted MCP server (one-click path) ---------------
     # PINNED allowlist (UX-DECISIONS §42): tool names are `mcp__<connector>__<vendor
     # tool>` exactly as mcp/tools.py builds them; anything the vendor ships that is
@@ -505,9 +495,7 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "write",
         "Create a Confluence page.",
     ),
-    ConnectorToolDef(
-        "zendesk", "zendesk_search", "Search Zendesk", "read", "Search Zendesk."
-    ),
+    ConnectorToolDef("zendesk", "zendesk_search", "Search Zendesk", "read", "Search Zendesk."),
     ConnectorToolDef(
         "zendesk", "zendesk_get_ticket", "Read ticket", "read", "Read a Zendesk ticket."
     ),
@@ -525,12 +513,8 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "read",
         "Search Linear issues.",
     ),
-    ConnectorToolDef(
-        "linear", "linear_get_issue", "Read issue", "read", "Read a Linear issue."
-    ),
-    ConnectorToolDef(
-        "linear", "linear_list_teams", "List teams", "read", "List Linear teams."
-    ),
+    ConnectorToolDef("linear", "linear_get_issue", "Read issue", "read", "Read a Linear issue."),
+    ConnectorToolDef("linear", "linear_list_teams", "List teams", "read", "List Linear teams."),
     ConnectorToolDef(
         "linear",
         "linear_create_issue",
@@ -545,9 +529,7 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "read",
         "Search projects, issues, or merge requests.",
     ),
-    ConnectorToolDef(
-        "gitlab", "gitlab_get_issue", "Read issue", "read", "Read a GitLab issue."
-    ),
+    ConnectorToolDef("gitlab", "gitlab_get_issue", "Read issue", "read", "Read a GitLab issue."),
     ConnectorToolDef(
         "gitlab",
         "gitlab_get_merge_request",
@@ -612,15 +594,9 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "read",
         "List Asana workspaces.",
     ),
-    ConnectorToolDef(
-        "asana", "asana_search_tasks", "Search tasks", "read", "Search Asana tasks."
-    ),
-    ConnectorToolDef(
-        "asana", "asana_get_task", "Read task", "read", "Read an Asana task."
-    ),
-    ConnectorToolDef(
-        "asana", "asana_create_task", "Create task", "write", "Create an Asana task."
-    ),
+    ConnectorToolDef("asana", "asana_search_tasks", "Search tasks", "read", "Search Asana tasks."),
+    ConnectorToolDef("asana", "asana_get_task", "Read task", "read", "Read an Asana task."),
+    ConnectorToolDef("asana", "asana_create_task", "Create task", "write", "Create an Asana task."),
     ConnectorToolDef(
         "hubspot",
         "hubspot_search",
@@ -663,9 +639,7 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "write",
         "Create a HubSpot task.",
     ),
-    ConnectorToolDef(
-        "dropbox", "dropbox_search", "Search files", "read", "Search Dropbox files."
-    ),
+    ConnectorToolDef("dropbox", "dropbox_search", "Search files", "read", "Search Dropbox files."),
     ConnectorToolDef(
         "dropbox",
         "dropbox_list_folder",
@@ -681,12 +655,8 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "Read a text file from Dropbox.",
     ),
     ConnectorToolDef("box", "box_search", "Search files", "read", "Search Box files."),
-    ConnectorToolDef(
-        "box", "box_list_folder", "List folder", "read", "List a Box folder."
-    ),
-    ConnectorToolDef(
-        "box", "box_read_file", "Read file", "read", "Read a text file from Box."
-    ),
+    ConnectorToolDef("box", "box_list_folder", "List folder", "read", "List a Box folder."),
+    ConnectorToolDef("box", "box_read_file", "Read file", "read", "Read a text file from Box."),
     ConnectorToolDef(
         "quickbooks",
         "quickbooks_query",
@@ -1153,9 +1123,7 @@ def patch_tool_settings(
 
 def mcp_tool_defs(connector: str) -> list[ConnectorToolDef]:
     """The connector's PINNED MCP tools (names `mcp__<connector>__<vendor tool>`)."""
-    return [
-        t for t in TOOLS_BY_CONNECTOR.get(connector, []) if t.name.startswith("mcp__")
-    ]
+    return [t for t in TOOLS_BY_CONNECTOR.get(connector, []) if t.name.startswith("mcp__")]
 
 
 def mcp_pinned_tools(connector: str) -> list[str]:

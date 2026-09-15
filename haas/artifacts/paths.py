@@ -1,4 +1,5 @@
 """Artifact path safety (specs/artifact-store/README.md §8)."""
+
 from __future__ import annotations
 
 import os

@@ -4,6 +4,7 @@ test_opensandbox.py covers the happy-path serialization; this file covers the
 response-handling and client-lifecycle branches that only run when the sandbox
 service misbehaves.
 """
+
 from __future__ import annotations
 
 import httpx
@@ -19,9 +20,7 @@ KEY = "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"  # haas-secret-ignore - synthe
 def _client(handler) -> OpenSandboxClient:
     return OpenSandboxClient(
         BASE,
-        client=httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), base_url=BASE
-        ),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=BASE),
     )
 
 
@@ -60,9 +59,7 @@ async def test_error_status_raises(status: int) -> None:
 
 async def test_error_body_is_redacted() -> None:
     """Sandbox bodies may echo credentials; they must not reach the message."""
-    client = _client(
-        lambda _r: httpx.Response(500, json={"seen": f"Bearer {KEY}"})
-    )
+    client = _client(lambda _r: httpx.Response(500, json={"seen": f"Bearer {KEY}"}))
     with pytest.raises(OpenSandboxError) as excinfo:
         await client.create_sandbox(SandboxSpec(sessionId="s_1"))
     message = str(excinfo.value)

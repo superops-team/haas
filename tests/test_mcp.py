@@ -1,4 +1,5 @@
 """MCP / Tool / Skill runtime tests."""
+
 from __future__ import annotations
 
 import pytest
@@ -24,8 +25,7 @@ from haas.policy.models import (
 
 def test_validate_mcp_server_valid() -> None:
     assert (
-        validate_mcp_server(McpServerConfig(name="repo", url="https://mcp.example.com/mcp"))
-        == []
+        validate_mcp_server(McpServerConfig(name="repo", url="https://mcp.example.com/mcp")) == []
     )
 
 
@@ -49,9 +49,7 @@ def test_validate_mcp_server_rejects_metadata_endpoint_by_default() -> None:
 
 
 def test_validate_mcp_server_rejects_loopback_by_default() -> None:
-    errors = validate_mcp_server(
-        McpServerConfig(name="repo", url="http://localhost:18080/mcp")
-    )
+    errors = validate_mcp_server(McpServerConfig(name="repo", url="http://localhost:18080/mcp"))
     assert "url_private_network_blocked" in errors
 
 
@@ -88,9 +86,7 @@ def test_materialize_skills_valid() -> None:
 
 
 def test_materialize_skills_requires_skill_md() -> None:
-    bundle = SkillBundle(
-        id="s1", name="bad", files=[SkillFile(path="other.md", content=b"x")]
-    )
+    bundle = SkillBundle(id="s1", name="bad", files=[SkillFile(path="other.md", content=b"x")])
     with pytest.raises(SkillMaterializationError, match="SKILL.md"):
         materialize_skills([bundle])
 

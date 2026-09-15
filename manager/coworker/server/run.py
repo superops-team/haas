@@ -131,13 +131,30 @@ def _ensure_api_token(port: int) -> Path | None:
         return None  # Tauri supplied an in-memory token; never persist it.
     token = secrets.token_hex(32)
     os.environ["COWORKER_API_TOKEN"] = token
-    return write_private_text(
-        state_dir() / f"sidecar-{port}.token", token + "\n"
-    )
+    return write_private_text(state_dir() / f"sidecar-{port}.token", token + "\n")
+
+
+def _run_haas_sidecar(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser(prog="openworker-server haas-sidecar")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8092)
+    args = parser.parse_args(argv)
+
+    import uvicorn
+
+    _exit_when_orphaned()
+    from haas.config import create_app as create_haas_app
+
+    uvicorn.run(create_haas_app(), host=args.host, port=args.port, ws_max_size=_WS_MAX_FRAME_BYTES)
 
 
 def main(argv=None) -> None:
     _ensure_ca_bundle()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "haas-sidecar":
+        _run_haas_sidecar(argv[1:])
+        return
+
     cfg = load_config()  # global config supplies defaults
     parser = argparse.ArgumentParser(prog="openworker-server")
     parser.add_argument("--cwd", default=None, help="optional seed/default workspace")
@@ -162,9 +179,7 @@ def main(argv=None) -> None:
 
         _exit_when_orphaned()
         app = build_app(args.cwd, args.model, args.mode)
-        uvicorn.run(
-            app, host=args.host, port=args.port, ws_max_size=_WS_MAX_FRAME_BYTES
-        )
+        uvicorn.run(app, host=args.host, port=args.port, ws_max_size=_WS_MAX_FRAME_BYTES)
     finally:
         if generated_token_path is not None:
             generated_token_path.unlink(missing_ok=True)

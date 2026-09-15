@@ -55,10 +55,7 @@ class SkillLoader:
         return self._skills.get(name)
 
     def catalog(self) -> list[dict]:
-        return [
-            {"name": s.name, "description": s.description}
-            for s in self._skills.values()
-        ]
+        return [{"name": s.name, "description": s.description} for s in self._skills.values()]
 
 
 def _parse_skill(md: Path) -> Skill:
@@ -89,12 +86,8 @@ def _parse_skill(md: Path) -> Skill:
     )
 
 
-def skill_catalog_text(
-    loader: SkillLoader, allowed: Optional[set[str]] = None
-) -> str:
-    catalog = [
-        c for c in loader.catalog() if allowed is None or c["name"] in allowed
-    ]
+def skill_catalog_text(loader: SkillLoader, allowed: Optional[set[str]] = None) -> str:
+    catalog = [c for c in loader.catalog() if allowed is None or c["name"] in allowed]
     if not catalog:
         return ""
     lines = [f"- {c['name']}: {c['description']}" for c in catalog]
@@ -125,9 +118,7 @@ def skill_tools(loader: SkillLoader, allowed: AllowedSkills = None) -> list:
             skill = loader.get(name)
         gate = _allowed_now()
         if skill is None or (gate is not None and name not in gate):
-            available = sorted(
-                n for n in loader.names() if gate is None or n in gate
-            )
+            available = sorted(n for n in loader.names() if gate is None or n in gate)
             return {"error": f"unknown skill: {name}", "available": available}
         return {
             "name": skill.name,

@@ -4,6 +4,7 @@ Compiles layered policy inputs into an :class:`EffectivePolicy` with
 narrow-only enforcement, and authorizes network and workspace-path access
 against the frozen policy.
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -27,11 +28,7 @@ _MODE_RANK = {
     "workspace-write": 1,
     "danger-full-access": 2,
 }
-# Rank = permissiveness, so a LOWER rank is stricter and may always be applied;
-# raising the rank widens the policy and needs delegation. `always` (every tool
-# call needs human approval) is therefore the strictest value, matching
-# _MODE_RANK where the strictest `read-only` is 0.
-_APPROVAL_RANK = {"always": 0, "on-request": 1, "never": 2}
+_APPROVAL_MODES = frozenset({"always", "on-request", "never"})
 
 
 class PolicyError(Exception):
@@ -117,11 +114,10 @@ class PolicyController:
 
         new_root = current.root
         if nxt.root:
-            if not _is_same_or_within(nxt.root, current.root):
-                if not allow_widening:
-                    raise PolicyWideningRejected(
-                        f"workspace root widened from {current.root!r} to {nxt.root!r}"
-                    )
+            if not _is_same_or_within(nxt.root, current.root) and not allow_widening:
+                raise PolicyWideningRejected(
+                    f"workspace root widened from {current.root!r} to {nxt.root!r}"
+                )
             new_root = nxt.root
 
         return WorkspacePolicy(
@@ -135,11 +131,7 @@ class PolicyController:
     ) -> NetworkPolicy:
         if nxt.defaultAction not in {"deny", "allow"}:
             raise PolicyInvalid(f"unknown network defaultAction: {nxt.defaultAction}")
-        if (
-            nxt.defaultAction == "allow"
-            and current.defaultAction == "deny"
-            and not allow_widening
-        ):
+        if nxt.defaultAction == "allow" and current.defaultAction == "deny" and not allow_widening:
             raise PolicyWideningRejected("network defaultAction widened from deny to allow")
 
         new_allow = current.allow
@@ -160,7 +152,7 @@ class PolicyController:
     def _merge_tools(
         self, current: ToolsPolicy, nxt: ToolsPolicy, allow_widening: bool
     ) -> ToolsPolicy:
-        if nxt.approvalMode not in _APPROVAL_RANK:
+        if nxt.approvalMode not in _APPROVAL_MODES:
             raise PolicyInvalid(f"unknown approvalMode: {nxt.approvalMode}")
 
         new_disabled = list(current.disabled)
@@ -168,14 +160,21 @@ class PolicyController:
             if tool not in new_disabled:
                 new_disabled.append(tool)
 
+        if current.approvalMode not in _APPROVAL_MODES:
+            raise PolicyInvalid(f"unknown approvalMode: {current.approvalMode}")
+
         new_approval = current.approvalMode
-        if _APPROVAL_RANK[nxt.approvalMode] > _APPROVAL_RANK[current.approvalMode]:
-            if not allow_widening:
+        if nxt.approvalMode != current.approvalMode:
+            # Approval modes are not linearly ordered. `never` closes the grant
+            # channel (it is not unrestricted), while `always` adds mandatory
+            # prompts. Only the transitions below are unambiguously narrowing.
+            narrowing = nxt.approvalMode == "never" or (
+                current.approvalMode == "on-request" and nxt.approvalMode == "always"
+            )
+            if not narrowing and not allow_widening:
                 raise PolicyWideningRejected(
                     f"approvalMode widened from {current.approvalMode} to {nxt.approvalMode}"
                 )
-            new_approval = nxt.approvalMode
-        elif _APPROVAL_RANK[nxt.approvalMode] < _APPROVAL_RANK[current.approvalMode]:
             new_approval = nxt.approvalMode
 
         return ToolsPolicy(disabled=new_disabled, approvalMode=new_approval)

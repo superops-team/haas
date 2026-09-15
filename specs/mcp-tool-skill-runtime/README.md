@@ -3,18 +3,21 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-30
-Related specs: [Harness Registry](../harness-registry/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
+Last reviewed: 2026-09-10
+Related specs: [Harness Registry](../harness-registry/README.md), [Harness Profile](../harness-profile/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
 
-The MCP / Tool / Skill Runtime converts the MCP servers, skills, disabled tools, and tool approval policies declared in a configured harness into executable runtime configuration for each harness, and maintains cross-harness capability declarations.
+The MCP / Tool / Skill Runtime converts the MCP servers, skills, AGENTS.md,
+disabled tools, and tool approval policies declared in the active
+`HarnessProfile` into executable runtime configuration for each harness, and
+maintains cross-harness capability declarations.
 
 ## 2. Sources and Rationale
 
 | Source | Adopted Content |
 |--------|-----------------|
-| Harness Registry | Configuration shape and validation for `mcpServers`, `skills`, and `disabledTools` |
+| Harness Profile | Configuration shape, versioning, and validation for `mcpServers`, `skills`, `agentsMd`, and `disabledTools` |
 | `mpa-codex-worker` MCP/skill specs | Source freezing, runtime headers, Codex native MCP configuration, and skill-folder materialization |
 | ADK 2.0 | `actions.artifactDelta`/skill materialization and harness capability declarations |
 | OpenSandbox | Shell/file/MCP capabilities in the sandbox, egress policy, and credential vault |
@@ -23,10 +26,10 @@ The MCP / Tool / Skill Runtime converts the MCP servers, skills, disabled tools,
 
 | Direction | Component | Relationship |
 |-----------|-----------|--------------|
-| Upstream | Harness Registry | Configuration validation and effective configuration expansion |
-| Upstream | Session Runtime | Freezes tools/MCP/skills when creating a session |
+| Upstream | Harness Profile / Harness Registry | Configuration validation, versioning, and effective configuration expansion |
+| Upstream | Session Runtime | Freezes tools/MCP/skills/AGENTS.md when creating a session or explicitly rebinding |
 | Upstream | Harness Adapter | Obtains adapter-specific configuration materialization |
-| Downstream | MCP servers | Streamable HTTP, SSE, or stdio |
+| Downstream | MCP servers | Brokered Streamable HTTP or SSE in P0; stdio is unsupported until its process contract exists |
 | Downstream | Skill Store | Stores and materializes skill bundles |
 | Downstream | Security Boundary | URL/header/secret/path validation |
 | Downstream | Model Proxy | Provider-specific tool schema transforms |
@@ -41,6 +44,8 @@ Responsibilities:
 - Convert enabled MCP servers into adapter-specific configuration that points to the loopback proxy.
 - Ensure that disabled MCP servers are not contacted.
 - Materialize the complete skill folder rather than writing only `SKILL.md`.
+- Materialize AGENTS.md sources from the profile snapshot and include their
+  fingerprint in `agentsMdVersion`.
 - Validate that skill paths do not escape their boundary and preserve binary content byte-for-byte.
 - Maintain disabledTools semantics: hard, advisory, or unsupported.
 - Record tool/MCP/skill capabilities and degradation events.
@@ -71,7 +76,8 @@ The proxy listens only on `127.0.0.1:18081` and is accessed by the harness throu
 async def validate_mcp_server(server: McpServerConfig, policy: Policy) -> ValidationResult: ...
 async def resolve_mcp_headers(server: McpServerConfig, ctx: RequestContext) -> ResolvedHeaders: ...
 async def materialize_skills(session: SessionRecord, skills: list[SkillBundle]) -> SkillMaterialization: ...
-async def render_adapter_tool_config(adapter: str, config: EffectiveHarnessConfig) -> AdapterToolConfig: ...
+async def materialize_agents_md(session: SessionRecord, agents_md: AgentsMdConfig) -> AgentsMdMaterialization: ...
+async def render_adapter_tool_config(adapter: str, profile: EffectiveHarnessProfile) -> AdapterToolConfig: ...
 async def enforce_disabled_tools(adapter: str, disabled: list[str]) -> ToolRestrictionResult: ...
 async def probe_mcp_server(server: McpServerConfig) -> McpProbeResult: ...
 async def relay_mcp_request(route: McpRoute, request: McpWireRequest) -> McpWireResponse: ...
@@ -120,6 +126,27 @@ async def relay_mcp_request(route: McpRoute, request: McpWireRequest) -> McpWire
 }
 ```
 
+### 6.2.1 AgentsMdConfig
+
+```json
+{
+  "mode": "snapshot",
+  "sources": [
+    {
+      "scope": "workspace",
+      "path": "AGENTS.md",
+      "contentRef": "file_agents_md",
+      "fingerprint": "sha256:def"
+    }
+  ],
+  "maxBytes": 262144
+}
+```
+
+AGENTS.md uses the same path-safety, secret-scan, and fingerprint rules as skill
+bundles, but it is not a skill. P0 supports only `mode=snapshot`; dynamic reload is
+P1/spec-only.
+
 ### 6.3 ToolRestrictionResult
 
 ```json
@@ -136,10 +163,10 @@ async def relay_mcp_request(route: McpRoute, request: McpWireRequest) -> McpWire
 
 ```text
 harness config submitted
-  -> validate MCP/skills/tools
-  -> active harness saved
+  -> validate profile MCP/skills/AGENTS.md/tools
+  -> active profile saved
   -> session created
-  -> effective MCP/skills/tools frozen
+  -> effective MCP/skills/AGENTS.md/tools frozen
   -> adapter-specific materialization
   -> optional MCP capability probe
   -> turn executes
@@ -155,6 +182,16 @@ Skill requiredness:
 - If an enabled skill is missing `SKILL.md`, configuration validation fails with `422 haas_skill_source_invalid`. A skill path that escapes its boundary (`..`, an absolute path, or control characters) also returns `422 haas_skill_source_invalid`, and the entire harness create/update operation does not take effect.
 - Skill file content supports `content` (text) or `contentB64` (binary). Binary content MUST round-trip byte-for-byte. The read endpoint is `GET /v1/haas/harnesses/{harness_id}/skills/{skill_id}/files`; unauthorized and nonexistent resources both return 404.
 - Runtime materialization failure fails session preparation unless the adapter declares skills advisory-only and the harness configuration accepts that degradation.
+
+### 7.1 Snapshot Content and Application
+
+P0 MCP supports brokered HTTP and SSE only. stdio is not accepted until a command/args/isolated-env/process-lifecycle contract exists. Required/optional applies to actual upstream discovery, not a fabricated local relay URL. The trusted external broker injects real credentials; worker loopback relays see only scoped runtime tokens.
+
+Each skill file contains exactly one of content, contentB64, or contentRef. contentRef and AGENTS.md source contentRef are immutable caller-owned `file_...` ids from the existing upload endpoint. Resolve ownership, bytes, size, encoding and digest before accepting the profile. Pin content for every applied/pending session; profile history cleanup cannot remove it. No Manager-local artifact URI or unvalidated remote URL is accepted.
+
+Materialize into isolated revision directories, verify bytes, then switch the active generation only after native readback. Never overwrite the bind-mounted project's AGENTS.md. The adapter must disable implicit mutable instruction/skill/config discovery or provide an isolated snapshot view at the same logical workspace paths. Global/workspace rule ordering is explicit (global before workspace); directory-scoped rules and uncontrolled nested discovery are unsupported in P0. If the pinned harness cannot enforce this source boundary, configuration validation fails rather than claiming snapshot isolation. File changes create a higher profile revision and delegated `/policy` applies it; automatic in-turn file watching is not enabled.
+
+Applying a profile refreshes model routes, MCP connections, skills and instructions together. Disconnect revoked MCP sources, revoke old generation tokens, and restart/resume the native runtime when reload cannot be verified. Preserve native conversation on the session volume. Failed application leaves the old applied revision and gates queued turns; do not silently mix old MCP with new instructions.
 
 ## 8. Security and Permissions
 
@@ -199,13 +236,15 @@ Metrics:
 | MCP proxy secret resolution fails | Proxy returns 401; the harness-side turn fails according to adapter semantics |
 | Skill missing `SKILL.md` | Reject configuration |
 | Partial write during skill materialization | Remove the partial directory and fail closed |
+| Partial write during AGENTS.md materialization | Remove the partial directory and fail closed |
 | Disabled tool unsupported | Mark `advisory` or `unsupported`; do not claim hard enforcement |
 | Header template value missing | Reject the turn before contacting MCP |
 
 ## 11. Test Plan and Acceptance Criteria
 
 - Unit: MCP configuration validation, header resolution, skill path validation, and disabled-tool mapping.
+- Unit: AGENTS.md source validation, snapshot fingerprints, and negative secret/path cases.
 - Integration: adapter-specific configuration rendering for Codex, Pi, and OpenCode fixtures.
-- Security: path traversal, secret-header redaction, and verification that a disabled source is not contacted.
+- Security: path traversal, secret-header redaction, AGENTS.md content redaction, and verification that a disabled source is not contacted.
 - Compatibility: skill-folder round-trip test; MCP-unavailable degradation test.
 - E2E: a Codex session with one mock MCP server proves tool discovery and safe event projection.

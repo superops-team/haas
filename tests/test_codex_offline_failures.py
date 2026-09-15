@@ -5,10 +5,12 @@ These cover the recovery and error semantics required by AGENTS.md 铁律 #8
 specs/codex-app-server-adapter §10, using an in-process fake transport so no
 real Codex binary, socket or network is required.
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 from typing import Any
 
 import pytest
@@ -33,6 +35,7 @@ from haas.harnesses.codex_app_server.rpc import (
     CodexJsonRpc,
     CodexNotReadyError,
     CodexRequestTimeout,
+    CodexSubscriberOverloaded,
     classify_message,
     decode_message,
 )
@@ -80,9 +83,7 @@ class FakeTransport:
             return
         if method in self.errors:
             await self._inbox.put(
-                json.dumps(
-                    {"jsonrpc": "2.0", "id": msg["id"], "error": self.errors[method]}
-                )
+                json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": self.errors[method]})
             )
             return
         await self._inbox.put(
@@ -120,9 +121,7 @@ def _isolate_connector(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     import haas.harnesses.codex_app_server.rpc as rpc_mod
 
-    monkeypatch.setattr(
-        rpc_mod, "connect_endpoint", rpc_mod.connect_endpoint, raising=True
-    )
+    monkeypatch.setattr(rpc_mod, "connect_endpoint", rpc_mod.connect_endpoint, raising=True)
 
 
 def _adapter_with(transport: FakeTransport, **kwargs: Any) -> CodexAdapter:
@@ -152,13 +151,37 @@ def _default_results() -> dict[str, Any]:
     }
 
 
-async def _started(
-    transport: FakeTransport, **turn_kwargs: Any
-) -> tuple[CodexAdapter, Any]:
-    adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
+async def test_concurrent_session_prepare_initializes_shared_connection_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    connect_calls = 0
+
+    async def delayed_connect() -> None:
+        nonlocal connect_calls
+        connect_calls += 1
+        await asyncio.sleep(0.05)
+        adapter._rpc._connected = True
+        adapter._rpc._initialized = True
+
+    monkeypatch.setattr(adapter._rpc, "connect", delayed_connect)
+
+    await asyncio.gather(
+        adapter.prepare_session(
+            PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
+        ),
+        adapter.prepare_session(
+            PrepareSessionRequest(sessionId="hsess_2", appName="chrn_1")
+        ),
     )
+
+    assert connect_calls == 1
+    assert adapter._generation == 1
+
+
+async def _started(transport: FakeTransport, **turn_kwargs: Any) -> tuple[CodexAdapter, Any]:
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     handle = await adapter.start_turn(
         StartTurnRequest(
             invocationId="inv_1",
@@ -372,9 +395,7 @@ async def test_stdio_transport_start_passes_explicit_secretless_env(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake-aws-secret-for-filter-test")
     monkeypatch.setenv("GITHUB_TOKEN", "not-a-real-github-token")
     monkeypatch.setenv("COOKIE", "session=fake-cookie")
-    monkeypatch.setattr(
-        asyncio, "create_subprocess_exec", fake_create_subprocess_exec
-    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
     transport = await StdioTransport.start("codex")
 
@@ -424,9 +445,7 @@ async def test_stdio_transport_recv_raises_on_eof() -> None:
 
 
 async def test_request_before_connect_is_not_ready() -> None:
-    rpc = CodexJsonRpc(
-        CodexEndpoint(transport="loopback_websocket", listen_url="ws://127.0.0.1:1")
-    )
+    rpc = CodexJsonRpc(CodexEndpoint(transport="loopback_websocket", listen_url="ws://127.0.0.1:1"))
     with pytest.raises(CodexNotReadyError):
         await rpc.request("thread/start", {})
     with pytest.raises(CodexNotReadyError):
@@ -434,13 +453,9 @@ async def test_request_before_connect_is_not_ready() -> None:
 
 
 async def test_rpc_surfaces_jsonrpc_error_payloads() -> None:
-    transport = FakeTransport(
-        _default_results(), errors={"thread/start": {"message": "boom"}}
-    )
+    transport = FakeTransport(_default_results(), errors={"thread/start": {"message": "boom"}})
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     with pytest.raises(CodexConnectionError, match="boom"):
         await adapter._rpc.request("thread/start", {})
 
@@ -448,9 +463,7 @@ async def test_rpc_surfaces_jsonrpc_error_payloads() -> None:
 async def test_rpc_surfaces_non_dict_error_payload() -> None:
     transport = FakeTransport(_default_results(), errors={"thread/start": "plain-error"})
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     with pytest.raises(CodexConnectionError, match="plain-error"):
         await adapter._rpc.request("thread/start", {})
 
@@ -458,9 +471,7 @@ async def test_rpc_surfaces_non_dict_error_payload() -> None:
 async def test_rpc_request_times_out_without_response() -> None:
     transport = FakeTransport(_default_results(), silent_methods={"thread/start"})
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     adapter._rpc._request_timeout = 0.05
     with pytest.raises(CodexRequestTimeout, match="timed out"):
         await adapter._rpc.request("thread/start", {})
@@ -469,9 +480,7 @@ async def test_rpc_request_times_out_without_response() -> None:
 async def test_rpc_send_failure_marks_disconnected() -> None:
     transport = FakeTransport(_default_results())
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     transport.send_error = BrokenPipeError("pipe gone")
     with pytest.raises(CodexConnectionError, match="send failed"):
         await adapter._rpc.request("thread/start", {})
@@ -481,9 +490,7 @@ async def test_rpc_send_failure_marks_disconnected() -> None:
 async def test_rpc_notify_failure_marks_disconnected() -> None:
     transport = FakeTransport(_default_results())
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     transport.send_error = OSError("socket dead")
     with pytest.raises(CodexConnectionError, match="send notification failed"):
         await adapter._rpc.notify("some/note", {})
@@ -493,9 +500,7 @@ async def test_rpc_notify_failure_marks_disconnected() -> None:
 async def test_rpc_routes_server_requests_separately() -> None:
     transport = FakeTransport(_default_results())
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     await transport.push({"jsonrpc": "2.0", "id": 999, "method": "approval/request"})
     requests = adapter._rpc.server_requests()
     async with asyncio.timeout(2):
@@ -506,9 +511,7 @@ async def test_rpc_routes_server_requests_separately() -> None:
 async def test_rpc_drops_invalid_and_unparsable_frames() -> None:
     transport = FakeTransport(_default_results())
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     await transport._inbox.put("this is not json")
     await transport._inbox.put(json.dumps({"id": 4242}))  # invalid: id, no method
     await transport.push({"jsonrpc": "2.0", "method": "kept/note", "params": {}})
@@ -518,12 +521,98 @@ async def test_rpc_drops_invalid_and_unparsable_frames() -> None:
     assert received["method"] == "kept/note"
 
 
+async def test_rpc_subscription_cursor_excludes_older_usage() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    await transport.push(
+        {
+            "jsonrpc": "2.0",
+            "method": "thread/tokenUsage/updated",
+            "params": {"threadId": "old", "turnId": "old", "tokenUsage": {}},
+        }
+    )
+    async with asyncio.timeout(2):
+        while adapter._rpc.notification_cursor < 1:
+            await asyncio.sleep(0)
+    cursor = adapter._rpc.notification_cursor
+    notifications = adapter._rpc.notifications(after=cursor)
+    pending = asyncio.create_task(anext(notifications))
+    await asyncio.sleep(0)
+    await transport.push(
+        {
+            "jsonrpc": "2.0",
+            "method": "thread/tokenUsage/updated",
+            "params": {"threadId": "new", "turnId": "new", "tokenUsage": {}},
+        }
+    )
+    received = await asyncio.wait_for(pending, timeout=1)
+    assert received["params"]["turnId"] == "new"
+    await notifications.aclose()
+
+
+async def test_slow_subscriber_does_not_block_shared_reader_or_rpc_responses() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    adapter._rpc._notify_queue_size = 1
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    notifications = adapter._rpc.notifications(after=adapter._rpc.notification_cursor)
+    first = asyncio.create_task(anext(notifications))
+    await asyncio.sleep(0)
+
+    await transport.push({"jsonrpc": "2.0", "method": "note/one", "params": {}})
+    assert (await asyncio.wait_for(first, timeout=1))["method"] == "note/one"
+    # Leave the subscriber suspended at its yield, then overflow its bounded queue.
+    await transport.push({"jsonrpc": "2.0", "method": "note/two", "params": {}})
+    await transport.push({"jsonrpc": "2.0", "method": "note/three", "params": {}})
+
+    # A response behind the overflow must still be read for an unrelated caller.
+    result = await asyncio.wait_for(adapter._rpc.request("thread/start", {}), timeout=1)
+    assert result == {"thread": {"id": "thr_1"}}
+    with pytest.raises(CodexSubscriberOverloaded):
+        await anext(notifications)
+    await notifications.aclose()
+
+
+async def test_subscription_rejects_cursor_older_than_bounded_replay_window() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    adapter._rpc._notify_queue_size = 2
+    adapter._rpc._notification_history = deque(maxlen=2)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+
+    for ordinal in range(3):
+        await transport.push({
+            "jsonrpc": "2.0", "method": f"note/{ordinal}", "params": {},
+        })
+    async with asyncio.timeout(1):
+        while adapter._rpc.notification_cursor < 3:
+            await asyncio.sleep(0)
+
+    notifications = adapter._rpc.notifications(after=0)
+    with pytest.raises(CodexSubscriberOverloaded):
+        await anext(notifications)
+
+
+async def test_rpc_retains_reader_failure_for_adapter_diagnostics() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    transport.recv_error = ValueError("oversized frame with private payload")
+    await transport._inbox.put("{}")
+
+    async with asyncio.timeout(2):
+        while adapter._rpc.connected:
+            await asyncio.sleep(0)
+
+    assert adapter._rpc.connection_failure_reason == "Codex app-server transport reader failed"
+    assert "private payload" not in adapter._rpc.connection_failure_reason
+
+
 async def test_close_fails_pending_requests() -> None:
     transport = FakeTransport(_default_results(), silent_methods={"thread/start"})
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     task = asyncio.create_task(adapter._rpc.request("thread/start", {}))
     await asyncio.sleep(0.05)
     await adapter._rpc.close()
@@ -592,7 +681,77 @@ async def test_stream_events_ignores_other_turns() -> None:
     assert result.status == "completed"
 
 
-async def test_interrupted_status_is_reported_as_cancelled() -> None:
+async def test_concurrent_turn_streams_do_not_steal_each_others_notifications() -> None:
+    async def collect_events(adapter: CodexAdapter, handle: Any) -> list[Any]:
+        return [event async for event in adapter.stream_events(handle)]
+
+    def event_text(events: list[Any]) -> str:
+        return "".join(
+            str(part.get("text") or "")
+            for event in events
+            for part in event.content.get("parts", [])
+            if isinstance(part, dict)
+        )
+
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    first = await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_1", sessionId="hsess_1", turnId="turn_1",
+            appName="chrn_1", input=[{"text": "first"}], timeoutSeconds=2,
+        )
+    )
+    transport.results["thread/start"] = {"thread": {"id": "thr_2"}}
+    transport.results["turn/start"] = {"turn": {"id": "codex_turn_2"}}
+    second = await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_2", sessionId="hsess_2", turnId="turn_2",
+            appName="chrn_1", input=[{"text": "second"}], timeoutSeconds=2,
+        )
+    )
+
+    first_events = asyncio.create_task(collect_events(adapter, first))
+    await asyncio.sleep(0)
+    second_events = asyncio.create_task(collect_events(adapter, second))
+    await asyncio.sleep(0)
+    for thread_id, turn_id, text in (
+        ("thr_2", "codex_turn_2", "second-result"),
+        ("thr_1", "codex_turn_1", "first-result"),
+    ):
+        await transport.push(
+            {
+                "jsonrpc": "2.0",
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": thread_id, "turnId": turn_id,
+                    "itemId": f"msg_{turn_id}", "delta": text,
+                },
+            }
+        )
+        await transport.push(
+            {
+                "jsonrpc": "2.0",
+                "method": "turn/completed",
+                "params": {
+                    "threadId": thread_id, "turnId": turn_id,
+                    "turn": {"id": turn_id, "status": "completed"},
+                },
+            }
+        )
+
+    first_result, second_result = await asyncio.wait_for(
+        asyncio.gather(first_events, second_events), timeout=1
+    )
+    assert event_text(first_result) == "first-result"
+    assert event_text(second_result) == "second-result"
+    assert first_result[-1].type == "harness.turn.completed"
+    assert second_result[-1].type == "harness.turn.completed"
+    assert not adapter._rpc._notification_subscribers
+    assert not adapter._rpc._server_request_subscribers
+
+
+async def test_interrupted_status_is_preserved_for_runtime_control_intent() -> None:
     transport = FakeTransport(_default_results())
     adapter, handle = await _started(transport)
     await transport.push(
@@ -607,8 +766,8 @@ async def test_interrupted_status_is_reported_as_cancelled() -> None:
         }
     )
     events = [e async for e in adapter.stream_events(handle)]
-    assert events[-1].type == "harness.turn.cancelled"
-    assert (await adapter.finalize_turn(handle)).status == "cancelled"
+    assert events[-1].type == "harness.turn.interrupted"
+    assert (await adapter.finalize_turn(handle)).status == "interrupted"
 
 
 async def test_stream_ends_without_terminal_yields_incomplete() -> None:
@@ -656,9 +815,7 @@ async def test_cancel_falls_back_to_accepted_when_interrupt_fails() -> None:
 async def test_start_turn_fails_when_thread_start_returns_no_id() -> None:
     transport = FakeTransport({**_default_results(), "thread/start": {"thread": {}}})
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     with pytest.raises(CodexConnectionError, match="no thread id"):
         await adapter.start_turn(
             StartTurnRequest(
@@ -711,9 +868,7 @@ async def test_start_turn_propagates_unexpected_resume_error() -> None:
 async def test_start_turn_passes_model_and_sandbox_policy() -> None:
     transport = FakeTransport(_default_results())
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     await adapter.start_turn(
         StartTurnRequest(
             invocationId="inv_1",
@@ -736,9 +891,7 @@ async def test_start_turn_passes_model_and_sandbox_policy() -> None:
 async def test_start_turn_defaults_writable_roots_when_malformed() -> None:
     transport = FakeTransport(_default_results())
     adapter = _adapter_with(transport)
-    await adapter.prepare_session(
-        PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
-    )
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
     await adapter.start_turn(
         StartTurnRequest(
             invocationId="inv_1",
@@ -759,18 +912,14 @@ async def test_start_turn_defaults_writable_roots_when_malformed() -> None:
 async def test_inspect_unknown_session_is_unknown() -> None:
     transport = FakeTransport(_default_results())
     adapter = _adapter_with(transport)
-    inspection = await adapter.inspect_session(
-        InspectSessionRequest(sessionId="never-seen")
-    )
+    inspection = await adapter.inspect_session(InspectSessionRequest(sessionId="never-seen"))
     assert inspection.status == "unknown"
 
 
 async def test_inspect_active_session_reports_thread() -> None:
     transport = FakeTransport(_default_results())
     adapter, _ = await _started(transport)
-    inspection = await adapter.inspect_session(
-        InspectSessionRequest(sessionId="hsess_1")
-    )
+    inspection = await adapter.inspect_session(InspectSessionRequest(sessionId="hsess_1"))
     assert inspection.status == "active"
     assert inspection.nativeRef["threadId"] == "thr_1"
 

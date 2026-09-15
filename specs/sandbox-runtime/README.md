@@ -3,14 +3,15 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-14
+Change ID: unified-runtime-approval-policy
 Related specs: [Architecture](../architecture/README.md), [Policy Controller](../policy-controller/README.md), [Harness Adapter](../harness-adapter/README.md), [Container Runtime](../container-runtime/README.md), [Security Boundary](../security-boundary/README.md), [Manager Delegation](../manager-delegation/README.md)
 
 ## 1. Component Role
 
-Sandbox Runtime is the standardized execution substrate for HaaS multi-harness environments. It projects the `EffectivePolicy` compiled by Policy Controller and the sandbox requirements declared by harness adapters into a unified set of OpenSandbox AIO sandbox/execd/credential vault configurations, allowing different harnesses (Codex, Pi, OpenCode, and AMP) to execute under the same isolation model.
+Sandbox Runtime projects `EffectivePolicy` and adapter declarations into one isolation contract implemented by Lite Docker (default) or OpenSandbox AIO. Harness-native sandboxing remains an inner layer; both implementations enforce the outer workspace, resource, network and credential boundary.
 
-It addresses the fact that each harness carries its own sandbox semantics (Codex sandbox policy, OpenCode permission config, and Pi workspace isolation). Sandbox Runtime converges these differences onto one set of underlying OpenSandbox capabilities instead of requiring HaaS to assemble a different isolation policy for every harness.
+OpenSandbox sandbox/execd/vault APIs below are AIO-specific. Lite uses Docker lifecycle, a private worker/broker network and retained session volume; it does not emulate unavailable AIO endpoints.
 
 ## 2. Sources and Rationale
 
@@ -29,10 +30,8 @@ It addresses the fact that each harness carries its own sandbox semantics (Codex
 | Upstream | Harness Adapter | Provides harness-specific sandbox declarations (writableRoots, cwd, approvalMode) |
 | Upstream | Session Runtime | Requests creation of a sandbox instance for a session/invocation |
 | Upstream | Artifact Store | Reports workspace file indexes and artifact paths |
-| Downstream | OpenSandbox sandbox API | Creates/destroys sandbox instances |
-| Downstream | OpenSandbox execd | Executes commands inside the sandbox with SSE result support |
-| Downstream | OpenSandbox credential vault | Stores provider/key references and issues short-lived tokens per session |
-| Downstream | OpenSandbox egress | Network egress policy |
+| Downstream | Lite Docker runtime | Default container lifecycle, mounts, resource limits and private worker/broker network |
+| Downstream | OpenSandbox AIO | Optional sandbox/execd/vault/egress projection |
 
 ## 4. Responsibility Boundaries
 
@@ -40,10 +39,10 @@ Responsibilities:
 
 - Compile `EffectivePolicy` into `SandboxSpec` (workspace mounts, writable roots, network egress, resource limit).
 - Validate and project manager-approved mount manifests for delegated sessions.
-- Create and track the lifecycle of an OpenSandbox sandbox instance for each session/invocation.
+- Create and track the selected Lite or AIO sandbox implementation for each delegated session.
 - Narrowly project the harness adapter's sandbox declaration (the projected scope MUST be less than or equal to the policy scope and MUST NOT expand it).
-- Write provider/key secrets to the credential vault; adapters receive only vault references or short-lived tokens.
-- Run harness runtime processes inside the sandbox and bridge execd output to the adapter.
+- Provision real secrets only to AIO vault or trusted Lite broker memory; adapters receive short-lived scoped tokens.
+- Run harness processes through the selected private worker transport and normalize results for the adapter.
 - Record sandbox lifecycle and security events.
 
 Non-responsibilities:
@@ -66,6 +65,16 @@ async def validate_mount_manifest(manifest: MountManifest, policy: EffectivePoli
 async def destroy_sandbox(sandbox_id: str) -> None: ...
 async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 ```
+
+### 5.1 Lite Isolation and Common Runtime Guarantees
+
+- Lite uses the existing runtime interface, Docker CPU/memory/PID limits, a read-only root filesystem, dedicated writable workspace/home/tmp roots, non-root worker identity, dropped capabilities and no-new-privileges. AIO must satisfy the same effective constraints in addition to its service projection.
+- Workers join only the internal per-session network from Container Runtime. The external broker is not a router: it accepts only authenticated model/MCP operations for the frozen invocation revision. Worker internet, DNS-based bypass, host/metadata access and cross-session broker access must be denied by the network boundary, not instructions. Verify IPv4/IPv6, redirects and DNS rebinding.
+- Lite P0 supports shell/file work and brokered model/MCP HTTP/SSE; arbitrary tool internet access and browser/VNC are unsupported. A request requiring unsupported egress or execution fails `haas_policy_unsupported`; enabling an unrestricted Docker network is not a fallback.
+- The broker is the only process that resolves long-lived credentials. Loopback relays inside the worker carry short-lived session/audience/generation tokens; native processes never receive real upstream credentials. Broker failure blocks execution rather than opening direct routes.
+- `create_sandbox` attaches the retained session volume, validates all authorized mount roots including overlaps, and verifies required enforcement before admission. Mount changes trigger a drained resource recreation under the same logical session. A native reference without retained native state is not a successful restore.
+- The control sidecar owns public acceptance, event ids and terminal state. A worker start has a durable deduplicated execution id and fenced generation. Private inspect/cancel/replay reconcile controller and worker state; they cannot create a second public invocation.
+- Workspace writer ownership covers every writable mount and overlapping parent/child roots across sessions. Hold ownership until old worker processes cannot write, not merely until a terminal database flag. Queue bounds are 100 waiting turns and 300 seconds by default; timeout/cancel removes the waiter. Admission, policy application and volume cleanup use the same ownership boundary.
 
 ## 6. Data Models
 
@@ -91,8 +100,8 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
   ],
   "isolatedWritableRoots": ["/home/haas", "/tmp", "/data/haas/cache"],
   "network": {
-    "defaultAction": "deny",
-    "allow": ["https://api.openai.com"]
+    "defaultAction": "allow",
+    "allow": []
   },
   "resources": {
     "cpu": 2,
@@ -112,7 +121,7 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
   "base": "codex",
   "cwd": "/workspace",
   "writableRoots": ["/workspace"],
-  "approvalMode": "never",
+  "approvalMode": "on-request",
   "nativeSandbox": {
     "supported": true,
     "mode": "workspace-write"
@@ -121,6 +130,13 @@ async def inspect_sandbox(sandbox_id: str) -> SandboxInspection: ...
 ```
 
 In the initial release, `compile_sandbox_spec` consumes only `cwd`, `writableRoots`, and `approvalMode`; `base` and `nativeSandbox` are adapter capability declarations for subsequent OpenSandbox projection (S5.3).
+
+The fresh-session product default is `workspace-write + public network allow + on-request`.
+These dimensions remain independent: changing approval mode does not change mounts or egress,
+and approving one action does not rebuild or widen the outer sandbox. Public-network allow is not
+host-network access; private/link-local/metadata/control-plane/cross-session routes remain blocked.
+An action that requires an outer-sandbox capability unavailable in the selected Lite/AIO variant
+is non-approvable and fails with `haas_policy_unsupported`.
 
 ### 6.3 Delegated Mount Manifest
 
@@ -154,10 +170,10 @@ manifest before container creation and before every restore:
 policy compiled
   -> harness sandbox decl collected
   -> sandbox spec compiled (narrow-only projection)
-  -> sandbox created
-  -> secret written to vault
-  -> harness runtime started inside sandbox
-  -> turn executes (execd streams back)
+  -> selected Lite/AIO sandbox created
+  -> short token issued; real secret provisioned only to broker/vault
+  -> harness runtime started through private worker transport
+  -> turn executes and normalized events stream back
   -> sandbox destroyed at session close
 ```
 
@@ -170,18 +186,25 @@ requested -> creating -> running -> draining -> stopped -> destroyed
 
 Rules:
 
-- A sandbox instance follows its session; deleting a session MUST synchronously destroy its sandbox.
+- A sandbox instance follows its session; deletion immediately revokes access/admission and schedules fenced physical cleanup. Cleanup failure must not permit another writer.
+- The running invocation uses an immutable sandbox/policy revision. A dynamic approval, network,
+  workspace, mount, or image policy update is staged through the session revision barrier and is
+  applied only before a later invocation. If the outer sandbox must change, drain and rebuild it
+  before advancing `appliedRevision`; never mutate the running sandbox in place.
+- A current-action approval resumes the waiting harness request through its adapter bridge. It
+  never changes the outer sandbox, mount set, network namespace, platform hard denies, or future
+  invocation defaults.
 - If writableRoots declared by the adapter exceed the policy, the compile phase MUST reject the declaration and MUST NOT silently expand the scope.
-- A provider key MUST only be written to the vault and MUST NOT appear in the sandbox env or startup command arguments.
+- A provider key may exist only in AIO vault or trusted Lite broker memory and MUST NOT enter worker env, mounts, startup arguments, or session volume.
 - After a sandbox restart, `generation` increases; the adapter determines and reports whether the harness thread is recoverable.
 
 ## 8. Security and Permissions
 
 - Sandbox isolation is a hard runtime boundary, but not the only boundary (defense in depth).
-- A harness's built-in sandbox can only serve as an inner layer and MUST NOT bypass the OpenSandbox sandbox/egress layer.
-- Credential vault scope is per session/audience, with a short TTL and revocation support.
+- A harness's built-in sandbox can only serve as an inner layer and MUST NOT bypass selected Lite/AIO runtime enforcement.
+- Runtime-token scope is per session/audience/generation with short TTL and revocation; real secrets remain in AIO vault or Lite broker memory.
 - All workspace paths MUST be canonicalized before comparison with policy.
-- Network egress is constrained by both OpenSandbox egress policy and the HaaS URL validator; neither MAY be omitted.
+- Network egress is constrained by Lite isolated broker networking or AIO egress plus the HaaS URL validator; neither runtime enforcement nor URL validation may be omitted.
 - The sandbox env, startup commands, and execd output MUST be redacted before entering logs/events.
 
 ## 9. Observability
@@ -210,19 +233,27 @@ Metrics:
 | adapter declaration exceeds policy | `haas_sandbox_widening_rejected`; fail closed |
 | sandbox restarts | `generation` increases; adapter inspection determines whether the thread is recoverable |
 | delegated mount manifest drifts | return `haas_delegation_mount_invalid`; require manager reauthorization or policy rebind |
-| vault write fails | turn does not start and returns `haas_vault_unavailable` |
+| vault/broker provisioning fails | turn does not start and returns `haas_vault_unavailable` |
 | egress blocks network access | handle as deny; record a security event with a redacted host |
+| approval asks for unavailable outer-sandbox capability | reject as non-approvable with `haas_policy_unsupported` |
+| sandbox rebuild for policy revision fails | keep the previous applied revision, block new turns, and expose a safe retry action |
 | destruction fails | retain a cleanup queue and retry; MUST NOT block convergence of session state |
 
 ## 11. Test Plan and Acceptance
 
 - Unit: SandboxSpec compilation, delegated mount validation, rejection of narrow-only projection violations, path canonicalization, and egress compilation.
-- Integration: OpenSandbox sandbox create/run/destroy, execd SSE result, credential vault writes, and short-lived token revocation.
+- Integration: common lifecycle/token/replay tests on Lite and AIO; AIO additionally covers sandbox/execd/vault APIs.
 - Security: provider keys do not enter the sandbox env/startup commands/logs; all widening is rejected.
 - E2E: a Codex turn completes file reads/writes inside the sandbox and produces an artifact; verify that paths are constrained.
+- Defaults: fresh Lite and AIO sessions have workspace write, public egress and on-request
+  approval, while host/private/metadata/control-plane paths remain unreachable.
+- Revision: update network/workspace/approval while a command is active; prove the current
+  sandbox is unchanged and the next invocation waits for the replacement generation.
+- Approval boundary: approving an action cannot add a host mount, join host networking, disclose
+  a credential, or enable a capability the selected runtime cannot enforce.
 
 ## 12. Next Validation Steps
 
 - Confirm the locally available OpenSandbox sandbox API and execd version and exact endpoints (`Unknown`; to be verified against the pinned commit during implementation). The initial `OpenSandboxClient` assumes the REST endpoints `POST/GET/DELETE /sandboxes[/{id}]`, `POST /sandboxes/{id}/exec`, and `POST /vault/secrets`, exposed as class constants so they can be corrected after probing.
-- Confirm that the Codex app-server process can run reliably as non-root inside an OpenSandbox sandbox and connect point-to-point to the loopback model/MCP proxy.
+- Confirm Codex runs non-root in both Lite and AIO and connects only through the scoped model/MCP relay.
 - Real OpenSandbox probing uses the explicit `HAAS_E2E_OPEN_SANDBOX=1` switch; without it, OpenSandbox client tests use an offline mock (`httpx.MockTransport`).

@@ -3,248 +3,125 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-03
-Related specs: [Startup](../startup/README.zh-CN.md), [Runtime Trim](../runtime-trim/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md), [Codex App-Server Adapter](../codex-app-server-adapter/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Observability](../observability/README.zh-CN.md)
+Last reviewed: 2026-09-10
+Change ID: manager-haas-sidecar-spec
+Related specs: [Startup](../startup/README.zh-CN.md), [Sandbox Runtime](../sandbox-runtime/README.zh-CN.md), [Config](../config/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
 
-Container Runtime 定义 HaaS 镜像、进程拓扑、端口、volume、health/ready 和 shutdown 语义。HaaS runtime image 必须基于开源 OpenSandbox AIO 镜像构建，继承 AIO 的 shell、file、browser 和 sandbox service 能力。
-
-启动编排、nginx 总入口和 Codex readiness 的详细合同由 [Startup](../startup/README.zh-CN.md) 定义；本组件只保留容器、进程和端口边界。
+Container Runtime 管理镜像选择、Docker 生命周期、挂载、持久运行数据、进程监督和平台验证。镜像变体、CPU 架构、执行后端身份是三个独立维度；两个镜像变体使用同一 HaaS 协议。
 
 ## 2. 来源与依据
 
-| 来源 | 采用内容 |
-|------|----------|
-| OpenSandbox README | 官方镜像 registry、sandbox lifecycle、credential vault、network policy |
-| OpenSandbox AIO example | `ghcr.io/agent-infra/sandbox:latest`、`/opt/gem/run.sh`、AIO port `8080` |
-| OpenSandbox API docs | lifecycle API、execd API、SSE command execution、file API |
-| `mpa-codex-worker` container runtime spec | `/health`/`/ready` 分离、runtime root、socket、shutdown、容器验证 |
-| 本组件总览 | Dockerfile 切换到 OpenSandbox AIO |
+产品默认 Lite。Mac Apple Silicon 使用 Docker CLI 在本机构建和运行 arm64 容器，不需要 Linux 构建主机或 amd64 交叉构建。镜像是 Linux OCI 镜像（`linux/arm64`），不是 Darwin 容器；所需宿主虚拟化由 Docker Engine 运行环境提供。Apple `container` 不是必备后端，不承诺 Linux 容器完全无 VM。
 
 ## 3. 上游与下游关系
 
-| 方向 | 对象 | 关系 |
-|------|------|------|
-| 上游 | Deployment system / developer | 构建和运行 HaaS image |
-| 上游 | HaaS sidecar | 读取 runtime dirs、ports、AIO endpoint、process status |
-| 上游 | Sandbox Runtime | 消费 AIO sandbox/execd/credential vault 服务 |
-| 下游 | OpenSandbox AIO | 基础 shell/file/browser/sandbox/execd/vault service |
-| 下游 | Codex app-server | 首期 harness runtime process |
-| 下游 | Model Proxy / MCP Proxy | loopback service |
-| 下游 | Observability | process logs、health、ready、resource metrics |
+Manager 选择执行端点并授权 workspace。Config 选择 Docker backend 和镜像目录。Sandbox Runtime 校验隔离，Container Runtime 创建资源，harness adapter 管理原生执行。公共 session/invocation 的持久事实由控制 sidecar 管理，不由 container id 决定。
 
 ## 4. 职责边界
 
-负责：
-
-- 定义 Dockerfile base image、dependency layer、runtime layer 和 entrypoint。
-- 保留或委托 OpenSandbox AIO `/opt/gem/run.sh`。
-- 保证 AIO 的 sandbox/execd/credential vault 服务可用，供 Sandbox Runtime 使用。
-- 启动 HaaS sidecar、Codex app-server、model proxy、MCP proxy 以及必要 watchdog。
-- 定义 `8080`、`8092`、`18080`、`18081` 端口归属。
-- AIO 基础镜像的 node22 REPL 默认占用 `8092`，与 HaaS sidecar 冲突。必须通过
-  AIO 自身的 `NODEJS_REPL_PORT_22` 覆盖为 `8093`（在 Dockerfile 中设置），
-  不得 fork 或私改 AIO 启动脚本。新增容器内服务前必须先确认端口未被 AIO 占用。
-- Sidecar 是容器存在的理由：entrypoint 必须监控其存活，sidecar 退出时容器以
-  非零码退出，禁止出现「容器 Up 但 API 不可用」的静默失败。AIO/Codex 退出只
-  记录告警，由 `/ready` 如实反映能力降级。
-- 定义 runtime root、workspace root、artifact root、state root 和 socket root。
-- 定义 health/ready/status 的容器语义。
-- 将 nginx 作为容器对外总入口，并把 HaaS sidecar readiness 作为对外 ready 的事实来源；具体启动 DAG 见 Startup spec。
-- 定义 SIGTERM drain：停止接新任务、flush event log、标记 ready=false、取消或落盘 active turn。
-- 定义 base image digest pin 和升级验证。
-- 在 runtime ENV 层落地 [Runtime Trim](../runtime-trim/README.zh-CN.md) 定义的 AIO 服务裁剪变量，
-  保证 CUA/BUA、sandbox 与 Codex readiness 不受影响。
-- 对 manager-delegated execution，支持每个 delegated session 一个 HaaS runtime
-  container、同 session 复用、idle TTL 清理、最大容器存活时间，以及从持久
-  delegated-session contract restore。
-
-不负责：
-
-- 不实现 OpenSandbox lifecycle server。
-- 不替代 HaaS Protocol 的 public API。
-- 不保存 provider secret。
-- 不用 Docker privileged 或 root 身份直接放宽 agent 工具权限。
-- 不在启动 critical path 执行模型请求、MCP 全量探测、skill 远端下载或长时间恢复。
-- 不决定哪些 host path 可挂载；只接收 manager 已授权且由 Policy Controller 与
-  Sandbox Runtime 校验过的 mount manifest。
+- 同时支持 Lite/AIO，不降低认证、secretless、workspace、资源与 egress policy。
+- Docker daemon 权限仅属于可信控制 sidecar，禁止把 socket 挂载进执行容器。
+- 仅 AIO 保留原启动脚本和官方 service-trim 配置。
+- 退出前停止接收工作、收敛活动 invocation、flush 状态并向子进程组转发 SIGTERM。
+- 必需 worker/sidecar 死亡时容器非零退出；原生 adapter 失败使 execution unavailable，直到恢复。
+- 不把模型调用、远程下载或可选 browser/MCP warmup 放在进程存活关键路径。
 
 ## 5. 核心接口
 
-### 5.1 Dockerfile Contract
+### 5.1 镜像与平台矩阵
 
-```dockerfile
-ARG HAAS_BASE_IMAGE=ghcr.io/agent-infra/sandbox@sha256:<production-pinned-digest>
-FROM ${HAAS_BASE_IMAGE}
+| Variant | Dockerfile 目标 | 平台 | 内容 |
+|---------|-----------------|------|------|
+| `lite`（默认） | `docker/Dockerfile.lite` | `linux/arm64`、`linux/amd64` | slim Python runtime、锁定的 HaaS 依赖、pin 的 Codex binary、git、CA 证书、shell、tini；仅支持执行所必需的依赖 |
+| `aio`（可选） | 现有根目录 `Dockerfile` | `linux/amd64` | digest pin 的 OpenSandbox AIO 加 HaaS/Codex；保留 browser/VNC 和官方启动链 |
 
-# install HaaS runtime dependencies after base AIO layers
-# install/pin Codex CLI and optional future harness CLIs
-# copy haas source after dependency layers
-# preserve /opt/gem/run.sh and add HaaS entrypoint wrapper
-```
+这是目标合同，不代表 Lite 已实现。保留现有 AIO Dockerfile 路径，不重复创建第二份 AIO Dockerfile。Lite 不含 AIO、nginx、browser、VNC、IDE、notebook 和开发/测试依赖组；其他语言工具链通过显式派生镜像提供，不放入默认 Lite。
 
-Rules:
+Release base 和 Codex 分发物按架构 pin digest/checksum。可变本地 tag 需要显式开发开关。记录 OCI index digest 与实际选中的 platform manifest digest；restore 使用记录的 manifest，不重新解析 `latest`。
 
-- Local experiments may use `ghcr.io/agent-infra/sandbox:latest`.
-- The Dockerfile default must remain the production-pinned digest. A local or CI build may set `HAAS_BASE_IMAGE` to a trusted digest-pinned mirror/cache reference; release builds may not use a mutable tag.
-- All HaaS images MUST be built and run for `linux/amd64`. This is a hard delivery contract: `make docker-build` and `make docker-check` pin `--platform=linux/amd64` (via `HAAS_PLATFORM`), and non-amd64 hosts (e.g. Apple Silicon) must cross-build amd64 through buildx/QEMU. Native-arch images must never be shipped as deliverables.
-- Dependency install layers must precede source code copy. npm and uv downloads use BuildKit cache mounts and remain governed by `uv.lock` and package pins.
-- `make docker-build` is the standard local build entrypoint; the override does not change the production default or AIO service contract.
-- Runtime env must be placed near the final runtime layer so it does not bust dependency cache.
-- The Dockerfile must not embed provider keys, MCP tokens, cookies or user auth files.
+### 5.2 构建与运行合同
 
-### 5.1.1 AIO Service Trim
+- 目标命令 `make docker-build-lite` 使用 Docker CLI 构建一个选定平台；Lite 实现门禁通过后 `make docker-build` 默认委托它。Apple Silicon + 本地 arm64 Engine 显式选择 `linux/arm64`。
+- `make docker-build-aio` 保留 `linux/amd64`；arm64 主机运行 AIO 需要显式可用的模拟环境，不能静默选择。
+- Release 分别验证两种 Lite 平台，再组合 OCI index；本机测试不要求多架构 `--load`，也不要求 push registry。
+- 按 Docker 执行节点选择架构，而非远程 Manager 的架构。Manager 本地 bind mount 要求 operator 确认的本地 Docker context，远程 context 不能解释 Manager 本地路径。
+- Preflight 检查 Docker CLI/daemon、context locality、架构、image manifest、挂载权限、磁盘容量及必需隔离，不支持的组合在用户工作开始前失败。
+- 目标 `make docker-check` 验证 Lite，`make docker-check-aio` 验证 AIO；迁移实现前现有 AIO 命令行为不变，不能因 spec 修改而宣告 runtime 支持。
+- Lite 每平台压缩预算 400 MiB，解包预算 1.2 GiB，测量不计 build cache；这些是验收目标，不是实测结果。
 
-HaaS 只消费 AIO 的 shell/file/browser/sandbox/execd/credential vault 能力，不使用 AIO 自带的
-IDE、notebook 和多版本 REPL 服务。这些服务通过 AIO **官方支持的 `DISABLE_*` / `NODE_VERSION`
-环境变量**在 runtime ENV 层关闭（默认：`DISABLE_CODE_SERVER`、`DISABLE_JUPYTER`、
-`DISABLE_NODEJS_REPL`、`NODE_VERSION=node22`），不 fork 或私改 AIO 启动脚本。
+### 5.3 进程、端口与就绪
 
-裁剪的完整合同——关闭清单、必须保留的能力、机制规则、gost/`18080` 前提、以及“运行时禁用只
-降资源占用、不减镜像层体积”的边界——由 [Runtime Trim](../runtime-trim/README.zh-CN.md) 权威定义。
-本组件只在 runtime ENV 层落地这些变量，并保证 CUA/BUA、sandbox 与 Codex readiness 不受影响。
+Lite 使用 tini 和独立最小 entrypoint，不复用当前 AIO-only 启动脚本。AIO 保留 `/opt/gem/run.sh`，使用 `NODEJS_REPL_PORT_22` 把 node22 REPL 从 8092 移至 8093，并应用 [Runtime Trim](../runtime-trim/README.zh-CN.md)。
 
-### 5.2 Entrypoint Contract
+| Surface | Lite | AIO |
+|---------|------|-----|
+| Host control sidecar | Loopback 8092 或选定本地端口 | 相同 |
+| 独立容器 API | 容器接口 8092，默认仅 publish 到 host loopback | nginx 8080 转发 sidecar loopback 8092 |
+| Delegated worker API | 私有容器网络 listener，不 publish 到 host/public | 相同信任边界，不公开 AIO 辅助路由 |
+| Harness model/MCP relay | Loopback 18080/18081，仅 scoped runtime token | 相同 |
 
-```text
-/opt/haas/run.sh
-  -> prepare runtime directories
-  -> start or delegate OpenSandbox AIO /opt/gem/run.sh
-  -> start HaaS sidecar on 8092
-  -> start Codex app-server listener for codex adapter
-  -> forward SIGTERM to all child process groups
-```
+`/health` 表示 HTTP 进程存活。`ready?scope=control` 只依赖 identity/config/store 初始化，不依赖 Codex 或已配置 profile。`ready?scope=execution` 额外要求 adapter/runtime/isolation 就绪。Profile 专属校验在 invocation acceptance 前完成；可选 AIO 服务不阻塞 Lite ready。握手及退出合同见 Startup。
 
-If a process manager is used, it must not make supervisor RUNNING equal HaaS ready. Readiness must be based on actual sidecar and adapter probes.
+### 5.4 内部 Delegated 执行
 
-### 5.3 Health / Ready
+Host control sidecar 仅接受一次公共 invocation，持久化到确定性 worker execution id 的映射。Worker role 不独立接受公共 ADK session，也不能递归创建 delegated container。私有 start/inspect/cancel/event API 使用 generation-scoped 服务认证和控制端分配的 execution id，在 session volume 持久化去重事实。Worker 上报 normalized fact，仅控制 sidecar 分配 public event id 和终态。连接断开后 inspect/replay，不能盲目启动第二次 native turn；崩溃后无法确定 native start 结果时必须对账或明确失败，不能自动重执行。
 
-| Endpoint | Meaning |
-|----------|---------|
-| `/health` or `/v1/haas/health` | HaaS sidecar process responds |
-| `/ready?scope=control` | HaaS can accept lightweight control-plane operations |
-| `/ready?scope=execution` | HaaS can start a harness turn |
-| AIO `/v1/shell/sessions` | AIO service readiness probe |
+执行容器接入 per-session internal Docker network。可信 model/MCP broker 同时接入该网络及独立 egress network，但不转发任意 IP 流量。Worker 不接外网或 host network。Loopback relay 将带认证的 model/MCP 请求交给 broker；broker 执行 frozen route policy，并在执行容器外解析 secret。不提供通用 CONNECT、任意 URL 转发或 credential-read API。执行约束及凭证配置见 Sandbox Runtime 和 Security Boundary。
+Delegated policy snapshot 携带 `network.defaultAction` 与 `network.allow`。当前
+`--network none` Docker backend 只支持 deny；在 isolated egress broker 能执行该策略前，
+allow 请求必须以 `haas_policy_unsupported` 失败关闭。
 
-## 6. 数据模型
+## 6. 数据模型与持久化
 
-### 6.1 RuntimeLayout
+`DelegatedImage` 记录 `reference`、可选 digest 输入、`variant` 和解析后的 `platform`；执行前记录选中 manifest digest。Runtime identity 为 `(delegatedSessionId, containerGeneration)`，不是新公共 session。
 
-```json
-{
-  "workspaceRoot": "/workspace",
-  "dataRoot": "/data/haas",
-  "runtimeRoot": "/tmp/haas",
-  "stateRoot": "/data/haas/state",
-  "artifactRoot": "/data/haas/artifacts",
-  "codexHome": "/data/haas/harnesses/codex/home",
-  "codexSocketPath": "/tmp/haas/codex.sock",
-  "aioBase": {
-    "image": "ghcr.io/agent-infra/sandbox@sha256:<digest>",
-    "servicePort": 8080,
-    "entrypoint": "/opt/gem/run.sh",
-    "services": ["shell", "file", "browser", "sandbox", "execd", "credential_vault"]
-  }
-}
-```
+独立于容器可写层的持久资源：
 
-### 6.2 RuntimeProcess
+- Control store：session、invocation、canonical event、目标/已应用配置、worker mapping 与幂等事实。
+- 挂载到 `/data/haas` 的 per-session Docker volume：Codex home/history、配置材料化 generation、skill/AGENTS.md 字节及可恢复 worker receipt。
+- Artifact Store 中的已发布文件字节，运行 volume 回收前完成复制。
 
-```json
-{
-  "name": "haas-sidecar",
-  "command": ["/app/haas/.venv/bin/uvicorn", "haas.api.app:create_app", "--factory"],
-  "port": 8092,
-  "critical": true,
-  "restart": "on_failure",
-  "healthEndpoint": "/v1/haas/health"
-}
-```
+不把控制数据库或宿主用户 HOME 挂载到 worker。Worker/broker 使用独立身份，无 privileged container、无 Docker socket，仅保留最小内核 capability。Native 文件属于私有执行数据，不进入 diagnostics/artifact，不作为 secret store。只有 native reference 而没有必要字节，不算可恢复。
 
-## 7. 运行模型与状态机
+## 7. 生命周期与配置更新
 
-```text
-image built
-  -> container starting
-  -> aio starting
-  -> sidecar listening
-  -> control ready
-  -> adapter probe pending
-  -> execution ready
-  -> draining
-  -> stopped
-```
+每个 delegated session 最多一个 active writer container。追问复用容器；idle TTL 默认 1800 秒，最大存活 28800 秒。达到最大存活时间后允许当前工作完成，随后在等待的追问开始前自动重建。
 
-Startup rules:
+Idle TTL 与配置重建只移除进程/容器层，不删除 session volume、公共历史或逻辑 binding。应用配置时等待 invocation 完全停止、flush native state、停止旧进程组、重新验证挂载，必要时重建资源。Mount 或 variant 变更使用授权的 `/policy` 更新，保持逻辑 session；原生续接不支持时报告应用失败，不静默新建 chat。准备资源失败不能降低任何已发布 profile version。
 
-- `/health` must become available before optional capability warmup completes.
-- `/ready?scope=control` and the default `/ready` are overall service readiness signals; they remain false until Codex app-server readiness probe completes.
-- `/ready?scope=execution` may use the same Codex gate for the P0 adapter; model provider, MCP discovery or browser startup remain outside the default gate unless declared a Codex execution-safety dependency.
-- AIO readiness and HaaS readiness are reported separately.
+删除先关闭 admission 并取消 pending 更新/turn，收敛 worker、撤销 broker token，随后释放 writer ownership。状态/artifact 立即不可访问；物理清理失败继续 fencing 并重试。Volume retention 跟随 session，而不是 idle TTL；旧清理结果不确定时 restore 不启动第二个 writer。
 
-Delegated-session container rules:
-
-- 每个 manager delegated session 同时最多拥有一个 active HaaS runtime container。
-- 同一 session 的后续 turn 在容器健康且未超过策略限制时复用 live container。
-- idle TTL 默认 30 分钟，通过 delegated policy snapshot 可配置。
-- 最大容器存活时间默认 8 小时，可配置。active turn 可以完成，但达到最大存活时间后 runtime 拒绝新 turn。
-- TTL 清理只销毁运行资源，不删除 HaaS session、event log、delegated-session contract、manager authorization snapshot 或 host file。
-- Restore 从持久 delegated-session contract 创建新的 container generation，并在启动工作前重新校验 mounts。
-- 所有 delegated HaaS runtime container 都必须按 `linux/amd64` 构建和运行，符合仓库级硬平台合同。
+Pause 后 delegated runtime 与 session volume 仍可继续。Idle TTL 可以回收 container，但 Continue 必须先从持久 volume 恢复，再启动关联的新 invocation。Cancel 撤销可恢复性，并遵循 delete/cleanup fencing 规则。
 
 ## 8. 安全与权限
 
-- Container root or privileged mode is not a substitute for harness sandbox policy.
-- Runtime secret files must be owner-only and excluded from artifacts.
-- AIO service endpoints should be bound to loopback unless intentionally exposed through a controlled proxy.
-- HaaS sidecar bearer auth is required for non-health endpoints.
-- Docker build args and image layers must not contain secrets.
-- Base image digest must be recorded for release builds.
+Model/provider/MCP credential 不进入 worker env、mount、config、command line 或 artifact。Worker-to-broker token 按 session/audience/generation 限定，短 TTL 且可撤销。Broker/network 故障不允许直连 provider fallback。Create/update/restore 都验证 mount 授权、可写目录重叠与 symlink/path drift。
 
 ## 9. 可观测性
 
-Container status must include:
-
-- image reference and digest;
-- AIO process status and port;
-- HaaS sidecar process status and port;
-- adapter process status;
-- model/MCP proxy status;
-- startup phase timings;
-- drain state;
-- last safe error reason.
-
-Logs must go to stdout/stderr or configured log files with redaction.
+安全诊断区分 image variant、选定架构、image digest、Docker availability、control/execution ready、配置 revision、runtime generation 和 cleanup state。Public discovery 不返回 container id/host path；native-only 细节需要独立授权 diagnostics。
 
 ## 10. 失败与恢复
 
-| 场景 | 行为 |
+| 失败 | 行为 |
 |------|------|
-| AIO service not ready | HaaS control ready may be true; execution ready false with safe reason |
-| HaaS sidecar not listening | container health fails |
-| Codex app-server not ready | execution ready false; session create can be pending only if API contract allows |
-| delegated container image unavailable | 返回 `haas_delegation_image_unavailable`；不得静默切换 image 或 platform |
-| delegated container idle TTL reached | drain idle runtime，销毁 container，保留 delegated-session contract |
-| delegated container max lifetime reached | 允许 active turn 完成，随后拒绝新 turn，直到 restore 创建新 generation |
-| SIGTERM | enter draining, reject new tasks, flush event log, cancel/settle active turns |
-| base image unavailable | build fails; do not silently switch image |
-| digest mismatch | release blocked |
-| port conflict | startup fails with safe diagnostics |
+| Docker 不可用/context 错误 | 结构化 preflight 失败；settings 仍可用 |
+| 平台不支持/digest 不一致 | 拒绝，不静默换镜像或架构 |
+| Egress/secret broker 不可用 | execution unavailable，无 raw credential/network fallback |
+| Native session 数据缺失 | 安全失败，保留公共 session 与 non-resumable 证据 |
+| 配置材料化失败 | 保持 applied revision，暴露失败，不使用 pending revision 执行 |
+| TTL/最大存活时间 | 从持久数据重建，generation 递增 |
+| SIGTERM/host 重启 | drain 或核对持久 worker 状态，不仅凭进程退出判定完成 |
 
 ## 11. 测试计划与验收
 
-- Dockerfile lint/static check for base image pin in release mode.
-- Build smoke from current checkout（`HAAS_DOCKER_BUILD=1 make docker-check`）。
-  静态检查不得作为容器变更的唯一证据：曾出现静态全绿但镜像根本无法构建
-  （`pyproject` 声明的 `README.md` 未 COPY）。容器相关变更必须跑 build 层。
-- Container run smoke verifies AIO port `8080` and HaaS port `8092`，并断言
-  `/v1/haas/status` 中装配的是真实 harness adapter（非测试替身），以及
-  sidecar 被杀后容器以非零码退出。AIO 启动慢于 sidecar，就绪判定需轮询。
-- Health/ready tests verify `/health` is not gated by optional warmups.
-- Shutdown test sends SIGTERM and asserts drain events/status.
-- Delegated lifecycle test verifies same-session reuse, idle TTL cleanup, max-lifetime refusal of new turns, and restore with a new container generation.
-- Secret scan verifies build args, env, logs and image metadata do not contain provider credentials.
-- Service-trim check (§5.1.1 / [Runtime Trim](../runtime-trim/README.zh-CN.md))：静态断言 Dockerfile
-  设置 `DISABLE_CODE_SERVER`、`DISABLE_JUPYTER`、`DISABLE_NODEJS_REPL`；build/smoke 断言
-  code-server/jupyter 未监听而 browser/VNC/sandbox 与 Codex readiness 仍正常。
+- 分别构建 Lite arm64/amd64 和 AIO amd64，验证依赖锁与 per-platform digest；Mac arm64 在 Mac 上通过 Docker CLI 构建运行。
+- 各支持组合真实执行 discovery → first turn → pause → interrupted readback → 关联新 turn 的 Continue → Stop/cancel → readback；fake 不替代真实门禁。
+- paused worker 在 idle TTL 后回收时，必须用同一 session volume 恢复并续接原生 session；native bytes 缺失时以 non-resumable 失败，不得本地或无上下文 fallback。
+- TTL 和配置更新后销毁/重建 worker，验证 native history、冻结内容及 artifact 下载保留。
+- 拒绝 worker 直连 internet、host/metadata、broker 任意转发、跨 session token、Docker socket 及 broker credential 读取。
+- 验证无 Codex 时 control ready、握手/隔离通过后的 execution ready，以及所有入口的渐进 SSE。
+- 验证 single-writer fencing、pending 更新失败/重启、有界退出、磁盘满和清理重试。
+- 测量 Lite 压缩/解包大小；真实安全和执行 smoke 通过前不宣告新 runtime 支持。

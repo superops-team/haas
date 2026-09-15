@@ -3,18 +3,20 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-30
-Related specs: [Harness Registry](../harness-registry/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
+Last reviewed: 2026-09-10
+Related specs: [Harness Registry](../harness-registry/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
 
-MCP / Tool / Skill Runtime 负责把 configured harness 中声明的 MCP servers、skills、disabled tools 和 tool approval 策略转换为各 harness 可执行的运行时配置，并维护跨 harness 的能力声明。
+MCP / Tool / Skill Runtime 负责把 active `HarnessProfile` 中声明的 MCP servers、
+skills、AGENTS.md、disabled tools 和 tool approval 策略转换为各 harness 可执行的
+运行时配置，并维护跨 harness 的能力声明。
 
 ## 2. 来源与依据
 
 | 来源 | 采用内容 |
 |------|----------|
-| Harness Registry | `mcpServers`、`skills`、`disabledTools` 的配置 shape 与校验 |
+| Harness Profile | `mcpServers`、`skills`、`agentsMd`、`disabledTools` 的配置 shape、版本和校验 |
 | `mpa-codex-worker` MCP/skill specs | source freeze、runtime headers、Codex native MCP config、skill folder materialization |
 | ADK 2.0 | `actions.artifactDelta`/skill 物化与 harness 能力声明 |
 | OpenSandbox | sandbox 内 shell/file/MCP 能力、egress policy 和 credential vault |
@@ -23,10 +25,10 @@ MCP / Tool / Skill Runtime 负责把 configured harness 中声明的 MCP servers
 
 | 方向 | 对象 | 关系 |
 |------|------|------|
-| 上游 | Harness Registry | 配置校验和有效配置展开 |
-| 上游 | Session Runtime | session 创建时冻结 tools/MCP/skills |
+| 上游 | Harness Profile / Harness Registry | 配置校验、版本和有效配置展开 |
+| 上游 | Session Runtime | session 创建或显式 rebind 时冻结 tools/MCP/skills/AGENTS.md |
 | 上游 | Harness Adapter | 获取 adapter-specific config materialization |
-| 下游 | MCP servers | Streamable HTTP、SSE 或 stdio |
+| 下游 | MCP servers | P0 为 brokered Streamable HTTP/SSE；stdio 等进程合同完成后再支持 |
 | 下游 | Skill Store | skill bundle 保存和 materialization |
 | 下游 | Security Boundary | URL/header/secret/path validation |
 | 下游 | Model Proxy | provider-specific tool schema transform |
@@ -41,6 +43,8 @@ MCP / Tool / Skill Runtime 负责把 configured harness 中声明的 MCP servers
 - 将 enabled MCP servers 转换为 adapter-specific config（指向 loopback proxy）。
 - 保证 disabled MCP server 不被连接。
 - 物化完整 skill folder，而不是只写 `SKILL.md`。
+- 物化 profile snapshot 中的 AGENTS.md sources，并把其 fingerprint 计入
+  `agentsMdVersion`。
 - 校验 skill path 不越界，二进制内容 byte-for-byte 保留。
 - 维护 disabledTools 的语义：hard、advisory、unsupported。
 - 记录 tool/MCP/skill capability 和降级事件。
@@ -71,7 +75,8 @@ proxy 只监听 `127.0.0.1:18081`，由 harness 在 sandbox 内经 loopback 访�
 async def validate_mcp_server(server: McpServerConfig, policy: Policy) -> ValidationResult: ...
 async def resolve_mcp_headers(server: McpServerConfig, ctx: RequestContext) -> ResolvedHeaders: ...
 async def materialize_skills(session: SessionRecord, skills: list[SkillBundle]) -> SkillMaterialization: ...
-async def render_adapter_tool_config(adapter: str, config: EffectiveHarnessConfig) -> AdapterToolConfig: ...
+async def materialize_agents_md(session: SessionRecord, agents_md: AgentsMdConfig) -> AgentsMdMaterialization: ...
+async def render_adapter_tool_config(adapter: str, profile: EffectiveHarnessProfile) -> AdapterToolConfig: ...
 async def enforce_disabled_tools(adapter: str, disabled: list[str]) -> ToolRestrictionResult: ...
 async def probe_mcp_server(server: McpServerConfig) -> McpProbeResult: ...
 async def relay_mcp_request(route: McpRoute, request: McpWireRequest) -> McpWireResponse: ...
@@ -120,6 +125,26 @@ async def relay_mcp_request(route: McpRoute, request: McpWireRequest) -> McpWire
 }
 ```
 
+### 6.2.1 AgentsMdConfig
+
+```json
+{
+  "mode": "snapshot",
+  "sources": [
+    {
+      "scope": "workspace",
+      "path": "AGENTS.md",
+      "contentRef": "file_agents_md",
+      "fingerprint": "sha256:def"
+    }
+  ],
+  "maxBytes": 262144
+}
+```
+
+AGENTS.md 使用与 skill bundle 相同的 path safety、secret scan 和 fingerprint
+规则，但它不是 skill。P0 只支持 `mode=snapshot`，动态 reload 是 P1/spec-only。
+
 ### 6.3 ToolRestrictionResult
 
 ```json
@@ -136,10 +161,10 @@ async def relay_mcp_request(route: McpRoute, request: McpWireRequest) -> McpWire
 
 ```text
 harness config submitted
-  -> validate MCP/skills/tools
-  -> active harness saved
+  -> validate profile MCP/skills/AGENTS.md/tools
+  -> active profile saved
   -> session created
-  -> effective MCP/skills/tools frozen
+  -> effective MCP/skills/AGENTS.md/tools frozen
   -> adapter-specific materialization
   -> optional MCP capability probe
   -> turn executes
@@ -160,6 +185,16 @@ Skill requiredness:
   `GET /v1/haas/harnesses/{harness_id}/skills/{skill_id}/files`，越权与不存在
   统一返回 404。
 - Runtime materialization failure fails session preparation unless adapter declares skills as advisory-only and the harness config accepts that degradation.
+
+### 7.1 Snapshot 内容与应用
+
+P0 MCP 仅支持 brokered HTTP/SSE；command/args/isolated-env/process-lifecycle 合同完成前不接受 stdio。Required/optional 针对真实 upstream discovery，不是假造的 loopback relay URL。可信外部 broker 注入真实 credential，worker relay 只持 scoped runtime token。
+
+Skill file 必须且只能有 content/contentB64/contentRef 之一；skill 和 AGENTS.md 的 contentRef 均为既有上传端点返回、caller-owned immutable `file_...` id。接受 profile 前验证 ownership、bytes、size、encoding、digest。Applied/pending session pin 内容，profile history 清理不能删除引用字节。不接受 Manager-local artifact URI 或未验证 remote URL。
+
+内容写入隔离 revision directory，验证后且 native readback 成功才切 active generation。不覆盖 bind-mounted 项目的 AGENTS.md。Adapter 必须关闭隐式可变 instruction/skill/config discovery，或在相同逻辑 workspace path 提供隔离 snapshot view。明确 global 在 workspace 前；P0 不支持 directory rule 和不受控 nested discovery。Pin 的 harness 无法执行该来源边界时 validation 失败，不能虚称 snapshot isolation。文件变更创建更高 profile revision，delegated `/policy` 应用，不开启 turn 内自动 file watcher。
+
+应用 profile 一起刷新 model route、MCP connection、skill、instruction；断开撤销来源、撤销旧 generation token，reload 不可验证时 restart/resume native runtime，session volume 保留 conversation。应用失败保持旧 applied revision 并阻止排队 turn，不混用旧 MCP 和新 instruction。
 
 ## 8. 安全与权限
 
@@ -201,13 +236,15 @@ Metrics:
 | MCP proxy secret 解析失败 | proxy 返回 401；harness 侧回合按 adapter 语义失败 |
 | Skill missing `SKILL.md` | reject config |
 | Skill materialization partial write | remove partial directory and fail closed |
+| AGENTS.md materialization partial write | remove partial directory and fail closed |
 | Disabled tool unsupported | mark `advisory` or `unsupported`; do not claim hard enforcement |
 | Header template missing value | reject turn before contacting MCP |
 
 ## 11. 测试计划与验收
 
 - Unit：MCP config validation、header resolution、skill path validation、disabled tool mapping。
+- Unit：AGENTS.md source validation、snapshot fingerprint、secret/path negative cases。
 - Integration：adapter-specific config rendering for Codex, Pi and OpenCode fixtures。
-- Security：path traversal, secret header redaction, disabled source not contacted。
+- Security：path traversal, secret header redaction, AGENTS.md content redaction, disabled source not contacted。
 - Compatibility：skill folder round-trip test；MCP unavailable degradation test。
 - E2E：Codex session with one mock MCP server proves tool discovery and safe event projection。

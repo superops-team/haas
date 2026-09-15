@@ -9,9 +9,9 @@ Related specs: [Architecture](../architecture/README.md), [Container Runtime](..
 
 ## 1. Component Role
 
-Startup defines the orchestration contract for a HaaS container from process startup until it can serve external requests. nginx is the container's single external entry point, the HaaS sidecar is the source of truth for the northbound API, and the actual Codex app-server protocol handshake determines overall `ready` status.
+Startup defines Lite, AIO and host control-sidecar orchestration. nginx/AIO instructions in this document apply only to the AIO image; Lite skips those phases and uses its dedicated minimal entrypoint. The host control sidecar listens on loopback, standalone Lite publishes its container 8092 listener to host loopback, and delegated workers use only private service transport (Container Runtime §5.3). HaaS owns northbound readiness.
 
-This component defines only standardized HaaS startup behavior. It does not implement or support the `mpa-codex-worker` `/v1/codex-worker/*` shim. The legacy project serves only as a reference for startup ordering, Unix socket probing, supervisor, and asynchronous warmup.
+`ready?scope=control` depends only on identity/config/store initialization and is available with an empty registry or unavailable Codex. `ready?scope=execution` (also the default `/ready` scope) adds adapter handshake, runtime and isolation checks. The Codex/overall-ready rules below refer only to execution scope. A host delegation controller checks its Docker execution path instead of requiring an unrelated host Codex process. Capability discovery is readable once control is ready, including unavailable features; it does not require execution readiness.
 
 The goal is to make the minimal service entry point available as quickly as possible without misclassifying non-critical capabilities as ready or allowing asynchronously initialized capabilities to block the overall service.
 

@@ -52,9 +52,7 @@ def _read(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _config_paths(
-    workspace: Optional[str | Path], *, workspace_trusted: bool
-) -> list[Path]:
+def _config_paths(workspace: Optional[str | Path], *, workspace_trusted: bool) -> list[Path]:
     """Config files to merge. Workspace MCP is executable provenance (stdio spawn),
     so an untrusted repo's `.coworker/mcp.json` is never read — cloning alone must
     not be enough to define processes that run at session open.

@@ -1,0 +1,88 @@
+{
+  "title": "HaaS: Make Agent Execution a Service",
+  "titleZh": "HaaS：把 Agent 执行变成服务",
+  "repositoryUrl": "https://github.com/superops-team/haas",
+  "voice": "Samantha",
+  "rate": 155,
+  "scenes": [
+    {
+      "id": "problem", "chapter": "THE REAL PROBLEM", "title": ["An agent that works.", "A service you can trust?"], "subtitle": "能执行任务，不等于能被产品稳定使用。",
+      "cues": [
+        ["An agent can complete a task.", "一个 Agent 可以完成任务。"],
+        ["But turning that agent into a dependable product is a different problem.", "但把它做成可靠的产品，是另一回事。"],
+        ["Each runtime brings its own sessions, tools, permissions, event stream, and recovery rules.", "每种 runtime 都有自己的会话、工具、权限、事件流和恢复规则。"],
+        ["Your application ends up owning all those differences.", "这些差异，最终都落到你的应用身上。"],
+        ["Switching runtimes means rebuilding the integration, not just changing a model name.", "切换 runtime，意味着重做接入，而不仅是换一个模型名。"]
+      ]
+    },
+    {
+      "id": "definition", "chapter": "HARNESS AS A SERVICE", "title": ["The runtime.", "Not just the model."], "subtitle": "统一完整 Agent Runtime 的服务边界，不重造执行引擎。",
+      "cues": [
+        ["HaaS stands for Harness as a Service.", "HaaS 是 Harness as a Service 的缩写。"],
+        ["A harness is the complete agent runtime.", "Harness 是完整的 Agent Runtime。"],
+        ["It reasons, uses tools, edits files, and maintains a session.", "它负责推理、使用工具、修改文件和维护会话。"],
+        ["HaaS puts a stable service boundary around that runtime.", "HaaS 为这个 runtime 建立稳定的服务边界。"],
+        ["It is not another model API, and it does not replace the agent's execution engine.", "它不是又一个模型 API，也不替代 Agent 自己的执行引擎。"]
+      ]
+    },
+    {
+      "id": "architecture", "chapter": "ONE SERVICE BOUNDARY", "title": ["One contract.", "Clear responsibilities."], "subtitle": "应用负责产品，HaaS 管理执行，Harness 提供原生能力。",
+      "cues": [
+        ["Your application or Manager calls an ADK-compatible web API with live event streaming.", "应用或 Manager 调用兼容 ADK、支持实时事件流的 Web API。"],
+        ["The HaaS control sidecar manages sessions, execution records, policies, and events.", "HaaS 控制 sidecar 管理会话、执行记录、策略和事件。"],
+        ["Adapters keep native harness protocols out of your application.", "Adapter 把 harness 原生协议隔离在应用之外。"],
+        ["The security design keeps provider credentials behind trusted proxies.", "安全设计把 provider 凭据保留在可信代理之后。"],
+        ["The runtime receives only scoped access.", "Runtime 仅获得限定范围的访问能力。"],
+        ["Codex app-server is the first implemented adapter.", "Codex app-server 是首个已实现的 adapter。"]
+      ]
+    },
+    {
+      "id": "execution", "chapter": "FOLLOW ONE EXECUTION", "title": ["A request is not a result.", "Follow the whole lifecycle."], "subtitle": "发现 → 提交 → 事件流 → 明确终态 → 结果回读",
+      "cues": [
+        ["Follow one execution.", "看一次执行。"],
+        ["The client discovers a configured harness, then submits a task through the run endpoint.", "客户端先发现已配置的 harness，再通过执行端点提交任务。"],
+        ["HaaS checks identity and policy before handing work to the adapter.", "HaaS 在把工作交给 adapter 前检查身份和策略。"],
+        ["As the runtime works, its output becomes canonical events, then the application's live stream.", "Runtime 的输出先成为 canonical event，再进入应用的实时流。"],
+        ["The execution finishes with an explicit terminal state.", "执行以明确的终态结束。"],
+        ["The client can read back the recorded result.", "客户端可以回读已记录的结果。"],
+        ["There is no need to guess whether the stream meant success.", "不必猜测流结束是否意味着成功。"]
+      ]
+    },
+    {
+      "id": "lifecycle", "chapter": "BEYOND THE HAPPY PATH", "title": ["A dropped connection", "is not a cancelled task."], "subtitle": "把请求连接和执行事实分开，失败仍需明确呈现。",
+      "cues": [
+        ["This lifecycle is where service integration gets difficult.", "服务接入的难点，就在这里。"],
+        ["A retry should not start the same work twice.", "重试，不应该重复启动同一份工作。"],
+        ["Two turns should not write through the same session at once.", "两个 turn 不应该同时通过同一 session 写入。"],
+        ["Losing a streaming connection should not be confused with cancelling the task.", "流式连接丢失，不应该被误认为任务取消。"],
+        ["HaaS uses idempotency, session leases, and event replay to address those cases.", "HaaS 用幂等、会话租约和事件回放处理这些情况。"],
+        ["Recovery still depends on the runtime and retained state. Failure must remain explicit.", "恢复仍取决于 runtime 和保留状态。失败必须明确呈现。"]
+      ]
+    },
+    {
+      "id": "deployment", "chapter": "DEPLOYMENT & HONEST BOUNDARIES", "title": ["Same service boundary.", "Explicit runtime choices."], "subtitle": "本地 sidecar、远端端点与容器执行，不是同一种隔离承诺。",
+      "cues": [
+        ["The same service boundary separates the product from where execution runs.", "同一个服务边界，把产品与执行位置分开。"],
+        ["The desktop design uses a local managed sidecar.", "桌面设计使用本地托管 sidecar。"],
+        ["Remote endpoints and delegated containers are explicit alternatives.", "远端端点和委托容器是显式替代方案。"],
+        ["Local does not automatically mean container-isolated.", "本地执行，不自动意味着容器隔离。"],
+        ["Lite targets minimal container execution; AIO adds the desktop and browser environment.", "Lite 面向最小容器执行；AIO 增加桌面与浏览器环境。"],
+        ["Those are different runtime choices, not interchangeable security guarantees.", "它们是不同运行方式，不是可互换的安全承诺。"],
+        ["Codex is implemented first. Pi, OpenCode, and AMP are planned.", "Codex 首先实现；Pi、OpenCode 和 AMP 仍在规划中。"],
+        ["Code in the repository is not the same as a verified release.", "仓库里有代码，不等于已经完成发布验证。"]
+      ]
+    },
+    {
+      "id": "value", "chapter": "THE PRODUCT YOU GET TO BUILD", "title": ["Build the product.", "Not every runtime integration."], "subtitle": "把精力留给产品，而不是反复对接每一种 Agent Runtime。",
+      "cues": [
+        ["The goal is not to build one more agent.", "目标不是再造一个 Agent。"],
+        ["It is to stop every product from rebuilding the machinery around every agent.", "而是让每个产品，不必为每种 Agent 重做外围执行基础设施。"],
+        ["A stable integration boundary. Execution you can track. Permissions you can reason about.", "稳定的接入边界，可以追踪的执行过程，能够理解的权限规则。"],
+        ["Start with the available Codex adapter and check its documented capability boundaries.", "从现有 Codex adapter 开始，核对文档中的能力边界。"],
+        ["Build your product against the HaaS service contract.", "面向 HaaS 服务合同，构建你的产品。"],
+        ["Make agent execution a service. Keep your focus on the product.", "把 Agent 执行变成服务，把精力留给真正的产品。"],
+        ["Explore the code and documentation on GitHub. Find HaaS under Superops Team.", "在 GitHub 上探索代码与文档：Superops Team 的 HaaS 仓库。"]
+      ]
+    }
+  ]
+}

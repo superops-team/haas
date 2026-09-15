@@ -16,7 +16,7 @@
 
 | ID | 优先级 | 目标 | 前置/命令 | 通过标准 |
 |----|--------|------|-----------|----------|
-| ST-001 | P0 | nginx 统一代理 ADK/HaaS 入口 | fake sidecar + nginx config fixture；`pytest -q -k ST_001` | ADK 路径和 `/v1/haas/*` 均代理到 `127.0.0.1:8092`；未出现 `/v1/codex-worker/*` 路由；nginx syntax 通过 |
+| ST-001 | P0 | nginx 统一代理 ADK/HaaS 入口 | fake sidecar + nginx config fixture；`pytest -q -k ST_001` | 文档定义的 ADK 路径和 `/v1/haas/*` 均代理到 `127.0.0.1:8092`；nginx syntax 通过 |
 | ST-002 | P0 | health 与 ready 分离 | sidecar listening、Codex socket 不存在；`pytest -q -k ST_002` | `/health` 返回存活结构；`/v1/haas/ready` 为结构化 503/`ready=false` |
 | ST-003 | P0 | Unix socket + initialize/initialized readiness | fake Codex server；`pytest -q -k ST_003` | socket 可连接、initialize 成功、initialized notification 成功 flush 后，sidecar 首次发布 `ready=true` |
 | ST-004 | P0 | initialize 失败 fail closed | fake server 返回 JSON-RPC error；`pytest -q -k ST_004` | health 仍可用；ready 保持 false；northbound 不泄漏原生错误 payload |

@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-10
 Related specs: [Security Boundary](../security-boundary/README.md), [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md)
 
 ## 1. Component Role
@@ -51,6 +51,8 @@ class Principal(TypedDict):
     principalId: str
     tenantId: str | None
     workspaceId: str | None
+    defaultUserId: str
+    allowedUserIds: list[str]
     roles: list[str]
 
 class IdentityProvider(Protocol):
@@ -76,11 +78,26 @@ Implementation registry:
   "principalId": "p_abc",
   "tenantId": "tenant_1",
   "workspaceId": "workspace_1",
+  "defaultUserId": "u_123",
+  "allowedUserIds": ["u_123"],
   "roles": ["user"]
 }
 ```
 
-`userId` is not a fixed field of the principal. It is a sub-scope within the principal scope and is evaluated by `owns(principal, user_id=...)`. By default, `userId` MAY be derived from the principal (`defaultUserId`), or the caller MAY declare it explicitly for validation by `owns`.
+ADK `userId` is a controlled business sub-identity, not an authentication override.
+`defaultUserId` is required after authentication. `allowedUserIds` is the exact set an
+ordinary principal may address; it MUST contain `defaultUserId`. If the request omits
+`userId`, Protocol Mapper uses `defaultUserId`. If it supplies `userId`, `owns()`
+accepts it only when it is in `allowedUserIds`, or when an independently granted
+`delegate_user`/admin scope explicitly authorizes that target. An explicit value never
+replaces `principalId`, tenant, workspace, roles, or token identity.
+
+`StaticTokenIdentityProvider` configuration MUST map every token to a fixed
+`defaultUserId` and explicit allowlist. `ExternalJwtIdentityProvider` maps configured,
+verified claims only; it MUST NOT derive the allowlist from arbitrary request headers.
+Invalid or unauthorized user sub-scope returns 404 without revealing existence.
+
+Managed launch `HAAS_STATIC_PRINCIPAL_JSON` is parsed only from trusted process configuration (base64 JSON), requires the Principal fields above and a defaultUserId included in allowedUserIds, and maps only the configured token file. Bootstrap defaults to user `manager`, not admin. Missing/invalid mapping fails startup; request/project fields never grant roles. Token creation/rotation is supervisor-owned, before authentication and outside worker containers.
 
 ## 7. Runtime Model and State Machine
 
@@ -120,6 +137,6 @@ Metric: `haas_identity_auth_total{outcome}`. Labels MUST be low-cardinality and 
 
 ## 11. Test Plan and Acceptance Criteria
 
-- Unit: the three `authenticate` outcomes, `owns` decisions, and `is_admin`.
+- Unit: the three `authenticate` outcomes, defaultUserId derivation, exact allowedUserIds decisions, independently scoped user delegation, rejection of explicit identity override, and `is_admin`.
 - Integration: cross-access by two principals to each other's harness/session/invocation/file returns 404 in all cases.
 - Security: plaintext tokens and complete principals never enter logs or metrics.

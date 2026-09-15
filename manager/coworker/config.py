@@ -35,9 +35,7 @@ class Config:
     model: str = "gpt-5.6-sol"
     mode: str = "interactive"
     max_iterations: int = 150
-    allowed_commands: list[str] = field(
-        default_factory=lambda: list(DEFAULT_ALLOWED_COMMANDS)
-    )
+    allowed_commands: list[str] = field(default_factory=lambda: list(DEFAULT_ALLOWED_COMMANDS))
     # In "custom" permission mode, these tools are auto-approved (e.g. file edits)
     # while everything else still asks.
     auto_allow: list[str] = field(default_factory=list)
@@ -73,9 +71,7 @@ class Config:
     # default shipped once as "connected but relay OFF" on every machine
     # without a hand-edited config.toml. Empty override ⇒ relay disabled
     # (manual Socket Mode still works); dev/BYO deployments point elsewhere.
-    cloud_relay_ws_url: str = (
-        "wss://l4z1paxb83.execute-api.us-east-1.amazonaws.com/ocw-connect"
-    )
+    cloud_relay_ws_url: str = "wss://l4z1paxb83.execute-api.us-east-1.amazonaws.com/ocw-connect"
     # HaaS delegated execution backend. It is user-global by default: a repository-local
     # config file must not opt itself into a stronger execution backend or broader mounts.
     haas_delegation: HaasDelegationConfig = field(default_factory=HaasDelegationConfig)
@@ -116,6 +112,9 @@ _WORKSPACE_FIELDS = _FIELDS - _GLOBAL_ONLY_FIELDS
 
 _HAAS_DELEGATION_FIELDS = {
     "enabled",
+    "mode",
+    "backend_preference",
+    "execution_mode",
     "base_url",
     "api_token",
     "user_id",
@@ -132,6 +131,9 @@ _HAAS_DELEGATION_FIELDS = {
     "request_timeout_seconds",
     "local_autostart",
     "allow_unpinned_local_image",
+    "network_access",
+    "workspace_mode",
+    "approval_mode",
 }
 
 
@@ -161,9 +163,7 @@ def _read(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _apply_haas_delegation_config(
-    cfg: HaasDelegationConfig, raw: Any
-) -> HaasDelegationConfig:
+def _apply_haas_delegation_config(cfg: HaasDelegationConfig, raw: Any) -> HaasDelegationConfig:
     if not isinstance(raw, dict):
         return cfg
     values = cfg.__dict__.copy()
@@ -172,6 +172,9 @@ def _apply_haas_delegation_config(
             values[key] = value
     return HaasDelegationConfig(
         enabled=bool(values["enabled"]),
+        mode=str(values["mode"]),
+        backend_preference=str(values["backend_preference"]),
+        execution_mode=str(values.get("execution_mode", cfg.execution_mode)),
         base_url=str(values["base_url"]).rstrip("/") or cfg.base_url,
         api_token=str(values["api_token"]),
         user_id=str(values["user_id"]),
@@ -188,12 +191,26 @@ def _apply_haas_delegation_config(
         request_timeout_seconds=max(0.1, float(values["request_timeout_seconds"])),
         local_autostart=bool(values["local_autostart"]),
         allow_unpinned_local_image=bool(values["allow_unpinned_local_image"]),
+        network_access=bool(values["network_access"]),
+        workspace_mode=(
+            str(values["workspace_mode"])
+            if values["workspace_mode"] in {"read-only", "workspace-write", "danger-full-access"}
+            else cfg.workspace_mode
+        ),
+        approval_mode=(
+            str(values["approval_mode"])
+            if values["approval_mode"] in {"never", "on-request", "always"}
+            else cfg.approval_mode
+        ),
     )
 
 
 def _apply_haas_delegation_env(cfg: HaasDelegationConfig) -> HaasDelegationConfig:
     values = cfg.__dict__.copy()
     string_env = {
+        "mode": "COWORKER_HAAS_MODE",
+        "backend_preference": "COWORKER_HAAS_BACKEND_PREFERENCE",
+        "execution_mode": "COWORKER_HAAS_EXECUTION_MODE",
         "base_url": "COWORKER_HAAS_BASE_URL",
         "api_token": "COWORKER_HAAS_API_TOKEN",
         "user_id": "COWORKER_HAAS_USER_ID",
@@ -212,6 +229,7 @@ def _apply_haas_delegation_env(cfg: HaasDelegationConfig) -> HaasDelegationConfi
         "local_autostart": "COWORKER_HAAS_LOCAL_AUTOSTART",
         "allow_unpinned_local_image": "COWORKER_HAAS_ALLOW_UNPINNED_LOCAL_IMAGE",
         "require_trusted_workspace": "COWORKER_HAAS_REQUIRE_TRUSTED_WORKSPACE",
+        "network_access": "COWORKER_HAAS_NETWORK_ACCESS",
     }.items():
         raw_bool = _env_bool(env_name)
         if raw_bool is not None:
@@ -271,8 +289,6 @@ def load_config(
                     setattr(cfg, key, value)
             if workspace_trusted:
                 cfg.allowed_commands = list(
-                    dict.fromkeys(
-                        [*cfg.allowed_commands, *workspace_allowed_commands(workspace)]
-                    )
+                    dict.fromkeys([*cfg.allowed_commands, *workspace_allowed_commands(workspace)])
                 )
     return cfg

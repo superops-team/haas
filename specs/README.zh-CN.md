@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-02
+Last reviewed: 2026-09-10
 Change ID: haas-platform-foundation
 
 `specs/` 是 HaaS 的长期技术规格入口。它把 Harness As A Service 的协议、组件边界、状态机、安全与容器运行时定义成可实现、可测试、可审查的工程合同。
@@ -23,6 +23,7 @@ HaaS Sidecar API
   |
   +-- Protocol Mapper (ADK <-> internal)
   +-- Harness Registry
+  +-- Harness Profile
   +-- Session Runtime
   +-- Admission Control
   +-- Event Log & SSE Replay
@@ -44,7 +45,7 @@ Harness Adapter Interface
   +-- Other harness adapters    (future)
   |
   v
-Sandbox Runtime (OpenSandbox sandbox/execd/credential vault projection)
+Sandbox Runtime（共同 policy 合同：Lite Docker 或 OpenSandbox AIO）
   |
   v
 OpenSandbox AIO container runtime
@@ -59,7 +60,7 @@ HaaS 不是模型代理本身，也不是单一 Codex Worker。模型代理是 H
 | 来源 | Revision / version | 关键结论 |
 |------|--------------------|----------|
 | ADK 2.0 docs | fetched 2026-08-26 | REST API 协议层：`/list-apps`、`/run`、`/run_sse`、`/apps/{app}/users/{user}/sessions/{sid}`、camelCase、`newMessage{role,parts}`、Event 含 `nodeInfo`/`output`、SSE `data:` 帧 |
-| `mpa-codex-worker` 本地参考 | local checkout on 2026-08-26 | 旧项目已经验证 sidecar API、Codex app-server、event log、SSE replay、session registry、model proxy、MCP proxy、secretless runtime 和容器化边界 |
+| `mpa-codex-worker` 本地参考 | local checkout on 2026-09-10 | 旧项目已经验证 sidecar API、Codex app-server、event log、SSE replay、session registry、model proxy、MCP proxy、secretless runtime 和容器化边界 |
 | Codex manual | fetched 2026-08-26 | `codex app-server` 支持 `stdio://`、`ws://IP:PORT`、`unix://`；连接必须先 `initialize` 再 `initialized` |
 | Local Codex CLI | `codex-cli 0.149.1` | `codex app-server --help` 暴露 `--listen`、`--ws-auth`、`generate-ts`、`generate-json-schema` |
 | OpenSandbox | commit `cfca10537a0af7afd11e67b8574e55b2bb2603ad` | sandbox lifecycle、execd、ingress、egress、credential vault、SDK/CLI/MCP |
@@ -78,13 +79,12 @@ HaaS 不是模型代理本身，也不是单一 Codex Worker。模型代理是 H
 
 ### 3.1 Northbound 协议
 
-HaaS 对上提供三个层级的 HTTP/SSE surface：
+HaaS 对上提供两个 HTTP/SSE surface：
 
 | Surface | 路径 | 兼容等级 | 用途 |
 |---------|------|----------|------|
 | ADK-compatible | `/list-apps`、`/run`、`/run_sse`、`/apps/{app}/users/{user}/sessions/{sid}` | Public API | 长期主协议，drop-in 兼容 ADK 2.0 client |
-| HaaS native | `/v1/haas/*` | Public extension | health/ready/status、diagnostics、harness CRUD、session/event 管理、artifact 等 ADK 未覆盖能力 |
-| ~~Legacy sidecar shim~~ | ~~`/v1/codex-worker/*`~~ | **本项目不实现** | 见 §3.1.1 |
+| HaaS native | `/v1/haas/*` | Public extension | health/ready/status、稳定 capability discovery、diagnostics、harness CRUD、session/event 管理、artifact 等 ADK 未覆盖能力 |
 
 规则：
 
@@ -92,25 +92,9 @@ HaaS 对上提供三个层级的 HTTP/SSE surface：
 2. HaaS native 只能做加法扩展，不得改变 ADK 字段语义。
 3. 所有 public surface 使用 `detail` + 结构化 `haasError` 错误形状。
 
-### 3.1.1 范围决策：不实现 `mpa-codex-worker` 迁移 shim
-
-**决策（2026-08-30）**：HaaS 与 `mpa-codex-worker` 只是架构同构，不承担其迁移
-职责。`/v1/codex-worker/*` shim **不属于本项目范围**，不实现、不测试、不在
-准出门禁中要求。若将来确需迁移旧上游，**单独立项**处理。
-
-影响与处理方式：
-
-- 各组件 spec 中残留的 legacy/shim 描述视为**历史背景与未来可选项**，不是待办；
-  实现时不得据此新增 `/v1/codex-worker/*` 路由。
-- `mpa-codex-worker` 仍可作为**设计参考来源**（它已验证过 sidecar API、event log、
-  SSE replay、model proxy、secretless 边界等），这与「不实现 shim」并不冲突。
-- 错误码 `haas_legacy_request_invalid` 与 OpenAPI 中的 legacy 条目予以保留，
-  避免改动已发布的兼容面；它们在本项目中处于**未使用**状态。
-- 新能力一律定义在 ADK 面或 HaaS native 面。
-
 ### 3.2 Runtime 边界
 
-HaaS 运行在 OpenSandbox AIO 基础镜像上。AIO 提供 shell、file、browser、exec、sandbox lifecycle、credential vault 等基础能力；HaaS 叠加 sidecar、adapter、proxy、event log、policy 和 Sandbox Runtime。
+目标默认是最小 Lite 镜像（Docker CLI、linux/arm64 与 linux/amd64）；OpenSandbox AIO 为可选 amd64 变体。Mac Apple Silicon 本机构建运行 arm64，不需要 Linux 构建主机。Container Runtime 拥有 image/platform/network/volume 边界，Lite 不依赖 AIO 服务。Lite 实现门禁通过前现有 AIO 工具保持原样；下文 8080 和 AIO 服务描述仅适用于 AIO。
 
 容器内默认端口：
 
@@ -134,7 +118,7 @@ HaaS 运行在 OpenSandbox AIO 基础镜像上。AIO 提供 shell、file、brows
 
 ### 3.4 Sandbox 标准化边界
 
-Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harness adapter 的 sandbox 声明，统一投影为 OpenSandbox sandbox/execd 配置。harness 自带 sandbox（如 Codex sandbox）只能在其内运行；provider credential 走 credential vault；网络 egress 由 OpenSandbox egress policy 与 HaaS URL validator 双层约束。详见 [Sandbox Runtime](sandbox-runtime/README.zh-CN.md)。
+Sandbox Runtime 把同一 policy 合同投影到 Lite Docker 或 OpenSandbox AIO；harness 自带 sandbox 仍是内层。Lite 使用隔离 worker/broker network 和 broker memory，AIO 使用 sandbox/execd/vault；两者都要求 runtime egress enforcement 与 URL validation。详见 [Sandbox Runtime](sandbox-runtime/README.zh-CN.md)。
 
 ## 4. 组件规划
 
@@ -143,6 +127,7 @@ Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harn
 | P0 | Architecture | `specs/architecture/README.md` | 系统级分层、事实归属、依赖方向和首期落地顺序 |
 | P0 | HaaS Protocol | `specs/haas-protocol/README.md` | ADK-compatible API、HaaS native API、错误和版本策略 |
 | P0 | Harness Registry | `specs/harness-registry/README.md` | configured harness catalog、appName 解析、base/capability/model/provider discovery |
+| P0 | Harness Profile | `specs/harness-profile/README.md` | 跨 harness 的 provider、MCP、skills、AGENTS.md、workspace/policy 和 budget 版本化配置、动态激活、session snapshot 与显式 rebind 合同 |
 | P0 | Harness Adapter | `specs/harness-adapter/README.md` | 多 harness adapter 抽象、能力矩阵、ADK 事件规范化 |
 | P0 | Codex App-Server Adapter | `specs/codex-app-server-adapter/README.md` | 首期 Codex app-server 连接、thread/turn、JSON-RPC、cancel、schema pin |
 | P0 | Session Runtime | `specs/session-runtime/README.md` | session/invocation/turn/container lifecycle、idempotency、lease、continuation |
@@ -156,7 +141,7 @@ Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harn
 | P0 | Stores | `specs/stores/README.md` | 持久化事实源：registry/session/event/idempotency/admission 接口、schema 与迁移 |
 | P0 | Identity | `specs/identity/README.md` | bearer -> principal、tenant/workspace/userId scope、`IdentityProvider` 接口 |
 | P0 | Config | `specs/config/README.md` | env/config 装配、端口表、`load_config`/`create_app` 契约 |
-| P1 | Sandbox Runtime | `specs/sandbox-runtime/README.md` | 统一投影 harness sandbox 到 OpenSandbox sandbox/execd/credential vault |
+| P1 | Sandbox Runtime | `specs/sandbox-runtime/README.md` | 把共同隔离 policy 投影到 Lite Docker 或 OpenSandbox AIO |
 | P1 | Model Proxy | `specs/model-proxy/README.md` | provider credential 隔离、OpenAI-compatible relay、usage normalization |
 | P1 | MCP / Tool / Skill Runtime | `specs/mcp-tool-skill-runtime/README.md` | MCP server、MCP proxy、tools、skills materialization、tool restriction |
 | P1 | Artifact Store | `specs/artifact-store/README.md` | 输入文件、session 产物、下载、归档和路径安全 |
@@ -187,6 +172,7 @@ Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harn
 | Object | `object` value | Id | Authority | 生命周期 |
 |--------|----------------|-----|-----------|----------|
 | Harness | `harness` | `chrn_...`（即 ADK `appName`） | Harness Registry | 创建到删除 |
+| Harness Profile | `harness_profile` | `hprof_...` | Harness Profile / Harness Registry | 版本化 draft/active/retired |
 | Invocation | `invocation` | `inv_...` | Session Runtime | 单次 `/run`，保留期内可读 |
 | Session | `session` | caller-supplied `sessionId`（默认 `hsess_...`） | Session Runtime | `(appName, userId, sessionId)` 三元组 |
 | Turn | `turn` | `turn_...` | Session Runtime | 一个 harness 执行回合 |
@@ -194,7 +180,7 @@ Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harn
 | File | `file` | `file_...` | Artifact Store | 跟随 container/session |
 | Event | none | invocation-scoped | Event Log | 保留期内可 replay |
 
-`invocation` 是 public 运行单元；`turn` 是内部执行单元。首期一一对应，但协议上不依赖两者永远相同。
+`invocation` 是 public 运行单元；`turn` 是内部执行单元。首期一一对应，但协议上不依赖两者永远相同。`harness` 是 ADK app identity，`harness_profile` 是可版本化执行配置；session 创建时冻结 active profile，后续动态更新只影响新 session，已有 session 必须显式 rebind 才能切换。
 
 ## 7. 全局 HTTP 约定
 
@@ -204,7 +190,9 @@ Sandbox Runtime 把 Policy Controller 的 workspace/network/tool policy 与 harn
 |--------|------|------|
 | `Authorization: Bearer <token>` | 除 health/ready probe 外必填 | HaaS caller token |
 | `Idempotency-Key` | 可选（服务端支持去重） | mutating API 幂等；重复 key 返回首次结果，不重复启动 harness |
-| `Last-Event-ID` | 可选 | `/run_sse` 与 HaaS native stream 的重连 replay cursor |
+| `Last-Event-ID` | 可选 | ADK `/run_sse` 重连 cursor；HaaS native stream/page 使用 `after_event_id` query parameter |
+| `X-HaaS-Invocation-ID` | 成功 `/run`、`/run_sse` 必填 | 持久 accepted invocation id |
+| `X-HaaS-Session-ID` | 成功 `/run`、`/run_sse` 必填 | 生效 session id，包括服务端生成值 |
 | `X-HaaS-Tenant-ID` | 条件 | 多租户部署必填或由 token 解析 |
 | `X-HaaS-Workspace-ID` | 条件 | workspace scope，由 token 或 header 解析 |
 | `X-HaaS-Trace-ID` | 可选 | 端到端 trace id；缺失时由服务端生成 |
@@ -238,7 +226,7 @@ HaaS native endpoints 使用：
 仅分页列表额外携带 `nextCursor`。Health/ready/status/diagnostics 同样返回该
 envelope。
 
-错误（所有 public surface 通用）：
+Pre-acceptance error 与 post-acceptance integrity error 使用以下结构化形状；正常 accepted execution failure 使用 HTTP 200 terminal event，不使用该 error response：
 
 ```json
 {
@@ -273,6 +261,7 @@ HaaS 稳定错误码使用 `haas_` 前缀或 ADK 语义码（如 `session_busy`�
 | 对象 | 前缀 | 生成方 |
 |------|------|--------|
 | harness / ADK app | `chrn_` | Harness Registry |
+| harness profile | `hprof_` | Harness Profile |
 | invocation | `inv_` | Session Runtime |
 | turn | `turn_` | Session Runtime |
 | container | `cntr_` | Container Runtime |
@@ -304,15 +293,23 @@ Public 事件是 ADK `Event`。canonical event 必须能无损投影为 ADK `Eve
 - `/run_sse` 事件按产生顺序 flush，`streaming:true` 时 `text` part 增量出现。
 - invocation 完成即关闭 stream；`/run` 一次性返回事件数组。
 - heartbeat 使用 SSE comment `: keep-alive`，不产生事件。
-- HaaS 内部 canonical event 可携带 `sequenceNumber`/`eventId` 用于 replay，但投影到 ADK `Event` 时只输出 ADK 字段（HaaS native stream 可额外输出 `haas` 元数据）。
-- 非流式 `/run` 输出必须等于 `/run_sse` 流式聚合输出（parity）。
+- 内部 `CanonicalEventRecord` 持久化稳定 `haas.*` `type`、type-specific 安全 `haas` metadata、`sequenceNumber`、`eventId`；adapter `nativeType` 永不持久化。
+- 投影为 ADK `Event` 时只输出 ADK 字段。HaaS native stream 输出强类型 public `CanonicalHaasEvent`，携带稳定顶层 `type` 与经过校验的 `haas` metadata，并剥离内部/原生字段。
+- 每个 invocation 的 terminal outcome 只能由唯一稳定 type 表达：`haas.turn.completed`、`haas.turn.failed`、`haas.turn.incomplete` 或 `haas.turn.cancelled`。Client 不得从人类文本或 stream close 推断 terminal outcome。
+- 对每种 accepted terminal outcome，非流式 `/run` 输出必须等于 `/run_sse` 的 ADK 流式聚合输出（parity），两者均保持 HTTP 200。Pre-acceptance failure 使用结构化 4xx/5xx；post-acceptance terminal-store integrity failure 携带 accepted metadata 供恢复。该 parity 不要求 HaaS-only native 字段进入 ADK surface。
 
 ## 9. 兼容与版本策略
 
-1. HaaS 首个协议版本为 `2026-08-26`，northbound 协议层对齐 ADK 2.0 REST API。
-2. HaaS native responses 必须返回 `HaaS-Version: 2026-08-26`。
+1. HaaS 首个协议版本为 `2026-09-10`，northbound 协议层对齐 ADK 2.0 REST API。
+2. HaaS native responses 必须返回 `HaaS-Version: 2026-09-10`。
 3. 同版本内只能新增 optional field、事件 part 类型或 `haas_` 前缀错误码。
 4. 删除、改名、改义、增加必填字段或收紧约束必须发布新版本。
+
+版本基线说明：
+
+- `2026-08-26` 是内部 draft baseline，从未作为 production compatibility release 发布。
+- `2026-09-10` 是首个包含稳定 capability discovery、typed native event、持久 execution acceptance、prepared-to-bound delegation、有界恢复读取的 candidate contract。
+- Runtime code 与 conformance test 未实现该合同时，服务不得宣称 `HaaS-Version: 2026-09-10`；必须报告实际已实现版本或保持未发布状态。
 
 ## 10. 组件间依赖方向
 
@@ -325,7 +322,7 @@ session runtime -> harness adapter interface
 session runtime / registry / event log / admission control -> stores
 admission control -> session runtime / registry / observability
 harness adapter -> sandbox runtime / model proxy / mcp-tool-skill runtime / container runtime
-sandbox runtime -> OpenSandbox sandbox/execd/credential vault
+sandbox runtime -> Lite Docker worker/broker 或 OpenSandbox AIO
 policy controller -> security-boundary
 codex adapter -> Codex app-server native protocol only
 model proxy -> provider clients
@@ -350,7 +347,7 @@ security-boundary <- all public and adapter boundaries
 - API/schema：FastAPI ASGI integration tests。
 - SSE：progressive flush、stream 关闭语义、heartbeat、disconnect/replay、parity。
 - Codex app-server：真实 handshake、thread/start、turn/start、cancel、schema generation/probe。
-- Sandbox：OpenSandbox sandbox/execd/credential vault 投影验证。
+- Sandbox：验证 Lite/AIO 共同隔离；AIO 额外验证 sandbox/execd/vault。
 - Container：OpenSandbox AIO build、ports、health/ready、SIGTERM drain。
 - Runtime trim：`DISABLE_*` 使 code-server/jupyter 不启动，而 browser/VNC/sandbox 与 Codex readiness 不回归（container smoke）。
 - Security：secret scan、redaction inverse assertions、SSRF allowlist、artifact traversal probes。

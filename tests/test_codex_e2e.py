@@ -4,6 +4,7 @@ These require an explicit environment switch (``HAAS_E2E=1`` or
 ``HAAS_E2E_CODEX=1``) and a local ``codex`` binary; they are skipped by
 default (roadmap §8.1).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -130,9 +131,7 @@ async def test_codex_adapter_loopback_websocket_real_turn() -> None:
         async for event in adapter.stream_events(handle):
             if event.type == "harness.text.delta":
                 text_parts.extend(
-                    p.get("text", "")
-                    for p in event.content.get("parts", [])
-                    if isinstance(p, dict)
+                    p.get("text", "") for p in event.content.get("parts", []) if isinstance(p, dict)
                 )
         result = await adapter.finalize_turn(handle)
         if result.status != "completed":

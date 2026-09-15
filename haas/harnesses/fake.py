@@ -1,4 +1,5 @@
 """Fake harness adapter for protocol decoupling tests (roadmap S3)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -42,6 +43,7 @@ class FakeAdapter:
             capabilities={
                 "streaming": True,
                 "sessionContinuation": "emulated",
+                "pausing": "emulated",
                 "cancellation": "hard",
                 "toolRestriction": "advisory",
                 "mcp": "unsupported",

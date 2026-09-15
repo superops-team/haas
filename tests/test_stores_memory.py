@@ -1,4 +1,7 @@
 """Contract tests for the in-memory Stores backend (specs/stores/README.md)."""
+
+import pytest
+
 from haas.stores.memory import (
     ApprovalRecord,
     ApprovalStateConflictError,
@@ -9,6 +12,9 @@ from haas.stores.memory import (
     DelegatedSessionRecord,
     HarnessRecord,
     IdempotencyConflictError,
+    IdempotencyExpiredError,
+    InputRequestRecord,
+    InputRequestStateConflictError,
     InvocationRecord,
     LeaseConflictError,
     LeaseFencingError,
@@ -100,19 +106,16 @@ def test_event_session_index_is_scoped_by_app_user_session() -> None:
         )
     )
 
-    assert [
-        e.eventId for e in store.read_session(("chrn_app", "u_1", "hsess_shared"))
-    ] == ["evt_user_1"]
-    assert [
-        e.eventId for e in store.read_session(("chrn_app", "u_2", "hsess_shared"))
-    ] == ["evt_user_2"]
-    assert [
-        e.eventId for e in store.read_session(("chrn_other", "u_1", "hsess_shared"))
-    ] == ["evt_app_2"]
-    assert (
-        store.read_invocation(("chrn_app", "u_2", "hsess_shared"), "inv_user_1")
-        == []
-    )
+    assert [e.eventId for e in store.read_session(("chrn_app", "u_1", "hsess_shared"))] == [
+        "evt_user_1"
+    ]
+    assert [e.eventId for e in store.read_session(("chrn_app", "u_2", "hsess_shared"))] == [
+        "evt_user_2"
+    ]
+    assert [e.eventId for e in store.read_session(("chrn_other", "u_1", "hsess_shared"))] == [
+        "evt_app_2"
+    ]
+    assert store.read_invocation(("chrn_app", "u_2", "hsess_shared"), "inv_user_1") == []
 
 
 def test_idempotency_reserve_replay_conflict_release() -> None:
@@ -152,6 +155,47 @@ def test_idempotency_in_flight_pending_tracking() -> None:
     assert store.replay("khash") is None
     # after release, a fresh reservation owns the key again
     assert store.reserve("khash", "rhash").replay is False
+
+
+def test_idempotency_terminal_result_expires_to_tombstone() -> None:
+    now = 1_000
+    store = MemoryStore(clock_ms=lambda: now)
+    store.reserve("khash", "rhash")
+    accepted = store.accept("khash", "inv_1", accepted_at_ms=now)
+    store.complete("khash", {"events": []}, completed_at_ms=now + 10)
+
+    assert accepted.expiresAtMs == now + 86_400_000
+    assert store.reserve("khash", "rhash").result == {"events": []}
+
+    now = accepted.expiresAtMs
+    try:
+        store.reserve("khash", "rhash")
+        raise AssertionError("expected IdempotencyExpiredError")
+    except IdempotencyExpiredError as exc:
+        assert exc.key_hash == "khash"
+        assert exc.invocation_id == "inv_1"
+        assert exc.expires_at_ms == accepted.expiresAtMs
+
+    # Tombstones reject every request hash and survive result eviction.
+    assert store.replay("khash") is None
+    try:
+        store.reserve("khash", "different")
+        raise AssertionError("expected IdempotencyExpiredError")
+    except IdempotencyExpiredError:
+        pass
+
+
+def test_idempotency_nonterminal_reservation_never_expires() -> None:
+    now = 1_000
+    store = MemoryStore(clock_ms=lambda: now)
+    store.reserve("khash", "rhash")
+    accepted = store.accept("khash", "inv_1", accepted_at_ms=now)
+
+    now = accepted.expiresAtMs + 1
+    replay = store.reserve("khash", "rhash")
+    assert replay.replay is True
+    assert replay.result is None
+    assert store.is_pending("khash") is True
 
 
 def test_session_read_unknown_cursor_raises() -> None:
@@ -284,12 +328,107 @@ def test_approval_resolve_is_single_use() -> None:
     assert resolved.status == "approved"
     assert resolved.decision == {"decision": "approved"}
     assert resolved.resolvedAtMs is not None
+    assert store.resolve_approval("appr_1", {"decision": "approved"}) == resolved
 
     try:
         store.resolve_approval("appr_1", {"decision": "denied"})
         raise AssertionError("expected ApprovalStateConflictError")
     except ApprovalStateConflictError:
         pass
+
+
+def test_terminal_invocation_closes_waiting_interactions() -> None:
+    store = MemoryStore()
+    store.put_approval(
+        ApprovalRecord(
+            id="appr_waiting",
+            sessionId="hsess_1",
+            invocationId="inv_1",
+            turnId="turn_1",
+        )
+    )
+    store.put_input_request(
+        InputRequestRecord(
+            id="inreq_waiting",
+            sessionId="hsess_1",
+            invocationId="inv_1",
+            turnId="turn_1",
+            questions=[],
+            nativeRequestId=1,
+            adapterGeneration=1,
+        )
+    )
+
+    store.close_pending_interactions("inv_1", resolved_at_ms=1234)
+
+    approval = store.get_approval("appr_waiting")
+    request = store.get_input_request("inreq_waiting")
+    assert approval is not None and approval.status == "cancelled"
+    assert approval.resolvedAtMs == 1234
+    assert request is not None and request.status == "cancelled"
+    assert request.resolvedAtMs == 1234
+    assert store.list_approvals("hsess_1", status="waiting") == []
+    assert store.list_input_requests("hsess_1", status="waiting") == []
+
+
+def test_successful_invocation_keeps_blocking_interaction_waiting() -> None:
+    store = MemoryStore()
+    store.put_approval(
+        ApprovalRecord(
+            id="appr_waiting",
+            sessionId="hsess_1",
+            invocationId="inv_1",
+            turnId="turn_1",
+        )
+    )
+
+    store.put_invocation(
+        InvocationRecord(
+            id="inv_1",
+            sessionId="hsess_1",
+            appName="chrn_1",
+            turnId="turn_1",
+            status="completed",
+        )
+    )
+
+    approval = store.get_approval("appr_waiting")
+    assert approval is not None and approval.status == "waiting"
+
+
+def test_interactions_are_listable_and_input_resolution_is_single_use() -> None:
+    store = MemoryStore()
+    store.put_approval(
+        ApprovalRecord(id="appr_1", sessionId="hsess_1", invocationId="inv_1", turnId="turn_1")
+    )
+    request = store.put_input_request(
+        InputRequestRecord(
+            id="inreq_1",
+            sessionId="hsess_1",
+            invocationId="inv_1",
+            turnId="turn_1",
+            questions=[{"id": "scope", "question": "Which?"}],
+            nativeRequestId=17,
+            adapterGeneration=3,
+        )
+    )
+
+    assert [item.id for item in store.list_approvals("hsess_1", status="waiting")] == ["appr_1"]
+    assert [item.id for item in store.list_input_requests("hsess_1", status="waiting")] == [
+        "inreq_1"
+    ]
+    assert request.nativeRequestId == 17
+
+    resolved = store.resolve_input_request(
+        "inreq_1", {"answers": {"scope": {"values": ["Current diff"]}}}
+    )
+    assert resolved.status == "answered"
+    assert (
+        store.resolve_input_request("inreq_1", dict(resolved.answers or {}))
+        == resolved
+    )
+    with pytest.raises(InputRequestStateConflictError):
+        store.resolve_input_request("inreq_1", {"answers": {}})
 
 
 def test_workspace_lock_single_writer_allows_ro_sharing() -> None:

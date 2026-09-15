@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-10
 
 ## 1. Component Role
 
@@ -20,6 +20,7 @@ HaaS Sidecar API (FastAPI)
   |
   +-- Protocol Mapper (ADK <-> internal)
   +-- Harness Registry
+  +-- Harness Profile
   +-- Session Runtime
   +-- Admission Control
   +-- Event Log & SSE Replay
@@ -41,7 +42,7 @@ Harness Adapter Interface
   +-- AMP adapter               (future)
   |
   v
-Sandbox Runtime (OpenSandbox sandbox/execd/credential vault projection)
+Sandbox Runtime (common policy contract: Lite Docker or OpenSandbox AIO)
   |
   v
 OpenSandbox AIO container runtime
@@ -52,7 +53,7 @@ Core layers:
 1. Upstream consumers depend only on the ADK 2.0 **REST API protocol layer**, not on any harness-native protocol. They also do not depend on the ADK execution engine (`BaseAgent`/WorkflowGraph), graph workflows, or ADK Web UI.
 2. A `harness adapter` represents a complete agent runtime, not an LLM provider.
 3. A `configured harness` is the unit of execution capability; `appName` is the configured harness `id`.
-4. `Sandbox Runtime` uniformly projects each harness execution sandbox into the OpenSandbox AIO sandbox/execd/credential vault. It is the standardized runtime substrate for multiple harnesses, rather than merely using AIO as a base image.
+4. `Sandbox Runtime` provides one policy/isolation contract implemented by Lite Docker (default) and optional OpenSandbox AIO. AIO-specific nodes below apply to AIO only; Lite uses the private worker/broker network and persistent session volume defined by Container Runtime. The host control sidecar owns public execution facts.
 5. `Admission Control` manages service-level quota, rate limiting, concurrency, and queue admission.
 6. `Manager Delegation` defines how an upstream manager binds sessions, policies, mount manifests, approvals, and container restore to HaaS as a full execution backend.
 7. `Stores` is the sole persistent source of truth; `Identity` is the authentication boundary; and `Config` is the assembly contract (see their respective specs).
@@ -79,11 +80,12 @@ logo, README masthead, metric definitions, and badge publication contract.
 | Upstream | Client / Manager / SDK / CLI | Depends only on ADK 2.0 HTTP/SSE |
 | Downstream | HaaS Protocol | Defines the public contract |
 | Downstream | Harness Registry | Manages configured harnesses (ADK apps) |
+| Downstream | Harness Profile | Manages versioned provider/MCP/skills/AGENTS.md/workspace profile revisions |
 | Downstream | Session Runtime | Manages session/invocation/turn |
 | Downstream | Admission Control | Quota, rate limiting, concurrency, and queue admission |
 | Downstream | Manager Delegation | Manager-facing delegated session binding, restore, approval relay, and workspace single-writer contract |
 | Downstream | Harness Adapter | Isolates concrete harnesses |
-| Downstream | Sandbox Runtime | Uniformly projects execution sandboxes into OpenSandbox |
+| Downstream | Sandbox Runtime | Projects one policy contract into Lite Docker or OpenSandbox AIO |
 | Downstream | Container Runtime | Owns the OpenSandbox AIO image and process topology |
 | Downstream | Security Boundary | Constrains all data crossing boundaries |
 
@@ -92,7 +94,7 @@ logo, README masthead, metric definitions, and badge publication contract.
 Responsibilities:
 
 - Define system-level component boundaries and dependency direction.
-- Define the relationship between the primary ADK protocol and HaaS native extensions. (The legacy shim is out of scope for this project; see [specs/README §3.1.1](../README.md#311-scope-decision-do-not-implement-the-mpa-codex-worker-migration-shim).)
+- Define the relationship between the primary ADK protocol and HaaS native extensions.
 - Define the initial P0/P1/P2 implementation order.
 - Identify the authoritative owner of each fact.
 - Define negative paths, recovery strategies, and verification gates.
@@ -111,7 +113,6 @@ This component exposes no runtime API. It defines the public architectural entry
 |---------|------|-------|
 | ADK-compatible API | `/list-apps`, `/run`, `/run_sse`, `/apps/{app}/users/{user}/sessions/{sid}` | HaaS Protocol |
 | HaaS native API | `/v1/haas/*` | HaaS Protocol |
-| ~~Legacy sidecar shim~~ | ~~`/v1/codex-worker/*`~~ | **Not implemented** (specs/README §3.1.1) |
 | Adapter interface | internal Python async interface | Harness Adapter |
 | Sandbox projection | internal SandboxRuntime API | Sandbox Runtime |
 | Container entrypoint | `/opt/haas/run.sh` | Container Runtime |
@@ -123,10 +124,11 @@ Key objects:
 | Object | Public? | Authority | Notes |
 |--------|---------|-----------|-------|
 | Harness | yes | Harness Registry | configured harness; `id`=ADK `appName`; `base` is an open string |
+| HarnessProfile | yes on HaaS native API | Harness Profile / Harness Registry | versioned execution configuration frozen into sessions as `EffectiveHarnessProfile` |
 | Run/Invocation | yes | Session Runtime | One ADK `/run`/`/run_sse`; `invocationId` |
 | Session | yes | Session Runtime | Unique `(appName, userId, sessionId)` tuple |
 | Turn | internal | Session Runtime | Adapter execution unit; 1:1 with an invocation in the initial release |
-| Event | yes | Event Log & SSE | ADK `Event` projection, invocation-scoped |
+| Event | yes | Event Log & SSE | Internal stable `CanonicalEventRecord`; ADK projection for ADK surfaces; typed `CanonicalHaasEvent` projection for session/invocation native streams |
 | DelegatedSession | yes on HaaS native API | Manager Delegation / Session Runtime | Manager-to-HaaS binding, policy snapshot, mount manifest, and runtime restore contract |
 | File | yes | Artifact Store | input files and produced artifacts |
 | Policy | internal/public summary | Policy Controller | Effective runtime constraints |
@@ -144,7 +146,7 @@ request received
   -> policy compilation
   -> sandbox projection (workspace/network/tool -> OpenSandbox)
   -> adapter execution
-  -> event append + ADK projection
+  -> stable canonical event append + ADK/native projection
   -> invocation finalization
   -> artifact publication
 ```
@@ -166,7 +168,7 @@ optional MCP/skill/browser warmup -> capability ready
 
 - Public API is authenticated except discovery/health/readiness probes.
 - Object scope is enforced on every read, write, cancel, delete, and artifact access; both `userId` and `sessionId` are isolated by principal scope.
-- Secretless applies before adapter execution; provider keys enter the OpenSandbox credential vault, and the harness receives only a short-lived token.
+- Secretless applies before adapter execution; AIO uses its vault and Lite uses the trusted external broker memory. Harness processes receive only short-lived scoped tokens.
 - Adapter native protocol data is never public by default.
 - Sandbox isolation is a hard runtime boundary. A harness sandbox provided by an adapter MUST run within it and does not replace the HaaS boundary.
 
@@ -198,6 +200,6 @@ System status must be able to answer:
 - Architecture review confirms every component has one owner and no reverse dependency.
 - Protocol tests cover ADK-compatible API before HaaS native expansion.
 - Adapter contract tests run against fake adapter and Codex app-server adapter.
-- Sandbox tests verify OpenSandbox sandbox/execd/credential vault projection for each harness.
+- Sandbox tests verify common isolation for Lite and AIO; AIO additionally verifies sandbox/execd/vault projection.
 - Admission tests verify quota/rate/queue boundaries.
 - Security tests cover every public surface and adapter env/config/log output.

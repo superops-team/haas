@@ -1,4 +1,5 @@
 """Structured JSON logger with redaction (specs/observability/README.md §4)."""
+
 from __future__ import annotations
 
 import json

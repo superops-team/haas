@@ -27,7 +27,14 @@ export default defineConfig(({ command }) => {
   return {
     base: "./",
     plugins: [react()],
-    server: { port: 1420, strictPort: true },
+    server: {
+      port: 1420,
+      strictPort: true,
+      // Tauri writes bundled sidecar files and generated HTML under src-tauri/target while
+      // compiling. Watching that tree reloads the WebView during startup and can leave WKWebView
+      // on an unpainted white frame even though React and the sidecar are healthy.
+      watch: { ignored: ["**/src-tauri/target/**"] },
+    },
     define: { __COWORKER_DEV_TOKEN__: JSON.stringify(devToken) },
     // Tauri CLI looks for these; harmless for the browser build.
     clearScreen: false,

@@ -5,6 +5,7 @@ this file covers what happens when the upstream provider misbehaves, plus the
 client lifecycle branches. AGENTS.md puts proxy/credential paths behind a 95%
 gate, and these are exactly the paths that run during an incident.
 """
+
 from __future__ import annotations
 
 import httpx
@@ -75,14 +76,13 @@ async def _call(proxy: ModelProxy, tokens: RuntimeTokenManager):
 @pytest.mark.parametrize("status", [400, 401, 429, 500, 503])
 async def test_provider_http_error_raises(status: int) -> None:
     proxy, tokens = _proxy(lambda _r: httpx.Response(status, json={"error": "nope"}))
-    with pytest.raises(ModelProxyError, match=f"provider HTTP {status}"):
+    with pytest.raises(ModelProxyError) as excinfo:
         await _call(proxy, tokens)
+    assert str(excinfo.value) == f'provider HTTP {status}: {{"message":"nope"}}'
 
 
 async def test_provider_non_json_response_raises() -> None:
-    proxy, tokens = _proxy(
-        lambda _r: httpx.Response(200, text="<html>gateway timeout</html>")
-    )
+    proxy, tokens = _proxy(lambda _r: httpx.Response(200, text="<html>gateway timeout</html>"))
     with pytest.raises(ModelProxyError, match="non-JSON"):
         await _call(proxy, tokens)
 
@@ -93,6 +93,7 @@ async def test_provider_error_body_does_not_leak_credentials() -> None:
     The error message is surfaced to callers and logs, so it is a secret
     surface (AGENTS.md 铁律 7).
     """
+
     def handler(request: httpx.Request) -> httpx.Response:
         # Hostile/naive provider echoing the inbound auth header verbatim.
         return httpx.Response(
@@ -104,7 +105,7 @@ async def test_provider_error_body_does_not_leak_credentials() -> None:
         await _call(proxy, tokens)
     message = str(excinfo.value)
     assert SECRET not in message
-    assert "[REDACTED]" in message
+    assert message == 'provider HTTP 401: {"message":"bad key"}'
     # The status code must still be actionable for the caller.
     assert "provider HTTP 401" in message
 
@@ -112,9 +113,7 @@ async def test_provider_error_body_does_not_leak_credentials() -> None:
 async def test_empty_authorization_is_rejected() -> None:
     proxy, _ = _proxy(lambda _r: httpx.Response(200, json={}))
     with pytest.raises(ModelProxyError):
-        await proxy.proxy_responses(
-            _route(), {"input": "hi"}, authorization="", policy=_policy()
-        )
+        await proxy.proxy_responses(_route(), {"input": "hi"}, authorization="", policy=_policy())
 
 
 async def test_usage_absent_is_tolerated() -> None:
@@ -130,9 +129,9 @@ async def test_usage_absent_is_tolerated() -> None:
 
 async def test_close_is_noop_for_injected_client() -> None:
     """An injected client is owned by the caller and must not be closed."""
-    client = httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda _r: httpx.Response(200, json={})
-    ))
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={}))
+    )
     proxy, tokens = _proxy(None, client=client)
     await _call(proxy, tokens)
     await proxy.close()
@@ -155,7 +154,9 @@ async def test_proxy_creates_and_reuses_its_own_client() -> None:
 
 async def test_huge_provider_body_is_truncated() -> None:
     """A multi-megabyte provider body must not be inlined into an error."""
-    proxy, tokens = _proxy(lambda _r: httpx.Response(500, text="x" * 10000))
+    proxy, tokens = _proxy(
+        lambda _r: httpx.Response(500, json={"error": {"message": "x" * 10000}})
+    )
     with pytest.raises(ModelProxyError) as excinfo:
         await _call(proxy, tokens)
     assert "<truncated>" in str(excinfo.value)
@@ -164,8 +165,45 @@ async def test_huge_provider_body_is_truncated() -> None:
 
 async def test_empty_provider_body_is_reported() -> None:
     proxy, tokens = _proxy(lambda _r: httpx.Response(502, text=""))
-    with pytest.raises(ModelProxyError, match="<empty>"):
+    with pytest.raises(ModelProxyError, match="^provider HTTP 502$"):
         await _call(proxy, tokens)
+
+
+async def test_non_json_provider_error_body_is_not_relayed() -> None:
+    proxy, tokens = _proxy(
+        lambda _r: httpx.Response(502, text="<html>internal gateway detail</html>")
+    )
+    with pytest.raises(ModelProxyError, match="^provider HTTP 502$"):
+        await _call(proxy, tokens)
+
+
+async def test_structured_provider_error_keeps_only_diagnostic_fields() -> None:
+    proxy, tokens = _proxy(
+        lambda _r: httpx.Response(
+            400,
+            json={
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "unsupported_parameter",
+                    "param": "reasoning.effort",
+                    "message": "reasoning.effort is unsupported",
+                    "request_body": {"input": "must not escape"},
+                },
+                "request_id": "must-not-escape",
+            },
+        )
+    )
+    with pytest.raises(ModelProxyError) as excinfo:
+        await _call(proxy, tokens)
+    message = str(excinfo.value)
+    assert message == (
+        'provider HTTP 400: {"code":"unsupported_parameter",'
+        '"type":"invalid_request_error","param":"reasoning.effort",'
+        '"message":"reasoning.effort is unsupported"}'
+    )
+    assert "request_body" not in message
+    assert "request_id" not in message
+
 
 async def test_close_releases_the_lazily_created_client() -> None:
     """Regression: close() checked _client, but the owned client lives in
@@ -188,8 +226,10 @@ async def test_revoked_runtime_token_is_rejected() -> None:
     tokens.revoke(token)
     with pytest.raises(ModelProxyError):
         await proxy.proxy_responses(
-            _route(), {"input": "hi"},
-            authorization=f"Bearer {token}", policy=_policy(),
+            _route(),
+            {"input": "hi"},
+            authorization=f"Bearer {token}",
+            policy=_policy(),
         )
 
 

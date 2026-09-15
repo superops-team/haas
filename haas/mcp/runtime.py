@@ -1,4 +1,5 @@
 """MCP / Tool / Skill materialization (specs/mcp-tool-skill-runtime §5)."""
+
 from __future__ import annotations
 
 import os

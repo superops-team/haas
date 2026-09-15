@@ -93,27 +93,22 @@ def begin_login(config: Config) -> dict[str, Any]:
     _pending_logins[state] = {"verifier": verifier, "created": _now()}
 
     redirect_uri = config.cloud_base_url.rstrip("/") + "/v1/auth/callback"
-    authorize_url = (
-        f"https://{config.cloud_auth_domain}/authorize?"
-        + urllib.parse.urlencode(
-            {
-                "response_type": "code",
-                "client_id": config.cloud_client_id,
-                "redirect_uri": redirect_uri,
-                "scope": LOGIN_SCOPES,
-                "audience": config.cloud_audience,
-                "state": state,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-            }
-        )
+    authorize_url = f"https://{config.cloud_auth_domain}/authorize?" + urllib.parse.urlencode(
+        {
+            "response_type": "code",
+            "client_id": config.cloud_client_id,
+            "redirect_uri": redirect_uri,
+            "scope": LOGIN_SCOPES,
+            "audience": config.cloud_audience,
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
     )
     return {"authorize_url": authorize_url, "state": state}
 
 
-def complete_login(
-    secrets: SecretStore, config: Config, code: str, state: str
-) -> dict[str, Any]:
+def complete_login(secrets: SecretStore, config: Config, code: str, state: str) -> dict[str, Any]:
     pending = _pending_logins.pop(state, None)
     if pending is None or float(pending["created"]) < _now() - _PENDING_TTL:
         return {"ok": False, "error": "unknown or expired sign-in attempt"}
@@ -320,8 +315,7 @@ def emit_session_created(
             sys.platform, _platform.system().lower() or "unknown"
         ),
         "session": {
-            "session_id_hash": "sha256:"
-            + hashlib.sha256(session_id.encode()).hexdigest(),
+            "session_id_hash": "sha256:" + hashlib.sha256(session_id.encode()).hexdigest(),
             "persona_id": persona_id,
             "persona_family": persona_family,
             "workspace_kind": workspace_kind,
@@ -508,8 +502,7 @@ def cloud_disconnect(
         return
     try:
         httpx.post(
-            config.cloud_base_url.rstrip("/")
-            + f"/v1/connections/{connection_id}/disconnect",
+            config.cloud_base_url.rstrip("/") + f"/v1/connections/{connection_id}/disconnect",
             headers={"Authorization": f"Bearer {token}"},
             timeout=10,
         )
@@ -595,9 +588,7 @@ def github_disconnect_installation(
         pass
 
 
-def slack_disconnect_workspace(
-    secrets: SecretStore, config: Config, team_id: str
-) -> None:
+def slack_disconnect_workspace(secrets: SecretStore, config: Config, team_id: str) -> None:
     """Best-effort: delete this user's relay routing row for one workspace so the
     cloud stops pushing its events. Local token deletion always proceeds regardless
     (the row only routes; without the desktop token nothing can be sent anyway)."""
@@ -650,8 +641,7 @@ def gallery_install_event(secrets: SecretStore, config: Config, slug: str) -> No
         return
     try:
         httpx.post(
-            config.cloud_base_url.rstrip("/")
-            + f"/v1/personas/gallery/{slug}/install-events",
+            config.cloud_base_url.rstrip("/") + f"/v1/personas/gallery/{slug}/install-events",
             json={"platform": __import__("sys").platform},
             headers={"Authorization": f"Bearer {token}"},
             timeout=10,
@@ -676,8 +666,7 @@ def gallery_detail(secrets: SecretStore, config: Config, slug: str) -> Optional[
         m = parse_manifest(manifest.get("manifest_markdown", ""), fallback_id=slug)
         capabilities = consent_summary(m)
         recommends = [
-            {"kind": r.kind, "ref": r.ref, "reason": r.reason, "tier": r.tier}
-            for r in m.recommends
+            {"kind": r.kind, "ref": r.ref, "reason": r.reason, "tier": r.tier} for r in m.recommends
         ]
     except Exception as exc:  # malformed manifest: surface, don't crash
         return {"ok": False, "error": f"manifest failed local validation: {exc}"}

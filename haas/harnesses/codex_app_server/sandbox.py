@@ -10,6 +10,7 @@ Codex uses two different enum shapes for sandbox:
 The adapter only projects the Sandbox Runtime result (mode + writable roots +
 network policy); it never widens isolation. Network access is fail-closed.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

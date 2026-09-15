@@ -12,6 +12,7 @@ import {
   getBoard,
   type Board,
   getHealth,
+  getExecutionEvidence as fetchExecutionEvidence,
   getRecentWorkspaces,
   getSessionMessages,
   getSessions,
@@ -44,8 +45,10 @@ import type {
   ApprovalDecision,
   Attachment,
   Item,
+  ModelCallStage,
   SessionInfo,
   SessionUsage,
+  TaskOutcome,
   TodoItem,
   WsEvent,
 } from "./types";
@@ -54,12 +57,13 @@ import { baseName } from "./paths";
 import { itemsFromMessages } from "./itemsFromMessages";
 import { addTurnUsage, emptyUsage, usageFromMessages } from "./usage";
 import { streamMode } from "./streamGate";
+import { appendBoundedActivityText, finalizeCurrentHaasTurn, insertReplayedHaasTool } from "./activity";
 import { InboxItemCard, approvalItemFromParked } from "./components/InboxItemCard";
 import { chooseFolder, isTauri, platformOS, startWindowDrag } from "./tauri";
 import { Icon } from "./components/Icon";
 import { Sidebar } from "./components/Sidebar";
-import { ThinkingBlock, Transcript } from "./components/Transcript";
-import { Composer } from "./components/Composer";
+import { Transcript } from "./components/Transcript";
+import { Composer, type ExecutionState } from "./components/Composer";
 import { Markdown } from "./components/Markdown";
 import { SearchModal } from "./components/SearchModal";
 import { SessionIntro } from "./components/SessionIntro";
@@ -215,8 +219,15 @@ export function App() {
   const [usage, setUsage] = useState<SessionUsage>(emptyUsage());
   const [surfaces, setSurfaces] = useState<SurfaceVisibility>({ cowork: true, chat: false, code: false });
   const [mode, setMode] = useState("interactive");
+  const [haasInteractionSupported, setHaasInteractionSupported] = useState(true);
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState(false);
+  const [executionState, setExecutionState] = useState<ExecutionState>("idle");
+  const [pauseSupported, setPauseSupported] = useState(false);
+  const [taskPhase, setTaskPhase] = useState<string | undefined>();
+  const [taskOutcome, setTaskOutcome] = useState<TaskOutcome | undefined>();
+  const [activityInspectorHost, setActivityInspectorHost] = useState<HTMLDivElement | null>(null);
+  const [activityInspectorOpen, setActivityInspectorOpen] = useState(false);
   // Transient "Compacting context…" indicator (OPE-27): set by the `compacting` event,
   // cleared by whatever the engine emits next — the summarizer call is otherwise a
   // multi-second silent stall mid-turn.
@@ -240,6 +251,13 @@ export function App() {
   // The turn's live thinking text (reasoning_delta events) — same ref-mirror pattern.
   // Folded onto the assistant item when the message finalizes; cleared on turn_start.
   const [reasoningStream, setReasoningStreamState] = useState("");
+  const [modelStages, setModelStages] = useState<ModelCallStage[]>([]);
+  const modelStagesRef = useRef<ModelCallStage[]>([]);
+  const setLiveModelStages = (value: ModelCallStage[]) => {
+    modelStagesRef.current = value;
+    setModelStages(value);
+  };
+  const seenHaasEventsRef = useRef(new Set<string>());
   const reasoningRef = useRef("");
   const setReasoningStream = (value: string) => {
     reasoningRef.current = value;
@@ -249,6 +267,22 @@ export function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [projects, setProjects] = useState<RecentWorkspace[]>([]);
   const [sessionId, setSessionId] = useState<string>(newId());
+  // Live model-call projections belong to exactly one session. Session changes can happen
+  // through several entry points (sidebar, persona, automation, archive/delete), so keep the
+  // boundary centralized instead of relying on each caller to clear every transient buffer.
+  useEffect(() => {
+    streamingRef.current = "";
+    setStreamingState("");
+    reasoningRef.current = "";
+    setReasoningStreamState("");
+    modelStagesRef.current = [];
+    setModelStages([]);
+  }, [sessionId]);
+  const loadExecutionEvidence = useCallback(
+    (invocationId: string, toolCallId: string, evidenceRef: string) =>
+      fetchExecutionEvidence(sessionId, invocationId, toolCallId, evidenceRef),
+    [sessionId],
+  );
   // Automation-run context (§ owner ask 2026-07-04): which task an open __run__ session belongs
   // to, driving the banner + "Back to runs". Best-effort — a run session without context still
   // shows a generic banner (detected by its __run__ id).
@@ -677,27 +711,50 @@ export function App() {
       const flushPartialStream = () => {
         const partial = streamingRef.current;
         const thinking = reasoningRef.current;
-        if (!partial && !thinking) return;
+        const stages = modelStagesRef.current;
+        if (!partial && !thinking && stages.length === 0) return;
         setStreaming("");
         setReasoningStream("");
+        setLiveModelStages([]);
         setItems((p) => [
           ...p,
           {
             kind: "assistant",
             text: partial,
             ts: Date.now() / 1000,
-            ...(thinking ? { reasoning: thinking } : {}),
+            ...(thinking && stages.length === 0 ? { reasoning: thinking } : {}),
+            ...(stages.length > 0 ? { modelStages: stages, source: "haas" as const } : {}),
           },
         ]);
       };
       // Any engine event after `compacting` means the summarizer finished (compacted /
       // silent no-op / failure prompt) — the transient must never outlive it.
       if (ev.type !== "compacting") setCompacting(false);
+      if (d.haasEventId) {
+        const eventKey = `${sessionId}:${String(d.haasEventId)}:${ev.type}`;
+        if (seenHaasEventsRef.current.has(eventKey)) return;
+        seenHaasEventsRef.current.add(eventKey);
+      }
       switch (ev.type) {
         case "ready":
           setConnected(true);
           if (d.model) setModel(d.model);
           if (d.mode) setMode(d.mode);
+          if (typeof d.haas_interaction_supported === "boolean")
+            setHaasInteractionSupported(d.haas_interaction_supported);
+          if (d.haas_task_outcome?.phase) {
+            setTaskPhase(String(d.haas_task_outcome.phase));
+            setTaskOutcome({
+              phase: String(d.haas_task_outcome.phase),
+              ...(d.haas_task_outcome.code ? { code: String(d.haas_task_outcome.code) } : {}),
+              ...(d.haas_task_outcome.safeReason
+                ? { safeReason: String(d.haas_task_outcome.safeReason) }
+                : {}),
+              ...(typeof d.haas_task_outcome.retryable === "boolean"
+                ? { retryable: d.haas_task_outcome.retryable }
+                : {}),
+            });
+          }
           if (d.command_trust?.required) setWorkspaceTrustRequest(d.command_trust);
           // Cowork: adopt the server-provisioned scratch dir (only when we don't already have one).
           if (d.workspace) setWorkspace((cur) => cur || d.workspace);
@@ -706,12 +763,22 @@ export function App() {
           // Server truth on a live turn: a reconnect mid-turn never sees turn_start, so
           // without this the Stop button and waiting row vanish (owner catch 2026-08-24).
           if (typeof d.running === "boolean") setRunning(d.running);
+          if (d.execution_control?.controlState)
+            setExecutionState(String(d.execution_control.controlState) as ExecutionState);
+          else if (typeof d.running === "boolean")
+            setExecutionState(d.running ? "running" : "idle");
+          if (typeof d.execution_control?.pauseSupported === "boolean")
+            setPauseSupported(d.execution_control.pauseSupported);
           break;
         case "turn_start":
           setRunning(true);
+          setExecutionState("running");
+          setTaskPhase("running");
+          setTaskOutcome(undefined);
           setReviewerPaused(false); // a fresh user message resets the denial streak
           setStreaming("");
           setReasoningStream("");
+          setLiveModelStages([]);
           // Background-delivered turns (channel message, self-wake, durable resume) have no local
           // send(), so the triggering message isn't in `items` yet — surface it. A connector message
           // carries a structured `source` (§3.1) → render the rich card; otherwise a plain user item.
@@ -744,14 +811,18 @@ export function App() {
           setStreaming((s) => s + (d.text || ""));
           break;
         case "reasoning_delta":
-          setReasoningStream(reasoningRef.current + (d.text || ""));
+          setReasoningStream(appendBoundedActivityText(reasoningRef.current, String(d.text || "")));
+          break;
+        case "model_stage_updated":
+          if (Array.isArray(d.modelStages)) setLiveModelStages(d.modelStages);
           break;
         case "assistant_message": {
           if (d.usage) setUsage((u) => addTurnUsage(u, d.usage));
           // The event's reasoning is authoritative (covers background-delivered turns);
           // the local buffer is the fallback for older servers.
-          const reasoning = d.reasoning || reasoningRef.current;
-          if (d.text || reasoning)
+          const stages = Array.isArray(d.modelStages) ? d.modelStages : modelStagesRef.current;
+          const reasoning = stages.length > 0 ? "" : d.reasoning || reasoningRef.current;
+          if (d.text || reasoning || stages.length > 0)
             setItems((p) => [
               ...p,
               {
@@ -759,19 +830,38 @@ export function App() {
                 text: d.text || "",
                 ts: Date.now() / 1000,
                 ...(reasoning ? { reasoning } : {}),
+                ...(stages.length > 0 ? { modelStages: stages } : {}),
+                ...(d.delegated ? { source: "haas" as const } : {}),
               },
             ]);
           setStreaming(""); // finalized into items (or empty tool-only turn)
           setReasoningStream("");
+          setLiveModelStages([]);
           break;
         }
         case "tool_proposed":
           if (d.name === "todo_write" && (d.arguments?.todos || d.arguments?.items))
             setTodo(normalizeTodos(d.arguments.todos ?? d.arguments.items));
-          setItems((p) => [
-            ...p,
-            { kind: "tool", id: newId(), name: d.name, args: d.arguments, status: "…" },
-          ]);
+          setItems((p) => {
+            const item: Extract<Item, { kind: "tool" }> = {
+              kind: "tool",
+              id: String(d.toolCallId || newId()),
+              name: d.toolName || d.name,
+              args: d.arguments || {},
+              status: "…",
+              ...(d.delegated ? { source: "haas" as const } : {}),
+              ...(d.activityKind ? { activityKind: d.activityKind } : {}),
+              ...(d.safeSummary ? { safeSummary: String(d.safeSummary) } : {}),
+              ...(d.invocationId ? { invocationId: String(d.invocationId) } : {}),
+              ...(d.commandPreview ? { commandPreview: String(d.commandPreview) } : {}),
+              ...(d.workingDirectory ? { workingDirectory: String(d.workingDirectory) } : {}),
+              ...(d.evidenceRef ? { evidenceRef: String(d.evidenceRef) } : {}),
+              ...(Number.isFinite(d.evidenceExpiresAtMs) ? { evidenceExpiresAtMs: Number(d.evidenceExpiresAtMs) } : {}),
+              ...(d.outputPreview ? { outputPreview: String(d.outputPreview) } : {}),
+              ...(Number.isFinite(d.omittedLineCount) ? { omittedLineCount: Number(d.omittedLineCount) } : {}),
+            };
+            return d.replayed ? insertReplayedHaasTool(p, item) : [...p, item];
+          });
           break;
         case "permission_required":
           // Unattended → the backend parked it in the Inbox; don't also surface a live card.
@@ -780,9 +870,9 @@ export function App() {
             ...p,
             {
               kind: "approval",
-              name: d.name,
-              args: d.arguments,
-              reason: d.reason,
+              name: d.name || d.kind || "harness_action",
+              args: d.arguments || { summary: d.safeSummary },
+              reason: d.reason || d.safeSummary || "",
               category: d.category,
               standingTarget: d.standing_target || undefined,
               searchProvider: d.search_provider || undefined,
@@ -790,6 +880,7 @@ export function App() {
               reviewerUnsure: d.reviewer_unsure || undefined,
               readonlyOk: !!d.readonly_ok,
               mcpDestination: d.mcp_destination || undefined,
+              haasApprovalId: d.approvalId || undefined,
             },
           ]);
           break;
@@ -851,29 +942,38 @@ export function App() {
             ...p,
             {
               kind: "question",
-              question: d.question || "",
-              options: d.options || [],
+              question: d.question || d.questions?.[0]?.question || "Input required",
+              options: d.options || d.questions?.[0]?.options || [],
               allow_text: d.allow_text !== false,
               multi: !!d.multi,
               header: d.header || "",
               questions: d.questions || [],
+              haasInputRequestId: d.inputRequestId || undefined,
             },
           ]);
           break;
         case "tool_finished":
           setItems((p) =>
-            updateLastTool(
-              p,
-              d.name,
-              d.status,
-              d.result_preview || d.reason,
-              d.display?.hidden_by_filters,
-              d.standing_rule,
-              d.reviewer_reason,
-              d.allow_anyway,
-              d.approval_origin,
-              d.approval_note,
-            ),
+            d.toolCallId
+              ? updateToolById(
+                  p,
+                  String(d.toolCallId),
+                  d.status || "completed",
+                  d.result_preview || d.outputPreview || d.safeReason,
+                  d,
+                )
+              : updateLastTool(
+                  p,
+                  d.name,
+                  d.status,
+                  d.result_preview || d.reason,
+                  d.display?.hidden_by_filters,
+                  d.standing_rule,
+                  d.reviewer_reason,
+                  d.allow_anyway,
+                  d.approval_origin,
+                  d.approval_note,
+                ),
           );
           // §8.4 breaker: the reviewer paused itself for the rest of the turn — say so
           // where the user is looking (persisted server-side for reloads) and on the
@@ -888,11 +988,71 @@ export function App() {
             setBrowserRefreshKey((k) => k + 1);
           }
           break;
+        case "tool_output_delta":
+          setItems((p) =>
+            updateToolById(
+              p,
+              String(d.toolCallId || ""),
+              undefined,
+              d.outputPreview || d.safeSummary,
+              { ...d, safeSummary: undefined },
+              true,
+            ),
+          );
+          break;
         case "turn_end":
+          const outcome: TaskOutcome = {
+            phase: String(d.taskPhase || d.status || "incomplete"),
+            ...(d.code ? { code: String(d.code) } : {}),
+            ...(d.safeReason ? { safeReason: String(d.safeReason) } : {}),
+            ...(typeof d.retryable === "boolean" ? { retryable: d.retryable } : {}),
+          };
+          setTaskPhase(outcome.phase);
+          setTaskOutcome(outcome);
+          setItems((items) => finalizeCurrentHaasTurn(items, outcome));
           if (d.status === "max_iterations_exceeded")
             setItems((p) => [...p, { kind: "notice", tone: "warn", text: t("app.notice.max_iterations") }]);
+          else if (
+            ["failed", "incomplete", "cancelled"].includes(String(d.status)) &&
+            !d.delegated
+          ) {
+            flushPartialStream();
+            setItems((p) => [
+              ...p,
+              {
+                kind: "notice",
+                tone: "warn",
+                text: `${String(d.status)}: ${String(d.safeReason || d.code || "execution did not complete")}`,
+                retriable: d.retryable === true,
+              },
+            ]);
+          }
+          break;
+        case "task_state":
+          if (d.phase) setTaskPhase(String(d.phase));
+          if (d.phase)
+            setTaskOutcome((current) => ({
+              phase: String(d.phase),
+              ...(d.code ? { code: String(d.code) } : current?.code ? { code: current.code } : {}),
+              ...(d.safeReason
+                ? { safeReason: String(d.safeReason) }
+                : current?.safeReason
+                  ? { safeReason: current.safeReason }
+                  : {}),
+              ...(typeof d.retryable === "boolean"
+                ? { retryable: d.retryable }
+                : typeof current?.retryable === "boolean"
+                  ? { retryable: current.retryable }
+                  : {}),
+            }));
+          if (d.phase === "verifying")
+            setItems((p) => [
+              ...p,
+              { kind: "notice", tone: "info", text: "Verifying remaining task steps…" },
+            ]);
           break;
         case "mode_notice":
+          if (d.mode) setMode(String(d.mode));
           // Server-authored + persisted (owner ruling 2026-08-24): the Auto-Approve
           // explainer once per session ever, one-line markers for later switches.
           setItems((p) => [
@@ -951,6 +1111,13 @@ export function App() {
           break;
         case "turn_done":
           setRunning(false);
+          setExecutionState((state) =>
+            state === "pausing" || state === "resuming" || state === "stopping"
+              ? state
+              : state === "paused"
+                ? "paused"
+                : "idle",
+          );
           setReviewerPaused(false); // the pause is scoped to the turn
           refreshSessions();
           // Catch-all artifact refresh: files created via shell or on a brand-new session (whose
@@ -965,6 +1132,12 @@ export function App() {
             }
           }
           break;
+        case "execution_control":
+          if (d.controlState)
+            setExecutionState(String(d.controlState) as ExecutionState);
+          if (typeof d.pauseSupported === "boolean")
+            setPauseSupported(d.pauseSupported);
+          break;
       }
     };
 
@@ -978,6 +1151,7 @@ export function App() {
         if (p) {
           pendingPromptRef.current = null;
           const shown = p.skill ? `/${p.skill}${p.text ? ` ${p.text}` : ""}` : p.text;
+          beginForegroundFollow();
           setItems((prev) => [
             ...prev,
             { kind: "user", text: shown, attachments: p.attachments, ts: Date.now() / 1000 },
@@ -1012,12 +1186,20 @@ export function App() {
   const atBottomRef = useRef(true);
   const autoScrollingRef = useRef(false);
   const lastScrollTopRef = useRef(0);
+  // Foreground sends own a short follow epoch: keep the committed prompt and the first
+  // accepted/running indicator visible. Background/replayed growth never sets this flag.
+  const pendingForegroundFollowRef = useRef(false);
   const [following, setFollowing] = useState(true);
-  const scrollToBottom = () => {
+  const beginForegroundFollow = () => {
+    pendingForegroundFollowRef.current = true;
+    atBottomRef.current = true;
+    setFollowing(true);
+  };
+  const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
     const el = scrollRef.current;
     if (!el) return;
     autoScrollingRef.current = true;
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    el.scrollTo({ top: el.scrollHeight, behavior });
   };
   const followLatest = () => {
     atBottomRef.current = true;
@@ -1038,6 +1220,7 @@ export function App() {
     }
     lastScrollTopRef.current = top;
     atBottomRef.current = atBottom;
+    if (!atBottom && !autoScrollingRef.current) pendingForegroundFollowRef.current = false;
     setFollowing(atBottom);
   };
   // A different session is a fresh viewport — never inherit a scrolled-up state. Declared
@@ -1048,9 +1231,16 @@ export function App() {
     setFollowing(true);
   }, [sessionId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (pendingForegroundFollowRef.current) {
+      // Layout now contains the local echo and, once accepted, WaitingForAgent. An instant
+      // alignment avoids a smooth animation chasing a stale pre-commit scrollHeight.
+      scrollToBottom("auto");
+      if (running) pendingForegroundFollowRef.current = false;
+      return;
+    }
     if (atBottomRef.current) scrollToBottom();
-  }, [items, streaming]);
+  }, [items, streaming, running, reasoningStream, modelStages, taskPhase]);
 
   // Track produced-file count for the topbar "Artifacts" affordance (works even when the rail is
   // hidden, where the rail itself doesn't fetch). Cowork only; refreshes on file writes/turn end.
@@ -1112,6 +1302,7 @@ export function App() {
     // reaches the lead instead of bouncing off a blocked composer (owner-hit
     // 2026-08-16). The card buttons stay the approve/plain-decline paths.
     if (!unattended && pendingTeam?.kind === "teamreq" && !pendingTeam.resolved) {
+      beginForegroundFollow();
       setItems((p) => [...p, { kind: "user", text, ts: Date.now() / 1000 }]);
       respondTeam(false, text);
       return;
@@ -1121,6 +1312,7 @@ export function App() {
       pendingItemsReq?.kind === "itemsreq" &&
       !pendingItemsReq.resolved
     ) {
+      beginForegroundFollow();
       setItems((p) => [...p, { kind: "user", text, ts: Date.now() / 1000 }]);
       respondItemsReq(false, text);
       return;
@@ -1128,10 +1320,11 @@ export function App() {
     // Force-run shows exactly what the user typed: "/name rest". Must match the server's
     // `display` sidecar formula so the turn_start dedupe recognizes the local echo.
     const shown = skill ? `/${skill}${text ? ` ${text}` : ""}` : text;
+    beginForegroundFollow();
     setItems((p) => [...p, { kind: "user", text: shown, attachments, ts: Date.now() / 1000 }]);
     // The visible model rides along with the message (single source of truth per turn).
     sessionRef.current?.userMessage(text, attachments, model, skill);
-    followLatest(); // sending always re-engages stream-following, wherever the user had scrolled
+    // The layout effect performs the actual scroll after the prompt/turn state is committed.
   };
   // Resolving a LIVE prompt also resolves its parked Inbox mirror server-side, but the polled
   // `sessionInbox` copy stays "pending" for up to a poll cycle — long enough for the docked
@@ -1150,7 +1343,7 @@ export function App() {
   const approve = (decision: ApprovalDecision) => {
     setItems((p) => resolveLastApproval(p, decision));
     dropSessionInbox("approval");
-    sessionRef.current?.approve(decision);
+    sessionRef.current?.approve(decision, pendingApproval?.haasApprovalId);
   };
   const respondPlan = (approved: boolean, mode?: string, feedback?: string) => {
     setItems((p) => resolveLastPlan(p, approved ? "approved" : "rejected"));
@@ -1183,18 +1376,53 @@ export function App() {
     setReviewerPaused(false); // an answered question resets the reviewer's streak
     setItems((p) => resolveLastQuestion(p, answer));
     dropSessionInbox("question");
-    sessionRef.current?.respondQuestion(answer);
+    if (pendingQuestion?.haasInputRequestId) {
+      let resolved: Record<string, string> = {};
+      try {
+        const parsed = JSON.parse(answer);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) resolved = parsed;
+      } catch {
+        const first = pendingQuestion.questions?.[0];
+        const key = first?.id || first?.header || first?.question || "answer";
+        resolved[key] = answer;
+      }
+      if (Object.keys(resolved).length === 0) {
+        const first = pendingQuestion.questions?.[0];
+        const key = first?.id || first?.header || first?.question || "answer";
+        resolved[key] = answer;
+      }
+      const answers = Object.fromEntries(
+        (pendingQuestion.questions || []).map((question) => {
+          const key = question.id || question.header || question.question;
+          return [key, { values: [String(resolved[question.header || question.question] ?? resolved[key] ?? "")] }];
+        }),
+      );
+      sessionRef.current?.respondQuestion(answer, pendingQuestion.haasInputRequestId, answers);
+    } else {
+      sessionRef.current?.respondQuestion(answer);
+    }
   };
   const prefillComposer = (text: string, attachments?: Attachment[]) =>
     setComposerPrefill((p) => ({ text, attachments, nonce: (p?.nonce ?? 0) + 1 }));
-  const interrupt = () => sessionRef.current?.interrupt();
+  const interrupt = () => {
+    setExecutionState("stopping");
+    sessionRef.current?.interrupt();
+  };
+  const pause = () => {
+    setExecutionState("pausing");
+    sessionRef.current?.pause();
+  };
+  const continueExecution = () => {
+    setRunning(true);
+    setExecutionState("resuming");
+    sessionRef.current?.continue();
+  };
   const retry = () => {
     // Optimistic running: turn_start confirms; a rejected retry still ends in turn_done.
     setRunning(true);
     sessionRef.current?.retry();
   };
   const changeMode = (m: string) => {
-    setMode(m);
     sessionRef.current?.setMode(m);
   };
   const changeModel = (m: string) => {
@@ -1211,6 +1439,8 @@ export function App() {
     setStreaming("");
     setTodo([]);
     setRunning(false);
+    setExecutionState("idle");
+    setPauseSupported(false);
     // "New session" under a browsed persona switches to it (expand≠switch: the header alone
     // doesn't switch; this explicit action does).
     if (target !== agent) {
@@ -1378,7 +1608,10 @@ export function App() {
     setSurface("session"); // selecting a conversation always returns to the conversation view
     setTodo([]);
     setStreaming("");
+    setReasoningStream("");
     setRunning(false);
+    setTaskPhase(undefined);
+    setTaskOutcome(undefined);
     if (ag) setAgent(ag);
     setReviewerPaused(false);
     setDraftFolderPicked(false); // a resumed session's folder is inherited, not a pick
@@ -1411,8 +1644,11 @@ export function App() {
     setItems([]);
     setUsage(emptyUsage());
     setStreaming("");
+    setReasoningStream("");
     setTodo([]);
     setRunning(false);
+    setTaskPhase(undefined);
+    setTaskOutcome(undefined);
 
     // The live workspace is only a valid fallback for a gated persona if it came from
     // another gated persona — a knowledge persona's workspace is a scratch dir, and a
@@ -1549,13 +1785,17 @@ export function App() {
   // `running` too: a mid-turn reconnect may land before any item is rebuilt — a live
   // session must show the transcript (waiting row, Stop), never the intro hero.
   const idle = items.length === 0 && !streaming && !running;
-  const pendingApproval = [...items].reverse().find((i) => i.kind === "approval" && !i.resolved);
+  const pendingApproval = [...items]
+    .reverse()
+    .find((i): i is Extract<Item, { kind: "approval" }> => i.kind === "approval" && !i.resolved);
   const pendingDirReq = [...items].reverse().find((i) => i.kind === "dirreq" && !i.resolved);
   const pendingToolReq = [...items].reverse().find((i) => i.kind === "toolreq" && !i.resolved);
   const pendingPlan = [...items].reverse().find((i) => i.kind === "planreq" && !i.resolved);
   const pendingTeam = [...items].reverse().find((i) => i.kind === "teamreq" && !i.resolved);
   const pendingItemsReq = [...items].reverse().find((i) => i.kind === "itemsreq" && !i.resolved);
-  const pendingQuestion = [...items].reverse().find((i) => i.kind === "question" && !i.resolved);
+  const pendingQuestion = [...items]
+    .reverse()
+    .find((i): i is Extract<Item, { kind: "question" }> => i.kind === "question" && !i.resolved);
   // Facts subtitle (§22): the session's FIXED facts, not controls — model (+ the
   // workspace folder for project-scoped sessions). Renders only once the session has history;
   // until then the model is still choosable in the composer, so there's no locked fact to state.
@@ -1790,7 +2030,7 @@ export function App() {
           onOpenIntegrations={() => setSurface("integrations")}
         />
       ) : (
-      <div className={"main" + (surface === "session" && agent !== "chat" && !railHidden ? " rail-open" : "")}>
+      <div className={"main" + (surface === "session" && agent !== "chat" && !railHidden && !activityInspectorOpen ? " rail-open" : "")}>
         <div className="main-topbar">
           {/* Left: the contextual cluster — [sidebar] [+ new session] [search] — rendered ONLY
               while the sidebar is collapsed (§22; the expanded sidebar already owns those
@@ -1931,6 +2171,7 @@ export function App() {
                 </button>
               </div>
             )}
+            <div className="conversation-body">
             <div className="main-scroll" ref={scrollRef} onScroll={handleScroll}>
               {idle ? (
                 agent === "cowork" ? (
@@ -1961,9 +2202,17 @@ export function App() {
               ) : (
                 <>
                   <Transcript
+                    key={sessionId}
                     items={items}
                     onApprove={approve}
                     running={running}
+                    taskPhase={taskPhase}
+                    taskOutcome={taskOutcome}
+                    loadExecutionEvidence={loadExecutionEvidence}
+                    reasoningText={reasoningStream}
+                    modelStages={modelStages}
+                    inspectorHost={activityInspectorHost}
+                    onInspectorOpenChange={setActivityInspectorOpen}
                     onRetry={retry}
                     onOpenConnectors={() => setSurface("integrations")}
                     onAllowAnyway={allowAnyway}
@@ -1976,11 +2225,6 @@ export function App() {
                   {/* Live thinking (reasoning models): a quiet collapsed block that streams the
                       trace for anyone who expands it; folds into the answer's disclosure when
                       the message finalizes. */}
-                  {running && reasoningStream && !streaming && (
-                    <div className="transcript">
-                      <ThinkingBlock text={reasoningStream} live />
-                    </div>
-                  )}
                   {/* Compaction runs between provider turns (nothing streams during it), so
                       the transient takes over the waiting slot with a specific label. */}
                   {running && compacting && <WaitingForAgent label={t("app.compacting_context")} />}
@@ -2000,6 +2244,8 @@ export function App() {
                   )}
                 </>
               )}
+            </div>
+            <div className="activity-inspector-host" ref={setActivityInspectorHost} />
             </div>
 
             {/* Scrolled up while the transcript is still growing → offer the way back down.
@@ -2073,6 +2319,8 @@ export function App() {
               models={models}
               modelLabels={modelLabels}
               running={running}
+              executionState={executionState}
+              pauseSupported={pauseSupported}
               gateOpen={!unattended && (!!pendingTeam || !!pendingItemsReq)}
               connected={connected}
               modelReady={modelReady}
@@ -2081,6 +2329,8 @@ export function App() {
               onConfigureVoiceInput={() => openSettings("voice")}
               onSend={send}
               onInterrupt={interrupt}
+              onPause={pause}
+              onContinue={continueExecution}
               onModeChange={changeMode}
               onModelChange={changeModel}
               sessionId={sessionId}
@@ -2093,6 +2343,7 @@ export function App() {
               contextWindow={modelContextWindows[model]}
               contextBar={contextBar}
               reviewerPaused={reviewerPaused}
+              interactionSupported={haasInteractionSupported}
               placeholder={
                 agent === "code"
                   ? t("composer.placeholder_code")
@@ -2176,7 +2427,7 @@ export function App() {
             />
                   </div>
           <RightRail
-            active={surface === "session" && agent !== "chat" && !railHidden}
+            active={surface === "session" && agent !== "chat" && !railHidden && !activityInspectorOpen}
             sessionId={sessionId}
             refreshKey={browserRefreshKey}
             toolNames={items.filter((i) => i.kind === "tool").map((i: any) => i.name)}
@@ -2344,6 +2595,66 @@ function updateLastTool(
         ...(allowAnyway ? { allowAnyway } : {}),
         ...(approvalOrigin ? { approvalOrigin } : {}),
         ...(approvalNote ? { approvalNote } : {}),
+      };
+      break;
+    }
+  }
+  return copy;
+}
+
+function updateToolById(
+  items: Item[],
+  id: string,
+  status?: string,
+  preview?: string,
+  metadata?: Record<string, any>,
+  appendPreview = false,
+): Item[] {
+  if (!id) return items;
+  const copy = [...items];
+  for (let i = copy.length - 1; i >= 0; i--) {
+    const item = copy[i];
+    if (item.kind === "tool" && item.id === id) {
+      copy[i] = {
+        ...item,
+        ...(status ? { status } : {}),
+        ...(preview
+          ? {
+              preview:
+                appendPreview && item.preview
+                  ? appendBoundedActivityText(item.preview, preview)
+                  : preview,
+            }
+          : {}),
+        ...(metadata?.activityKind && !item.activityKind ? { activityKind: metadata.activityKind } : {}),
+        ...(metadata?.safeSummary && !item.safeSummary ? { safeSummary: String(metadata.safeSummary) } : {}),
+        ...(metadata?.outputPreview
+          ? {
+              outputPreview:
+                appendPreview && item.outputPreview
+                  ? appendBoundedActivityText(item.outputPreview, String(metadata.outputPreview))
+                  : String(metadata.outputPreview),
+            }
+          : {}),
+        ...(Number.isFinite(metadata?.omittedLineCount)
+          ? {
+              omittedLineCount: appendPreview
+                ? (item.omittedLineCount || 0) + Number(metadata?.omittedLineCount)
+                : Number(metadata?.omittedLineCount),
+            }
+          : {}),
+        ...(Number.isFinite(metadata?.durationMs) ? { durationMs: Number(metadata?.durationMs) } : {}),
+        ...(Number.isFinite(metadata?.exitCode) ? { exitCode: Number(metadata?.exitCode) } : {}),
+        ...(metadata?.safeReason ? { safeReason: String(metadata.safeReason) } : {}),
+        ...(typeof metadata?.retryable === "boolean" ? { retryable: metadata.retryable } : {}),
+        ...(metadata?.recoveryGroupId ? { recoveryGroupId: String(metadata.recoveryGroupId) } : {}),
+        ...(metadata?.invocationId && !item.invocationId ? { invocationId: String(metadata.invocationId) } : {}),
+        ...(metadata?.commandPreview && !item.commandPreview ? { commandPreview: String(metadata.commandPreview) } : {}),
+        ...(metadata?.workingDirectory && !item.workingDirectory ? { workingDirectory: String(metadata.workingDirectory) } : {}),
+        ...(metadata?.evidenceRef && !item.evidenceRef ? { evidenceRef: String(metadata.evidenceRef) } : {}),
+        ...(Number.isFinite(metadata?.evidenceExpiresAtMs) && item.evidenceExpiresAtMs === undefined
+          ? { evidenceExpiresAtMs: Number(metadata?.evidenceExpiresAtMs) }
+          : {}),
       };
       break;
     }

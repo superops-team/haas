@@ -379,6 +379,42 @@ async def test_manual_run_prepare_and_finalize(tmp_path, monkeypatch):
     assert manager.task_store.get(task.id).run_count == 1
 
 
+def test_manual_haas_run_does_not_finalize_incomplete_as_ok(tmp_path, monkeypatch):
+    from coworker.providers import AssistantTurn, ModelCapabilities, ProviderClient
+    from coworker.server.manager import SessionManager
+
+    class ScriptedProvider(ProviderClient):
+        def complete(self, *, model, messages, tools=None, **settings):
+            return AssistantTurn(text="Partial progress", finish_reason="stop")
+
+        def capabilities(self, model):
+            return ModelCapabilities()
+
+    monkeypatch.setenv("COWORKER_STATE_DIR", str(tmp_path / "state"))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    manager = SessionManager(data_dir=tmp_path / "data", provider=ScriptedProvider())
+    task = _task(workspace=str(ws), agent="cowork")
+    manager.task_store.save(task)
+    prep = manager.prepare_manual_run(task.id)
+    engine = manager.get_engine(prep["session_id"], workspace=str(ws), agent="cowork")
+    engine.messages.append({"role": "assistant", "content": "Partial progress"})
+    manager.save(prep["session_id"], engine)
+    manager.session_store.set_bindings(
+        prep["session_id"],
+        {
+            "haas_delegation": {
+                "stream_bridge": {"terminalStatus": "incomplete"}
+            }
+        },
+    )
+
+    out = manager.finalize_manual_run(task.id, prep["run_id"])
+
+    assert out["run"]["status"] == "error"
+    assert out["run"]["error"] == "HaaS invocation incomplete"
+
+
 # -- REST ----------------------------------------------------------------------
 def test_automations_rest(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient

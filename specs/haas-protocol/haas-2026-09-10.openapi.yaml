@@ -1,0 +1,4194 @@
+openapi: 3.1.0
+info:
+  title: Harness As A Service Protocol (ADK 2.0)
+  version: "2026-09-10"
+  summary: ADK 2.0-compatible protocol surface for HaaS.
+  description: |
+    HaaS exposes the Google ADK 2.0 REST API protocol layer as its northbound contract,
+    plus HaaS-native control-plane extensions.
+    Prose in README.md is normative when behavior cannot be expressed in OpenAPI.
+servers:
+  - url: http://127.0.0.1:8092
+    description: Local HaaS sidecar
+security:
+  - bearerAuth: []
+tags:
+  - name: Discovery
+  - name: Execution
+  - name: Sessions
+  - name: HaaS
+paths:
+  /health:
+    get:
+      tags: [HaaS]
+      operationId: getHealthAlias
+      summary: Container liveness alias for HaaS health
+      security: []
+      responses:
+        "200":
+          description: Health snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /ready:
+    get:
+      tags: [HaaS]
+      operationId: getReadyAlias
+      summary: Container readiness alias for HaaS readiness
+      security: []
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [control, execution, capability]
+            default: execution
+      responses:
+        "200":
+          description: Ready snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /list-apps:
+    get:
+      tags: [Discovery]
+      operationId: listApps
+      summary: List configured harness app names in caller scope
+      responses:
+        "200":
+          description: Array of app names (harness ids)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /run:
+    post:
+      tags: [Execution]
+      operationId: runAgent
+      summary: Run a harness and return all events in one JSON array
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunRequest"
+      responses:
+        "200":
+          description: |
+            HTTP 200 ADK Event array for every accepted invocation terminal outcome,
+            including completed, failed, incomplete, interrupted, and cancelled. Pre-acceptance
+            failures use the structured 4xx/5xx responses below.
+          headers:
+            Idempotency-Expires-At:
+              $ref: "#/components/headers/IdempotencyExpiresAt"
+            X-HaaS-Invocation-ID:
+              $ref: "#/components/headers/HaaSInvocationId"
+            X-HaaS-Session-ID:
+              $ref: "#/components/headers/HaaSSessionId"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Event"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          description: Confirmed execution idempotency replay expiry; no execution is started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          description: Pre-acceptance adapter/provider preflight failure; no invocation exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "503":
+          description: Pre-acceptance service failure, or post-acceptance terminal-event integrity failure with haasError.accepted=true and invocationId
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+  /run_sse:
+    post:
+      tags: [Execution]
+      operationId: runAgentSse
+      summary: Run a harness and stream events over SSE
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+        - $ref: "#/components/parameters/LastEventId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunRequest"
+      responses:
+        "200":
+          description: |
+            HTTP 200 SSE stream for every accepted invocation. After acceptance,
+            failed/incomplete/interrupted/cancelled outcomes are terminal ADK events followed by
+            stream closure; they do not change the HTTP status.
+          headers:
+            Idempotency-Expires-At:
+              $ref: "#/components/headers/IdempotencyExpiresAt"
+            X-HaaS-Invocation-ID:
+              $ref: "#/components/headers/HaaSInvocationId"
+            X-HaaS-Session-ID:
+              $ref: "#/components/headers/HaaSSessionId"
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              x-haas-event-schema:
+                $ref: "#/components/schemas/Event"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          description: Confirmed execution idempotency replay or event-cursor expiry; no execution is started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          description: Pre-acceptance adapter/provider preflight failure before SSE headers; no invocation exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "503":
+          description: Pre-acceptance service failure, or post-acceptance terminal-event integrity failure before SSE headers with haasError.accepted=true and invocationId
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+  /apps/{app_name}/users/{user_id}/sessions/{session_id}:
+    parameters:
+      - $ref: "#/components/parameters/AppName"
+      - $ref: "#/components/parameters/UserId"
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [Sessions]
+      operationId: getSession
+      summary: Get one session with state and events
+      responses:
+        "200":
+          description: Session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: ADK session read exceeds the bounded response budget; use the native events-page API
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+    patch:
+      tags: [Sessions]
+      operationId: updateSession
+      summary: Update session state via stateDelta
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stateDelta]
+              properties:
+                stateDelta:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "200":
+          description: Updated session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Sessions]
+      operationId: deleteSession
+      summary: Delete a session and its data
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/health:
+    get:
+      tags: [HaaS]
+      operationId: getHaasHealth
+      summary: HaaS process liveness
+      security: []
+      responses:
+        "200":
+          description: Health snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /v1/haas/ready:
+    get:
+      tags: [HaaS]
+      operationId: getHaasReady
+      summary: HaaS readiness by scope
+      security: []
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [control, execution, capability]
+            default: execution
+      responses:
+        "200":
+          description: Ready snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /v1/haas/status:
+    get:
+      tags: [HaaS]
+      operationId: getHaasStatus
+      summary: HaaS diagnostic status
+      responses:
+        "200":
+          description: Status snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /v1/haas/capabilities:
+    get:
+      tags: [HaaS]
+      operationId: getHaasCapabilities
+      summary: Discover caller-visible HaaS and harness capabilities
+      description: |
+        Stable pre-session capability discovery. Unknown feature keys or enum values
+        must be treated as unsupported by clients. Runtime diagnostics remain on
+        /v1/haas/status and /v1/haas/diagnostics.
+      responses:
+        "200":
+          description: Caller-scoped capability snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitiesEnvelope"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/haas/diagnostics:
+    get:
+      tags: [HaaS]
+      operationId: getHaasDiagnostics
+      summary: Redacted HaaS diagnostics
+      responses:
+        "200":
+          description: Diagnostic snapshot
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /v1/haas/harnesses:
+    get:
+      tags: [HaaS]
+      operationId: listHaasHarnesses
+      summary: List configured harnesses with details
+      responses:
+        "200":
+          description: Harness list wrapped in the HaaS envelope (`data.harnesses`).
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HarnessListEnvelope"
+    post:
+      tags: [HaaS]
+      operationId: createHarness
+      summary: Create a configured harness
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HarnessCreate"
+      responses:
+        "200":
+          description: Created harness (`data` = Harness)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HarnessEnvelope"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /v1/haas/harnesses/{harness_id}:
+    parameters:
+      - $ref: "#/components/parameters/HarnessId"
+    get:
+      tags: [HaaS]
+      operationId: getHaasHarness
+      summary: Get one configured harness
+      responses:
+        "200":
+          description: Harness (`data` = Harness)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HarnessEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [HaaS]
+      operationId: updateHarness
+      summary: Update a configured harness
+      description: The fields `id`, `base`, and `createdAtMs` are immutable.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HarnessCreate"
+      responses:
+        "200":
+          description: Updated harness (`data` = Harness)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HarnessEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [HaaS]
+      operationId: deleteHarness
+      summary: Delete a configured harness
+      description: Deleting a harness does not delete historical sessions.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Deleted
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/harnesses/{harness_id}/skills/{skill_id}/files:
+    parameters:
+      - $ref: "#/components/parameters/HarnessId"
+      - $ref: "#/components/parameters/SkillId"
+    get:
+      tags: [HaaS]
+      operationId: listHarnessSkillFiles
+      summary: List files in one configured skill bundle
+      responses:
+        "200":
+          description: Skill files (`data` = {id, name, files})
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillFilesEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/profiles:
+    get:
+      tags: [HaaS]
+      operationId: listHarnessProfiles
+      summary: List versioned harness profiles
+      parameters:
+        - name: harnessId
+          in: query
+          schema:
+            type: string
+            pattern: "^chrn_"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, active, retired]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Profile page (`data` = array of HarnessProfile, `nextCursor` for pagination)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileListEnvelope"
+    post:
+      tags: [HaaS]
+      operationId: createHarnessProfile
+      summary: Create a draft harness profile revision
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HarnessProfileCreate"
+      responses:
+        "200":
+          description: Created profile (`data` = HarnessProfile)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /v1/haas/profiles/{profile_id}:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    get:
+      tags: [HaaS]
+      operationId: getHarnessProfile
+      summary: Get one harness profile revision
+      responses:
+        "200":
+          description: Profile (`data` = HarnessProfile)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [HaaS]
+      operationId: updateHarnessProfile
+      summary: Update a draft harness profile revision
+      description: Only draft revisions are editable; active and retired revisions are immutable.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HarnessProfileCreate"
+      responses:
+        "200":
+          description: Updated draft profile (`data` = HarnessProfile)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /v1/haas/profiles/{profile_id}/validate:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    post:
+      tags: [HaaS]
+      operationId: validateHarnessProfile
+      summary: Validate a harness profile revision without side effects
+      responses:
+        "200":
+          description: Validation result (`data` = ProfileValidation)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileValidationEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /v1/haas/profiles/{profile_id}/activate:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    post:
+      tags: [HaaS]
+      operationId: activateHarnessProfile
+      summary: Activate a validated harness profile revision
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Activated profile (`data` = HarnessProfile)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/haas/models:
+    get:
+      tags: [HaaS]
+      operationId: listModels
+      summary: List models by harness backend
+      responses:
+        "200":
+          description: Model catalog (`data` = ModelCatalog)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelCatalogEnvelope"
+  /v1/haas/delegated-sessions:
+    post:
+      tags: [HaaS]
+      operationId: createDelegatedSession
+      summary: Create or reuse a prepared manager-owned delegated-session candidate
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegatedSessionCreate"
+      responses:
+        "200":
+          description: Delegated session contract (`data` = DelegatedSessionContract)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegatedSessionEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/haas/delegated-sessions/{delegated_session_id}:
+    parameters:
+      - $ref: "#/components/parameters/DelegatedSessionId"
+    get:
+      tags: [HaaS]
+      operationId: getDelegatedSession
+      summary: Get one delegated session contract and runtime status
+      responses:
+        "200":
+          description: Delegated session contract (`data` = DelegatedSessionContract)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegatedSessionEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/delegated-sessions/{delegated_session_id}/restore:
+    parameters:
+      - $ref: "#/components/parameters/DelegatedSessionId"
+    post:
+      tags: [HaaS]
+      operationId: restoreDelegatedSession
+      summary: Restore runtime resources for a delegated session
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegatedSessionRestore"
+      responses:
+        "200":
+          description: Delegated session contract after restore (`data` = DelegatedSessionContract)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegatedSessionEnvelope"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/haas/delegated-sessions/{delegated_session_id}/policy:
+    parameters:
+      - $ref: "#/components/parameters/DelegatedSessionId"
+    post:
+      tags: [HaaS]
+      operationId: updateDelegatedSessionPolicy
+      summary: Explicitly update or rebind a delegated session policy snapshot
+      description: |
+        In-place complete-domain update for delegationPolicySnapshot,
+        mountManifest, profileRef and/or image. The same delegated session and
+        manager chat binding are retained. A validated desired revision is
+        persisted and reconciled independently of later turns; current accepted
+        work is unchanged. Runtime verification advances appliedRevision. A
+        failed application records a failed result and gates future turns.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegatedSessionPolicyUpdate"
+      responses:
+        "200":
+          description: Delegated session contract after policy update (`data` = DelegatedSessionContract)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegatedSessionEnvelope"
+        "202":
+          description: |
+            Validated desired revision accepted for asynchronous reconciliation.
+            Current work is unchanged; future turns wait for appliedRevision.
+            Response includes a non-null pendingPolicyUpdate.
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegatedSessionEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/haas/sessions:
+    get:
+      tags: [HaaS]
+      operationId: listHaasSessions
+      summary: List sessions across users (admin view)
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: app
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session page (`data` = array of Session, `nextCursor` for pagination)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionListEnvelope"
+  /v1/haas/sessions/{session_id}/invocations/{invocation_id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/InvocationId"
+    get:
+      tags: [HaaS]
+      operationId: getHaasInvocation
+      summary: Read authoritative invocation status for recovery
+      responses:
+        "200":
+          description: Invocation (`data` = Invocation)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvocationEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/sessions/{session_id}/approvals:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [HaaS]
+      operationId: listHaasApprovals
+      summary: List caller-visible approval records for recovery
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [waiting, approved, denied, expired, cancelled]
+            default: waiting
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval page
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalListEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/sessions/{session_id}/input-requests:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [HaaS]
+      operationId: listHaasInputRequests
+      summary: List caller-visible structured input requests for recovery
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [waiting, answered, expired, cancelled]
+            default: waiting
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Structured input request page
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InputRequestListEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/sessions/{session_id}/events-page:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [HaaS]
+      operationId: listHaasSessionEventsPage
+      summary: Read a bounded page of canonical HaaS events
+      parameters:
+        - $ref: "#/components/parameters/AfterEventId"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: Canonical event page ordered by eventId
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanonicalEventPageEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Cursor expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+  /v1/haas/sessions/{session_id}/events:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [HaaS]
+      operationId: streamHaasSessionEvents
+      summary: Stream canonical HaaS session events with replay
+      parameters:
+        - $ref: "#/components/parameters/AfterEventId"
+      responses:
+        "200":
+          description: SSE stream
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              x-haas-event-schema:
+                $ref: "#/components/schemas/CanonicalHaasEvent"
+  /v1/haas/sessions/{session_id}/invocations/{invocation_id}/events:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/InvocationId"
+    get:
+      tags: [HaaS]
+      operationId: streamHaasInvocationEvents
+      summary: Stream canonical HaaS invocation events with replay
+      parameters:
+        - $ref: "#/components/parameters/AfterEventId"
+      responses:
+        "200":
+          description: SSE stream
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              x-haas-event-schema:
+                $ref: "#/components/schemas/CanonicalHaasEvent"
+  /v1/haas/sessions/{session_id}/invocations/{invocation_id}/tools/{tool_call_id}/evidence:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/InvocationId"
+      - $ref: "#/components/parameters/ToolCallId"
+    get:
+      tags: [HaaS]
+      operationId: getExecutionEvidence
+      summary: Read scoped short-lived command evidence
+      description: |
+        Display-only lookup of one in-memory command-evidence record. The bearer
+        principal, complete session scope, invocation, tool call, and evidence_ref
+        must all match. The response is never durable or cacheable. Ordinary URLs
+        and validated unexpired authorization URLs remain usable; credential values
+        remain masked.
+      parameters:
+        - name: evidence_ref
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^evd_"
+      responses:
+        "200":
+          description: Current execution evidence (`data` = ExecutionEvidence)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+            Referrer-Policy:
+              schema:
+                type: string
+                const: no-referrer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionEvidenceEnvelope"
+        "404":
+          description: Evidence absent, unavailable, or outside caller scope
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+            Referrer-Policy:
+              schema:
+                type: string
+                const: no-referrer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "410":
+          description: Matching evidence has expired
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+            Referrer-Policy:
+              schema:
+                type: string
+                const: no-referrer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+  /v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/InvocationId"
+    post:
+      tags: [HaaS]
+      operationId: cancelInvocation
+      summary: Cancel a running invocation (idempotent)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Current invocation state (`data` = Invocation)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvocationEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/haas/sessions/{session_id}/invocations/{invocation_id}/pause:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/InvocationId"
+    post:
+      tags: [HaaS]
+      operationId: pauseInvocation
+      summary: Pause a running invocation after its interrupted terminal is observed
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Authoritative interrupted invocation (`data` = Invocation)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvocationEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/haas/sessions/{session_id}/invocations/{invocation_id}/continue:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/InvocationId"
+    post:
+      tags: [HaaS]
+      operationId: continueInvocation
+      summary: Continue an interrupted invocation as a new linked invocation
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContinueInvocationRequest"
+      responses:
+        "200":
+          description: ADK Event SSE projection for the new linked invocation
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+            X-HaaS-Invocation-ID:
+              $ref: "#/components/headers/HaaSInvocationId"
+            X-HaaS-Session-ID:
+              $ref: "#/components/headers/HaaSSessionId"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              x-haas-event-schema:
+                $ref: "#/components/schemas/Event"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/haas/sessions/{session_id}/profile:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [HaaS]
+      operationId: getSessionProfileRecoveryRef
+      summary: Read the authoritative applied profile reference for recovery
+      description: |
+        Native control-plane recovery read for one non-delegated session. The
+        response contains only the applied profile reference and a
+        credential-free execution-intent fingerprint. It never exposes the
+        effective profile snapshot, provider URLs, credential references, MCP
+        headers, skill bytes, or policy bodies, and it does not change the ADK
+        Session schema. A missing, ambiguous, or out-of-scope session returns
+        404 session_not_found. A manager-delegated session returns 409
+        haas_profile_rebind_unsupported and must use its delegated policy
+        contract instead.
+      responses:
+        "200":
+          description: Authoritative recovery-safe profile reference
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionProfileRecoveryEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/haas/sessions/{session_id}/profile-rebind:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [HaaS]
+      operationId: rebindSessionProfile
+      summary: Explicitly rebind future invocations in an existing session to a profile snapshot
+      description: |
+        Applies to non-delegated sessions only. A manager-delegated session
+        (carrying delegatedSessionRef) returns 409 haas_profile_rebind_unsupported;
+        its runtime configuration is owned by the manager-authorized mount manifest
+        and delegation policy snapshot and is changed only through
+        /v1/haas/delegated-sessions/{delegated_session_id}/policy.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfileRebindRequest"
+      responses:
+        "200":
+          description: Session profile snapshot after rebind (`data` = EffectiveHarnessProfile)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EffectiveProfileEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /v1/haas/sessions/{session_id}/policy:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [HaaS]
+      operationId: updateSessionPolicy
+      summary: Stage a revisioned policy update for future invocations
+      description: |
+        Updates one or more complete workspace, network, or tools policy domains.
+        The expected revision is compared with the current desired revision. An
+        accepted/running invocation remains frozen on its applied revision; new
+        invocations wait until the desired revision is applied and verified. A
+        failed application retains the previous applied snapshot and gates new
+        work. This operation never grants an action-scoped approval and never
+        bypasses platform hard denies.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Required mutation key. Replaying the same key and request returns the original result.
+          schema:
+            type: string
+            maxLength: 255
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionPolicyUpdateRequest"
+      responses:
+        "200":
+          description: Policy revision applied synchronously (`data` = SessionPolicyRevision)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionPolicyRevisionEnvelope"
+        "202":
+          description: Desired revision persisted and pending runtime reconciliation
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionPolicyRevisionEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/haas/sessions/{session_id}/approvals/{approval_id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/ApprovalId"
+    post:
+      tags: [HaaS]
+      operationId: resolveApproval
+      summary: Resolve a manager approval request for a waiting harness action
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalDecision"
+      responses:
+        "200":
+          description: Approval resolution (`data` = ApprovalResolution)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalResolutionEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/haas/sessions/{session_id}/input-requests/{input_request_id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/InputRequestId"
+    post:
+      tags: [HaaS]
+      operationId: answerInputRequest
+      summary: Answer a waiting structured input request
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InputRequestAnswer"
+      responses:
+        "200":
+          description: Input request resolution (`data` = InputRequestResolution)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InputRequestResolutionEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/haas/sessions/{session_id}/artifacts:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [HaaS]
+      operationId: listHaasSessionArtifacts
+      summary: List HaaS artifact details for a session
+      responses:
+        "200":
+          description: HaaS artifact list
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HaasEnvelope"
+  /v1/haas/files:
+    post:
+      tags: [HaaS]
+      operationId: uploadFile
+      summary: Upload a file for use as task input
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                purpose:
+                  type: string
+                  default: user_data
+      responses:
+        "200":
+          description: Stored file (`data` = File)
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileEnvelope"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+  /v1/haas/sessions/{session_id}/artifacts/archive:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [HaaS]
+      operationId: downloadSessionArchive
+      summary: Download all session artifacts as an archive
+      responses:
+        "200":
+          description: Artifact archive
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/files/{file_id}/content:
+    parameters:
+      - $ref: "#/components/parameters/FileId"
+    get:
+      tags: [HaaS]
+      operationId: downloadFile
+      summary: Download one artifact's raw bytes
+      responses:
+        "200":
+          description: File bytes
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+            X-Content-Type-Options:
+              required: true
+              schema:
+                type: string
+                const: nosniff
+          content:
+            "*/*":
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/haas/files/{file_id}/pdf:
+    parameters:
+      - $ref: "#/components/parameters/FileId"
+    get:
+      tags: [HaaS]
+      operationId: previewFilePdf
+      summary: Render an artifact as PDF when preview support is enabled
+      responses:
+        "200":
+          description: PDF bytes
+          headers:
+            HaaS-Version:
+              $ref: "#/components/headers/HaaSVersion"
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    TraceId:
+      name: X-HaaS-Trace-ID
+      in: header
+      required: false
+      description: Correlation only, never identity or authorization. Invalid values return invalid_input.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{1,128}$"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Optional idempotency key. Replaying a key returns the first result without restarting the harness.
+      schema:
+        type: string
+        maxLength: 255
+    LastEventId:
+      name: Last-Event-ID
+      in: header
+      required: false
+      description: |
+        Optional resume cursor. When set, HaaS resumes the matching invocation's stream
+        instead of starting a new turn: it resolves this event id to its invocation
+        (must fall within the request's appName/userId/sessionId scope), replays retained
+        events after it, then goes live. No new harness turn is started on resume.
+      schema:
+        type: string
+    AfterEventId:
+      name: after_event_id
+      in: query
+      required: false
+      schema:
+        type: string
+    AppName:
+      name: app_name
+      in: path
+      required: true
+      schema:
+        type: string
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: string
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+    DelegatedSessionId:
+      name: delegated_session_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^dgsess_"
+    ApprovalId:
+      name: approval_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^appr_"
+    InputRequestId:
+      name: input_request_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^inreq_"
+    InvocationId:
+      name: invocation_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^inv_"
+    ToolCallId:
+      name: tool_call_id
+      in: path
+      required: true
+      schema:
+        type: string
+    HarnessId:
+      name: harness_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^chrn_"
+    ProfileId:
+      name: profile_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^hprof_"
+    SkillId:
+      name: skill_id
+      in: path
+      required: true
+      schema:
+        type: string
+    FileId:
+      name: file_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^file_"
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    Unauthorized:
+      description: Missing or invalid credential
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    NotFound:
+      description: Object not found in caller scope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    Conflict:
+      description: State conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    UnprocessableEntity:
+      description: Semantically invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    RateLimited:
+      description: Rate or quota limit
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    Forbidden:
+      description: Operation is not allowed by policy or security boundary
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    ServiceUnavailable:
+      description: Required service is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    PayloadTooLarge:
+      description: Uploaded payload is too large
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    BadGateway:
+      description: Upstream service failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+    NotImplemented:
+      description: Capability is not implemented
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorDetail"
+  headers:
+    IdempotencyExpiresAt:
+      description: Epoch milliseconds of execution replay expiry, 24 hours after acceptance; present when Idempotency-Key was supplied. Nonterminal reservations remain protected after this time.
+      schema:
+        type: integer
+        minimum: 0
+    HaaSVersion:
+      description: The HaaS native protocol version actually used to serve this response.
+      required: true
+      schema:
+        type: string
+        examples: ["2026-09-10"]
+    HaaSInvocationId:
+      description: Durable invocation id. Present on successful /run and /run_sse responses after the acceptance boundary.
+      required: true
+      schema:
+        type: string
+        pattern: "^inv_"
+    HaaSSessionId:
+      description: Effective session id, including a server-generated id when the request omitted sessionId.
+      required: true
+      schema:
+        type: string
+  schemas:
+    CanonicalHaasEventBase:
+      type: object
+      required: [type, eventId, invocationId, sessionId, turnId, appName, harnessId, author, sequenceNumber, content, actions, haas, observedAtMs]
+      properties:
+        type:
+          type: string
+        eventId:
+          type: string
+          pattern: "^evt_"
+        invocationId:
+          type: [string, "null"]
+          pattern: "^inv_"
+          description: Non-null for invocation-scoped event types; null for session-scoped lifecycle event types.
+        sessionId:
+          type: string
+        turnId:
+          type: [string, "null"]
+          pattern: "^turn_"
+          description: Non-null for invocation-scoped event types; null for session-scoped lifecycle event types.
+        appName:
+          type: string
+        harnessId:
+          type: string
+          pattern: "^chrn_"
+        author:
+          type: string
+        sequenceNumber:
+          type: integer
+          minimum: 0
+          description: Gapless within one invocation for invocation-scoped types, or within the session lifecycle namespace for session-scoped types.
+        content:
+          type: object
+          required: [role, parts]
+          properties:
+            role:
+              type: string
+              enum: [model, user]
+            parts:
+              type: array
+              items:
+                $ref: "#/components/schemas/Part"
+          additionalProperties: true
+        actions:
+          type: object
+          properties:
+            stateDelta:
+              type: object
+              additionalProperties: true
+            artifactDelta:
+              type: object
+              additionalProperties: true
+            requestedAuthConfigs:
+              type: object
+              additionalProperties: true
+          additionalProperties: true
+        haas:
+          type: object
+          additionalProperties: true
+        observedAtMs:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    EmptyHaasEventMetadata:
+      type: object
+      additionalProperties: false
+    ModelCallId:
+      type: string
+      pattern: "^mcall_"
+      description: Stable invocation-scoped identifier for one actual model round trip; contains no prompt or provider payload.
+    OutputTextEventMetadata:
+      type: object
+      properties:
+        itemId: {type: string}
+        modelCallId: {$ref: "#/components/schemas/ModelCallId"}
+        messagePhase:
+          type: string
+          enum: [commentary, final_answer]
+      additionalProperties: false
+    OutputReasoningEventMetadata:
+      type: object
+      properties:
+        itemId: {type: string}
+        summaryIndex: {type: integer, minimum: 0}
+        modelCallId: {$ref: "#/components/schemas/ModelCallId"}
+      additionalProperties: false
+    OutputItemCompletedEventMetadata:
+      type: object
+      required: [itemId]
+      properties:
+        itemId: {type: string}
+        modelCallId: {$ref: "#/components/schemas/ModelCallId"}
+        messagePhase:
+          type: string
+          enum: [commentary, final_answer]
+      additionalProperties: false
+    ToolStartedEventMetadata:
+      type: object
+      required: [toolCallId, toolName, safeSummary]
+      properties:
+        toolCallId: {type: string}
+        toolName: {type: string}
+        safeSummary: {type: string}
+        activityKind: {$ref: "#/components/schemas/ToolActivityKind"}
+        commandPreview: {$ref: "#/components/schemas/CommandPreview"}
+        workingDirectory: {$ref: "#/components/schemas/WorkingDirectoryHint"}
+        evidenceRef: {$ref: "#/components/schemas/EvidenceRef"}
+        evidenceExpiresAtMs: {$ref: "#/components/schemas/EvidenceExpiresAtMs"}
+        modelCallId: {$ref: "#/components/schemas/ModelCallId"}
+      additionalProperties: false
+    ToolOutputEventMetadata:
+      type: object
+      required: [toolCallId, toolName, safeSummary]
+      properties:
+        toolCallId: {type: string}
+        toolName: {type: string}
+        safeSummary: {type: string}
+        activityKind: {$ref: "#/components/schemas/ToolActivityKind"}
+        outputPreview: {$ref: "#/components/schemas/ToolOutputPreview"}
+        omittedLineCount: {type: integer, minimum: 0}
+        commandPreview: {$ref: "#/components/schemas/CommandPreview"}
+        workingDirectory: {$ref: "#/components/schemas/WorkingDirectoryHint"}
+        evidenceRef: {$ref: "#/components/schemas/EvidenceRef"}
+        evidenceExpiresAtMs: {$ref: "#/components/schemas/EvidenceExpiresAtMs"}
+        modelCallId: {$ref: "#/components/schemas/ModelCallId"}
+      additionalProperties: false
+    ToolCompletedEventMetadata:
+      type: object
+      required: [toolCallId, toolName, status]
+      properties:
+        toolCallId: {type: string}
+        toolName: {type: string}
+        status: {type: string, const: completed}
+        activityKind: {$ref: "#/components/schemas/ToolActivityKind"}
+        durationMs: {type: integer, minimum: 0}
+        exitCode: {type: integer}
+        outputPreview: {$ref: "#/components/schemas/ToolOutputPreview"}
+        omittedLineCount: {type: integer, minimum: 0}
+        commandPreview: {$ref: "#/components/schemas/CommandPreview"}
+        workingDirectory: {$ref: "#/components/schemas/WorkingDirectoryHint"}
+        evidenceRef: {$ref: "#/components/schemas/EvidenceRef"}
+        evidenceExpiresAtMs: {$ref: "#/components/schemas/EvidenceExpiresAtMs"}
+        modelCallId: {$ref: "#/components/schemas/ModelCallId"}
+      additionalProperties: false
+    ToolFailedEventMetadata:
+      type: object
+      required: [toolCallId, toolName, status, safeReason, retryable]
+      properties:
+        toolCallId: {type: string}
+        toolName: {type: string}
+        status: {type: string, const: failed}
+        code: {type: string}
+        safeReason: {type: string}
+        retryable: {type: boolean}
+        activityKind: {$ref: "#/components/schemas/ToolActivityKind"}
+        durationMs: {type: integer, minimum: 0}
+        exitCode: {type: integer}
+        outputPreview: {$ref: "#/components/schemas/ToolOutputPreview"}
+        omittedLineCount: {type: integer, minimum: 0}
+        commandPreview: {$ref: "#/components/schemas/CommandPreview"}
+        workingDirectory: {$ref: "#/components/schemas/WorkingDirectoryHint"}
+        evidenceRef: {$ref: "#/components/schemas/EvidenceRef"}
+        evidenceExpiresAtMs: {$ref: "#/components/schemas/EvidenceExpiresAtMs"}
+        modelCallId: {$ref: "#/components/schemas/ModelCallId"}
+      additionalProperties: false
+    ToolActivityKind:
+      type: string
+      enum: [command, read, search, edit, tool]
+      description: Presentation-neutral semantic class observed by the adapter or policy catalog. Unknown operations use tool.
+    ToolOutputPreview:
+      type: string
+      maxLength: 4096
+      x-haas-max-utf8-bytes: 4096
+      x-haas-max-logical-lines: 20
+      description: Bounded redacted preview. Runtime enforcement uses the HaaS byte and logical-line limits because JSON Schema maxLength counts characters. Complete output requires a separately authorized artifact.
+    CommandPreview:
+      type: string
+      maxLength: 512
+      description: One-line bounded command summary with credential values and signed URL material redacted for durable event use.
+    WorkingDirectoryHint:
+      type: string
+      maxLength: 512
+      description: Container-relative or otherwise non-host-sensitive working-directory hint. Absolute host paths are prohibited.
+    EvidenceRef:
+      type: string
+      pattern: "^evd_"
+      description: Opaque locator for scoped in-memory evidence; never evidence content.
+    EvidenceExpiresAtMs:
+      type: integer
+      minimum: 0
+      description: Epoch-millisecond upper bound after which the evidence locator is unusable.
+    ExecutionEvidenceLink:
+      type: object
+      required: [url, kind, expiresAtMs]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Complete display URL. Validated authorization URLs retain their signature byte-for-byte until expiry.
+        kind:
+          type: string
+          enum: [ordinary, authorization]
+        expiresAtMs:
+          type: [integer, "null"]
+          minimum: 0
+      additionalProperties: false
+    ExecutionEvidence:
+      type: object
+      required: [evidenceRef, sessionId, invocationId, toolCallId, command, workingDirectory, output, outputStream, links, expiresAtMs]
+      properties:
+        evidenceRef: {$ref: "#/components/schemas/EvidenceRef"}
+        sessionId: {type: string}
+        invocationId: {type: string, pattern: "^inv_"}
+        toolCallId: {type: string}
+        command:
+          type: string
+          description: Actual command with credential values masked; validated authorization URLs may remain intact.
+        workingDirectory:
+          type: string
+          description: Actual container working directory; absolute host paths are prohibited.
+        output:
+          type: string
+          maxLength: 8388608
+          x-haas-max-utf8-bytes: 8388608
+          description: Command output, complete through the 8 MiB bound, with credential values masked. Larger output is explicitly truncated.
+        outputStream:
+          type: string
+          enum: [combined, stdout, stderr]
+          description: combined unless the adapter has authoritative stream identity.
+        links:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/ExecutionEvidenceLink"
+        expiresAtMs: {$ref: "#/components/schemas/EvidenceExpiresAtMs"}
+      additionalProperties: false
+    TokenUsage:
+      type: object
+      required: [inputTokens, outputTokens, totalTokens]
+      properties:
+        inputTokens: {type: integer, minimum: 0}
+        outputTokens: {type: integer, minimum: 0}
+        totalTokens: {type: integer, minimum: 0}
+        cacheReadTokens: {type: integer, minimum: 0}
+        cacheWriteTokens: {type: integer, minimum: 0}
+        reasoningOutputTokens: {type: integer, minimum: 0}
+      additionalProperties: false
+    UsageEventMetadata:
+      type: object
+      required: [usage]
+      properties:
+        usage:
+          $ref: "#/components/schemas/TokenUsage"
+        scope:
+          type: string
+          enum: [model_call, turn, thread]
+        modelCallId: {$ref: "#/components/schemas/ModelCallId"}
+        cumulativeUsage:
+          $ref: "#/components/schemas/TokenUsage"
+      additionalProperties: false
+    PlanUpdatedEventMetadata:
+      type: object
+      required: [counts, total]
+      properties:
+        counts:
+          type: object
+          required: [pending, inProgress, completed]
+          properties:
+            pending: {type: integer, minimum: 0}
+            inProgress: {type: integer, minimum: 0}
+            completed: {type: integer, minimum: 0}
+          additionalProperties: false
+        total: {type: integer, minimum: 0}
+      additionalProperties: false
+    TurnStartedEventMetadata:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, const: running}
+      additionalProperties: false
+    TurnCompletedEventMetadata:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, const: completed}
+      additionalProperties: false
+    TurnFailedEventMetadata:
+      type: object
+      required: [status, code, safeReason, retryable]
+      properties:
+        status: {type: string, const: failed}
+        code: {type: string}
+        safeReason: {type: string}
+        retryable: {type: boolean}
+      additionalProperties: false
+    TurnIncompleteEventMetadata:
+      type: object
+      required: [status, code, safeReason, retryable]
+      properties:
+        status: {type: string, const: incomplete}
+        code: {type: string}
+        safeReason: {type: string}
+        retryable: {type: boolean}
+      additionalProperties: false
+    TurnInterruptedEventMetadata:
+      type: object
+      required: [status, controlIntent]
+      properties:
+        status: {type: string, const: interrupted}
+        controlIntent: {type: string, const: pause}
+      additionalProperties: false
+    TurnCancelledEventMetadata:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, const: cancelled}
+      additionalProperties: false
+    DelegatedSessionEventMetadata:
+      type: object
+      required: [delegatedSessionId]
+      properties:
+        delegatedSessionId: {type: string, pattern: "^dgsess_"}
+      additionalProperties: false
+    DelegatedPolicyEventMetadata:
+      type: object
+      required: [delegatedSessionId, policyVersion]
+      properties:
+        delegatedSessionId: {type: string, pattern: "^dgsess_"}
+        policyVersion: {type: string}
+      additionalProperties: false
+    DelegatedGenerationEventMetadata:
+      type: object
+      required: [delegatedSessionId, containerGeneration]
+      properties:
+        delegatedSessionId: {type: string, pattern: "^dgsess_"}
+        containerGeneration: {type: integer, minimum: 0}
+      additionalProperties: false
+    DelegatedFailureEventMetadata:
+      type: object
+      required: [delegatedSessionId, safeReason, retryable]
+      properties:
+        delegatedSessionId: {type: string, pattern: "^dgsess_"}
+        safeReason: {type: string}
+        retryable: {type: boolean}
+      additionalProperties: false
+    WorkspaceLockQueuedEventMetadata:
+      type: object
+      required: [delegatedSessionId, canonicalWorkspaceHash, queuePosition]
+      properties:
+        delegatedSessionId: {type: string, pattern: "^dgsess_"}
+        canonicalWorkspaceHash: {type: string}
+        queuePosition: {type: integer, minimum: 1}
+      additionalProperties: false
+    WorkspaceLockEventMetadata:
+      type: object
+      required: [delegatedSessionId, canonicalWorkspaceHash]
+      properties:
+        delegatedSessionId: {type: string, pattern: "^dgsess_"}
+        canonicalWorkspaceHash: {type: string}
+      additionalProperties: false
+    PolicyUpdateEventMetadata:
+      type: object
+      required: [delegatedSessionId, updateId, revision, fields]
+      properties:
+        delegatedSessionId: {type: string, pattern: "^dgsess_"}
+        updateId: {type: string, minLength: 1}
+        revision: {type: integer, minimum: 1}
+        fields:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {type: string, enum: [profileRef, delegationPolicySnapshot, mountManifest, image]}
+        code: {type: string}
+        safeReason: {type: string}
+      additionalProperties: false
+    ProfileEventMetadata:
+      type: object
+      required: [profileId, profileVersion]
+      properties:
+        profileId: {type: string, pattern: "^hprof_"}
+        profileVersion: {type: integer, minimum: 1}
+        profileFingerprint: {type: string}
+        retiredByProfileId: {type: string, pattern: "^hprof_"}
+        sessionId: {type: string}
+        safeReason: {type: string}
+      additionalProperties: false
+    ApprovalRequiredEventMetadata:
+      type: object
+      required: [approvalId, kind, safeSummary, policyReason, availableDecisions, expiresAtMs]
+      properties:
+        approvalId: {type: string, pattern: "^appr_"}
+        kind: {type: string}
+        safeSummary: {type: string}
+        policyReason: {type: string}
+        availableDecisions:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {type: string, enum: [approved, denied, cancelled]}
+        availableScopes:
+          type: array
+          uniqueItems: true
+          items: {type: string, enum: [action]}
+        expiresAtMs: {type: integer, minimum: 0}
+      additionalProperties: false
+    ApprovalResolvedEventMetadata:
+      type: object
+      required: [approvalId, status]
+      properties:
+        approvalId: {type: string, pattern: "^appr_"}
+        status: {type: string, enum: [approved, denied, expired, cancelled]}
+      additionalProperties: false
+    InputRequiredEventMetadata:
+      type: object
+      required: [inputRequestId, questions, blocking, expiresAtMs]
+      properties:
+        inputRequestId: {type: string, pattern: "^inreq_"}
+        questions:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/InputQuestion"
+        blocking: {type: boolean}
+        expiresAtMs: {type: integer, minimum: 0}
+      additionalProperties: false
+    InputResolvedEventMetadata:
+      type: object
+      required: [inputRequestId, status]
+      properties:
+        inputRequestId: {type: string, pattern: "^inreq_"}
+        status: {type: string, enum: [answered, expired, cancelled]}
+      additionalProperties: false
+    EventUnparsedMetadata:
+      type: object
+      required: [safeReason, retryable]
+      properties:
+        safeReason: {type: string}
+        retryable: {type: boolean}
+      additionalProperties: false
+    CanonicalHaasEvent:
+      description: Public event object carried by each data frame on HaaS native event streams. Internal adapter/native fields are prohibited.
+      oneOf:
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.plan.updated}
+                haas: {$ref: "#/components/schemas/PlanUpdatedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.output.text.delta}
+                haas: {$ref: "#/components/schemas/OutputTextEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.output.reasoning.delta}
+                haas: {$ref: "#/components/schemas/OutputReasoningEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.output.item.completed}
+                haas: {$ref: "#/components/schemas/OutputItemCompletedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.tool.started}
+                haas: {$ref: "#/components/schemas/ToolStartedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.tool.output}
+                haas: {$ref: "#/components/schemas/ToolOutputEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.tool.completed}
+                haas: {$ref: "#/components/schemas/ToolCompletedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.tool.failed}
+                haas: {$ref: "#/components/schemas/ToolFailedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.usage.updated}
+                haas: {$ref: "#/components/schemas/UsageEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.turn.started}
+                haas: {$ref: "#/components/schemas/TurnStartedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.turn.completed}
+                haas: {$ref: "#/components/schemas/TurnCompletedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.turn.failed}
+                haas: {$ref: "#/components/schemas/TurnFailedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.turn.incomplete}
+                haas: {$ref: "#/components/schemas/TurnIncompleteEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.turn.interrupted}
+                haas: {$ref: "#/components/schemas/TurnInterruptedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.turn.cancelled}
+                haas: {$ref: "#/components/schemas/TurnCancelledEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, enum: [haas.delegation.session_created, haas.delegation.session_bound]}
+                haas: {$ref: "#/components/schemas/DelegatedSessionEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, enum: [haas.delegation.policy_snapshot, haas.delegation.policy_updated]}
+                haas: {$ref: "#/components/schemas/DelegatedPolicyEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, enum: [haas.delegation.policy_update_pending, haas.delegation.policy_update_applied]}
+                haas: {$ref: "#/components/schemas/PolicyUpdateEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.delegation.policy_update_failed}
+                haas:
+                  allOf:
+                    - $ref: "#/components/schemas/PolicyUpdateEventMetadata"
+                    - required: [code, safeReason]
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, enum: [haas.delegation.restore_started, haas.delegation.container_ttl_destroyed]}
+                haas: {$ref: "#/components/schemas/DelegatedGenerationEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.delegation.restore_failed}
+                haas: {$ref: "#/components/schemas/DelegatedFailureEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.delegation.workspace_lock_queued}
+                haas: {$ref: "#/components/schemas/WorkspaceLockQueuedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, enum: [haas.delegation.workspace_lock_acquired, haas.delegation.workspace_lock_released]}
+                haas: {$ref: "#/components/schemas/WorkspaceLockEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type:
+                  type: string
+                  enum:
+                    - haas.profile.created
+                    - haas.profile.validation_failed
+                    - haas.profile.activated
+                    - haas.profile.retired
+                    - haas.profile.rebind_requested
+                    - haas.profile.rebind_applied
+                haas:
+                  $ref: "#/components/schemas/ProfileEventMetadata"
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.approval.required}
+                haas: {$ref: "#/components/schemas/ApprovalRequiredEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.approval.resolved}
+                haas: {$ref: "#/components/schemas/ApprovalResolvedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.input.required}
+                haas: {$ref: "#/components/schemas/InputRequiredEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.input.resolved}
+                haas: {$ref: "#/components/schemas/InputResolvedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.adapter.event_unparsed}
+                haas: {$ref: "#/components/schemas/EventUnparsedMetadata"}
+    CapabilityState:
+      type: object
+      required: [status, mode, enforcement]
+      properties:
+        status:
+          type: string
+          enum: [available, degraded, unavailable, unsupported]
+        mode:
+          type: string
+          enum: [native, proxy, emulated, best_effort, advisory, instructions, workspace_scan, estimated, unattended_only, human_bridge, none]
+        enforcement:
+          type: string
+          enum: [hard, advisory, none]
+        safeReason:
+          type: [string, "null"]
+        retryable:
+          type: boolean
+      additionalProperties: false
+    FeatureCapabilities:
+      type: object
+      required: [runSse, delegatedSessions, modelProxy, mcpProxy, skillMaterialization, approvalHandling, inputHandling, artifacts]
+      properties:
+        runSse:
+          $ref: "#/components/schemas/CapabilityState"
+        delegatedSessions:
+          $ref: "#/components/schemas/CapabilityState"
+        modelProxy:
+          $ref: "#/components/schemas/CapabilityState"
+        mcpProxy:
+          $ref: "#/components/schemas/CapabilityState"
+        skillMaterialization:
+          $ref: "#/components/schemas/CapabilityState"
+        approvalHandling:
+          $ref: "#/components/schemas/CapabilityState"
+        inputHandling:
+          $ref: "#/components/schemas/CapabilityState"
+        artifacts:
+          $ref: "#/components/schemas/CapabilityState"
+      additionalProperties:
+        $ref: "#/components/schemas/CapabilityState"
+    WorkspaceCapability:
+      type: object
+      required: [id, status, mode, enforcement]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        status:
+          type: string
+          enum: [available, degraded, unavailable, unsupported]
+        mode:
+          type: string
+          enum: [native, proxy, emulated, best_effort, advisory, instructions, workspace_scan, estimated, unattended_only, human_bridge, none]
+        enforcement:
+          type: string
+          enum: [hard, advisory, none]
+        safeReason:
+          type: [string, "null"]
+        retryable:
+          type: boolean
+      additionalProperties: false
+    HarnessCapabilities:
+      type: object
+      required: [streaming, sessionContinuation, pausing, cancellation, approval, input, toolRestriction, mcp, skills, files, usage]
+      properties:
+        streaming:
+          $ref: "#/components/schemas/CapabilityState"
+        sessionContinuation:
+          $ref: "#/components/schemas/CapabilityState"
+        pausing:
+          $ref: "#/components/schemas/CapabilityState"
+        cancellation:
+          $ref: "#/components/schemas/CapabilityState"
+        approval:
+          $ref: "#/components/schemas/CapabilityState"
+        input:
+          $ref: "#/components/schemas/CapabilityState"
+        toolRestriction:
+          $ref: "#/components/schemas/CapabilityState"
+        mcp:
+          $ref: "#/components/schemas/CapabilityState"
+        skills:
+          $ref: "#/components/schemas/CapabilityState"
+        files:
+          $ref: "#/components/schemas/CapabilityState"
+        usage:
+          $ref: "#/components/schemas/CapabilityState"
+      additionalProperties:
+        $ref: "#/components/schemas/CapabilityState"
+    HarnessCapabilitySnapshot:
+      type: object
+      required: [id, base, status, capabilities]
+      properties:
+        id:
+          type: string
+          pattern: "^chrn_"
+        base:
+          type: string
+        activeProfileId:
+          type: [string, "null"]
+          pattern: "^hprof_"
+        activeProfileVersion:
+          type: [integer, "null"]
+          minimum: 1
+        activeProfileFingerprint:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [available, degraded, unavailable, unsupported]
+        safeReason:
+          type: [string, "null"]
+        retryable:
+          type: boolean
+        capabilities:
+          $ref: "#/components/schemas/HarnessCapabilities"
+      additionalProperties: false
+    CapabilitiesSnapshot:
+      type: object
+      required: [object, protocolVersion, adkProtocolVersion, features, workspaceModes, harnesses, generatedAtMs]
+      properties:
+        object:
+          type: string
+          const: haas_capabilities
+        protocolVersion:
+          type: string
+        adkProtocolVersion:
+          type: string
+        features:
+          $ref: "#/components/schemas/FeatureCapabilities"
+        workspaceModes:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceCapability"
+        harnesses:
+          type: array
+          items:
+            $ref: "#/components/schemas/HarnessCapabilitySnapshot"
+        generatedAtMs:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    RunRequest:
+      type: object
+      required: [appName, newMessage]
+      properties:
+        appName:
+          type: string
+        userId:
+          type: string
+        sessionId:
+          type: string
+        newMessage:
+          type: object
+          required: [role, parts]
+          properties:
+            role:
+              type: string
+              const: user
+            parts:
+              type: array
+              items:
+                $ref: "#/components/schemas/Part"
+        streaming:
+          type: boolean
+          default: false
+        haas:
+          type: object
+          properties:
+            profileId:
+              type: string
+              pattern: "^hprof_"
+            profileVersion:
+              type: integer
+              minimum: 1
+            model:
+              type: string
+            instructions:
+              type: string
+            metadata:
+              type: object
+              additionalProperties: true
+            maxOutputTokens:
+              type: integer
+              minimum: 1
+            maxStep:
+              type: integer
+              minimum: 1
+            timeoutSeconds:
+              type: integer
+              minimum: 1
+          additionalProperties: false
+      additionalProperties: true
+    Part:
+      type: object
+      properties:
+        text:
+          type: string
+        inlineData:
+          type: object
+          properties:
+            displayName:
+              type: string
+            mimeType:
+              type: string
+            data:
+              type: string
+        fileId:
+          type: string
+        functionCall:
+          type: object
+          additionalProperties: true
+        functionResponse:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    Event:
+      type: object
+      required: [id, invocationId, author, timestamp, content, actions]
+      properties:
+        id:
+          type: string
+        invocationId:
+          type: string
+        author:
+          type: string
+        timestamp:
+          type: number
+        content:
+          type: object
+          required: [role, parts]
+          properties:
+            role:
+              type: string
+              enum: [model, user]
+            parts:
+              type: array
+              items:
+                $ref: "#/components/schemas/Part"
+        actions:
+          type: object
+          properties:
+            stateDelta:
+              type: object
+              additionalProperties: true
+            artifactDelta:
+              type: object
+              additionalProperties: true
+            requestedAuthConfigs:
+              type: object
+              additionalProperties: true
+        longRunningToolIds:
+          type: array
+          items:
+            type: string
+        nodeInfo:
+          type: [object, "null"]
+          additionalProperties: true
+        output:
+          nullable: true
+      additionalProperties: true
+    Session:
+      type: object
+      required: [id, appName, userId, state, events, lastUpdateTime]
+      properties:
+        id:
+          type: string
+        appName:
+          type: string
+        userId:
+          type: string
+        state:
+          type: object
+          additionalProperties: true
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/Event"
+        lastUpdateTime:
+          type: number
+      additionalProperties: true
+    Invocation:
+      type: object
+      required: [id, sessionId, appName, status, acceptedAtMs, sessionControl]
+      properties:
+        idempotencyExpiresAtMs:
+          type: [integer, "null"]
+          minimum: 0
+          description: Server-authoritative replay expiry; null when no execution key exists.
+        terminalEventId:
+          type: [string, "null"]
+          description: Authoritative terminal record used to reconcile independent ADK/native streams.
+        id:
+          type: string
+          pattern: "^inv_"
+        sessionId:
+          type: string
+        appName:
+          type: string
+        status:
+          type: string
+          enum: [accepted, running, pausing, completed, failed, incomplete, interrupted, cancelling, cancelled]
+        continuedFromInvocationId:
+          type: [string, "null"]
+          pattern: "^inv_"
+        continuedFromTurnId:
+          type: [string, "null"]
+          pattern: "^turn_"
+        sessionControl:
+          $ref: "#/components/schemas/SessionControl"
+        acceptedAtMs:
+          type: integer
+          minimum: 0
+        startedAtMs:
+          type: [integer, "null"]
+          minimum: 0
+        completedAtMs:
+          type: [integer, "null"]
+        model:
+          type: string
+        error:
+          type: [object, "null"]
+          additionalProperties: true
+      additionalProperties: true
+    SessionControl:
+      type: object
+      required: [controlState, supportsResume, resumableInvocationId]
+      properties:
+        controlState:
+          type: string
+          enum: [idle, running, pausing, paused, resuming, cancelling, cancelled, control_degraded]
+        supportsResume:
+          type: boolean
+        resumableInvocationId:
+          type: [string, "null"]
+          pattern: "^inv_"
+      additionalProperties: false
+    ContinueInvocationRequest:
+      type: object
+      properties:
+        additionalInstruction:
+          type: string
+          maxLength: 4000
+      additionalProperties: false
+    DelegatedSessionCreate:
+      type: object
+      required: [managerSessionId, haasSessionId, haasUserId, harnessId, image, profileRef, provider, workspaceMode, mountManifest]
+      properties:
+        managerSessionId:
+          type: string
+        haasSessionId:
+          type: string
+        haasUserId:
+          type: string
+        harnessId:
+          type: string
+          pattern: "^chrn_"
+        image:
+          $ref: "#/components/schemas/DelegatedImage"
+        profileRef:
+          $ref: "#/components/schemas/DelegatedProfileRef"
+        provider:
+          $ref: "#/components/schemas/DelegatedProvider"
+        workspaceMode:
+          type: string
+          const: bind_mount
+          description: P0 only. snapshot_upload and remote_workspace are not accepted by this request schema.
+        mountManifest:
+          $ref: "#/components/schemas/MountManifest"
+        delegationPolicySnapshot:
+          $ref: "#/components/schemas/DelegationPolicy"
+        metadata:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    HarnessProfileCreate:
+      type: object
+      required: [harnessId, base, provider]
+      properties:
+        harnessId:
+          type: string
+          pattern: "^chrn_"
+        base:
+          type: string
+        name:
+          type: string
+        provider:
+          $ref: "#/components/schemas/ProviderRoute"
+        mcpServers:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpServerConfig"
+          default: []
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/SkillBundle"
+          default: []
+        agentsMd:
+          $ref: "#/components/schemas/AgentsMdConfig"
+        workspace:
+          $ref: "#/components/schemas/WorkspaceProfile"
+        policy:
+          $ref: "#/components/schemas/ProfilePolicy"
+        budget:
+          $ref: "#/components/schemas/ProfileBudget"
+        metadata:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    HarnessProfile:
+      type: object
+      required: [id, object, harnessId, base, provider, version, status, profileFingerprint, createdAtMs, updatedAtMs, activatedAtMs]
+      properties:
+        id:
+          type: string
+          pattern: "^hprof_"
+        object:
+          type: string
+          const: harness_profile
+        harnessId:
+          type: string
+          pattern: "^chrn_"
+        base:
+          type: string
+        name:
+          type: string
+        provider:
+          $ref: "#/components/schemas/ProviderRoute"
+        mcpServers:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpServerConfig"
+          default: []
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/SkillBundle"
+          default: []
+        agentsMd:
+          $ref: "#/components/schemas/AgentsMdConfig"
+        workspace:
+          $ref: "#/components/schemas/WorkspaceProfile"
+        policy:
+          $ref: "#/components/schemas/ProfilePolicy"
+        budget:
+          $ref: "#/components/schemas/ProfileBudget"
+        metadata:
+          type: object
+          additionalProperties: true
+        version:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [draft, active, retired]
+        profileFingerprint:
+          type: string
+        validation:
+          $ref: "#/components/schemas/ProfileValidation"
+        createdAtMs:
+          type: integer
+          minimum: 0
+        updatedAtMs:
+          type: integer
+          minimum: 0
+        activatedAtMs:
+          type: [integer, "null"]
+          minimum: 0
+      additionalProperties: false
+    ProviderRoute:
+      type: object
+      required: [providerId, name, model, credentialRef, wireApi]
+      properties:
+        providerId:
+          type: string
+          description: Stable provider identity. Retained alongside the human-readable `name`.
+        name:
+          type: string
+          description: Human-readable provider alias. Both `providerId` and `name` are retained.
+        model:
+          type: string
+        credentialRef:
+          type: string
+        credentialFingerprint:
+          type: string
+        baseUrl:
+          type: string
+          format: uri
+        wireApi:
+          type: string
+          enum: [openai-compatible, responses, agent-plan]
+          description: |
+            Request/stream protocol. `openai-compatible` = the OpenAI-compatible
+            protocol family; `responses` = require the OpenAI Responses protocol
+            type within that family; `agent-plan` = the Ark Agent Plan protocol.
+        apiType:
+          type: string
+          enum: [responses, chat_completions]
+          description: Required for openai-compatible and agent-plan; responses wireApi implies responses and rejects chat_completions. No protocol guessing or silent conversion.
+        allowlistRuleId:
+          type: string
+      allOf:
+        - if:
+            required: [wireApi]
+            properties:
+              wireApi: {enum: [openai-compatible, agent-plan]}
+          then:
+            required: [apiType]
+        - if:
+            required: [wireApi]
+            properties:
+              wireApi: {const: responses}
+          then:
+            properties:
+              apiType: {const: responses}
+      additionalProperties: false
+    McpServerConfig:
+      type: object
+      required: [name, url, transport, enabled]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        url:
+          type: string
+          format: uri
+        transport:
+          type: string
+          enum: [http, sse]
+          description: P0 brokered transports; stdio is unavailable until command/args/env and process lifecycle are specified.
+        enabled:
+          type: boolean
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        auth:
+          type: object
+          required: [type, ref]
+          properties:
+            type:
+              type: string
+              enum: [secret_ref]
+            ref:
+              type: string
+          additionalProperties: false
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          default: 60
+        required:
+          type: boolean
+          default: false
+      additionalProperties: false
+    SkillBundle:
+      type: object
+      required: [id, name, enabled, files]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        enabled:
+          type: boolean
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/SkillFile"
+        fingerprint:
+          type: string
+      additionalProperties: false
+    AgentsMdConfig:
+      type: object
+      required: [mode, sources, maxBytes]
+      properties:
+        mode:
+          type: string
+          enum: [snapshot]
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentsMdSource"
+        maxBytes:
+          type: integer
+          minimum: 1
+          maximum: 1048576
+      additionalProperties: false
+    AgentsMdSource:
+      type: object
+      required: [scope, path, contentRef, fingerprint]
+      properties:
+        scope:
+          type: string
+          enum: [global, workspace, directory]
+        path:
+          type: string
+          description: Relative profile materialization path. Absolute paths, `..`, control characters, and symlink escapes are invalid and must fail closed.
+        contentRef:
+          type: string
+          pattern: "^file_"
+          description: Immutable caller-owned upload id from POST /v1/haas/files.
+        fingerprint:
+          type: string
+      additionalProperties: false
+    WorkspaceProfile:
+      type: object
+      required: [mode, roots]
+      properties:
+        mode:
+          type: string
+          enum: [bind_mount, snapshot_upload, remote_workspace]
+        roots:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceRoot"
+      additionalProperties: false
+    WorkspaceRoot:
+      type: object
+      required: [containerPath, access]
+      properties:
+        containerPath:
+          type: string
+        access:
+          type: string
+          enum: [ro, rw]
+      additionalProperties: false
+    ProfilePolicy:
+      type: object
+      properties:
+        network:
+          type: object
+          properties:
+            defaultAction:
+              type: string
+              enum: [allow, deny]
+            allow:
+              type: array
+              items:
+                type: string
+          additionalProperties: false
+        tools:
+          type: object
+          properties:
+            disabled:
+              type: array
+              items:
+                type: string
+            approvalMode:
+              type: string
+              enum: [never, on-request, always]
+          additionalProperties: false
+        model:
+          type: object
+          properties:
+            allowedModels:
+              type: array
+              items:
+                type: string
+            fallbackModel:
+              type: [string, "null"]
+          additionalProperties: false
+      additionalProperties: false
+    ProfileBudget:
+      type: object
+      properties:
+        maxStep:
+          type: integer
+          minimum: 1
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+        maxOutputTokens:
+          type: integer
+          minimum: 1
+      additionalProperties: false
+    ProfileValidation:
+      type: object
+      required: [profileId, valid, findings]
+      properties:
+        profileId:
+          type: string
+          pattern: "^hprof_"
+        valid:
+          type: boolean
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProfileValidationFinding"
+      additionalProperties: false
+    ProfileValidationFinding:
+      type: object
+      required: [severity, code, safeReason]
+      properties:
+        severity:
+          type: string
+          enum: [error, warning, info]
+        code:
+          type: string
+        safeReason:
+          type: string
+        field:
+          type: [string, "null"]
+      additionalProperties: false
+    EffectiveHarnessProfile:
+      type: object
+      required: [profileId, profileVersion, profileFingerprint, harnessId, base, resolvedAtMs]
+      properties:
+        profileId:
+          type: string
+          pattern: "^hprof_"
+        profileVersion:
+          type: integer
+          minimum: 1
+        profileFingerprint:
+          type: string
+        harnessId:
+          type: string
+          pattern: "^chrn_"
+        base:
+          type: string
+        providerFingerprint:
+          type: string
+        mcpVersion:
+          type: string
+        skillsVersion:
+          type: string
+        agentsMdVersion:
+          type: string
+        workspacePolicyVersion:
+          type: string
+        resolvedAtMs:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    SessionProfileRecoveryRef:
+      type: object
+      required: [profileId, profileVersion, profileFingerprint, harnessId, base, executionIntentFingerprint]
+      properties:
+        profileId:
+          type: string
+          pattern: "^hprof_"
+        profileVersion:
+          type: integer
+          minimum: 1
+        profileFingerprint:
+          type: string
+        harnessId:
+          type: string
+          pattern: "^chrn_"
+        base:
+          type: string
+        executionIntentFingerprint:
+          type: string
+          description: Stable hash of execution-affecting profile content after opaque credential references are removed.
+      additionalProperties: false
+    SessionProfileRecoveryEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/SessionProfileRecoveryRef"
+    ProfileRebindRequest:
+      type: object
+      description: |
+        Non-delegated sessions only. Wait for running work, replace the applied
+        snapshot under the session lease, and preserve the same session/history.
+        An identical target is a no-op; versions cannot move backward.
+        expectedProfileVersion compares against the currently applied version.
+      required: [profileId]
+      properties:
+        profileId:
+          type: string
+          pattern: "^hprof_"
+        expectedProfileVersion:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+      additionalProperties: false
+    SessionWorkspacePolicy:
+      type: object
+      required: [mode, root, writableRoots]
+      properties:
+        mode:
+          type: string
+          enum: [read-only, workspace-write, danger-full-access]
+        root:
+          type: string
+          description: Canonical sandbox workspace root, never a host path.
+        writableRoots:
+          type: array
+          uniqueItems: true
+          items: {type: string}
+      additionalProperties: false
+    SessionNetworkPolicy:
+      type: object
+      required: [defaultAction, allow]
+      properties:
+        defaultAction:
+          type: string
+          enum: [deny, allow]
+        allow:
+          type: array
+          uniqueItems: true
+          items: {type: string}
+      additionalProperties: false
+    SessionToolsPolicy:
+      type: object
+      required: [disabled, approvalMode]
+      properties:
+        disabled:
+          type: array
+          uniqueItems: true
+          items: {type: string}
+        approvalMode:
+          type: string
+          enum: [never, on-request, always]
+          description: "`never` disables prompting and does not grant unrestricted execution."
+      additionalProperties: false
+    SessionPolicy:
+      type: object
+      properties:
+        workspace:
+          $ref: "#/components/schemas/SessionWorkspacePolicy"
+        network:
+          $ref: "#/components/schemas/SessionNetworkPolicy"
+        tools:
+          $ref: "#/components/schemas/SessionToolsPolicy"
+      minProperties: 1
+      additionalProperties: false
+    EffectiveSessionPolicy:
+      type: object
+      required: [workspace, network, tools]
+      properties:
+        workspace:
+          $ref: "#/components/schemas/SessionWorkspacePolicy"
+        network:
+          $ref: "#/components/schemas/SessionNetworkPolicy"
+        tools:
+          $ref: "#/components/schemas/SessionToolsPolicy"
+      additionalProperties: false
+    SessionPolicyUpdateRequest:
+      type: object
+      required: [expectedRevision, policy]
+      properties:
+        expectedRevision:
+          type: integer
+          minimum: 1
+          description: Must equal the current desired revision or the server returns haas_policy_revision_conflict.
+        policy:
+          $ref: "#/components/schemas/SessionPolicy"
+      additionalProperties: false
+    SessionPolicyRevision:
+      type: object
+      required: [sessionId, desiredRevision, appliedRevision, status, desiredPolicy, appliedPolicy]
+      properties:
+        sessionId:
+          type: string
+        desiredRevision:
+          type: integer
+          minimum: 1
+        appliedRevision:
+          type: integer
+          minimum: 1
+          description: Never exceeds desiredRevision and advances only after verified application.
+        status:
+          type: string
+          enum: [pending, applied, failed]
+        desiredPolicy:
+          allOf:
+            - $ref: "#/components/schemas/EffectiveSessionPolicy"
+          description: Complete target snapshot associated with desiredRevision.
+        appliedPolicy:
+          allOf:
+            - $ref: "#/components/schemas/EffectiveSessionPolicy"
+          description: Complete verified snapshot associated with appliedRevision; remains unchanged on apply failure.
+        code:
+          type: string
+          description: Stable HaaS error code; required when status is failed.
+        safeReason:
+          type: string
+      allOf:
+        - if:
+            required: [status]
+            properties:
+              status: {const: failed}
+          then:
+            required: [code, safeReason]
+      additionalProperties: false
+    DelegatedSessionRestore:
+      type: object
+      properties:
+        reason:
+          type: string
+          enum: [follow_up_turn, process_restart, manual_restore]
+        metadata:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    DelegatedSessionPolicyUpdate:
+      type: object
+      description: |
+        Supplied complete domains replace previous values; omitted domains remain
+        unchanged. Validate authority and content, persist the full desired target
+        and increment desiredRevision. Reconcile independently of a next turn,
+        waiting for accepted/running/cancelling work and restore to quiesce.
+        Advance appliedRevision only after runtime verification; record failure
+        without advancing it and gate new turns. Occupancy alone is not a 409.
+        Preserve the same logical session and native history.
+      anyOf:
+        - required: [delegationPolicySnapshot]
+        - required: [mountManifest]
+        - required: [profileRef]
+        - required: [image]
+      properties:
+        expectedRevision:
+          type: integer
+          minimum: 1
+          description: Optional optimistic concurrency guard against the current desiredRevision.
+        image:
+          $ref: "#/components/schemas/DelegatedImage"
+        delegationPolicySnapshot:
+          $ref: "#/components/schemas/DelegationPolicy"
+        mountManifest:
+          $ref: "#/components/schemas/MountManifest"
+        profileRef:
+          $ref: "#/components/schemas/DelegatedProfileRef"
+        reason:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    DelegatedSessionContract:
+      type: object
+      required: [id, object, managerSessionId, haasSessionId, haasUserId, harnessId, binding, image, profileRef, provider, workspaceMode, mountManifest, delegationPolicySnapshot, runtime, acceptedInvocationId, bindingAcceptedAtMs, bindingFailureSafeReason, desiredRevision, appliedRevision, pendingPolicyUpdate, lastPolicyUpdateResult, createdAtMs, updatedAtMs]
+      properties:
+        id:
+          type: string
+          pattern: "^dgsess_"
+        object:
+          type: string
+          const: delegated_session
+        managerSessionId:
+          type: string
+        haasSessionId:
+          type: string
+        haasUserId:
+          type: string
+        harnessId:
+          type: string
+          pattern: "^chrn_"
+        harnessBase:
+          type: string
+        binding:
+          type: string
+          enum: [prepared, haas_bound, bind_failed]
+        image:
+          $ref: "#/components/schemas/DelegatedImage"
+        profileRef:
+          $ref: "#/components/schemas/DelegatedProfileRef"
+        provider:
+          $ref: "#/components/schemas/DelegatedProvider"
+        workspaceMode:
+          type: string
+          const: bind_mount
+        mountManifest:
+          $ref: "#/components/schemas/MountManifest"
+        delegationPolicySnapshot:
+          $ref: "#/components/schemas/DelegationPolicy"
+        runtime:
+          $ref: "#/components/schemas/DelegatedRuntime"
+        acceptedInvocationId:
+          type: [string, "null"]
+          pattern: "^inv_"
+        bindingAcceptedAtMs:
+          type: [integer, "null"]
+          minimum: 0
+        bindingFailureSafeReason:
+          type: [string, "null"]
+        desiredRevision:
+          type: integer
+          minimum: 1
+        appliedRevision:
+          type: integer
+          minimum: 1
+          description: Never exceeds desiredRevision; advances only after verified runtime application.
+        lastPolicyUpdateResult:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/PolicyUpdateResult"
+        pendingPolicyUpdate:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/PendingPolicyUpdate"
+        createdAtMs:
+          type: integer
+          minimum: 0
+        updatedAtMs:
+          type: integer
+          minimum: 0
+      allOf:
+        - if:
+            properties:
+              binding: {const: prepared}
+          then:
+            properties:
+              acceptedInvocationId: {const: null}
+              bindingAcceptedAtMs: {const: null}
+        - if:
+            properties:
+              binding: {const: haas_bound}
+          then:
+            properties:
+              acceptedInvocationId: {type: string, pattern: "^inv_"}
+              bindingAcceptedAtMs: {type: integer, minimum: 0}
+              bindingFailureSafeReason: {const: null}
+        - if:
+            properties:
+              binding: {const: bind_failed}
+          then:
+            properties:
+              acceptedInvocationId: {const: null}
+              bindingAcceptedAtMs: {const: null}
+              bindingFailureSafeReason: {type: string, minLength: 1}
+      additionalProperties: true
+    DelegatedImage:
+      type: object
+      required: [reference]
+      properties:
+        reference:
+          type: string
+        digest:
+          type: [string, "null"]
+        variant:
+          type: string
+          enum: [lite, aio]
+          default: lite
+          description: |
+            Image variant. `lite` is the default minimal sandbox image
+            (Mac Apple Silicon uses Docker CLI and linux/arm64; no Linux build
+            host or amd64 cross-build is required). `aio` is OpenSandbox AIO
+            for desktop / X11 / VNC capability, currently linux/amd64 only.
+        platform:
+          type: string
+          enum: [linux/arm64, linux/amd64]
+          description: Resolved from the Docker execution node and selected manifest, not the Manager host.
+      additionalProperties: false
+    DelegatedProfileRef:
+      type: object
+      required: [profileId, profileVersion, profileFingerprint]
+      properties:
+        profileId:
+          type: string
+          pattern: "^hprof_"
+        profileVersion:
+          type: integer
+          minimum: 1
+        profileFingerprint:
+          type: string
+      additionalProperties: false
+    PendingPolicyUpdate:
+      type: object
+      required: [updateId, revision, requestedAtMs, fields]
+      description: Public summary only; the private store retains the full resolved target and authorization. Null does not establish success; compare desiredRevision/appliedRevision and lastPolicyUpdateResult.
+      properties:
+        updateId:
+          type: string
+          minLength: 1
+        revision:
+          type: integer
+          minimum: 1
+        requestedAtMs:
+          type: integer
+          minimum: 0
+        fields:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [delegationPolicySnapshot, mountManifest, profileRef, image]
+          minItems: 1
+      additionalProperties: false
+    PolicyUpdateResult:
+      type: object
+      required: [updateId, revision, status]
+      properties:
+        updateId: {type: string, minLength: 1}
+        revision: {type: integer, minimum: 1}
+        status: {type: string, enum: [applied, failed]}
+        code: {type: string, description: Existing HaaS error catalog code; required for failure.}
+        safeReason: {type: string}
+      allOf:
+        - if:
+            required: [status]
+            properties:
+              status: {const: failed}
+          then:
+            required: [code, safeReason]
+      additionalProperties: false
+    DelegatedProvider:
+      type: object
+      description: Effective route derived from the frozen profile and authorized management override; refreshed atomically on profile application. Creation input must match the selected effective profile; it is not a second mutable route owner.
+      required: [providerId, name, model, credentialRef, wireApi]
+      properties:
+        providerId: {type: string}
+        name: {type: string}
+        model: {type: string}
+        credentialRef: {type: string}
+        baseUrl: {type: string, format: uri}
+        wireApi: {type: string, enum: [openai-compatible, responses, agent-plan]}
+        apiType: {type: string, enum: [responses, chat_completions]}
+        providerFingerprint: {type: string}
+      allOf:
+        - if:
+            required: [wireApi]
+            properties:
+              wireApi: {enum: [openai-compatible, agent-plan]}
+          then:
+            required: [apiType]
+        - if:
+            required: [wireApi]
+            properties:
+              wireApi: {const: responses}
+          then:
+            properties:
+              apiType: {const: responses}
+      additionalProperties: false
+    MountManifest:
+      type: object
+      required: [version, primaryWorkspace]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        primaryWorkspace:
+          $ref: "#/components/schemas/MountEntry"
+        extraMounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/MountEntry"
+          default: []
+      additionalProperties: false
+    MountEntry:
+      type: object
+      required: [hostPathCanonical, containerPath, access]
+      properties:
+        hostPathCanonical:
+          type: string
+        containerPath:
+          type: string
+        access:
+          type: string
+          enum: [ro, rw]
+      additionalProperties: false
+    DelegationPolicy:
+      type: object
+      required: [version, idleTtlSeconds, maxContainerLifetimeSeconds, rwWorkspaceConcurrency, queuePolicy, restorePolicy, mountPolicy]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        idleTtlSeconds:
+          type: integer
+          minimum: 1
+        maxContainerLifetimeSeconds:
+          type: integer
+          minimum: 1
+        rwWorkspaceConcurrency:
+          type: string
+          enum: [single_writer]
+        queuePolicy:
+          type: string
+          enum: [fifo]
+        restorePolicy:
+          type: string
+          enum: [fail_closed]
+        policyChangeMode:
+          type: string
+          enum: [snapshot_per_session]
+          default: snapshot_per_session
+        mountPolicy:
+          type: string
+          enum: [project_rw_extra_ro]
+        network:
+          type: object
+          description: New OpenHarness sessions materialize allow with an empty allow list. Already-created legacy snapshots that omit this field remain fail-closed as deny.
+          required: [defaultAction, allow]
+          properties:
+            defaultAction: {type: string, enum: [deny, allow]}
+            allow:
+              type: array
+              items: {type: string}
+          additionalProperties: false
+        tools:
+          type: object
+          description: New OpenHarness sessions materialize on-request. Already-created legacy snapshots that omit this field remain no-prompt.
+          required: [disabled, approvalMode]
+          properties:
+            disabled:
+              type: array
+              uniqueItems: true
+              items: {type: string}
+            approvalMode:
+              type: string
+              enum: [never, on-request, always]
+          additionalProperties: false
+      additionalProperties: false
+    DelegatedRuntime:
+      type: object
+      required: [status, containerGeneration]
+      properties:
+        status:
+          type: string
+          enum: [no_runtime, creating, running, idle, ttl_destroyed, restoring, draining, destroyed, failed]
+        containerId:
+          type: [string, "null"]
+        containerGeneration:
+          type: integer
+          minimum: 0
+        lastStartedAtMs:
+          type: [integer, "null"]
+        lastActiveAtMs:
+          type: [integer, "null"]
+      additionalProperties: true
+    ApprovalRecordPublic:
+      type: object
+      required: [id, sessionId, invocationId, status, request, createdAtMs]
+      properties:
+        id: {type: string, pattern: "^appr_"}
+        sessionId: {type: string}
+        invocationId: {type: string, pattern: "^inv_"}
+        status: {type: string, enum: [waiting, approved, denied, expired, cancelled]}
+        request:
+          type: object
+          required: [kind, safeSummary, policyReason, availableDecisions, expiresAtMs]
+          properties:
+            kind: {type: string}
+            safeSummary: {type: string}
+            policyReason: {type: string}
+            availableDecisions:
+              type: array
+              minItems: 1
+              uniqueItems: true
+              items: {type: string, enum: [approved, denied, cancelled]}
+            availableScopes:
+              type: array
+              uniqueItems: true
+              items: {type: string, enum: [action]}
+            expiresAtMs: {type: integer, minimum: 0}
+          additionalProperties: false
+        createdAtMs: {type: integer, minimum: 0}
+        resolvedAtMs: {type: [integer, "null"], minimum: 0}
+      additionalProperties: false
+    InputQuestion:
+      type: object
+      required: [id, question]
+      properties:
+        id: {type: string, minLength: 1}
+        header: {type: string}
+        question: {type: string, minLength: 1}
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/InputQuestionOption"
+        allowText: {type: boolean}
+        multi: {type: boolean}
+        secret: {type: boolean, default: false}
+      additionalProperties: false
+    InputQuestionOption:
+      type: object
+      required: [label]
+      properties:
+        label: {type: string, minLength: 1}
+        description: {type: string}
+      additionalProperties: false
+    InputAnswer:
+      type: object
+      properties:
+        values:
+          type: array
+          minItems: 1
+          items: {type: string}
+        secretRef:
+          type: string
+          description: Private handle used instead of values for a secret question.
+      oneOf:
+        - required: [values]
+          not: {required: [secretRef]}
+        - required: [secretRef]
+          not: {required: [values]}
+      additionalProperties: false
+    InputRequestRecordPublic:
+      type: object
+      required: [id, sessionId, invocationId, turnId, status, questions, blocking, createdAtMs, expiresAtMs]
+      properties:
+        id: {type: string, pattern: "^inreq_"}
+        sessionId: {type: string}
+        invocationId: {type: string, pattern: "^inv_"}
+        turnId: {type: string}
+        status: {type: string, enum: [waiting, answered, expired, cancelled]}
+        questions:
+          type: array
+          minItems: 1
+          items: {$ref: "#/components/schemas/InputQuestion"}
+        blocking: {type: boolean}
+        createdAtMs: {type: integer, minimum: 0}
+        expiresAtMs: {type: integer, minimum: 0}
+        resolvedAtMs: {type: [integer, "null"], minimum: 0}
+      additionalProperties: false
+    InputRequestAnswer:
+      type: object
+      required: [answers]
+      properties:
+        answers:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/InputAnswer"
+      additionalProperties: false
+    InputRequestResolution:
+      type: object
+      required: [inputRequestId, sessionId, status, resolvedAtMs]
+      properties:
+        inputRequestId: {type: string, pattern: "^inreq_"}
+        sessionId: {type: string}
+        status: {type: string, enum: [answered, expired, cancelled]}
+        resolvedAtMs: {type: integer, minimum: 0}
+      additionalProperties: false
+    ApprovalDecision:
+      type: object
+      required: [decision, scope]
+      properties:
+        decision:
+          type: string
+          enum: [approved, denied, cancelled]
+        scope:
+          type: string
+          const: action
+          description: Authorizes only this exact approval record's native action; never mutates session policy.
+        reason:
+          type: string
+        expiresAtMs:
+          type: [integer, "null"]
+        metadata:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    ApprovalResolution:
+      type: object
+      required: [approvalId, sessionId, status]
+      properties:
+        approvalId:
+          type: string
+          pattern: "^appr_"
+        sessionId:
+          type: string
+        status:
+          type: string
+          enum: [approved, denied, expired, cancelled]
+        resolvedAtMs:
+          type: integer
+          minimum: 0
+      additionalProperties: true
+    SkillFile:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Relative profile materialization path. Absolute paths, `..`, control characters, and symlink escapes are invalid and must fail closed.
+        content:
+          type: string
+        contentB64:
+          type: string
+        contentRef:
+          type: string
+          pattern: "^file_"
+          description: Caller-owned immutable upload id, retained while referenced by a profile/session.
+      oneOf:
+        - required: [content]
+        - required: [contentB64]
+        - required: [contentRef]
+      additionalProperties: false
+    File:
+      type: object
+      required: [id, object, filename, bytes]
+      properties:
+        id:
+          type: string
+          pattern: "^file_"
+        object:
+          type: string
+          const: file
+        sessionId:
+          type: string
+        invocationId:
+          type: string
+        filename:
+          type: string
+        relativePath:
+          type: string
+        bytes:
+          type: integer
+          minimum: 0
+        mediaType:
+          type: string
+        sha256:
+          type: string
+        createdAtMs:
+          type: integer
+          minimum: 0
+      additionalProperties: true
+    HarnessCreate:
+      type: object
+      required: [base]
+      description: |
+        Configured harness identity input. Dynamic runtime configuration belongs
+        to HarnessProfile. Legacy projection fields in this schema are accepted
+        only for read-modify-write compatibility and must not bypass profile
+        validation in new implementations.
+      properties:
+        name:
+          type: string
+        base:
+          type: string
+        activeProfileId:
+          type: string
+          pattern: "^hprof_"
+        defaultModel:
+          type: string
+          deprecated: true
+          description: Legacy projection of the active profile model; use HarnessProfile.provider.model for writes.
+        systemPrompt:
+          type: string
+          deprecated: true
+          description: Legacy projection; use HarnessProfile/AGENTS.md snapshot fields for new writes.
+        mcpServers:
+          type: array
+          deprecated: true
+          description: Legacy projection; use HarnessProfile.mcpServers for new writes.
+          items:
+            type: object
+            additionalProperties: true
+        skills:
+          type: array
+          deprecated: true
+          description: Legacy projection; use HarnessProfile.skills for new writes.
+          items:
+            type: object
+            additionalProperties: true
+        disabledTools:
+          type: array
+          deprecated: true
+          description: Legacy projection; use HarnessProfile.policy.tools.disabled for new writes.
+          items:
+            type: string
+        provider:
+          type: object
+          deprecated: true
+          description: Legacy projection; use HarnessProfile.provider for new writes.
+          additionalProperties: true
+        maxStep:
+          type: [integer, "null"]
+          deprecated: true
+          description: Legacy projection; use HarnessProfile.budget.maxStep for new writes.
+        timeoutSeconds:
+          type: [integer, "null"]
+          deprecated: true
+          description: Legacy projection; use HarnessProfile.budget.timeoutSeconds for new writes.
+      additionalProperties: true
+    Harness:
+      type: object
+      required: [id, object, name, base, createdAtMs]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: harness
+        name:
+          type: string
+        base:
+          type: string
+        baseLabel:
+          type: string
+        activeProfileId:
+          type: [string, "null"]
+          pattern: "^hprof_"
+        activeProfileVersion:
+          type: [integer, "null"]
+          minimum: 1
+        activeProfileFingerprint:
+          type: [string, "null"]
+        defaultModel:
+          type: string
+        systemPrompt:
+          type: string
+        mcpServers:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        skills:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        disabledTools:
+          type: array
+          items:
+            type: string
+        provider:
+          type: object
+          additionalProperties: true
+        maxStep:
+          type: [integer, "null"]
+        timeoutSeconds:
+          type: [integer, "null"]
+        adapterCapabilities:
+          type: object
+          additionalProperties: true
+        createdAtMs:
+          type: integer
+          minimum: 0
+        updatedAtMs:
+          type: integer
+          minimum: 0
+      additionalProperties: true
+    ModelCatalog:
+      type: object
+      required: [backends]
+      properties:
+        backends:
+          type: object
+          additionalProperties:
+            type: object
+            required: [default, models]
+            properties:
+              default:
+                type: string
+              models:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+    HaasEnvelope:
+      type: object
+      required: [data, traceId]
+      description: |
+        HaaS native response envelope. `data` carries the resource (object or array).
+        Paginated list responses additionally include `nextCursor` (null when exhausted).
+        Additional optional fields may be added within a protocol version.
+      properties:
+        data: {}
+        nextCursor:
+          type: [string, "null"]
+        traceId:
+          type: string
+    CapabilitiesEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/CapabilitiesSnapshot"
+    HarnessEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/Harness"
+    ProfileEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/HarnessProfile"
+    ProfileListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data, nextCursor]
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/HarnessProfile"
+            nextCursor:
+              type: [string, "null"]
+    ProfileValidationEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ProfileValidation"
+    EffectiveProfileEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/EffectiveHarnessProfile"
+    HarnessListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [harnesses]
+              properties:
+                harnesses:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Harness"
+    FileEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/File"
+    CanonicalEventPageEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data, nextCursor]
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/CanonicalHaasEvent"
+            nextCursor:
+              type: [string, "null"]
+    ApprovalListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data, nextCursor]
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/ApprovalRecordPublic"
+            nextCursor:
+              type: [string, "null"]
+    InputRequestListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data, nextCursor]
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/InputRequestRecordPublic"
+            nextCursor:
+              type: [string, "null"]
+    InvocationEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/Invocation"
+    ExecutionEvidenceEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ExecutionEvidence"
+    DelegatedSessionEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/DelegatedSessionContract"
+    SessionPolicyRevisionEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/SessionPolicyRevision"
+    ApprovalResolutionEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ApprovalResolution"
+    InputRequestResolutionEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/InputRequestResolution"
+    ModelCatalogEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ModelCatalog"
+    SkillFilesEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [id, name, files]
+              properties:
+                id:
+                  type: string
+                name:
+                  type: string
+                files:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/SkillFile"
+    SessionListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/HaasEnvelope"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Session"
+    ErrorDetail:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+        haasError:
+          type: object
+          required: [type, code]
+          properties:
+            type:
+              type: string
+            code:
+              enum:
+                - missing_credential
+                - invalid_credential
+                - app_not_found
+                - haas_harness_not_found
+                - haas_profile_not_found
+                - haas_profile_conflict
+                - haas_profile_rebind_required
+                - haas_profile_rebind_unsupported
+                - haas_agents_md_invalid
+                - session_not_found
+                - haas_invocation_not_found
+                - haas_execution_evidence_not_found
+                - haas_execution_evidence_expired
+                - haas_delegated_session_not_found
+                - haas_file_not_found
+                - invalid_input
+                - haas_unsupported_base
+                - haas_tool_schema_unsupported
+                - session_busy
+                - session_expired
+                - haas_offset_expired
+                - haas_cancel_unsupported
+                - haas_invocation_not_running
+                - haas_resume_required
+                - haas_invocation_not_resumable
+                - haas_delegated_session_conflict
+                - haas_approval_not_found
+                - haas_approval_state_conflict
+                - haas_input_request_not_found
+                - haas_input_request_state_conflict
+                - haas_interaction_unsupported
+                - haas_policy_denied
+                - haas_policy_invalid
+                - haas_policy_unsupported
+                - haas_policy_revision_conflict
+                - haas_url_not_allowed
+                - haas_secret_input_invalid
+                - haas_provider_source_invalid
+                - haas_mcp_source_invalid
+                - haas_skill_source_invalid
+                - haas_adapter_unavailable
+                - haas_adapter_incompatible
+                - haas_adapter_overloaded
+                - haas_adapter_error
+                - haas_model_unavailable
+                - haas_provider_error
+                - haas_provider_timeout
+                - haas_model_proxy_token_invalid
+                - haas_model_proxy_token_expired
+                - haas_mcp_unavailable
+                - haas_sandbox_widening_rejected
+                - haas_vault_unavailable
+                - haas_request_timeout
+                - haas_delegation_backend_unavailable
+                - haas_delegation_restore_failed
+                - haas_delegation_mount_invalid
+                - haas_delegation_image_unavailable
+                - haas_workspace_lock_busy
+                - haas_workspace_lock_timeout
+                - haas_rate_limited
+                - haas_quota_exceeded
+                - haas_queue_full
+                - haas_queue_timeout
+                - haas_store_unavailable
+                - haas_idempotency_store_unavailable
+                - haas_idempotency_conflict
+                - haas_idempotency_expired
+                - haas_identity_unavailable
+                - haas_session_read_too_large
+                - haas_file_too_large
+                - haas_preview_unavailable
+                - haas_archive_failed
+              type: string
+            param:
+              type: [string, "null"]
+            safeReason:
+              type: string
+            retryable:
+              type: boolean
+            traceId:
+              type: string
+            accepted:
+              type: boolean
+              description: True only when an invocation was durably accepted before a post-acceptance integrity failure.
+            invocationId:
+              type: string
+              pattern: "^inv_"
+              description: Present with accepted=true so the caller can reconcile through readback.
+          allOf:
+            - if:
+                properties:
+                  accepted: {const: true}
+                required: [accepted]
+              then:
+                required: [invocationId]
+          additionalProperties: true
+      additionalProperties: true

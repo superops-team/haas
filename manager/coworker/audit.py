@@ -69,9 +69,7 @@ class AuditStore:
             ("cache_write", "INTEGER DEFAULT 0"),
         ):
             try:
-                self._conn.execute(
-                    f"ALTER TABLE audit_events ADD COLUMN {column} {decl}"
-                )
+                self._conn.execute(f"ALTER TABLE audit_events ADD COLUMN {column} {decl}")
             except sqlite3.OperationalError:
                 pass  # column already exists
         self._conn.commit()
@@ -80,9 +78,7 @@ class AuditStore:
         tool = str(event.get("tool") or event.get("tool_name") or "")
         connector = str(event.get("connector") or connector_for_tool(tool) or "")
         args = _sanitize_args(tool, event.get("arguments") or {})
-        resource = _resource(
-            tool, event.get("arguments") or {}, event.get("result") or {}
-        )
+        resource = _resource(tool, event.get("arguments") or {}, event.get("result") or {})
         with self._lock:
             self._conn.execute(
                 """
@@ -133,8 +129,14 @@ class AuditStore:
                     (session_id, stage),
                 ).fetchall()
             out = {
-                "checks": 0, "allow": 0, "deny": 0, "unsure": 0,
-                "tokens_in": 0, "tokens_out": 0, "cache_read": 0, "cache_write": 0,
+                "checks": 0,
+                "allow": 0,
+                "deny": 0,
+                "unsure": 0,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "cache_read": 0,
+                "cache_write": 0,
             }
             for row in rows:
                 status = str(row["status"])

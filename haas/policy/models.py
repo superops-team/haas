@@ -1,4 +1,5 @@
 """Policy Controller data models (specs/policy-controller/README.md §6)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -22,15 +23,16 @@ class WorkspacePolicy:
 
 @dataclass
 class NetworkPolicy:
-    # deny | allow  (deny is the only safe default)
-    defaultAction: str = "deny"
+    # deny | allow. Fresh OpenHarness sessions allow public egress; the
+    # controller still blocks private/link-local/metadata destinations.
+    defaultAction: str = "allow"
     allow: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ToolsPolicy:
     disabled: list[str] = field(default_factory=list)
-    approvalMode: str = "never"
+    approvalMode: str = "on-request"
 
 
 @dataclass

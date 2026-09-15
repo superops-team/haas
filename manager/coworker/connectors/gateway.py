@@ -43,9 +43,7 @@ class Gateway:
         on_unauthorized: Optional[Callable] = None,
     ) -> None:
         self.secrets = secrets or SecretStore()
-        self.settings = (
-            settings if settings is not None else load_settings(self.secrets)
-        )
+        self.settings = settings if settings is not None else load_settings(self.secrets)
         self._handler = handler
         # Tried before the handler: if an inbound message is an Inbox reply (carries an
         # [ow:<id>] token), it resolves the item and is consumed — not routed as a new turn.
@@ -62,9 +60,7 @@ class Gateway:
     def set_handler(self, handler: MessageHandler) -> None:
         self._handler = handler
 
-    def set_reply_resolver(
-        self, resolver: Optional[Callable[[MessageEvent], bool]]
-    ) -> None:
+    def set_reply_resolver(self, resolver: Optional[Callable[[MessageEvent], bool]]) -> None:
         self._reply_resolver = resolver
 
     def register(self, adapter: BasePlatformAdapter) -> None:
@@ -203,13 +199,9 @@ class Gateway:
         adapter = self._adapters.get(platform)
         if adapter is None:
             return SendResult(False, error=f"no adapter for {platform}")
-        return await adapter.send_interactive(
-            chat_id, text, buttons, thread_id=thread_id
-        )
+        return await adapter.send_interactive(chat_id, text, buttons, thread_id=thread_id)
 
-    async def update_message(
-        self, platform: str, chat_id: str, message_id: str, text: str
-    ) -> None:
+    async def update_message(self, platform: str, chat_id: str, message_id: str, text: str) -> None:
         """Replace a resolved prompt's buttons with a plain-text outcome, if the adapter supports it."""
         adapter = self._adapters.get(platform)
         fn = getattr(adapter, "update_message", None)

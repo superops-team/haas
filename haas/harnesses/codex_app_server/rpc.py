@@ -4,12 +4,14 @@ One :class:`CodexJsonRpc` instance owns one transport connection. The
 connection is initialized exactly once (``initialize`` request followed by an
 ``initialized`` notification) before any thread/turn method may be called.
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator
+from collections import deque
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from websockets.exceptions import ConnectionClosed, WebSocketException
@@ -37,6 +39,10 @@ class CodexNotReadyError(CodexConnectionError):
 
 class CodexRequestTimeout(CodexConnectionError):
     """Raised when a JSON-RPC request receives no response within its timeout."""
+
+
+class CodexSubscriberOverloaded(CodexConnectionError):
+    """Raised only in the slow turn consumer whose bounded queue overflowed."""
 
 
 def message_id(msg: JsonObject) -> Any:
@@ -102,9 +108,20 @@ class CodexJsonRpc:
         self._connected = False
         self._initialized = False
         self._pending_requests: dict[Any, asyncio.Future[JsonObject]] = {}
-        self._notifications: asyncio.Queue[JsonObject] = asyncio.Queue(maxsize=notify_queue_size)
-        self._server_requests: asyncio.Queue[JsonObject] = asyncio.Queue(maxsize=notify_queue_size)
+        self._notify_queue_size = notify_queue_size
+        self._notification_history: deque[tuple[int, JsonObject]] = deque(
+            maxlen=notify_queue_size
+        )
+        self._server_request_history: deque[tuple[int, JsonObject]] = deque(
+            maxlen=notify_queue_size
+        )
+        self._notification_sequence = 0
+        self._server_request_sequence = 0
+        self._notification_subscribers: set[asyncio.Queue[JsonObject]] = set()
+        self._server_request_subscribers: set[asyncio.Queue[JsonObject]] = set()
+        self._overloaded_subscribers: set[asyncio.Queue[JsonObject]] = set()
         self._notification_task: asyncio.Task[None] | None = None
+        self._connection_failure_reason: str | None = None
 
     @property
     def connected(self) -> bool:
@@ -118,11 +135,17 @@ class CodexJsonRpc:
     def request_timeout(self) -> float:
         return self._request_timeout
 
+    @property
+    def connection_failure_reason(self) -> str | None:
+        """Return a stable, content-free explanation for reader failure."""
+        return self._connection_failure_reason
+
     async def connect(self) -> None:
         """Connect and run the initialize/initialized handshake."""
         if self._connected and self._initialized:
             return
         await self.close()
+        self._connection_failure_reason = None
 
         self._transport = await connect_endpoint(self._endpoint, codex_bin=self._codex_bin)
         self._connected = True
@@ -161,6 +184,8 @@ class CodexJsonRpc:
             if not future.done():
                 future.set_exception(CodexConnectionError("connection closed"))
         self._pending_requests.clear()
+        self._notification_history.clear()
+        self._server_request_history.clear()
 
     def _next_request_id(self) -> int:
         self._request_id += 1
@@ -216,17 +241,87 @@ class CodexJsonRpc:
             self._connected = False
             raise CodexConnectionError(f"send notification failed: {exc}") from exc
 
-    def notifications(self) -> AsyncIterator[JsonObject]:
-        """Iterate inbound server notifications."""
-        return self._queue_iterator(self._notifications)
+    async def respond(self, request_id: Any, result: JsonObject) -> None:
+        """Answer a server-initiated request using its original JSON-RPC id."""
+        if request_id is None:
+            raise CodexConnectionError("server request id is required")
+        if not self._connected or self._transport is None:
+            raise CodexNotReadyError("codex app-server is not connected")
+        message = json.dumps({"jsonrpc": JSONRPC_VERSION, "id": request_id, "result": result})
+        try:
+            await self._transport.send(message)
+        except (OSError, ConnectionError, WebSocketException, EOFError) as exc:
+            self._connected = False
+            raise CodexConnectionError(f"send response failed: {exc}") from exc
 
-    def server_requests(self) -> AsyncIterator[JsonObject]:
-        """Iterate inbound server-initiated requests (e.g. approval requests)."""
-        return self._queue_iterator(self._server_requests)
+    @property
+    def notification_cursor(self) -> int:
+        return self._notification_sequence
 
-    async def _queue_iterator(self, queue: asyncio.Queue[JsonObject]) -> AsyncIterator[JsonObject]:
-        while True:
-            yield await queue.get()
+    @property
+    def server_request_cursor(self) -> int:
+        return self._server_request_sequence
+
+    def notifications(self, *, after: int = 0) -> AsyncGenerator[JsonObject, None]:
+        """Subscribe to inbound notifications without stealing from peers."""
+        return self._subscription(
+            self._notification_history, self._notification_subscribers, after=after
+        )
+
+    def server_requests(self, *, after: int = 0) -> AsyncGenerator[JsonObject, None]:
+        """Subscribe to server requests without stealing from peer turns."""
+        return self._subscription(
+            self._server_request_history, self._server_request_subscribers, after=after
+        )
+
+    async def _subscription(
+        self,
+        history: deque[tuple[int, JsonObject]],
+        subscribers: set[asyncio.Queue[JsonObject]],
+        *,
+        after: int,
+    ) -> AsyncGenerator[JsonObject, None]:
+        if history and after < history[0][0] - 1:
+            raise CodexSubscriberOverloaded(
+                "Codex app-server replay window was exceeded before subscription"
+            )
+        queue: asyncio.Queue[JsonObject] = asyncio.Queue(maxsize=self._notify_queue_size)
+        for sequence, message in history:
+            if sequence > after:
+                try:
+                    queue.put_nowait(message)
+                except asyncio.QueueFull as exc:
+                    raise CodexSubscriberOverloaded(
+                        "Codex app-server turn consumer queue overloaded"
+                    ) from exc
+        subscribers.add(queue)
+        try:
+            while True:
+                if queue in self._overloaded_subscribers:
+                    raise CodexSubscriberOverloaded(
+                        "Codex app-server turn consumer queue overloaded"
+                    )
+                yield await queue.get()
+        finally:
+            subscribers.discard(queue)
+            self._overloaded_subscribers.discard(queue)
+
+    async def _publish(
+        self,
+        message: JsonObject,
+        sequence: int,
+        history: deque[tuple[int, JsonObject]],
+        subscribers: set[asyncio.Queue[JsonObject]],
+    ) -> None:
+        history.append((sequence, message))
+        for queue in tuple(subscribers):
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                # Isolate a stalled consumer. Blocking here would also stop JSON-RPC
+                # responses and every unrelated turn sharing this reader.
+                subscribers.discard(queue)
+                self._overloaded_subscribers.add(queue)
 
     async def _notification_loop(self) -> None:
         assert self._transport is not None
@@ -246,13 +341,27 @@ class CodexJsonRpc:
                     if future is not None and not future.done():
                         future.set_result(msg)
                 elif kind == "server_request":
-                    await self._server_requests.put(msg)
+                    self._server_request_sequence += 1
+                    await self._publish(
+                        msg, self._server_request_sequence,
+                        self._server_request_history, self._server_request_subscribers
+                    )
                 elif kind == "notification":
-                    await self._notifications.put(msg)
+                    self._notification_sequence += 1
+                    await self._publish(
+                        msg, self._notification_sequence,
+                        self._notification_history, self._notification_subscribers
+                    )
                 # "invalid" is silently dropped (best effort).
         except asyncio.CancelledError:
             pass
         except (TimeoutError, OSError, ConnectionError, WebSocketException, EOFError):
+            self._connection_failure_reason = "Codex app-server transport connection closed"
+            self._connected = False
+        except Exception:
+            # Transport/parser exception text may contain native payload data.
+            # Preserve a stable diagnostic category without leaking that content.
+            self._connection_failure_reason = "Codex app-server transport reader failed"
             self._connected = False
         finally:
             self._connected = False

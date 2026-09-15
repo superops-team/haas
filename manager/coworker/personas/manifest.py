@@ -23,7 +23,15 @@ _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 VALID_FAMILIES = {"code", "knowledge"}  # legacy key, shimmed in parse()
 VALID_TEAM = {"lead", "worker"}
 # "auto" kept as the legacy spelling of "bypass-approvals" (Mode._missing_).
-VALID_MODES = {"discuss", "plan", "interactive", "custom", "auto", "bypass-approvals", "auto-approve"}
+VALID_MODES = {
+    "discuss",
+    "plan",
+    "interactive",
+    "custom",
+    "auto",
+    "bypass-approvals",
+    "auto-approve",
+}
 VALID_REC_KINDS = {"connector", "mcp"}
 VALID_REC_TIERS = {"core", "optional"}
 VALID_GROUPS = {"general", "security"}
@@ -93,9 +101,7 @@ class PersonaManifest:
     # gates behavior, so a third-party persona claiming "security" is harmless.
     group: str = "general"
     builtin: bool = False
-    source: Optional[str] = (
-        None  # where it was loaded from (path / url), for provenance
-    )
+    source: Optional[str] = None  # where it was loaded from (path / url), for provenance
 
     def to_agent(self):
         """Materialize the runtime Agent (prompt + catalog-expanded tools + traits)."""
@@ -152,13 +158,9 @@ def _connectors(
             )
         declared = True
     elif isinstance(raw, list):
-        declared = tuple(
-            dict.fromkeys(s for s in (str(x).strip() for x in raw) if s)
-        )
+        declared = tuple(dict.fromkeys(s for s in (str(x).strip() for x in raw) if s))
     else:
-        raise ManifestError(
-            f"{persona_id}: `connectors` must be a list of connector ids or 'all'"
-        )
+        raise ManifestError(f"{persona_id}: `connectors` must be a list of connector ids or 'all'")
 
     if declared is not True:
         granted = set(declared or ())
@@ -215,9 +217,7 @@ def _recommends(persona_id: str, meta: dict) -> list[Recommendation]:
     out: list[Recommendation] = []
     for item in raw:
         if not isinstance(item, dict):
-            raise ManifestError(
-                f"persona {persona_id!r}: each `recommends` item must be a mapping"
-            )
+            raise ManifestError(f"persona {persona_id!r}: each `recommends` item must be a mapping")
         if "connector" in item:
             kind, ref = "connector", str(item.get("connector") or "").strip()
         elif "mcp" in item:
@@ -227,9 +227,7 @@ def _recommends(persona_id: str, meta: dict) -> list[Recommendation]:
                 f"persona {persona_id!r}: each `recommends` item needs a `connector:` or `mcp:` key"
             )
         if not ref:
-            raise ManifestError(
-                f"persona {persona_id!r}: a `recommends` item has an empty {kind}"
-            )
+            raise ManifestError(f"persona {persona_id!r}: a `recommends` item has an empty {kind}")
         tier = str(item.get("tier", "optional")).strip().lower()
         if tier not in VALID_REC_TIERS:
             raise ManifestError(
@@ -268,9 +266,7 @@ def parse_manifest(
         # so `My Persona.md` without an explicit id still installs (as `my-persona`).
         persona_id = _slugify(str(fallback_id or ""))
         if not persona_id:
-            raise ManifestError(
-                "manifest needs an `id` (or a filename to derive one from)"
-            )
+            raise ManifestError("manifest needs an `id` (or a filename to derive one from)")
     if not body.strip():
         raise ManifestError(f"persona {persona_id!r} has no body (the system prompt)")
 
@@ -298,9 +294,7 @@ def parse_manifest(
 
     group = str(meta.get("group", "general") or "general").strip().lower()
     if group not in VALID_GROUPS:
-        raise ManifestError(
-            f"persona {persona_id!r}: group must be one of {sorted(VALID_GROUPS)}"
-        )
+        raise ManifestError(f"persona {persona_id!r}: group must be one of {sorted(VALID_GROUPS)}")
 
     team_raw = str(meta.get("team", "") or "").strip().lower()
     if team_raw and team_raw not in VALID_TEAM:

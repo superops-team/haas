@@ -38,9 +38,7 @@ def migrate_legacy_default(secrets: SecretStore) -> None:
         return
     match = re.search(r"\d+", str(default.get("account") or ""))
     hub_id = match.group(0) if match else "default"
-    portal = {
-        k: v for k, v in default.items() if k not in ("default_portal", "hidden_fields")
-    }
+    portal = {k: v for k, v in default.items() if k not in ("default_portal", "hidden_fields")}
     portal.setdefault("hub_id", hub_id)
     secrets.put(PREFIX + hub_id, portal)
     pointer: dict[str, Any] = {
@@ -72,9 +70,7 @@ def default_portal(secrets: SecretStore) -> str:
     return next(iter(portals), "")
 
 
-def resolve(
-    secrets: SecretStore, portal: str = ""
-) -> tuple[str, str, Optional[dict[str, Any]]]:
+def resolve(secrets: SecretStore, portal: str = "") -> tuple[str, str, Optional[dict[str, Any]]]:
     """(hub_id, profile_key, profile) for the requested — or default — portal.
     `portal` may be a hub id or a portal name (account) — names are what agents
     see in results, so accept both."""
@@ -88,9 +84,7 @@ def resolve(
     return "", "", None
 
 
-def managed_connect_portal(
-    secrets: SecretStore, profile: dict[str, Any]
-) -> dict[str, Any]:
+def managed_connect_portal(secrets: SecretStore, profile: dict[str, Any]) -> dict[str, Any]:
     """Store one managed-OAuth portal; the first becomes the default.
     Reconnecting the same hub_id replaces its tokens (e.g. a read → write
     re-consent lands in place)."""

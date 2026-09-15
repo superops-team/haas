@@ -4,6 +4,7 @@ export type EventType =
   | "turn_start"
   | "assistant_delta"
   | "reasoning_delta"
+  | "model_stage_updated"
   | "assistant_message"
   | "tool_proposed"
   | "permission_required"
@@ -14,7 +15,9 @@ export type EventType =
   | "team_proposed"
   | "items_proposed"
   | "tool_started"
+  | "tool_output_delta"
   | "tool_finished"
+  | "task_state"
   | "iteration_end"
   | "turn_end"
   | "error"
@@ -25,7 +28,8 @@ export type EventType =
   | "memory_saved"
   | "compacting"
   | "compacted"
-  | "turn_done";
+  | "turn_done"
+  | "execution_control";
 
 export interface WsEvent {
   type: EventType;
@@ -125,6 +129,62 @@ export interface Attachment {
   text?: string; // text files
 }
 
+export type ActivityKind = "command" | "read" | "search" | "edit" | "tool";
+export type ActivityStatus =
+  | "pending"
+  | "running"
+  | "waiting"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export interface TaskOutcome {
+  phase: string;
+  code?: string;
+  safeReason?: string;
+  retryable?: boolean;
+}
+
+export interface ModelCallUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  reasoningOutputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
+
+export type ModelCallStep =
+  | { stepId: string; kind: "output_pending" | "commentary" | "result"; text: string }
+  | { stepId: string; kind: "reasoning_summary"; text: string; previewText?: string; previewFrozen?: boolean }
+  | { stepId: string; kind: "tool"; activityId: string };
+
+export interface ModelCallStage {
+  modelCallId: string;
+  status: "running" | "completed" | "failed" | "incomplete" | "cancelled";
+  steps: ModelCallStep[];
+  usage?: ModelCallUsage;
+}
+
+export interface PersistedActivity {
+  id: string;
+  kind: ActivityKind;
+  status: ActivityStatus;
+  title: string;
+  summary: string;
+  preview: string;
+  omittedLineCount: number;
+  durationMs?: number;
+  exitCode?: number;
+  safeReason?: string;
+  recoveryGroupId?: string;
+  invocationId?: string;
+  commandPreview?: string;
+  workingDirectory?: string;
+  evidenceRef?: string;
+  evidenceExpiresAtMs?: number;
+}
+
 // Transcript items
 // `ts` = unix seconds (the server's canonical-message stamp; live items stamp locally).
 // Optional: sessions saved before the server stamped timestamps have none.
@@ -134,7 +194,7 @@ export type Item =
   // (ConnectorMessageCard) instead of a plain user bubble. Generalizes to any connector via the
   // registry — no per-connector special-casing.
   | { kind: "connector"; source: MessageSource }
-  | { kind: "assistant"; text: string; ts?: number; reasoning?: string }
+  | { kind: "assistant"; text: string; ts?: number; reasoning?: string; source?: "manager" | "haas"; activities?: PersistedActivity[]; modelStages?: ModelCallStage[]; taskOutcome?: TaskOutcome }
   // `hidden` = results the user's privacy filters removed before the agent saw them
   // (from the tool message's `_display` sidecar; the agent-visible content has no trace).
   // `standingRule` = the task-scoped rule that auto-allowed this call ("tool → target").
@@ -144,7 +204,37 @@ export type Item =
   // `approvalOrigin` = why the call ran without a card: "reviewer" (auto-approved by the
   // Auto-Approve reviewer; `approvalNote` carries its one-line reason) or "bypass"
   // (bypass-approvals mode). Rendered as a quiet debugging chip, deliberately subtle.
-  | { kind: "tool"; id: string; name: string; args: any; status: string; preview?: string; hidden?: number; standingRule?: string; reviewerReason?: string; allowAnyway?: boolean; approvalOrigin?: string; approvalNote?: string; approvalGrant?: string }
+  | {
+      kind: "tool";
+      id: string;
+      name: string;
+      args: any;
+      status: string;
+      preview?: string;
+      source?: "manager" | "haas";
+      activityKind?: ActivityKind;
+      safeSummary?: string;
+      outputPreview?: string;
+      omittedLineCount?: number;
+      durationMs?: number;
+      exitCode?: number;
+      safeReason?: string;
+      retryable?: boolean;
+      recoveryGroupId?: string;
+      invocationId?: string;
+      commandPreview?: string;
+      workingDirectory?: string;
+      evidenceRef?: string;
+      evidenceExpiresAtMs?: number;
+      taskOutcome?: TaskOutcome;
+      hidden?: number;
+      standingRule?: string;
+      reviewerReason?: string;
+      allowAnyway?: boolean;
+      approvalOrigin?: string;
+      approvalNote?: string;
+      approvalGrant?: string;
+    }
   | {
       kind: "approval";
       name: string;
@@ -172,6 +262,7 @@ export type Item =
       // user's own config, never the server's claims). Drives the honest scope chip —
       // "leaves this computer → host" (http) / "runs a local program" (stdio).
       mcpDestination?: { transport: string; host?: string };
+      haasApprovalId?: string;
       resolved?: ApprovalDecision;
     }
   | {
@@ -221,6 +312,7 @@ export type Item =
       multi?: boolean;
       header?: string;
       questions?: GroupedQuestion[];
+      haasInputRequestId?: string;
       resolved?: string;
     }
   | {
@@ -255,9 +347,11 @@ export type QuestionOption =
 // One step of a grouped ask_user call (up to 4, rendered as a stepper). The answer map is keyed
 // by `header` (falling back to `question`).
 export interface GroupedQuestion {
+  id?: string;
   question: string;
   header?: string;
   options?: QuestionOption[];
   allow_text?: boolean;
   multi?: boolean;
+  isSecret?: boolean;
 }

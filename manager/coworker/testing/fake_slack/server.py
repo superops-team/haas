@@ -66,9 +66,7 @@ class FakeSlack:
         self._outbound: list[dict] = []
         self._acks: list[dict] = []
         self.unknown_methods: list[str] = []
-        self.api_calls: list[str] = (
-            []
-        )  # every Web API method, in order (caching assertions)
+        self.api_calls: list[str] = []  # every Web API method, in order (caching assertions)
 
         self._sockets: set[WebSocket] = set()
         self._socket_connected = asyncio.Event()
@@ -172,9 +170,7 @@ class FakeSlack:
         """Total Socket Mode connects so far — a reconnect bumps this."""
         return self._socket_connections
 
-    async def wait_socket_connections(
-        self, at_least: int, timeout: float = 5.0
-    ) -> None:
+    async def wait_socket_connections(self, at_least: int, timeout: float = 5.0) -> None:
         """Block until the client has connected `at_least` times (used to await a reconnect)."""
         deadline = asyncio.get_event_loop().time() + timeout
         while self._socket_connections < at_least:
@@ -410,9 +406,7 @@ class FakeSlack:
             return {"ok": True, "ts": ts, "channel": params.get("channel")}
         # Unknown method: no-op but surface the gap.
         self.unknown_methods.append(method)
-        logger.info(
-            "FakeSlack: unhandled Web API method %s (params=%s)", method, params
-        )
+        logger.info("FakeSlack: unhandled Web API method %s (params=%s)", method, params)
         return {"ok": True}
 
     async def _api_endpoint(self, request: Request) -> JSONResponse:

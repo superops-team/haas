@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-02
+Last reviewed: 2026-09-10
 Change ID: haas-platform-foundation
 
 `specs/` is the entry point for HaaS long-term technical specifications. It defines the Harness As A Service protocol, component boundaries, state machines, security, and container runtime as implementable, testable, and reviewable engineering contracts.
@@ -23,6 +23,7 @@ HaaS Sidecar API
   |
   +-- Protocol Mapper (ADK <-> internal)
   +-- Harness Registry
+  +-- Harness Profile
   +-- Session Runtime
   +-- Admission Control
   +-- Event Log & SSE Replay
@@ -44,7 +45,7 @@ Harness Adapter Interface
   +-- Other harness adapters    (future)
   |
   v
-Sandbox Runtime (OpenSandbox sandbox/execd/credential vault projection)
+Sandbox Runtime (common policy contract: Lite Docker or OpenSandbox AIO)
   |
   v
 OpenSandbox AIO container runtime
@@ -78,13 +79,12 @@ This design uses the following external facts as inputs; they are not in-reposit
 
 ### 3.1 Northbound Protocol
 
-HaaS exposes three tiers of HTTP/SSE surfaces upstream:
+HaaS exposes two HTTP/SSE surfaces upstream:
 
 | Surface | Path | Compatibility level | Purpose |
 |---------|------|----------|------|
 | ADK-compatible | `/list-apps`, `/run`, `/run_sse`, `/apps/{app}/users/{user}/sessions/{sid}` | Public API | Long-term primary protocol, drop-in compatible with ADK 2.0 clients |
-| HaaS native | `/v1/haas/*` | Public extension | ADK-uncovered capabilities such as health/ready/status, diagnostics, harness CRUD, session/event management, and artifacts |
-| ~~Legacy sidecar shim~~ | ~~`/v1/codex-worker/*`~~ | **Not implemented by this project** | See §3.1.1 |
+| HaaS native | `/v1/haas/*` | Public extension | ADK-uncovered capabilities such as health/ready/status, stable capability discovery, diagnostics, harness CRUD, session/event management, and artifacts |
 
 Rules:
 
@@ -92,20 +92,9 @@ Rules:
 2. HaaS native extensions MUST be additive only and MUST NOT change ADK field semantics.
 3. All public surfaces use a `detail` + structured `haasError` error shape.
 
-### 3.1.1 Scope Decision: Do Not Implement the `mpa-codex-worker` Migration Shim
-
-**Decision (2026-08-30)**: HaaS and `mpa-codex-worker` are only architecturally isomorphic; HaaS does not assume migration responsibility for it. The `/v1/codex-worker/*` shim is **out of scope for this project**: it will not be implemented, tested, or required by release gates. If migration of legacy upstream consumers becomes necessary, it will be handled as a **separate initiative**.
-
-Implications and handling:
-
-- Residual legacy/shim descriptions in component specs are **historical context and future options**, not pending tasks. They MUST NOT be used as grounds to add `/v1/codex-worker/*` routes during implementation.
-- `mpa-codex-worker` MAY still serve as a **design reference** because it has validated the sidecar API, event log, SSE replay, model proxy, secretless boundaries, and other patterns. This does not conflict with the decision not to implement the shim.
-- The `haas_legacy_request_invalid` error code and legacy entries in OpenAPI are retained to avoid changing a published compatibility surface; they are **unused** in this project.
-- All new capabilities MUST be defined on either the ADK surface or the HaaS native surface.
-
 ### 3.2 Runtime Boundary
 
-HaaS runs on the OpenSandbox AIO base image. AIO provides foundational capabilities such as shell, file, browser, exec, sandbox lifecycle, and credential vault; HaaS adds the sidecar, adapters, proxies, event log, policy, and Sandbox Runtime.
+The target default is a minimal Lite image (Docker CLI, linux/arm64 and linux/amd64); OpenSandbox AIO remains optional on amd64. Mac Apple Silicon builds/runs arm64 locally without a Linux build host. Container Runtime owns image/platform/network/volume boundaries; Lite does not require AIO services. Existing AIO tooling remains unchanged until the Lite implementation gate passes. Port 8080 and AIO service descriptions below apply to AIO only.
 
 Default container ports:
 
@@ -129,7 +118,7 @@ Upstream consumers MAY see only ADK `Event`/`Session` objects, errors, and artif
 
 ### 3.4 Sandbox Standardization Boundary
 
-Sandbox Runtime uniformly projects the Policy Controller's workspace/network/tool policy and the harness adapter's sandbox declaration into OpenSandbox sandbox/execd configuration. A harness-provided sandbox (such as the Codex sandbox) MUST run within it; provider credentials flow through the credential vault; and network egress is constrained by both the OpenSandbox egress policy and the HaaS URL validator. See [Sandbox Runtime](sandbox-runtime/README.md).
+Sandbox Runtime projects one policy contract into Lite Docker or OpenSandbox AIO. A harness-provided sandbox remains an inner layer. Lite uses the isolated worker/broker network and broker memory; AIO uses sandbox/execd/vault. Both require runtime egress enforcement plus URL validation. See [Sandbox Runtime](sandbox-runtime/README.md).
 
 ## 4. Component Plan
 
@@ -138,6 +127,7 @@ Sandbox Runtime uniformly projects the Policy Controller's workspace/network/too
 | P0 | Architecture | `specs/architecture/README.md` | System-level layering, fact ownership, dependency direction, and initial implementation order |
 | P0 | HaaS Protocol | `specs/haas-protocol/README.md` | ADK-compatible API, HaaS native API, errors, and versioning strategy |
 | P0 | Harness Registry | `specs/harness-registry/README.md` | Configured harness catalog, appName resolution, and base/capability/model/provider discovery |
+| P0 | Harness Profile | `specs/harness-profile/README.md` | Versioned cross-harness configuration for provider, MCP, skills, AGENTS.md, workspace/policy, budgets, activation, session snapshots, and explicit rebind |
 | P0 | Harness Adapter | `specs/harness-adapter/README.md` | Multi-harness adapter abstraction, capability matrix, and ADK event normalization |
 | P0 | Codex App-Server Adapter | `specs/codex-app-server-adapter/README.md` | Initial Codex app-server connection, thread/turn, JSON-RPC, cancel, and schema pin |
 | P0 | Session Runtime | `specs/session-runtime/README.md` | Session/invocation/turn/container lifecycle, idempotency, leases, and continuation |
@@ -151,7 +141,7 @@ Sandbox Runtime uniformly projects the Policy Controller's workspace/network/too
 | P0 | Stores | `specs/stores/README.md` | Persistent source of truth: registry/session/event/idempotency/admission interfaces, schemas, and migrations |
 | P0 | Identity | `specs/identity/README.md` | Bearer -> principal, tenant/workspace/userId scope, and `IdentityProvider` interface |
 | P0 | Config | `specs/config/README.md` | Env/config assembly, port table, and `load_config`/`create_app` contracts |
-| P1 | Sandbox Runtime | `specs/sandbox-runtime/README.md` | Uniformly project harness sandboxes into OpenSandbox sandbox/execd/credential vault |
+| P1 | Sandbox Runtime | `specs/sandbox-runtime/README.md` | Project the common isolation policy into Lite Docker or OpenSandbox AIO |
 | P1 | Model Proxy | `specs/model-proxy/README.md` | Provider credential isolation, OpenAI-compatible relay, and usage normalization |
 | P1 | MCP / Tool / Skill Runtime | `specs/mcp-tool-skill-runtime/README.md` | MCP servers, MCP proxy, tools, skill materialization, and tool restrictions |
 | P1 | Artifact Store | `specs/artifact-store/README.md` | Input files, session outputs, downloads, archives, and path security |
@@ -182,6 +172,7 @@ Every component spec MUST contain the following sections. Sections MAY be concis
 | Object | `object` value | Id | Authority | Lifecycle |
 |--------|----------------|-----|-----------|----------|
 | Harness | `harness` | `chrn_...` (the ADK `appName`) | Harness Registry | Creation through deletion |
+| Harness Profile | `harness_profile` | `hprof_...` | Harness Profile / Harness Registry | Versioned draft/active/retired |
 | Invocation | `invocation` | `inv_...` | Session Runtime | One `/run`; readable during the retention period |
 | Session | `session` | Caller-supplied `sessionId` (default `hsess_...`) | Session Runtime | `(appName, userId, sessionId)` tuple |
 | Turn | `turn` | `turn_...` | Session Runtime | One harness execution turn |
@@ -189,7 +180,7 @@ Every component spec MUST contain the following sections. Sections MAY be concis
 | File | `file` | `file_...` | Artifact Store | Follows the container/session |
 | Event | none | invocation-scoped | Event Log | Replayable during the retention period |
 
-An `invocation` is the public run unit; a `turn` is the internal execution unit. They are 1:1 in the initial release, but the protocol does not assume that they will always remain so.
+An `invocation` is the public run unit; a `turn` is the internal execution unit. They are 1:1 in the initial release, but the protocol does not assume that they will always remain so. A `harness` is the ADK app identity, while `harness_profile` is the versioned execution configuration. Session creation freezes the active profile; later dynamic updates affect only new sessions unless an existing session is explicitly rebound.
 
 ## 7. Global HTTP Conventions
 
@@ -199,7 +190,9 @@ An `invocation` is the public run unit; a `turn` is the internal execution unit.
 |--------|------|------|
 | `Authorization: Bearer <token>` | Required except for health/ready probes | HaaS caller token |
 | `Idempotency-Key` | Optional (server supports deduplication) | Idempotency for mutating APIs; a repeated key returns the first result and does not restart the harness |
-| `Last-Event-ID` | Optional | Reconnection replay cursor for `/run_sse` and HaaS native streams |
+| `Last-Event-ID` | Optional | ADK `/run_sse` reconnection cursor; HaaS native streams/pages use the `after_event_id` query parameter |
+| `X-HaaS-Invocation-ID` | Required on successful `/run` and `/run_sse` | Durable accepted invocation id |
+| `X-HaaS-Session-ID` | Required on successful `/run` and `/run_sse` | Effective session id, including server-generated ids |
 | `X-HaaS-Tenant-ID` | Conditional | Required for multi-tenant deployments or derived from the token |
 | `X-HaaS-Workspace-ID` | Conditional | Workspace scope, derived from the token or header |
 | `X-HaaS-Trace-ID` | Optional | End-to-end trace id; generated by the server if absent |
@@ -231,7 +224,7 @@ Pagination:
 
 Single resources (Harness, File, Invocation, and others), lists, and diagnostic responses are consistently wrapped in `data`; only paginated lists additionally carry `nextCursor`. Health/ready/status/diagnostics also return this envelope.
 
-Errors (common to all public surfaces):
+Pre-acceptance errors and post-acceptance integrity errors use the structured shape below. Normal accepted execution failures use HTTP 200 terminal events instead of this error response:
 
 ```json
 {
@@ -263,6 +256,7 @@ The projection layer is responsible for converting `ms -> float seconds` (`ms / 
 | Object | Prefix | Generator |
 |------|------|--------|
 | harness / ADK app | `chrn_` | Harness Registry |
+| harness profile | `hprof_` | Harness Profile |
 | invocation | `inv_` | Session Runtime |
 | turn | `turn_` | Session Runtime |
 | container | `cntr_` | Container Runtime |
@@ -293,15 +287,23 @@ Rules:
 - `/run_sse` events are flushed in production order. With `streaming:true`, `text` parts appear incrementally.
 - The stream closes when the invocation completes; `/run` returns the event array in one response.
 - Heartbeats use the SSE comment `: keep-alive` and do not produce events.
-- Internal HaaS canonical events MAY carry `sequenceNumber`/`eventId` for replay, but projection to an ADK `Event` emits only ADK fields (a HaaS native stream MAY additionally emit `haas` metadata).
-- Non-streaming `/run` output MUST equal the aggregated streaming output of `/run_sse` (parity).
+- Internal `CanonicalEventRecord` persists a stable `haas.*` `type`, type-specific safe `haas` metadata, `sequenceNumber`, and `eventId`; adapter `nativeType` is never persisted.
+- Projection to an ADK `Event` emits only ADK fields. HaaS native streams emit the strongly typed public `CanonicalHaasEvent`, including stable top-level `type` and validated `haas` metadata while stripping internal/native fields.
+- Terminal outcome is represented by exactly one stable type per invocation: `haas.turn.completed`, `haas.turn.failed`, `haas.turn.incomplete`, or `haas.turn.cancelled`. Clients MUST NOT infer terminal outcome from human text or stream closure.
+- Non-streaming `/run` output MUST equal the aggregated ADK streaming output of `/run_sse` for every accepted terminal outcome (parity); both remain HTTP 200. Pre-acceptance failures use structured 4xx/5xx; post-acceptance terminal-store integrity failures use accepted metadata for recovery. This parity does not require HaaS-only native fields to appear on ADK surfaces.
 
 ## 9. Compatibility and Versioning Strategy
 
-1. The first HaaS protocol version is `2026-08-26`; its northbound protocol layer aligns with the ADK 2.0 REST API.
-2. HaaS native responses MUST return `HaaS-Version: 2026-08-26`.
+1. The first HaaS protocol version is `2026-09-10`; its northbound protocol layer aligns with the ADK 2.0 REST API.
+2. HaaS native responses MUST return `HaaS-Version: 2026-09-10`.
 3. Within the same version, changes MAY only add optional fields, event part types, or `haas_`-prefixed error codes.
 4. Removing, renaming, or changing semantics, adding required fields, or tightening constraints MUST require a new version.
+
+Version baseline note:
+
+- `2026-08-26` was an internal draft baseline and was never a production-published compatibility release.
+- `2026-09-10` is the first candidate contract that includes stable capability discovery, typed native events, durable execution acceptance, prepared-to-bound delegation, and bounded recovery reads.
+- Until runtime code and conformance tests implement this contract, the service MUST NOT advertise `HaaS-Version: 2026-09-10`; it must report its actually implemented version or remain unreleased.
 
 ## 10. Inter-Component Dependency Direction
 
@@ -314,7 +316,7 @@ session runtime -> harness adapter interface
 session runtime / registry / event log / admission control -> stores
 admission control -> session runtime / registry / observability
 harness adapter -> sandbox runtime / model proxy / mcp-tool-skill runtime / container runtime
-sandbox runtime -> OpenSandbox sandbox/execd/credential vault
+sandbox runtime -> Lite Docker worker/broker or OpenSandbox AIO
 policy controller -> security-boundary
 codex adapter -> Codex app-server native protocol only
 model proxy -> provider clients
@@ -339,7 +341,7 @@ Implementation stage:
 - API/schema: FastAPI ASGI integration tests.
 - SSE: progressive flush, stream-closure semantics, heartbeat, disconnect/replay, and parity.
 - Codex app-server: real handshake, thread/start, turn/start, cancel, and schema generation/probe.
-- Sandbox: verify OpenSandbox sandbox/execd/credential vault projection.
+- Sandbox: verify common Lite/AIO isolation; AIO additionally verifies sandbox/execd/vault.
 - Container: OpenSandbox AIO build, ports, health/ready, and SIGTERM drain.
 - Runtime trim: `DISABLE_*` prevents code-server/jupyter from starting without regressing browser/VNC/sandbox or Codex readiness (container smoke).
 - Security: secret scan, inverse redaction assertions, SSRF allowlist, and artifact traversal probes.

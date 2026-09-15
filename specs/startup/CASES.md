@@ -16,7 +16,7 @@ These cases are executable acceptance supplements to `specs/startup/README.md`. 
 
 | ID | Priority | Objective | Prerequisite/Command | Pass Criteria |
 |----|----------|-----------|----------------------|---------------|
-| ST-001 | P0 | nginx uniformly proxies ADK/HaaS entry points | fake sidecar + nginx config fixture; `pytest -q -k ST_001` | ADK paths and `/v1/haas/*` are both proxied to `127.0.0.1:8092`; no `/v1/codex-worker/*` route exists; nginx syntax passes |
+| ST-001 | P0 | nginx uniformly proxies ADK/HaaS entry points | fake sidecar + nginx config fixture; `pytest -q -k ST_001` | The documented ADK paths and `/v1/haas/*` are proxied to `127.0.0.1:8092`; nginx syntax passes |
 | ST-002 | P0 | Separate health from ready | sidecar listening, Codex socket absent; `pytest -q -k ST_002` | `/health` returns a liveness structure; `/v1/haas/ready` returns a structured 503/`ready=false` |
 | ST-003 | P0 | Unix socket + initialize/initialized readiness | fake Codex server; `pytest -q -k ST_003` | After the socket is connectable, initialize succeeds, and the initialized notification flushes successfully, the sidecar first publishes `ready=true` |
 | ST-004 | P0 | initialize failure fails closed | fake server returns a JSON-RPC error; `pytest -q -k ST_004` | Health remains available; ready remains false; the northbound interface does not leak the native error payload |

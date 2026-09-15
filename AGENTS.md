@@ -33,13 +33,14 @@ Client / Manager
    的单位。`base` 可为 `codex`、`pi`、`opencode`、`amp` 等开放字符串。
 4. 首期 Codex 实现必须走 Codex app-server；`codex exec` 只能作为本地
    诊断或显式 fallback，不得成为生产主路径。
-5. Docker runtime 必须基于开源 OpenSandbox AIO 镜像构建，默认参考
-   `ghcr.io/agent-infra/sandbox:<tag-or-digest>`。生产镜像必须 pin digest，
-   `latest` 只允许本地实验。所有镜像按 `linux/amd64` 架构构建与启动是硬性
-   约定（详见「Docker 与 OpenSandbox AIO」第 2 条）。
+5. Docker runtime 提供两个稳定变体：**`lite`（默认）**是最小沙箱镜像，不依赖
+   OpenSandbox AIO 服务，支持 `linux/amd64` + `linux/arm64` 多架构，可在 Mac
+   Docker CLI 下运行 arm64 容器，不要求 Linux 构建主机；**`aio`** 基于开源 OpenSandbox AIO 镜像
+   （默认参考 `ghcr.io/agent-infra/sandbox:<tag-or-digest>`），仅 `linux/amd64`，
+   面向需要桌面/VNC/浏览器/CUA/BUA 的场景。生产镜像必须 pin digest；`latest`
+   只允许本地实验。AIO 变体的平台合同详见「Docker 与镜像变体」章节。
 6. Harness 纳管协议以 Google ADK 2.0 REST API 协议层为首个兼容目标，同时保留
-   HaaS 自有 control-plane 扩展。旧 `mpa-codex-worker` 迁移 shim 不在本项目
-   范围（见「协议与接口规范」第 3 条）。
+   HaaS 自有 control-plane 扩展。Northbound 只包含 ADK 与 `/v1/haas/*` 两个协议面。
 
 ## AI 开发铁律
 
@@ -213,9 +214,8 @@ haas/
 2. HaaS 自有控制面使用 `/v1/haas/*`，只承载 runtime、diagnostics、profile、
    harness CRUD、session/event 管理、artifact 和内部运维能力；不得重新定义
    ADK 已有字段语义。
-3. **`/v1/codex-worker/*` 迁移 shim 不在本项目范围（决策 2026-08-30）。**
-   HaaS 与 `mpa-codex-worker` 只是架构同构，不承担其迁移职责；如确需迁移旧
-   上游，单独立项。不得实现该 shim，新增能力一律定义在 ADK 面或 HaaS 面。
+3. 所有新增能力一律定义在 ADK 面或 `/v1/haas/*`，不得增加其他 northbound
+   兼容命名空间。
 4. 所有 mutating API 必须支持 `Idempotency-Key`（可选传入，服务端去重）。重复
    key 必须返回第一次请求的结果，不得重复启动 harness。
 5. `POST /run_sse` 返回 `text/event-stream`，事件为 `data:` 帧；`streaming:true`
@@ -251,30 +251,48 @@ haas/
 5. Codex app-server schema 必须由当前 pin 的 Codex 版本生成或验证；升级 Codex
    版本必须重新生成/比对 schema 并更新 `specs/codex-app-server-adapter/`。
 
-## Docker 与 OpenSandbox AIO
+## Docker 与镜像变体
 
-1. Dockerfile 必须基于开源 OpenSandbox AIO 镜像构建。当前调研参考镜像为
-   `ghcr.io/agent-infra/sandbox:latest`；生产必须改为 digest pin，例如
-   `ghcr.io/agent-infra/sandbox@sha256:<digest>`。
-2. **`linux/amd64` 是硬性平台约定**：本项目所有镜像必须按 `linux/amd64`
-   架构构建并启动，不接受其他架构作为交付目标。构建命令必须显式指定
-   `--platform=linux/amd64`（如 `docker build --platform=linux/amd64`、
-   `docker buildx build --platform=linux/amd64`），Dockerfile 的 `FROM` 与
-   多阶段基础镜像必须以 `linux/amd64` 解析。在非 amd64 主机（如 Apple
-   Silicon）上必须通过跨架构构建（buildx/QEMU）产出 amd64 镜像，本机
-   smoke/E2E 启动镜像时也必须以 `--platform=linux/amd64` 运行；不得用主机原生
-   架构镜像冒充交付产物。镜像推送和发布同样只交付 amd64 产物。
-3. HaaS 镜像只在 AIO 基础上叠加 sidecar、harness adapter、首期 Codex CLI/
-   app-server 依赖和启动脚本，不 fork 或私改 AIO 基础能力。
-4. 必须保留 AIO `/opt/gem/run.sh` 能力或等价启动链路。若 HaaS 自定义 entrypoint，
-   必须明确如何启动 AIO 服务、HaaS sidecar、Codex app-server 和健康检查。
-5. 默认端口约定：
-   - `8080`：AIO sandbox 服务或被 AIO 保留的入口
-   - `8092`：HaaS sidecar HTTP/SSE API
-   - `18080`：HaaS model proxy loopback
-   - `18081`：HaaS MCP/tool proxy loopback
-6. `/health` 只表示进程存活；`/ready` 表示是否可接新 session 或执行 turn。
-   二者不得混用。
+HaaS 从同一份源代码构建两个稳定镜像变体，均为公开合同：
+
+- **Lite（默认，`docker/Dockerfile.lite`）**：最小 slim Python/HaaS/Codex、git、
+  CA、shell、tini 与 loopback relay，不含 AIO/nginx/browser/VNC/IDE/notebook。
+  支持 `linux/amd64` 与 `linux/arm64`；Mac Apple Silicon 用 Docker CLI 在本机
+  构建运行 arm64，不要求 Linux 主机或 amd64 交叉构建。Docker Engine 提供所需
+  虚拟化，不承诺完全无 VM。压缩 ≤400 MiB、解包 ≤1.2 GiB 是待实测验收目标。
+- **AIO（现有根目录 `Dockerfile`）**：基于 digest-pinned OpenSandbox AIO，
+  保留 shell/file/browser/sandbox/execd/vault 和官方启动能力，仅 amd64。
+
+完整隔离、broker 凭证边界、session volume 与平台合同见 `specs/container-runtime/`。
+目标 Dockerfile/命令未实现前不得宣称已交付，现有 AIO 构建入口保留到迁移完成。
+
+规则：
+
+1. 两份 Dockerfile 生产构建必须 digest pin。`latest` 只允许本地实验。Lite
+   `HAAS_LITE_BASE` 与 AIO `HAAS_AIO_BASE` 都可指向可信 digest pin 的镜像镜像
+   仓/缓存；release 构建不得使用可变 tag。
+2. **平台合同分变体**：
+   - Lite 发布 `linux/amd64` 与 `linux/arm64`；本地 `make docker-build-lite`
+     只构建实际 Docker 执行节点的平台，Mac Apple Silicon 默认 arm64。发布时
+     分别构建验证后组合 OCI index；本机无需多架构 `--load` 或 registry push。
+   - AIO 只发布 `linux/amd64`；`make docker-build-aio` 显式 `--platform=linux/amd64`。
+     非 amd64 主机通过 buildx/QEMU 交叉构建 amd64；不得以主机原生架构冒充交付。
+3. HaaS 镜像只在 base 上叠加 sidecar、harness adapter、首期 Codex CLI/app-server
+   依赖和启动脚本，不 fork 或私改 base 能力。
+4. AIO 变体必须保留 AIO `/opt/gem/run.sh` 或等价启动链路。Lite 变体使用独立
+   `/opt/haas/run.sh`（tini + sidecar + Codex adapter + loopback proxy），不启动
+   nginx 或 AIO。
+5. 端口约定：
+   - `8080`：仅 AIO 变体使用（AIO sandbox 服务/统一入口）；lite 变体不占用、不暴露。
+   - `8092`：HaaS sidecar HTTP/SSE API（两变体共用）。
+   - `18080`：HaaS model proxy loopback（两变体共用）。
+   - `18081`：HaaS MCP/tool proxy loopback（两变体共用）。
+6. `/health` 只表示进程存活；`/ready` 表示是否可接新 session 或执行 turn，
+   两变体规则一致。
+7. Manager 与独立 HaaS 默认使用 `lite` 变体；通过
+   `HAAS_DEFAULT_IMAGE_VARIANT=aio` 或 delegated-session `image.variant=aio`
+   显式选择。普通 restore 保持记录的 variant；显式 `/policy` 更新可在当前 turn
+   完成后重建运行资源，保持同一逻辑 session，须通过安全与原生续接验证。
 
 ## 开发命令
 
@@ -322,8 +340,9 @@ lint/type/test 目标在 S1 运行时骨架初始化后补齐。文档初始化�
 最终交付说明必须列出：
 
 - 组件 spec 更新列表
-- 兼容面影响，包括 ADK 与 HaaS native（legacy sidecar 不在范围内）
+- 兼容面影响，包括 ADK 与 HaaS native
 - 测试命令与结果
 - 未执行验证、原因和残余风险
 - 安全/脱敏/容器/事件流相关结论
 - 提交安全结论：`make pre-commit` / `make secret-scan` 结果与放行/拦截说明
+ pre-commit` / `make secret-scan` 结果与放行/拦截说明

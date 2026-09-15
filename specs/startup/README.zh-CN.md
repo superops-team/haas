@@ -9,9 +9,9 @@ Related specs: [Architecture](../architecture/README.zh-CN.md), [Container Runti
 
 ## 1. 组件定位
 
-Startup 定义 HaaS 容器从进程启动到对外可服务的编排合同。nginx 是容器对外总入口，HaaS sidecar 是 northbound API 的事实 owner，Codex app-server 的真实协议握手决定整体 `ready`。
+Startup 定义 Lite、AIO 与宿主控制 sidecar 编排。本文 nginx/AIO 指令仅适用于 AIO 镜像，Lite 使用独立最小 entrypoint 并跳过这些阶段。宿主控制 sidecar 监听 loopback，独立 Lite 将容器 8092 publish 到 host loopback，delegated worker 仅使用私有服务 transport（Container Runtime §5.3）。HaaS 拥有 northbound readiness。
 
-本组件只定义标准化 HaaS 启动行为，不实现或兼容 `mpa-codex-worker` 的 `/v1/codex-worker/*` shim。旧项目仅作为启动顺序、Unix socket 探测、supervisor 和异步 warmup 的参考来源。
+`ready?scope=control` 仅依赖 identity/config/store 初始化，空 registry 或 Codex 不可用时仍可就绪。`ready?scope=execution`（也是默认 `/ready` scope）额外验证 adapter 握手、runtime 和隔离；下文 Codex/整体 ready 规则只针对 execution scope。宿主 delegation controller 检查 Docker 执行路径，不要求无关的 host Codex 进程。Control ready 后即可读取包含 unavailable feature 的 capabilities，不以 execution ready 为前提。
 
 目标是让最小服务入口尽快可用，同时不把非关键能力误判为 ready，也不让可异步初始化的能力阻塞整体服务。
 

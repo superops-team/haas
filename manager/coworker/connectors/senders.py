@@ -49,15 +49,11 @@ def _send_telegram(
     except Exception as exc:  # network / decode
         return SendResult(False, error=str(exc))
     if data.get("ok"):
-        return SendResult(
-            True, message_id=str(data.get("result", {}).get("message_id"))
-        )
+        return SendResult(True, message_id=str(data.get("result", {}).get("message_id")))
     return SendResult(False, error=data.get("description") or "telegram send failed")
 
 
-def _send_slack(
-    token: str, chat_id: str, text: str, thread_id: Optional[str] = None
-) -> SendResult:
+def _send_slack(token: str, chat_id: str, text: str, thread_id: Optional[str] = None) -> SendResult:
     import httpx
 
     from .slack_addr import split
@@ -179,9 +175,7 @@ def _send_slack_file(
         )
         got = resp.json()
         if not got.get("ok"):
-            return SendResult(
-                False, error=got.get("error") or "slack upload-url failed"
-            )
+            return SendResult(False, error=got.get("error") or "slack upload-url failed")
         up = httpx.post(
             got["upload_url"],
             files={"file": (filename, data)},

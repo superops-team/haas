@@ -37,9 +37,7 @@ def _profile_connected(descriptor, profile: dict[str, Any]) -> bool:
     # flag is what marks it connected, so don't require the manual fields.
     if profile.get("mode") == "relay":
         return True
-    required = [
-        f.key for f in descriptor.fields if f.required and f.key != "allowed_users"
-    ]
+    required = [f.key for f in descriptor.fields if f.required and f.key != "allowed_users"]
     return bool(profile) and all(bool(profile.get(k)) for k in required)
 
 
@@ -202,9 +200,7 @@ def _slack_workspaces(secrets: SecretStore) -> list[dict[str, Any]]:
             "installer_user_id": profile.get("slack_user_id") or "",
             "installer_name": profile.get("sender_name") or "",
         }
-        for team_id, profile in sorted(
-            _slack_team_profiles(secrets), key=lambda t: t[0]
-        )
+        for team_id, profile in sorted(_slack_team_profiles(secrets), key=lambda t: t[0])
     ]
 
 
@@ -343,13 +339,9 @@ def connect_connector(
     if missing:
         return {"ok": False, "error": "missing: " + ", ".join(missing)}
 
-    allowed = sorted(
-        {u.strip() for u in raw.get("allowed_users", "").split(",") if u.strip()}
-    )
+    allowed = sorted({u.strip() for u in raw.get("allowed_users", "").split(",") if u.strip()})
     if not allowed and existing.get("allowed_users"):
-        allowed = list(
-            existing["allowed_users"]
-        )  # don't wipe the live allow-list on reconnect
+        allowed = list(existing["allowed_users"])  # don't wipe the live allow-list on reconnect
     token_creds = {k: v for k, v in raw.items() if k != "allowed_users" and v}
 
     identity = None
@@ -359,9 +351,7 @@ def connect_connector(
             return {"ok": False, "error": result.error or "validation failed"}
         identity = result.identity
 
-    profile_type = (
-        "oauth" if d.auth == "oauth" else "none" if d.auth == "none" else "token"
-    )
+    profile_type = "oauth" if d.auth == "oauth" else "none" if d.auth == "none" else "token"
     profile: dict[str, Any] = {"type": profile_type, "enabled": True, **token_creds}
     if any(f.key == "allowed_users" for f in d.fields):
         profile["allowed_users"] = allowed
@@ -418,9 +408,7 @@ def managed_connect_connector(
     return {"ok": True, "account": profile.get("account") or None}
 
 
-def managed_connect_slack_install(
-    secrets: SecretStore, form: dict[str, Any]
-) -> dict[str, Any]:
+def managed_connect_slack_install(secrets: SecretStore, form: dict[str, Any]) -> dict[str, Any]:
     """Store a managed Slack install (relay mode) from the broker's form-POST.
 
     Slack managed install is multi-workspace and inbound-via-relay, so unlike a
@@ -487,30 +475,23 @@ def disconnect_connector(secrets: SecretStore, name: str) -> dict[str, Any]:
         from . import gmail_accounts
 
         for email, _profile in gmail_accounts.list_accounts(secrets):
-            dropped_accounts = (
-                secrets.delete(gmail_accounts.PREFIX + email) or dropped_accounts
-            )
+            dropped_accounts = secrets.delete(gmail_accounts.PREFIX + email) or dropped_accounts
     if name == "google_calendar":
         from . import gcal_accounts
 
         for email, _profile in gcal_accounts.list_accounts(secrets):
-            dropped_accounts = (
-                secrets.delete(gcal_accounts.PREFIX + email) or dropped_accounts
-            )
+            dropped_accounts = secrets.delete(gcal_accounts.PREFIX + email) or dropped_accounts
     if name == "hubspot":
         from . import hubspot_portals
 
         for hub_id, _profile in hubspot_portals.list_portals(secrets):
-            dropped_accounts = (
-                secrets.delete(hubspot_portals.PREFIX + hub_id) or dropped_accounts
-            )
+            dropped_accounts = secrets.delete(hubspot_portals.PREFIX + hub_id) or dropped_accounts
     if name == "github":
         from . import github_installs
 
         for installation_id, _profile in github_installs.list_installs(secrets):
             dropped_accounts = (
-                secrets.delete(github_installs.PREFIX + installation_id)
-                or dropped_accounts
+                secrets.delete(github_installs.PREFIX + installation_id) or dropped_accounts
             )
     profile = secrets.get(f"{name}:default") or {}
     if profile.get("mode") == "mcp":

@@ -76,8 +76,7 @@ def build_callables(
         # try to derive a schema from this `**kwargs` wrapper): the registry reads both attrs.
         _invoke.__name__ = name
         _invoke.__doc__ = (
-            getattr(mcp_tool, "description", None)
-            or f"MCP tool {remote} from {server.name}"
+            getattr(mcp_tool, "description", None) or f"MCP tool {remote} from {server.name}"
         )
         _invoke.__aisuite_tool_metadata__ = ai.ToolMetadata(
             name=name,

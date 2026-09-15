@@ -91,9 +91,7 @@ def _browser_page(
         color = _BRAND_COLORS.get(connector, "#3670b2")
         initial = _html.escape((connector[:1] or "?").upper())
         badge = f'<span class="mini" style="background:{color}">{initial}</span>'
-    icon = (
-        f'<div class="ico ok">✓{badge}</div>' if ok else '<div class="ico bad">✕</div>'
-    )
+    icon = f'<div class="ico ok">✓{badge}</div>' if ok else '<div class="ico bad">✕</div>'
     err = f'<div class="err">{_html.escape(error)}</div>' if error else ""
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
@@ -146,8 +144,7 @@ def _connector_title(name: str) -> str:
 
 
 _CONNECT_FAILED_DETAIL = (
-    "Something went wrong finishing this connection. "
-    "Close this tab and try again from OpenHarness."
+    "Something went wrong finishing this connection. Close this tab and try again from OpenHarness."
 )
 
 _CLOUD_DISABLED_ERROR = (
@@ -163,6 +160,8 @@ from ..attachments import (
 )
 from ..engine import ApprovalOutcome
 from ..inbox import VIS_INBOX, VIS_INLINE
+from ..delegation import HaasDelegationError
+from ..haas import HaasClientError
 from ..permissions import Mode
 from ..providers import AssistantTurn
 from .. import toolchain
@@ -176,9 +175,7 @@ def create_app(manager: SessionManager) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
-            live = (
-                await manager.start_gateway()
-            )  # start messaging listeners (if configured)
+            live = await manager.start_gateway()  # start messaging listeners (if configured)
             if live:
                 print(f"[coworker] messaging gateway live: {', '.join(live)}")
         except Exception:  # never let a bad connector stop the server
@@ -199,11 +196,7 @@ def create_app(manager: SessionManager) -> FastAPI:
 
     def _request_authenticated(request: Request) -> bool:
         provided = request.headers.get("x-openworker-token", "")
-        return bool(
-            api_token
-            and provided
-            and secrets.compare_digest(provided, api_token)
-        )
+        return bool(api_token and provided and secrets.compare_digest(provided, api_token))
 
     def _websocket_authenticated(ws: WebSocket) -> bool:
         if not api_token:
@@ -427,12 +420,8 @@ def create_app(manager: SessionManager) -> FastAPI:
         if body.get("clear"):
             manager.session_skills.clear(session_id, skill)
         else:
-            manager.session_skills.set(
-                session_id, skill, bool(body.get("enabled", False))
-            )
-        return manager.session_skills_view(
-            session_id, str(body.get("workspace", "")) or None
-        )
+            manager.session_skills.set(session_id, skill, bool(body.get("enabled", False)))
+        return manager.session_skills_view(session_id, str(body.get("workspace", "")) or None)
 
     @app.get("/v1/sessions/{session_id}/connections")
     def session_connections(session_id: str, persona: str = "") -> dict[str, Any]:
@@ -452,9 +441,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         if body.get("clear"):
             manager.session_connections.clear(session_id, connector)
         else:
-            manager.session_connections.set(
-                session_id, connector, bool(body.get("enabled", False))
-            )
+            manager.session_connections.set(session_id, connector, bool(body.get("enabled", False)))
         persona = str(body.get("persona", "")) or None
         return {
             "ok": True,
@@ -478,9 +465,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                     data = base64.b64decode(str(body["zip_b64"]), validate=True)
                 except (ValueError, binascii.Error):
                     return {"ok": False, "error": "Invalid archive encoding."}
-                summaries = reg.install_from_zip(
-                    data, str(body.get("filename", ""))
-                )
+                summaries = reg.install_from_zip(data, str(body.get("filename", "")))
             elif body.get("gallery_slug"):
                 return {
                     "ok": False,
@@ -500,9 +485,7 @@ def create_app(manager: SessionManager) -> FastAPI:
     def export_persona(persona_id: str, body: dict) -> dict[str, Any]:
         # Sharing v1 (OPE-7): zip the persona's bundle into the chosen folder. The zip
         # is the import format — send it to a teammate, they import it from the picker.
-        return manager.personas.export_persona(
-            persona_id, str((body or {}).get("dir", ""))
-        )
+        return manager.personas.export_persona(persona_id, str((body or {}).get("dir", "")))
 
     @app.get("/v1/cloud/gallery/{slug}")
     def cloud_gallery_detail(slug: str) -> dict[str, Any]:
@@ -531,9 +514,9 @@ def create_app(manager: SessionManager) -> FastAPI:
             if "enabled" in body:
                 # Disable archives the persona's sessions atomically (server-side, one
                 # request) so any client gets the same semantic. See set_persona_enabled.
-                archived = manager.set_persona_enabled(
-                    persona_id, bool(body["enabled"])
-                )["archived_sessions"]
+                archived = manager.set_persona_enabled(persona_id, bool(body["enabled"]))[
+                    "archived_sessions"
+                ]
             if "surfaced" in body:
                 reg.set_surfaced(persona_id, bool(body["surfaced"]))
             if body.get("default"):
@@ -585,9 +568,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         # Dedicated §5/§8 route; delegates to the same manager toggle as POST /v1/personas/{id}
         # (so disable archives the persona's sessions here too).
         try:
-            manager.set_persona_enabled(
-                persona_id, bool((body or {}).get("enabled", True))
-            )
+            manager.set_persona_enabled(persona_id, bool((body or {}).get("enabled", True)))
         except KeyError:
             return {"ok": False, "error": f"unknown persona: {persona_id}"}
         return {"ok": True, "personas": manager.personas.list_all()}
@@ -650,9 +631,7 @@ def create_app(manager: SessionManager) -> FastAPI:
 
     @app.post("/v1/workspaces/open")
     def open_workspace(body: dict) -> dict[str, Any]:
-        return manager.open_workspace(
-            body.get("path", ""), create=bool(body.get("create"))
-        )
+        return manager.open_workspace(body.get("path", ""), create=bool(body.get("create")))
 
     @app.get("/v1/workspaces/trusted")
     def trusted_workspaces() -> dict[str, Any]:
@@ -693,6 +672,26 @@ def create_app(manager: SessionManager) -> FastAPI:
     @app.get("/v1/sessions/{session_id}/messages")
     def session_messages(session_id: str) -> dict[str, Any]:
         return {"messages": manager.session_messages(session_id)}
+
+    @app.get("/v1/sessions/{session_id}/execution-evidence")
+    async def session_execution_evidence(
+        session_id: str, invocation_id: str, tool_call_id: str, evidence_ref: str
+    ) -> JSONResponse:
+        try:
+            evidence = await manager.get_haas_execution_evidence(
+                session_id, invocation_id, tool_call_id, evidence_ref
+            )
+        except (HaasClientError, HaasDelegationError, ValueError) as exc:
+            status = getattr(exc, "status_code", None) or 502
+            return JSONResponse(
+                {"error": str(exc), "code": getattr(exc, "code", "evidence_unavailable")},
+                status_code=status,
+                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+            )
+        return JSONResponse(
+            {"data": evidence},
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
 
     @app.patch("/v1/sessions/{session_id}")
     def session_patch(session_id: str, body: dict) -> dict[str, Any]:
@@ -808,8 +807,10 @@ def create_app(manager: SessionManager) -> FastAPI:
         actor = _board_actor(request)
         if actor is None:
             return JSONResponse(
-                {"error": "board token required (Authorization: Bearer …) — mint"
-                          " one with `ocw board token` on the serving machine"},
+                {
+                    "error": "board token required (Authorization: Bearer …) — mint"
+                    " one with `ocw board token` on the serving machine"
+                },
                 status_code=401,
             )
         try:
@@ -823,18 +824,14 @@ def create_app(manager: SessionManager) -> FastAPI:
 
     @app.get("/v1/board/whoami")
     def board_whoami(request: Request):
-        return _board(
-            request, lambda actor: {"actor": actor.id, "role": actor.role.value}
-        )
+        return _board(request, lambda actor: {"actor": actor.id, "role": actor.role.value})
 
     @app.get("/v1/board/spaces")
     def board_spaces(request: Request):
         return _board(request, lambda actor: {"spaces": manager.team_store.spaces()})
 
     @app.get("/v1/board/items")
-    def board_list_items(
-        request: Request, space: str, state: str = "", assignee: str = ""
-    ):
+    def board_list_items(request: Request, space: str, state: str = "", assignee: str = ""):
         return _board(
             request,
             lambda actor: {
@@ -862,9 +859,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                 title=str(body.get("title", "")),
                 criteria=str(body.get("criteria", "")),
                 description=str(body.get("description", "")),
-                parent=(
-                    int(body["parent"]) if body.get("parent") is not None else None
-                ),
+                parent=(int(body["parent"]) if body.get("parent") is not None else None),
                 case=str(body.get("case") or "") or None,
             )
             manager.kick_team_tick()  # a new filing is lead-subscription news
@@ -956,18 +951,12 @@ def create_app(manager: SessionManager) -> FastAPI:
             # Cheap pre-decode bound: base64 is ~4/3 of the payload, so anything
             # multiples over the cap is refused before allocating the decode.
             if len(raw) > 15 * 1024 * 1024:
-                return JSONResponse(
-                    {"error": "attachment exceeds 10MB"}, status_code=400
-                )
+                return JSONResponse({"error": "attachment exceeds 10MB"}, status_code=400)
             try:
                 data = base64.b64decode(raw, validate=True)
             except (binascii.Error, ValueError):
-                return JSONResponse(
-                    {"error": "data_b64 is not valid base64"}, status_code=400
-                )
-            ref = manager.attachment_store.put(
-                data, str(body.get("filename", ""))
-            )
+                return JSONResponse({"error": "data_b64 is not valid base64"}, status_code=400)
+            ref = manager.attachment_store.put(data, str(body.get("filename", "")))
             filename = str(body.get("filename", ""))
             event = manager.team_store.attach_ref(
                 str(body.get("space", "")),
@@ -1015,9 +1004,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         return _board(
             request,
             lambda actor: {
-                "events": manager.team_store.feed_for(
-                    space, actor.id, limit=int(limit)
-                )
+                "events": manager.team_store.feed_for(space, actor.id, limit=int(limit))
             },
         )
 
@@ -1035,9 +1022,7 @@ def create_app(manager: SessionManager) -> FastAPI:
 
     @app.get("/v1/board/journal/cases")
     def board_journal_cases(request: Request):
-        return _board(
-            request, lambda actor: {"cases": manager.journal_store.overview(actor)}
-        )
+        return _board(request, lambda actor: {"cases": manager.journal_store.overview(actor)})
 
     @app.get("/v1/board/journal")
     def board_journal_read(
@@ -1090,9 +1075,7 @@ def create_app(manager: SessionManager) -> FastAPI:
     @app.post("/v1/memory")
     def add_memory(body: dict) -> dict[str, Any]:
         body = body or {}
-        return manager.add_memory(
-            str(body.get("content", "")), str(body.get("scope", "workspace"))
-        )
+        return manager.add_memory(str(body.get("content", "")), str(body.get("scope", "workspace")))
 
     # Declared before the /{item_id} routes so "settings" can never be parsed as an id.
     @app.get("/v1/memory/settings")
@@ -1143,9 +1126,7 @@ def create_app(manager: SessionManager) -> FastAPI:
     @app.post("/v1/chat/completions")
     def chat_completions(body: dict) -> dict[str, Any]:
         model = body.get("model", manager.model)
-        turn = manager.provider_complete(
-            model, body.get("messages", []), body.get("tools")
-        )
+        turn = manager.provider_complete(model, body.get("messages", []), body.get("tools"))
         return _openai_response(model, turn)
 
     # -- MCP servers ------------------------------------------------------------
@@ -1207,9 +1188,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         return await manager.signout_mcp(name)
 
     @app.get("/mcp/oauth/callback")
-    async def mcp_oauth_callback(
-        code: str = "", state: str = "", error: str = ""
-    ) -> Any:
+    async def mcp_oauth_callback(code: str = "", state: str = "", error: str = "") -> Any:
         # Loopback landing for the MCP OAuth browser flow (mcp/oauth.py). Browser-facing:
         # returns the same styled page as the managed-connector callbacks.
         from fastapi.responses import HTMLResponse
@@ -1271,9 +1250,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         acknowledged = bool(isinstance(body, dict) and body.get("acknowledge_risk"))
         # token validation does a blocking HTTP call → keep it off the event loop
         result = await asyncio.to_thread(
-            lambda: manager.connect_connector(
-                name, fields or {}, acknowledged=acknowledged
-            )
+            lambda: manager.connect_connector(name, fields or {}, acknowledged=acknowledged)
         )
         if result.get("ok"):
             await _refresh_listeners_if_two_way(name)
@@ -1449,9 +1426,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         return hubspot_portals.set_hidden_fields(manager.secrets, fields)
 
     @app.post("/v1/connectors/{name}/unauthorized/{item_id}")
-    async def connector_unauthorized_resolve(
-        name: str, item_id: str, body: dict
-    ) -> dict[str, Any]:
+    async def connector_unauthorized_resolve(name: str, item_id: str, body: dict) -> dict[str, Any]:
         # Resolve a parked unauthorized message: dismiss / allow / allow_deliver (§19).
         action = str((body or {}).get("action", "")).strip()
         return await manager.resolve_unauthorized(name, item_id, action)
@@ -1506,9 +1481,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         )
 
     @app.post("/v1/connectors/{name}/connect-managed")
-    async def connector_connect_managed(
-        name: str, body: Optional[dict] = None
-    ) -> dict[str, Any]:
+    async def connector_connect_managed(name: str, body: Optional[dict] = None) -> dict[str, Any]:
         """Cloud-managed one-click connector OAuth is disabled in OpenHarness."""
         return {
             "ok": False,
@@ -1549,9 +1522,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         )
 
     @app.get("/v1/connectors/slack/workspaces/{team_id}/directory")
-    async def slack_directory(
-        team_id: str, q: str = "", limit: int = 25
-    ) -> dict[str, Any]:
+    async def slack_directory(team_id: str, q: str = "", limit: int = 25) -> dict[str, Any]:
         """Workspace member roster for the people picker (team_id "default" =
         the manual Socket-Mode workspace). Cached locally; never leaves this machine."""
         from ..connectors import slack_directory as roster
@@ -1561,9 +1532,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         )
 
     @app.get("/v1/connectors/slack/workspaces/{team_id}/channels")
-    async def slack_channels(
-        team_id: str, q: str = "", limit: int = 25
-    ) -> dict[str, Any]:
+    async def slack_channels(team_id: str, q: str = "", limit: int = 25) -> dict[str, Any]:
         """Channel roster for the channel typeahead: all public channels, private
         ones only where the bot is a member (Slack API constraint)."""
         from ..connectors import slack_directory as roster
@@ -1588,9 +1557,7 @@ def create_app(manager: SessionManager) -> FastAPI:
 
     @app.post("/v1/connectors/slack/approval-owners/remove")
     def slack_approval_owner_remove(body: dict) -> dict[str, Any]:
-        return manager.set_slack_approval_owner(
-            str(body.get("user_id", "")), add=False
-        )
+        return manager.set_slack_approval_owner(str(body.get("user_id", "")), add=False)
 
     # -- audit / browser observability ------------------------------------------
     @app.get("/v1/audit")
@@ -1650,9 +1617,7 @@ def create_app(manager: SessionManager) -> FastAPI:
     async def providers_verify(body: dict) -> dict[str, Any]:
         # Live read-only credential check (sync httpx) — run off the event loop.
         name = (body or {}).get("name", "") or "openai"
-        return await asyncio.to_thread(
-            manager.verify_provider, name, (body or {}).get("fields")
-        )
+        return await asyncio.to_thread(manager.verify_provider, name, (body or {}).get("fields"))
 
     @app.post("/v1/providers/openai-codex/signin")
     async def codex_signin() -> dict[str, Any]:
@@ -1865,11 +1830,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         # Unattended → the cross-session Inbox; attended → inline in this session only. The agent
         # stays blocked until the item is resolved (live WS response, REST, or a bound channel).
         def _visibility() -> str:
-            return (
-                VIS_INBOX
-                if manager.unattended.is_unattended(session_id)
-                else VIS_INLINE
-            )
+            return VIS_INBOX if manager.unattended.is_unattended(session_id) else VIS_INLINE
 
         async def _mirror(item) -> None:
             # Unattended items mirror to a bound channel as buttons (see mirror_inbox_item).
@@ -1894,12 +1855,8 @@ def create_app(manager: SessionManager) -> FastAPI:
                 data=manager.approval_prompt_data(session_id, _request),
                 tool_call_id=getattr(_request, "tool_call_id", None),
             )
-            if (
-                item.state == "pending"
-            ):  # freshly raised (not a durable-resume re-raise)
-                manager.persist_session(
-                    session_id
-                )  # the pending tool call is now on disk
+            if item.state == "pending":  # freshly raised (not a durable-resume re-raise)
+                manager.persist_session(session_id)  # the pending tool call is now on disk
                 if item.visibility == VIS_INBOX:
                     await _mirror(item)
             resolution = await manager.inbox.wait(item.id)
@@ -2021,9 +1978,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                 manager.persist_session(session_id)
                 if item.visibility == VIS_INBOX:
                     await _mirror(item)
-            resp = _parse_json(
-                await manager.inbox.wait(item.id)
-            )  # {granted, path, writable}
+            resp = _parse_json(await manager.inbox.wait(item.id))  # {granted, path, writable}
             if not resp.get("granted"):
                 return {"granted": False, "reason": "the user declined the request"}
             path = (resp.get("path") or args.get("path") or "").strip()
@@ -2033,9 +1988,7 @@ def create_app(manager: SessionManager) -> FastAPI:
             if bool(args.get("primary", False)):
                 # Root promotion (workspace-scratch-design.md §5) — the shell cd inside
                 # is blocking, keep it off the event loop.
-                promo = await asyncio.to_thread(
-                    manager.promote_workspace, session_id, path
-                )
+                promo = await asyncio.to_thread(manager.promote_workspace, session_id, path)
                 if promo.get("ok"):
                     return {
                         "granted": True,
@@ -2060,8 +2013,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                     "path": path,
                     "writable": writable,
                     "primary": False,
-                    "note": promo.get("error", "")
-                    + " — granted as an additional folder instead",
+                    "note": promo.get("error", "") + " — granted as an additional folder instead",
                 }
             res = manager.add_root(session_id, path, writable)
             if not res.get("ok"):
@@ -2074,8 +2026,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                     r
                     for r in res.get("roots", [])
                     if r.get("path")
-                    and Path(r["path"]).expanduser().resolve()
-                    == Path(path).expanduser().resolve()
+                    and Path(r["path"]).expanduser().resolve() == Path(path).expanduser().resolve()
                 ),
                 None,
             )
@@ -2099,9 +2050,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                 manager.persist_session(session_id)
                 if item.visibility == VIS_INBOX:
                     await _mirror(item)
-            resp = _parse_json(
-                await manager.inbox.wait(item.id)
-            )  # {approved, mode, feedback}
+            resp = _parse_json(await manager.inbox.wait(item.id))  # {approved, mode, feedback}
             if not resp.get("approved"):
                 return {
                     "approved": False,
@@ -2143,9 +2092,7 @@ def create_app(manager: SessionManager) -> FastAPI:
             # The gate checkbox is the USER's call: an explicit enable_chat in the
             # response overrides whatever the lead proposed.
             enable_chat = bool(
-                resp["enable_chat"]
-                if "enable_chat" in resp
-                else _args.get("enable_chat", False)
+                resp["enable_chat"] if "enable_chat" in resp else _args.get("enable_chat", False)
             )
             return manager.create_team(
                 session_id,
@@ -2180,9 +2127,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                     "approved": False,
                     "feedback": resp.get("feedback") or "the user declined the split",
                 }
-            return manager.board_create_items(
-                session_id, [i for i in items if isinstance(i, dict)]
-            )
+            return manager.board_create_items(session_id, [i for i in items if isinstance(i, dict)])
 
         async def _apply_model(model: Optional[str]) -> None:
             # Mid-session rebind is allowed (roadmap item 3, supersedes the 2026-07-04
@@ -2210,9 +2155,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                 manager.inbox.resolve(pend[0].id, resolution)
 
         workspace = ws.query_params.get("workspace")
-        mcp_tools = await manager.prepare_mcp_tools(
-            session_id, workspace=workspace, agent=agent
-        )
+        mcp_tools = await manager.prepare_mcp_tools(session_id, workspace=workspace, agent=agent)
         engine = manager.get_engine(
             session_id,
             workspace=workspace,
@@ -2230,9 +2173,7 @@ def create_app(manager: SessionManager) -> FastAPI:
             await ws.send_json(
                 {
                     "type": "error",
-                    "data": {
-                        "error": "no valid workspace — choose a project folder first"
-                    },
+                    "data": {"error": "no valid workspace — choose a project folder first"},
                 }
             )
             await ws.close()
@@ -2253,6 +2194,11 @@ def create_app(manager: SessionManager) -> FastAPI:
         # Auto-compaction failure prompt (OPE-27): only an ATTENDED session may be asked
         # Retry/Trim — unattended runs auto-trim (the policy in engine._compact_now).
         engine.is_attended = lambda: _visibility() == VIS_INLINE
+        # Reconcile durable HaaS terminal state before publishing the reconnect
+        # snapshot. Otherwise a failed invocation can flash or remain `running`
+        # for this socket even though reconciliation fixes the database moments
+        # after the stale `ready` frame was sent.
+        pending_haas_events = await manager.pending_haas_interactions(session_id)
         await ws.send_json(
             {
                 "type": "ready",
@@ -2262,9 +2208,14 @@ def create_app(manager: SessionManager) -> FastAPI:
                     # drop). Without server truth the GUI never learns a turn is live —
                     # no Stop button, no waiting row (owner catch 2026-08-24).
                     "running": manager.is_running(session_id),
+                    "execution_control": manager.haas_control_state(session_id),
                     "agent": getattr(engine, "agent_name", "code"),
                     "model": engine.model,
                     "mode": engine.permissions.mode.value,
+                    "haas_interaction_supported": await manager.haas_interaction_supported(
+                        session_id, workspace
+                    ),
+                    "haas_task_outcome": manager.haas_task_outcome(session_id),
                     "workspace": (
                         str(getattr(engine, "executor").cwd)
                         if getattr(engine, "executor", None)
@@ -2283,6 +2234,12 @@ def create_app(manager: SessionManager) -> FastAPI:
                 },
             }
         )
+        for replay_event in await manager.replay_haas_process_events(session_id):
+            await ws.send_json(
+                {"type": replay_event.type.value, "data": replay_event.data}
+            )
+        for pending_event in pending_haas_events:
+            await ws.send_json({"type": pending_event.type.value, "data": pending_event.data})
 
         # Checkpoint events: persist mid-turn so a crash/quit can't eat the conversation.
         # turn_start = the user message just landed (a brand-new session gets its row here,
@@ -2300,6 +2257,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         async def run_turn(content, *, retry: bool = False, display=None) -> None:
             # The receive loop atomically claims this session before scheduling the task.
             # Keeping the claim outside prevents two back-to-back frames from both starting.
+            haas_turn_started = False
             try:
                 events = manager.run_turn_events(
                     session_id,
@@ -2316,6 +2274,18 @@ def create_app(manager: SessionManager) -> FastAPI:
                     await manager.broadcast_session(
                         session_id, {"type": event.type.value, "data": event.data}
                     )
+                    if event.type.value == "turn_start" and event.data.get("delegated"):
+                        haas_turn_started = True
+                        # Acceptance and capability discovery are now durable. Publish
+                        # them before the first output so a fresh chat exposes Pause
+                        # without requiring a reconnect.
+                        await manager.broadcast_session(
+                            session_id,
+                            {
+                                "type": "execution_control",
+                                "data": manager.haas_control_state(session_id),
+                            },
+                        )
                     if event.type.value in _CHECKPOINTS:
                         manager.save(session_id, engine)
                     if event.type.value == "turn_start" and not event.data.get("delegated"):
@@ -2325,9 +2295,51 @@ def create_app(manager: SessionManager) -> FastAPI:
             finally:
                 manager.mark_idle(session_id)
                 manager.save(session_id, engine)
-                await manager.broadcast_session(
-                    session_id, {"type": "turn_done", "data": {}}
+                terminal_control = manager.haas_control_state(session_id)
+                # Pause already publishes its authoritative `paused` readback in
+                # the control request path. Other terminal paths (notably Stop)
+                # need this final projection to clear an optimistic transition.
+                if haas_turn_started and terminal_control.get("controlState") != "paused":
+                    await manager.broadcast_session(
+                        session_id,
+                        {"type": "execution_control", "data": terminal_control},
+                    )
+                await manager.broadcast_session(session_id, {"type": "turn_done", "data": {}})
+
+        async def continue_turn(additional_instruction: str | None = None) -> None:
+            try:
+                events = manager.continue_haas_turn_events(
+                    session_id,
+                    engine,
+                    additional_instruction=additional_instruction,
                 )
+                async for event in events:
+                    await manager.broadcast_session(
+                        session_id, {"type": event.type.value, "data": event.data}
+                    )
+                    if event.type.value == "turn_start":
+                        await manager.broadcast_session(
+                            session_id,
+                            {
+                                "type": "execution_control",
+                                "data": manager.haas_control_state(session_id),
+                            },
+                        )
+                    if event.type.value in _CHECKPOINTS:
+                        manager.save(session_id, engine)
+            except (HaasClientError, HaasDelegationError) as exc:
+                await reject_input(f"Could not continue HaaS execution: {exc}")
+            finally:
+                manager.mark_idle(session_id)
+                manager.save(session_id, engine)
+                await manager.broadcast_session(
+                    session_id,
+                    {
+                        "type": "execution_control",
+                        "data": manager.haas_control_state(session_id),
+                    },
+                )
+                await manager.broadcast_session(session_id, {"type": "turn_done", "data": {}})
 
         # This socket is now a live view of the session; background turns (channel delivery,
         # self-wake, durable resume) broadcast here too, not just locally driven run_turns.
@@ -2337,9 +2349,7 @@ def create_app(manager: SessionManager) -> FastAPI:
         ):
             from coworker.permissions import AUTO_APPROVE_NOTICE
 
-            engine._append_notice(
-                "mode_notice", AUTO_APPROVE_NOTICE, title="Auto-approve is on."
-            )
+            engine._append_notice("mode_notice", AUTO_APPROVE_NOTICE, title="Auto-approve is on.")
             manager.save(session_id, engine, touch=False)  # migration ≠ activity
             await ws.send_json(
                 {
@@ -2351,11 +2361,49 @@ def create_app(manager: SessionManager) -> FastAPI:
                 }
             )
         inbound_times: deque[float] = deque()
+        control_tasks: set[asyncio.Task[None]] = set()
 
         async def reject_input(reason: str) -> None:
             # Input validation failures are not provider failures and must not offer "Retry"
             # or flush an in-progress assistant stream in the GUI.
             await ws.send_json({"type": "input_rejected", "data": {"error": reason}})
+
+        def spawn_control(coro) -> None:
+            task = asyncio.create_task(coro)
+            control_tasks.add(task)
+            task.add_done_callback(control_tasks.discard)
+
+        async def pause_execution() -> None:
+            try:
+                await manager.broadcast_session(
+                    session_id,
+                    {
+                        "type": "execution_control",
+                        "data": {
+                            "controlState": "pausing",
+                            "supportsResume": False,
+                            "resumableInvocationId": None,
+                        },
+                    },
+                )
+                paused = await manager.request_pause(session_id)
+                await manager.broadcast_session(
+                    session_id,
+                    {
+                        "type": "execution_control",
+                        "data": paused.get("sessionControl")
+                        or manager.haas_control_state(session_id),
+                    },
+                )
+            except (HaasClientError, HaasDelegationError) as exc:
+                await manager.broadcast_session(
+                    session_id,
+                    {
+                        "type": "execution_control",
+                        "data": manager.haas_control_state(session_id),
+                    },
+                )
+                await reject_input(f"Could not pause HaaS execution: {exc}")
 
         async def claim_turn(*, retry: bool = False, content=None, display=None) -> None:
             if not manager.try_mark_running(session_id):
@@ -2374,10 +2422,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                     continue
 
                 now = asyncio.get_running_loop().time()
-                while (
-                    inbound_times
-                    and now - inbound_times[0] > _WS_RATE_LIMIT_WINDOW_SECONDS
-                ):
+                while inbound_times and now - inbound_times[0] > _WS_RATE_LIMIT_WINDOW_SECONDS:
                     inbound_times.popleft()
                 if len(inbound_times) >= _WS_RATE_LIMIT_COUNT:
                     await reject_input("Too many WebSocket messages; reconnect and try again.")
@@ -2393,7 +2438,18 @@ def create_app(manager: SessionManager) -> FastAPI:
                     await reject_input("Invalid WebSocket message: missing string type.")
                     continue
                 if kind == "approval":
-                    _resolve_pending(message.get("decision", "deny"))
+                    approval_id = message.get("haas_approval_id")
+                    if isinstance(approval_id, str):
+                        try:
+                            await manager.resolve_haas_approval(
+                                session_id,
+                                approval_id,
+                                approved=message.get("decision") not in {"deny", "denied"},
+                            )
+                        except (HaasClientError, HaasDelegationError, ValueError) as exc:
+                            await reject_input(f"Could not resolve HaaS approval: {exc}")
+                    else:
+                        _resolve_pending(message.get("decision", "deny"))
                 elif kind == "directory_response":
                     _resolve_pending(
                         json.dumps(
@@ -2405,9 +2461,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                         )
                     )
                 elif kind == "tool_response":
-                    _resolve_pending(
-                        json.dumps({"approved": bool(message.get("approved"))})
-                    )
+                    _resolve_pending(json.dumps({"approved": bool(message.get("approved"))}))
                 elif kind == "plan_response":
                     _resolve_pending(
                         json.dumps(
@@ -2433,7 +2487,20 @@ def create_app(manager: SessionManager) -> FastAPI:
                         )
                     )
                 elif kind == "question_response":
-                    _resolve_pending(str(message.get("answer", "")))
+                    input_request_id = message.get("haas_input_request_id")
+                    if isinstance(input_request_id, str):
+                        answers = message.get("answers")
+                        if not isinstance(answers, dict):
+                            await reject_input("Invalid HaaS input response.")
+                        else:
+                            try:
+                                await manager.answer_haas_input(
+                                    session_id, input_request_id, answers=answers
+                                )
+                            except (HaasClientError, HaasDelegationError, ValueError) as exc:
+                                await reject_input(f"Could not answer HaaS input: {exc}")
+                    else:
+                        _resolve_pending(str(message.get("answer", "")))
                 elif kind == "allow_anyway":
                     # §8.4: the user clicked "Allow anyway" on a reviewer-denied tool card.
                     # Registers a ONE-SHOT exact-action approval on the engine; the GUI then
@@ -2448,7 +2515,58 @@ def create_app(manager: SessionManager) -> FastAPI:
                     else:
                         engine.approve_action_once(name, arguments or {})
                 elif kind == "interrupt":
-                    engine.request_interrupt()
+                    try:
+                        stop_readback = await manager.request_interrupt(session_id, engine)
+                        # Publish after the acknowledgement even while the old run
+                        # task is still unwinding. A paused Stop can otherwise leave
+                        # the GUI stuck at its optimistic `stopping` state.
+                        if stop_readback is not None or not manager.is_running(session_id):
+                            await manager.broadcast_session(
+                                session_id,
+                                {
+                                    "type": "execution_control",
+                                    "data": manager.haas_control_state(session_id),
+                                },
+                            )
+                    except (HaasClientError, HaasDelegationError) as exc:
+                        await manager.broadcast_session(
+                            session_id,
+                            {
+                                "type": "execution_control",
+                                "data": manager.haas_control_state(session_id),
+                            },
+                        )
+                        await reject_input(f"Could not stop HaaS execution: {exc}")
+                elif kind == "pause":
+                    # Pause waits for HaaS's authoritative interrupted terminal.
+                    # Keep receiving so a subsequent Stop can supersede it.
+                    spawn_control(pause_execution())
+                elif kind == "continue":
+                    paused_control = manager.haas_control_state(session_id)
+                    if not manager.try_mark_running(session_id):
+                        await reject_input(
+                            "This session is already running a turn. Wait for it to finish."
+                        )
+                    else:
+                        instruction = message.get("text")
+                        await manager.broadcast_session(
+                            session_id,
+                            {
+                                "type": "execution_control",
+                                "data": {
+                                    "controlState": "resuming",
+                                    "supportsResume": False,
+                                    "resumableInvocationId": paused_control.get(
+                                        "resumableInvocationId"
+                                    ),
+                                },
+                            },
+                        )
+                        asyncio.create_task(
+                            continue_turn(
+                                instruction if isinstance(instruction, str) and instruction else None
+                            )
+                        )
                 elif kind == "retry":
                     # Re-run after a provider error (engine guards on the error-notice
                     # tail, so a stray frame is a no-op that still ends with turn_done).
@@ -2460,8 +2578,15 @@ def create_app(manager: SessionManager) -> FastAPI:
                         pass
                     else:
                         previous = engine.permissions.mode
-                        engine.permissions.mode = new_mode
                         if previous is not new_mode:
+                            try:
+                                await manager.update_haas_approval_mode(
+                                    session_id, engine, new_mode
+                                )
+                            except (HaasClientError, HaasDelegationError, ValueError) as exc:
+                                await reject_input(str(exc))
+                                continue
+                            engine.permissions.mode = new_mode
                             manager.audit_autonomy_change(
                                 session_id, "mode", previous.value, new_mode.value
                             )
@@ -2476,8 +2601,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                             )
 
                             if new_mode is Mode.AUTO_APPROVE and not any(
-                                m.get("kind") == "mode_notice"
-                                for m in engine.messages
+                                m.get("kind") == "mode_notice" for m in engine.messages
                             ):
                                 engine._append_notice(
                                     "mode_notice",
@@ -2487,15 +2611,15 @@ def create_app(manager: SessionManager) -> FastAPI:
                                 notice_data = {
                                     "title": "Auto-approve is on.",
                                     "text": AUTO_APPROVE_NOTICE,
+                                    "mode": new_mode.value,
                                 }
                             else:
-                                label = MODE_LABELS.get(
-                                    new_mode.value, new_mode.value
-                                )
-                                engine._append_notice(
-                                    "mode_switch", f"{label} is on."
-                                )
-                                notice_data = {"text": f"{label} is on."}
+                                label = MODE_LABELS.get(new_mode.value, new_mode.value)
+                                engine._append_notice("mode_switch", f"{label} is on.")
+                                notice_data = {
+                                    "text": f"{label} is on.",
+                                    "mode": new_mode.value,
+                                }
                             # A mode switch with no accompanying message is bookkeeping,
                             # not activity (owner ruling 2026-08-24): the transcript
                             # records it, Recents doesn't reorder. The next real turn's
@@ -2534,8 +2658,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                         )
                     elif len(attachments) > _MAX_ATTACHMENTS:
                         reject = (
-                            f"Too many attachments ({len(attachments)}; "
-                            f"limit {_MAX_ATTACHMENTS})."
+                            f"Too many attachments ({len(attachments)}; limit {_MAX_ATTACHMENTS})."
                         )
                     elif any(not isinstance(a, dict) for a in attachments):
                         reject = "Invalid attachment: expected an object."
@@ -2569,18 +2692,13 @@ def create_app(manager: SessionManager) -> FastAPI:
                                 data = attachment.get("data_url")
                                 if (
                                     not isinstance(data, str)
-                                    or not data.startswith(
-                                        "data:application/pdf;base64,"
-                                    )
+                                    or not data.startswith("data:application/pdf;base64,")
                                     or len(data) > MAX_PDF_CHARS
                                 ):
                                     reject = "Invalid or oversized PDF attachment."
                             else:
                                 body = attachment.get("text")
-                                if (
-                                    not isinstance(body, str)
-                                    or len(body) > MAX_TEXT_CHARS
-                                ):
+                                if not isinstance(body, str) or len(body) > MAX_TEXT_CHARS:
                                     reject = "Invalid or oversized text attachment."
                             if reject is not None:
                                 break
@@ -2608,9 +2726,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                         skill = skill.strip()
                         menu = manager.effective_skill_names(session_id, workspace)
                         if skill not in menu:
-                            await reject_input(
-                                f"Skill '{skill}' is not available in this session."
-                            )
+                            await reject_input(f"Skill '{skill}' is not available in this session.")
                             continue
                         display = f"/{skill}" + (f" {text}" if text else "")
                         text = (

@@ -160,9 +160,7 @@ def scheduling_tools(
         from croniter import croniter
 
         if not cron and not fire_at:
-            return {
-                "error": "provide a cron (recurring) or a fire_at ISO datetime (one-time)"
-            }
+            return {"error": "provide a cron (recurring) or a fire_at ISO datetime (one-time)"}
         if cron and not croniter.is_valid(cron):
             return {"error": f"invalid cron expression: {cron}"}
         schedule = Schedule(
@@ -200,9 +198,7 @@ def scheduling_tools(
     def list_scheduled_tasks():
         return {"tasks": [t.public() for t in store.list()]}
 
-    def update_scheduled_task(
-        id, enabled=None, instructions=None, cron=None, title=None
-    ):
+    def update_scheduled_task(id, enabled=None, instructions=None, cron=None, title=None):
         from croniter import croniter
 
         task = store.get(id)

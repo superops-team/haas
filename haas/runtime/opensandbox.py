@@ -5,6 +5,7 @@ class constants so they can be corrected after a live OpenSandbox probe
 (spec §12: exact endpoints are verified at implementation time against the
 pinned commit).
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -133,8 +134,7 @@ class OpenSandboxClient:
             # Upstream bodies are an untrusted secret surface: redact and
             # truncate before they reach errors or logs.
             raise OpenSandboxError(
-                f"opensandbox HTTP {resp.status_code}: "
-                f"{safe_upstream_body(resp.text)}"
+                f"opensandbox HTTP {resp.status_code}: {safe_upstream_body(resp.text)}"
             )
         if resp.status_code == 204 or not resp.content:
             return {}

@@ -124,9 +124,7 @@ class CoworkerApp(App):
             user_rules=self._user_rules,
             messages=self._resume_messages,
         )
-        self._write(
-            f"[b]coworker · code[/b]  ·  model {self.model}  ·  mode {self.mode.value}"
-        )
+        self._write(f"[b]coworker · code[/b]  ·  model {self.model}  ·  mode {self.mode.value}")
         self._write(f"workspace: {self.workspace}")
         if self._resume_messages:
             self._write(
@@ -182,16 +180,12 @@ class CoworkerApp(App):
             if data.get("text"):
                 self._write(f"[b green]assistant[/b green]\n{data['text']}")
         elif event.type is EventType.TOOL_PROPOSED:
-            self._write(
-                f"[yellow]→ {data['name']}[/yellow] {_short(data.get('arguments'), 100)}"
-            )
+            self._write(f"[yellow]→ {data['name']}[/yellow] {_short(data.get('arguments'), 100)}")
         elif event.type is EventType.TOOL_FINISHED:
             status = data.get("status")
             tag = "green" if status == "ok" else "red"
             extra = data.get("result_preview") or data.get("reason") or ""
-            self._write(
-                f"  [{tag}]✓ {data['name']} · {status}[/{tag}] {_short(extra, 100)}"
-            )
+            self._write(f"  [{tag}]✓ {data['name']} · {status}[/{tag}] {_short(extra, 100)}")
         elif event.type is EventType.INTERRUPTED:
             self._write("[red]⏹ interrupted[/red]")
         elif event.type is EventType.ERROR:
@@ -213,10 +207,14 @@ class CoworkerApp(App):
         if name in {"/quit", "/exit"}:
             self.exit()
         elif name == "/help":
-            self._write(
-                "commands: /mode plan|interactive|auto · /model <id> · /clear · /quit"
-            )
-        elif name == "/mode" and arg in {"plan", "interactive", "auto", "bypass-approvals", "auto-approve"}:
+            self._write("commands: /mode plan|interactive|auto · /model <id> · /clear · /quit")
+        elif name == "/mode" and arg in {
+            "plan",
+            "interactive",
+            "auto",
+            "bypass-approvals",
+            "auto-approve",
+        }:
             self.mode = Mode(arg)
             if self.engine:
                 self.engine.permissions.mode = self.mode

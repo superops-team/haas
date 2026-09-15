@@ -27,7 +27,7 @@ S2 and S4 can be developed in parallel after S1; S3 depends on S1/S2; S5 depends
 | ST-T2 | Dedicated Codex probe | Implement Unix socket connect plus initialize success plus initialized notification write/flush; bounded timeout and resource cleanup. | Probe returns ready only after handshake completion; failures stay fail-closed; notification does not wait for response. | ST-003, ST-004, ST-005, ST-011 | ST-T1 |
 | ST-T3 | Generation-safe publication | Guard probe completion with active-generation check and atomically publish/revoke readiness. | Stale old-generation result can never write ready=true; socket replacement revokes old readiness. | ST-006, ST-007 | ST-T1, ST-T2 |
 | ST-T4 | Sidecar readiness API | Integrate startup state with `/v1/haas/health`, `/v1/haas/ready`, aliases and structured 503/error behavior. | Health remains available while Codex is unavailable; ready reflects sidecar + Codex + drain state only. | ST-002, ST-003, ST-004, ST-008, ST-012 | ST-T1, ST-T2, ST-T3 |
-| ST-T5 | nginx HaaS entrypoint | Add validated nginx config/upstream for ADK and HaaS paths, SSE settings, forwarded headers and syntax gate. | Nginx is sole external listener, proxies to sidecar, does not fake ready, and no legacy shim is added. | ST-001, ST-008, ST-013 | ST-T4 |
+| ST-T5 | nginx HaaS entrypoint | Add validated nginx config/upstream for ADK and HaaS paths, SSE settings, forwarded headers and syntax gate. | Nginx is sole external listener, proxies only documented public surfaces to sidecar, and does not fake ready. | ST-001, ST-008, ST-013 | ST-T4 |
 | ST-T6 | Async startup registry | Start AIO/Codex/sidecar/nginx without unnecessary serial waits; run optional warmups in cancellable background tasks with capability status. | Slow optional tasks do not block ready; ordinary failure does not revoke ready; execution-safety dependency failure does. | ST-009, ST-010, ST-015 | ST-T4 |
 | ST-T7 | Drain and restart lifecycle | Implement ready revocation before SIGTERM drain, stop accepting work, cancel/settle turns, stop background tasks and re-probe new generation. | Shutdown and restart are bounded, observable and fail closed. | ST-007, ST-012 | ST-T3, ST-T4, ST-T6 |
 | ST-T8 | Security/observability | Add safe startup events/metrics, secretless redaction assertions, loopback checks and phase timing. | No token/raw JSON-RPC/prompt/credential in logs/status/events; required startup phase and ready latency metrics are emitted. | ST-013, ST-015 | ST-T1, ST-T4 |
@@ -37,6 +37,6 @@ S2 and S4 can be developed in parallel after S1; S3 depends on S1/S2; S5 depends
 
 - Every P0/P1 requirement in `README.md` maps to at least one case in `CASES.md`.
 - Every implementation task maps to one or more cases; ST-T9 is the execution task for all cases.
-- No task introduces `/v1/codex-worker/*`, public Codex JSON-RPC, mutable readiness shortcuts, or provider/MCP calls in the critical path.
+- No task introduces undocumented public routes, public Codex JSON-RPC, mutable readiness shortcuts, or provider/MCP calls in the critical path.
 - Any task that changes the ADK/HaaS public schema MUST update the relevant protocol spec and OpenAPI before implementation.
 - Container and real Codex validation remain explicitly gated; default tests stay offline.

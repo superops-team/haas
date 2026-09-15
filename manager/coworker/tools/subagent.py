@@ -120,9 +120,7 @@ def explorer_tools(
             return {"error": f"explorer produced no report (status: {status})"}
         result: dict[str, Any] = {"report": report}
         if status != "completed":
-            result["note"] = (
-                f"explorer stopped early ({status}); the report may be partial"
-            )
+            result["note"] = f"explorer stopped early ({status}); the report may be partial"
         return result
 
     return [

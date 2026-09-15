@@ -248,11 +248,13 @@ class ConversationStore:
                     elif call_id not in trailing_calls:
                         # Synthesise a placeholder so the thread is well-formed.
                         # Skip trailing calls — they're pending, not corrupt.
-                        repaired.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": '{"error": "tool result was lost during an interrupted turn"}',
-                        })
+                        repaired.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": '{"error": "tool result was lost during an interrupted turn"}',
+                            }
+                        )
             elif i in consumed_result_indices:
                 continue  # already moved this tool result up
             else:
@@ -264,9 +266,7 @@ class ConversationStore:
         path = self._file(sid)
         if not path.exists():
             return 0
-        return sum(
-            1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
-        )
+        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
 
     def _append(self, sid: str, messages: list[dict]) -> None:
         with open(self._file(sid), "a", encoding="utf-8") as f:
@@ -400,22 +400,16 @@ class ConversationStore:
             agent=row["agent"] or "code",
             message_count=len(messages),
             updated_at=row["updated_at"],
-            extra_roots=_load_roots(
-                row["extra_roots"] if "extra_roots" in row.keys() else None
-            ),
+            extra_roots=_load_roots(row["extra_roots"] if "extra_roots" in row.keys() else None),
             grants=_load_grants(row["grants"] if "grants" in row.keys() else None),
             # Auto-compaction state (OPE-27) — same defensive parse as grants.
-            compaction=_load_grants(
-                row["compaction"] if "compaction" in row.keys() else None
-            ),
+            compaction=_load_grants(row["compaction"] if "compaction" in row.keys() else None),
             pinned=bool(row["pinned"]),
             archived=bool(row["archived"]),
             origin=row["origin"],
             origin_label=row["origin_label"],
             team=_load_grants(row["team"] if "team" in row.keys() else None),
-            bindings=_load_grants(
-                row["bindings"] if "bindings" in row.keys() else None
-            ),
+            bindings=_load_grants(row["bindings"] if "bindings" in row.keys() else None),
         )
 
     def set_team(self, session_id: str, team: dict) -> None:
@@ -486,9 +480,7 @@ class ConversationStore:
                 origin=r["origin"],
                 origin_label=r["origin_label"],
                 team=_load_grants(r["team"] if "team" in r.keys() else None),
-                bindings=_load_grants(
-                    r["bindings"] if "bindings" in r.keys() else None
-                ),
+                bindings=_load_grants(r["bindings"] if "bindings" in r.keys() else None),
             )
             for r in rows
         ]
@@ -537,9 +529,7 @@ class ConversationStore:
 
     def delete(self, session_id: str) -> bool:
         with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM sessions WHERE session_id = ?", (session_id,)
-            )
+            cur = self._conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
             self._conn.commit()
         path = self._file(session_id)
         if path.exists():

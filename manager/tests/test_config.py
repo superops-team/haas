@@ -11,8 +11,15 @@ def test_defaults_when_no_files(tmp_path):
     assert cfg.mode == "interactive"
     assert cfg.max_iterations == 150
     assert cfg.allowed_commands == []
-    assert cfg.haas_delegation.enabled is False
-    assert cfg.haas_delegation.local_autostart is False
+    assert cfg.haas_delegation.enabled is True
+    assert cfg.haas_delegation.local_autostart is True
+    assert cfg.haas_delegation.network_access is True
+
+
+def test_product_default_prefers_haas_without_test_override(tmp_path, monkeypatch):
+    monkeypatch.delenv("COWORKER_HAAS_BACKEND_PREFERENCE", raising=False)
+    cfg = load_config(global_path=tmp_path / "nope.toml")
+    assert cfg.haas_delegation.backend_preference == "haas"
 
 
 def test_global_and_workspace_override(tmp_path):
@@ -59,14 +66,11 @@ def test_workspace_cannot_grant_its_own_permissions(tmp_path):
 
 def test_trusted_workspace_adds_its_command_allowances_only(tmp_path):
     g = tmp_path / "global.toml"
-    g.write_text(
-        'allowed_commands = ["git status"]\nauto_allow = ["write_file"]\n'
-    )
+    g.write_text('allowed_commands = ["git status"]\nauto_allow = ["write_file"]\n')
     ws = tmp_path / "ws"
     (ws / ".coworker").mkdir(parents=True)
     (ws / ".coworker" / "config.toml").write_text(
-        'allowed_commands = ["pytest", "git status"]\n'
-        'auto_allow = ["run_shell"]\n'
+        'allowed_commands = ["pytest", "git status"]\nauto_allow = ["run_shell"]\n'
     )
 
     cfg = load_config(ws, global_path=g, workspace_trusted=True)
@@ -86,6 +90,7 @@ def test_haas_delegation_config_is_global_only(tmp_path):
         'image = "haas:prod"\n'
         'image_digest = "sha256:abc"\n'
         "local_autostart = true\n"
+        "network_access = true\n"
         'trigger_keywords = ["ship"]\n'
     )
     ws = tmp_path / "ws"
@@ -105,27 +110,32 @@ def test_haas_delegation_config_is_global_only(tmp_path):
     assert cfg.haas_delegation.image == "haas:prod"
     assert cfg.haas_delegation.image_digest == "sha256:abc"
     assert cfg.haas_delegation.local_autostart is True
+    assert cfg.haas_delegation.network_access is True
     assert cfg.haas_delegation.trigger_keywords == ["ship"]
 
 
 def test_haas_delegation_env_switches(tmp_path, monkeypatch):
     monkeypatch.setenv("COWORKER_HAAS_DELEGATION_ENABLED", "1")
     monkeypatch.setenv("COWORKER_HAAS_LOCAL_AUTOSTART", "true")
+    monkeypatch.setenv("COWORKER_HAAS_EXECUTION_MODE", "local_api")
     monkeypatch.setenv("COWORKER_HAAS_BASE_URL", "http://127.0.0.1:58092")
     monkeypatch.setenv("COWORKER_HAAS_API_TOKEN", "env-token")
     monkeypatch.setenv("COWORKER_HAAS_IMAGE", "haas:local")
     monkeypatch.setenv("COWORKER_HAAS_IMAGE_DIGEST", "sha256:abc")
     monkeypatch.setenv("COWORKER_HAAS_ALLOW_UNPINNED_LOCAL_IMAGE", "1")
+    monkeypatch.setenv("COWORKER_HAAS_NETWORK_ACCESS", "1")
     monkeypatch.setenv("COWORKER_HAAS_TRIGGER_KEYWORDS", "ship,delegate")
 
     cfg = load_config(global_path=tmp_path / "missing.toml")
 
     assert cfg.haas_delegation.enabled is True
     assert cfg.haas_delegation.local_autostart is True
+    assert cfg.haas_delegation.execution_mode == "local_api"
     assert cfg.haas_delegation.base_url == "http://127.0.0.1:58092"
     assert cfg.haas_delegation.api_token == "env-token"
     assert cfg.haas_delegation.image_digest == "sha256:abc"
     assert cfg.haas_delegation.allow_unpinned_local_image is True
+    assert cfg.haas_delegation.network_access is True
     assert cfg.haas_delegation.trigger_keywords == ["ship", "delegate"]
 
 

@@ -4,6 +4,7 @@ Verifies the adapter never injects credentials (Authorization, bearer tokens,
 API keys) into the JSON-RPC requests it sends to Codex app-server. The model
 provider credential path (S6 model proxy) is the only allowed secret channel.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,7 +25,8 @@ def _contains_secret(message: dict[str, Any]) -> bool:
 
 
 @pytest.mark.integration
-async def test_adapter_requests_are_secretless() -> None:
+@pytest.mark.parametrize("with_proxy", [False, True])
+async def test_adapter_requests_are_secretless(with_proxy: bool) -> None:
     captured: list[dict[str, Any]] = []
 
     async def handler(ws: Any) -> None:
@@ -82,11 +84,55 @@ async def test_adapter_requests_are_secretless() -> None:
                 turnId="turn_1",
                 appName="chrn_1",
                 input=[{"text": "hi"}],
+                credentials={
+                    "baseUrl": "http://127.0.0.1:18080/v1",
+                    "token": "ephemeral-capability",
+                }
+                if with_proxy
+                else {},
+                model="test-model",
             )
         )
         _ = [event async for event in adapter.stream_events(handle)]
 
+    if with_proxy:
+        params = next(
+            message["params"] for message in captured if message.get("method") == "thread/start"
+        )
+        assert params["config"]["features.multi_agent"] is False
+        assert params["config"]["features.default_mode_request_user_input"] is False
+        assert params["config"]["web_search"] == "disabled"
+        assert params["config"]["model_reasoning_summary"] == "auto"
+        provider = params["config"]["model_providers.haas"]
+        authorization = "Bearer ephemeral-capability"  # haas-secret-ignore
+        assert provider["http_headers"].pop("Authorization") == authorization
+        assert provider["base_url"] == "http://127.0.0.1:18080/v1"
+        assert provider["requires_openai_auth"] is False
     for message in captured:
-        assert not _contains_secret(
-            message
-        ), f"secret leaked in request: {json.dumps(message)[:200]}"
+        assert not _contains_secret(message), (
+            f"secret leaked in request: {json.dumps(message)[:200]}"
+        )
+
+
+def test_human_bridge_enables_default_mode_request_user_input_only_on_request() -> None:
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+
+    def request(invocation_id: str, approval_policy: str) -> StartTurnRequest:
+        return StartTurnRequest(
+            invocationId=invocation_id,
+            sessionId=f"hsess_{invocation_id}",
+            turnId=f"turn_{invocation_id}",
+            appName="chrn_1",
+            input=[],
+            model="test-model",
+            credentials={
+                "baseUrl": "http://127.0.0.1:18080/v1",
+                "token": "opaque",
+            },
+            policy={"approvalPolicy": approval_policy},
+        )
+
+    interactive = adapter._model_overrides(request("inv_1", "on-request"))
+    unattended = adapter._model_overrides(request("inv_2", "never"))
+    assert interactive["config"]["features.default_mode_request_user_input"] is True
+    assert unattended["config"]["features.default_mode_request_user_input"] is False

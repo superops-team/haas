@@ -29,6 +29,13 @@ import {
 // `caution` prefixes the label with a warning triangle; `gated` hides the entry unless the
 // server's auto_approve flag is on. Picker-local extensions of Dropdown's Option.
 type ModeOption = Option & { caution?: boolean; gated?: boolean };
+export type ExecutionState =
+  | "idle"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "resuming"
+  | "stopping";
 
 // "auto" is the legacy wire value for Bypass approvals (server: Mode.BYPASS_APPROVALS).
 // Auto-approve is `gated`: shown only when getSettings().auto_approve is true (the feature
@@ -86,6 +93,8 @@ interface Props {
   // session; after the first turn the fact lives in the topbar subtitle (§22) — no
   // interactive-then-disabled control.
   running: boolean;
+  executionState?: ExecutionState;
+  pauseSupported?: boolean;
   // A proposal gate (team/items) is awaiting the user: the engine is suspended,
   // so `running` is true — but typing must stay possible, because a typed reply
   // IS an answer (decline-with-feedback). Unblocks Send while the gate is up.
@@ -101,6 +110,8 @@ interface Props {
   // effective skill menu. Absent (e.g. tests without sessions) → the popup never opens.
   sessionId?: string;
   onInterrupt: () => void;
+  onPause?: () => void;
+  onContinue?: () => void;
   onModeChange: (mode: string) => void;
   onModelChange: (model: string) => void;
   // When set (Code/Cowork), the Mode menu is shown. The folder/roots + branch controls left the
@@ -133,6 +144,7 @@ interface Props {
   // §8.4 breaker tripped this turn: the mode chip says so quietly until the turn ends
   // or an ask_user answer resets the streak.
   reviewerPaused?: boolean;
+  interactionSupported?: boolean;
 }
 
 export function Composer(props: Props) {
@@ -387,6 +399,10 @@ export function Composer(props: Props) {
     const body = (skill ? text.slice(skill.length + 1) : text).trim();
     if (
       (!body && attachments.length === 0 && !skill) ||
+      props.executionState === "pausing" ||
+      props.executionState === "paused" ||
+      props.executionState === "resuming" ||
+      props.executionState === "stopping" ||
       (props.running && !props.gateOpen) ||
       dictation?.recording ||
       dictationBusy
@@ -680,6 +696,7 @@ export function Composer(props: Props) {
           ) : props.workspace !== undefined ? (
             <ModeMenu
               reviewerPaused={props.reviewerPaused}
+              interactionSupported={props.interactionSupported}
               mode={props.mode}
               onModeChange={props.onModeChange}
               unattended={props.unattended}
@@ -756,11 +773,40 @@ export function Composer(props: Props) {
             </button>
           )}
 
-          {/* send / stop — a pending gate re-opens Send: the reply resolves it */}
-          {props.running && !props.gateOpen ? (
-            <button className="btn danger" onClick={props.onInterrupt}>
-              {t("composer.stop")}
-            </button>
+          {/* send / lifecycle — a pending gate re-opens Send: the reply resolves it */}
+          {(props.executionState === "paused" ||
+            props.executionState === "pausing" ||
+            props.executionState === "resuming" ||
+            props.executionState === "stopping" ||
+            (props.running && !props.gateOpen)) ? (
+            <div className="flex items-center gap-1.5">
+              {props.executionState === "paused" ? (
+                <button className="btn" onClick={props.onContinue}>
+                  {t("composer.continue")}
+                </button>
+              ) : props.executionState === "pausing" ? (
+                <button className="btn" disabled>
+                  {t("composer.pausing")}
+                </button>
+              ) : props.executionState === "resuming" ? (
+                <button className="btn" disabled>
+                  {t("composer.continuing")}
+                </button>
+              ) : props.executionState === "stopping" ? (
+                <button className="btn danger" disabled>
+                  {t("composer.stopping")}
+                </button>
+              ) : props.pauseSupported ? (
+                <button className="btn" onClick={props.onPause}>
+                  {t("composer.pause")}
+                </button>
+              ) : null}
+              {props.executionState !== "stopping" && (
+                <button className="btn danger" onClick={props.onInterrupt}>
+                  {t("composer.stop")}
+                </button>
+              )}
+            </div>
           ) : (
             <button
               className={
@@ -770,7 +816,11 @@ export function Composer(props: Props) {
                   : "bg-paper border border-line text-faint")
               }
               onClick={submit}
-              disabled={!props.connected || !!dictation?.recording || !!dictationBusy}
+              disabled={
+                !props.connected ||
+                !!dictation?.recording ||
+                !!dictationBusy
+              }
               title={needsModel ? t("composer.connect_to_send") : undefined}
               aria-label={t("common.send")}
             >
@@ -942,12 +992,14 @@ function ModeMenu({
   unattended,
   onUnattendedChange,
   reviewerPaused,
+  interactionSupported = true,
 }: {
   mode: string;
   onModeChange: (mode: string) => void;
   unattended?: boolean;
   onUnattendedChange?: (on: boolean) => void;
   reviewerPaused?: boolean;
+  interactionSupported?: boolean;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -1000,6 +1052,12 @@ function ModeMenu({
               <button
                 key={o.value}
                 className="w-full flex flex-col items-start px-2.5 py-1.5 rounded-lg text-left hover:bg-paper"
+                disabled={o.value === "interactive" && !interactionSupported}
+                title={
+                  o.value === "interactive" && !interactionSupported
+                    ? "This HaaS runtime does not support interactive approval"
+                    : undefined
+                }
                 onClick={() => {
                   onModeChange(o.value);
                   setOpen(false);

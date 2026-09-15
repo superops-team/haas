@@ -164,9 +164,7 @@ def _parse_rg(stdout: str, root: Path, n: int) -> dict[str, Any]:
     return {"count": len(matches), "matches": matches}
 
 
-def _py_grep(
-    root: Path, base: Path, pattern: str, glob: Optional[str], n: int
-) -> dict[str, Any]:
+def _py_grep(root: Path, base: Path, pattern: str, glob: Optional[str], n: int) -> dict[str, Any]:
     try:
         rx = re.compile(pattern)
     except re.error as exc:

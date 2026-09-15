@@ -4,6 +4,7 @@ These sit on the model-proxy credential path, which AGENTS.md puts behind a
 95% gate. Usage normalization is billing-relevant: spec 6.3 forbids
 fabricating zero when a provider does not report usage.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -17,9 +18,11 @@ KEY = "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"  # haas-secret-ignore - synthe
 
 class _Provider:
     def __init__(self, **kw):
+        self.providerId = kw.get("providerId", "openai")
         self.name = kw.get("name", "openai-compatible")
         self.baseUrl = kw.get("baseUrl", "https://api.example.com/v1")
         self.wireApi = kw.get("wireApi", "responses")
+        self.apiType = kw.get("apiType", "responses")
         self.credentialRef = kw.get("credentialRef", "secret://t/p")
         self.credentialFingerprint = kw.get("credentialFingerprint", "fp_1")
         self.allowlistRuleId = kw.get("allowlistRuleId", "rule_1")
@@ -98,9 +101,7 @@ def test_usage_camel_case_aliases() -> None:
 
 
 def test_total_is_derived_when_provider_omits_it() -> None:
-    usage = normalize_usage(
-        "openai-compatible", {"usage": {"input_tokens": 8, "output_tokens": 5}}
-    )
+    usage = normalize_usage("openai-compatible", {"usage": {"input_tokens": 8, "output_tokens": 5}})
     assert usage.totalTokens == 13
 
 
@@ -115,8 +116,13 @@ def test_total_is_not_derived_from_a_single_side() -> None:
 def test_usage_reads_dotted_cache_path() -> None:
     usage = normalize_usage(
         "openai-compatible",
-        {"usage": {"input_tokens": 1, "output_tokens": 1,
-                   "input_tokens_details": {"cached_tokens": 9}}},
+        {
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "input_tokens_details": {"cached_tokens": 9},
+            }
+        },
     )
     assert usage.cacheReadTokens == 9
 
@@ -147,9 +153,12 @@ def test_bool_is_not_accepted_as_token_count() -> None:
 
 
 def test_usage_ignores_non_int_values() -> None:
-    assert normalize_usage(
-        "openai-compatible", {"usage": {"input_tokens": "12", "output_tokens": None}}
-    ) is None
+    assert (
+        normalize_usage(
+            "openai-compatible", {"usage": {"input_tokens": "12", "output_tokens": None}}
+        )
+        is None
+    )
 
 
 # --- secret resolution ------------------------------------------------------

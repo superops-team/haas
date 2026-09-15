@@ -1,4 +1,5 @@
 """Tests for ADK message → Codex input format conversion in CodexAdapter."""
+
 from __future__ import annotations
 
 from haas.harnesses.codex_app_server.adapter import _to_codex_input
@@ -20,9 +21,7 @@ def test_adk_message_format() -> None:
 
 def test_adk_message_multiple_parts() -> None:
     """ADK message with multiple text parts."""
-    result = _to_codex_input([
-        {"role": "user", "parts": [{"text": "hello"}, {"text": "world"}]}
-    ])
+    result = _to_codex_input([{"role": "user", "parts": [{"text": "hello"}, {"text": "world"}]}])
     assert result == [
         {"type": "text", "text": "hello"},
         {"type": "text", "text": "world"},
@@ -43,10 +42,12 @@ def test_simplified_format() -> None:
 
 def test_mixed_formats() -> None:
     """A mix of ADK and native formats."""
-    result = _to_codex_input([
-        {"role": "user", "parts": [{"text": "from adk"}]},
-        {"type": "text", "text": "from native"},
-    ])
+    result = _to_codex_input(
+        [
+            {"role": "user", "parts": [{"text": "from adk"}]},
+            {"type": "text", "text": "from native"},
+        ]
+    )
     assert result == [
         {"type": "text", "text": "from adk"},
         {"type": "text", "text": "from native"},
@@ -55,9 +56,9 @@ def test_mixed_formats() -> None:
 
 def test_adk_message_with_non_text_part() -> None:
     """Non-text parts in ADK message are skipped."""
-    result = _to_codex_input([
-        {"role": "user", "parts": [{"text": "hello"}, {"functionCall": {"name": "x"}}]}
-    ])
+    result = _to_codex_input(
+        [{"role": "user", "parts": [{"text": "hello"}, {"functionCall": {"name": "x"}}]}]
+    )
     assert result == [{"type": "text", "text": "hello"}]
 
 

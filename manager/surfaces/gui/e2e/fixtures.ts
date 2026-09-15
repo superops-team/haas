@@ -911,6 +911,50 @@ export async function mockApi(page: import("@playwright/test").Page) {
           }, 120);
           return;
         }
+        if (/inspect haas activity/i.test(msg.text)) {
+          const toolCallId = "haas_call_1";
+          send("reasoning_delta", {
+            text: "Inspecting the package and choosing focused verification.",
+            haasEventId: "evt_reasoning_1",
+          });
+          send("tool_proposed", {
+            toolCallId,
+            toolName: "exec_command",
+            activityKind: "command",
+            safeSummary: "Run the focused test suite",
+            delegated: { backend: "haas", execution_mode: "local_api" },
+            haasEventId: "evt_tool_start_1",
+          });
+          send("tool_output_delta", {
+            toolCallId,
+            activityKind: "command",
+            outputPreview: "24 passed\n1 warning",
+            omittedLineCount: 0,
+            delegated: { backend: "haas", execution_mode: "local_api" },
+            haasEventId: "evt_tool_output_1",
+          });
+          send("tool_finished", {
+            toolCallId,
+            toolName: "exec_command",
+            activityKind: "command",
+            safeSummary: "Run the focused test suite",
+            status: "completed",
+            durationMs: 820,
+            exitCode: 0,
+            outputPreview: "24 passed\n1 warning",
+            omittedLineCount: 0,
+            delegated: { backend: "haas", execution_mode: "local_api" },
+            haasEventId: "evt_tool_done_1",
+          });
+          send("assistant_message", {
+            text: "The release checks passed.",
+            reasoning: "Inspecting the package and choosing focused verification.",
+            delegated: { backend: "haas", execution_mode: "local_api" },
+          });
+          send("turn_end", { status: "completed", taskPhase: "completed" });
+          send("turn_done");
+          return;
+        }
         // Auto-compaction (OPE-27): the server signals `compacting` (the transient
         // spinner label), summarizes for a beat, then emits the marker and the turn
         // continues normally — the divider must render inline.
@@ -945,6 +989,15 @@ export async function mockApi(page: import("@playwright/test").Page) {
               send("turn_done");
             }
           }, 120);
+          return;
+        }
+        // Accepted but initially silent: only turn_start changes the rendered height by adding
+        // WaitingForAgent. This is the real gap between submit and the first harness fact.
+        if (/silent start scroll follow/i.test(msg.text)) {
+          setTimeout(() => {
+            send("assistant_message", { text: "Silent start follow completed." });
+            send("turn_done");
+          }, 2_000);
           return;
         }
         send("assistant_delta", { text: "Echo: " });

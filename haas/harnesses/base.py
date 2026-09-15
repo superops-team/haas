@@ -1,4 +1,5 @@
 """Harness adapter interface and canonical event types (specs/harness-adapter/)."""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -46,6 +47,8 @@ class StartTurnRequest:
     sandbox: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)
     credentials: dict[str, Any] = field(default_factory=dict)
+    principalId: str = ""
+    userId: str = ""
 
 
 @dataclass
@@ -84,7 +87,7 @@ class HarnessEvent:
 
 @dataclass
 class AdapterTurnResult:
-    status: str  # completed | failed | incomplete | cancelled
+    status: str  # completed | failed | incomplete | interrupted | cancelled
     terminalEvent: HarnessEvent | None = None
 
 
@@ -92,7 +95,7 @@ class AdapterTurnResult:
 class HarnessSandboxDecl:
     cwd: str = "/workspace"
     writableRoots: list[str] = field(default_factory=lambda: ["/workspace"])
-    approvalMode: str = "never"
+    approvalMode: str = "on-request"
 
 
 @dataclass

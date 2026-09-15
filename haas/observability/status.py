@@ -1,4 +1,5 @@
 """Runtime status snapshot (specs/observability/README.md §5.1)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

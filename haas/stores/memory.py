@@ -7,15 +7,30 @@ The AdmissionStore window/quota semantics are defined together with the
 Admission Control component (haas-55t.6); this module ships the stores needed
 by session/event-log/idempotency/registry first.
 """
+
 from __future__ import annotations
 
+import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 SessionKey = tuple[str, str, str]  # (appName, userId, sessionId)
 InvocationEventKey = tuple[str, str, str, str]  # (appName, userId, sessionId, invocationId)
 AccountKey = tuple[str | None, str | None]  # (tenantId, workspaceId)
+
+
+def default_session_policy() -> dict[str, Any]:
+    return {
+        "workspace": {
+            "mode": "workspace-write",
+            "root": "/workspace",
+            "writableRoots": ["/workspace"],
+        },
+        "network": {"defaultAction": "allow", "allow": []},
+        "tools": {"disabled": [], "approvalMode": "on-request"},
+    }
 
 
 def _now_ms() -> int:
@@ -26,9 +41,11 @@ def _now_ms() -> int:
 class ProviderConfig:
     """Model provider route configuration (specs/harness-registry §6.1)."""
 
+    providerId: str = "openai"
     name: str = "openai-compatible"
     baseUrl: str = ""
     wireApi: str = "responses"
+    apiType: str = "responses"
     credentialRef: str = ""
     credentialFingerprint: str = ""
     allowlistRuleId: str = ""
@@ -61,6 +78,30 @@ class HarnessRecord:
 
 
 @dataclass
+class ProfileRecord:
+    """One immutable-or-draft harness profile revision."""
+
+    id: str
+    harnessId: str
+    base: str
+    version: int
+    content: dict[str, Any]
+    profileFingerprint: str
+    status: str = "draft"
+    validation: dict[str, Any] | None = None
+    tenantId: str | None = None
+    workspaceId: str | None = None
+    object: str = "harness_profile"
+    schemaVersion: int = 1
+    createdAtMs: int = field(default_factory=_now_ms)
+    updatedAtMs: int = field(default_factory=_now_ms)
+    activatedAtMs: int | None = None
+
+    def account_key(self) -> AccountKey:
+        return (self.tenantId, self.workspaceId)
+
+
+@dataclass
 class SessionRecord:
     id: str
     appName: str
@@ -68,6 +109,17 @@ class SessionRecord:
     status: str = "active"
     state: dict[str, Any] = field(default_factory=dict)
     delegatedSessionRef: dict[str, Any] | None = None
+    effectiveProfile: dict[str, Any] | None = None
+    desiredPolicy: dict[str, Any] = field(default_factory=default_session_policy)
+    appliedPolicy: dict[str, Any] = field(default_factory=default_session_policy)
+    desiredRevision: int = 1
+    appliedRevision: int = 1
+    policyStatus: str = "applied"
+    pendingPolicyUpdate: dict[str, Any] | None = None
+    lastPolicyUpdateResult: dict[str, Any] | None = None
+    controlState: str = "idle"
+    supportsResume: bool = False
+    resumableInvocationId: str | None = None
     schemaVersion: int = 1
     createdAtMs: int = field(default_factory=_now_ms)
     updatedAtMs: int = field(default_factory=_now_ms)
@@ -82,9 +134,15 @@ class InvocationRecord:
     turnId: str
     userId: str = ""
     status: str = "running"
+    acceptedAtMs: int | None = None
+    idempotencyKeyHash: str | None = None
+    idempotencyExpiresAtMs: int | None = None
     schemaVersion: int = 1
     startedAtMs: int = field(default_factory=_now_ms)
     completedAtMs: int | None = None
+    continuedFromInvocationId: str | None = None
+    continuedFromTurnId: str | None = None
+    executionContext: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -96,6 +154,8 @@ class TurnRecord:
     schemaVersion: int = 1
     startedAtMs: int = field(default_factory=_now_ms)
     completedAtMs: int | None = None
+    continuedFromInvocationId: str | None = None
+    continuedFromTurnId: str | None = None
 
 
 @dataclass
@@ -129,6 +189,19 @@ class DelegatedSessionRecord:
     delegationPolicySnapshot: dict[str, Any]
     harnessBase: str = "codex"
     binding: str = "haas_bound"
+    profileRef: dict[str, Any] = field(default_factory=dict)
+    workspaceMode: str = "bind_mount"
+    acceptedInvocationId: str | None = None
+    bindingAcceptedAtMs: int | None = None
+    bindingFailureSafeReason: str | None = None
+    desiredRevision: int = 1
+    appliedRevision: int = 1
+    pendingPolicyUpdate: dict[str, Any] | None = None
+    # Private, fully resolved candidate. It is durable but deliberately omitted
+    # from the public projection because it may contain host mount paths and
+    # other controller-only configuration.
+    pendingPolicyTarget: dict[str, Any] | None = None
+    lastPolicyUpdateResult: dict[str, Any] | None = None
     runtime: DelegatedRuntimeRecord = field(default_factory=DelegatedRuntimeRecord)
     object: str = "delegated_session"
     schemaVersion: int = 1
@@ -146,10 +219,19 @@ class DelegatedSessionRecord:
             "harnessBase": self.harnessBase,
             "binding": self.binding,
             "image": dict(self.image),
+            "profileRef": dict(self.profileRef),
             "provider": dict(self.provider),
+            "workspaceMode": self.workspaceMode,
             "mountManifest": dict(self.mountManifest),
             "delegationPolicySnapshot": dict(self.delegationPolicySnapshot),
             "runtime": self.runtime.to_dict(),
+            "acceptedInvocationId": self.acceptedInvocationId,
+            "bindingAcceptedAtMs": self.bindingAcceptedAtMs,
+            "bindingFailureSafeReason": self.bindingFailureSafeReason,
+            "desiredRevision": self.desiredRevision,
+            "appliedRevision": self.appliedRevision,
+            "pendingPolicyUpdate": self.pendingPolicyUpdate,
+            "lastPolicyUpdateResult": self.lastPolicyUpdateResult,
             "createdAtMs": self.createdAtMs,
             "updatedAtMs": self.updatedAtMs,
         }
@@ -164,6 +246,9 @@ class ApprovalRecord:
     status: str = "waiting"
     request: dict[str, Any] = field(default_factory=dict)
     decision: dict[str, Any] | None = None
+    nativeRequestId: str | int | None = None
+    adapterGeneration: int | None = None
+    expiresAtMs: int | None = None
     schemaVersion: int = 1
     createdAtMs: int = field(default_factory=_now_ms)
     resolvedAtMs: int | None = None
@@ -177,6 +262,39 @@ class ApprovalRecord:
             "status": self.status,
             "request": dict(self.request),
             "decision": None if self.decision is None else dict(self.decision),
+            "expiresAtMs": self.expiresAtMs,
+            "createdAtMs": self.createdAtMs,
+            "resolvedAtMs": self.resolvedAtMs,
+        }
+
+
+@dataclass
+class InputRequestRecord:
+    id: str
+    sessionId: str
+    invocationId: str
+    turnId: str
+    questions: list[dict[str, Any]]
+    nativeRequestId: str | int
+    adapterGeneration: int
+    status: str = "waiting"
+    blocking: bool = True
+    answers: dict[str, Any] | None = None
+    expiresAtMs: int | None = None
+    schemaVersion: int = 1
+    createdAtMs: int = field(default_factory=_now_ms)
+    resolvedAtMs: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "inputRequestId": self.id,
+            "sessionId": self.sessionId,
+            "invocationId": self.invocationId,
+            "turnId": self.turnId,
+            "status": self.status,
+            "questions": [dict(question) for question in self.questions],
+            "blocking": self.blocking,
+            "expiresAtMs": self.expiresAtMs,
             "createdAtMs": self.createdAtMs,
             "resolvedAtMs": self.resolvedAtMs,
         }
@@ -185,14 +303,16 @@ class ApprovalRecord:
 @dataclass
 class CanonicalEventRecord:
     eventId: str
-    invocationId: str
+    invocationId: str | None
     sessionId: str
-    turnId: str
+    turnId: str | None
     author: str
     sequenceNumber: int
     content: dict[str, Any]
     actions: dict[str, Any]
-    schemaVersion: int = 1
+    type: str = "haas.adapter.event_unparsed"
+    haas: dict[str, Any] = field(default_factory=dict)
+    schemaVersion: int = 2
     observedAtMs: int = field(default_factory=_now_ms)
     redactionApplied: bool = True
     harnessId: str = ""
@@ -207,6 +327,12 @@ class IdempotencyRecord:
     requestHash: str
     result: Any | None = None
     released: bool = False
+    accepted: bool = False
+    invocationId: str | None = None
+    acceptedAtMs: int | None = None
+    completedAtMs: int | None = None
+    expiresAtMs: int | None = None
+    tombstone: bool = False
     schemaVersion: int = 1
     createdAtMs: int = field(default_factory=_now_ms)
 
@@ -220,6 +346,16 @@ class IdempotencyReservation:
 
 class IdempotencyConflictError(Exception):
     """Same idempotency key, different request hash: fail closed (409)."""
+
+
+class IdempotencyExpiredError(Exception):
+    """A completed execution key expired and remains reserved as a tombstone."""
+
+    def __init__(self, key_hash: str, invocation_id: str | None, expires_at_ms: int) -> None:
+        super().__init__(key_hash)
+        self.key_hash = key_hash
+        self.invocation_id = invocation_id
+        self.expires_at_ms = expires_at_ms
 
 
 class CursorNotFoundError(Exception):
@@ -236,6 +372,14 @@ class ApprovalNotFoundError(Exception):
 
 class ApprovalStateConflictError(Exception):
     """Approval was already resolved -> 409 haas_approval_state_conflict."""
+
+
+class InputRequestNotFoundError(Exception):
+    """Input request id is unknown."""
+
+
+class InputRequestStateConflictError(Exception):
+    """Input request is resolved or cannot resume this adapter generation."""
 
 
 @dataclass
@@ -263,15 +407,22 @@ class WorkspaceLockResult:
 class MemoryStore:
     """Single-process in-memory backend behind the Stores domain interface."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        clock_ms: Callable[[], int] = _now_ms,
+        idempotency_ttl_ms: int = 86_400_000,
+    ) -> None:
+        self._clock_ms = clock_ms
+        self._idempotency_ttl_ms = idempotency_ttl_ms
         self._harnesses: dict[str, HarnessRecord] = {}
+        self._profiles: dict[str, ProfileRecord] = {}
         self._sessions: dict[SessionKey, SessionRecord] = {}
         self._invocations: dict[str, InvocationRecord] = {}
         self._turns: dict[str, TurnRecord] = {}
-        self._events_by_invocation: dict[
-            InvocationEventKey, list[CanonicalEventRecord]
-        ] = {}
+        self._events_by_invocation: dict[InvocationEventKey, list[CanonicalEventRecord]] = {}
         self._events_by_session: dict[SessionKey, list[CanonicalEventRecord]] = {}
+        self._next_event_number = 0
         self._idempotency: dict[str, IdempotencyRecord] = {}
         self._leases: dict[SessionKey, Lease] = {}
         self._lease_tokens: dict[SessionKey, int] = {}
@@ -282,6 +433,7 @@ class MemoryStore:
         self._delegated_by_manager_session: dict[str, str] = {}
         self._delegated_by_haas_session: dict[str, str] = {}
         self._approvals: dict[str, ApprovalRecord] = {}
+        self._input_requests: dict[str, InputRequestRecord] = {}
 
     # --- RegistryStore --------------------------------------------------
 
@@ -306,6 +458,35 @@ class MemoryStore:
 
     def delete_harness(self, harness_id: str) -> None:
         self._harnesses.pop(harness_id, None)
+
+    # --- ProfileStore ---------------------------------------------------
+
+    def save_profile(self, profile: ProfileRecord) -> ProfileRecord:
+        existing = self._profiles.get(profile.id)
+        created_at = existing.createdAtMs if existing is not None else profile.createdAtMs
+        record = replace(profile, createdAtMs=created_at, updatedAtMs=self._clock_ms())
+        self._profiles[record.id] = record
+        return record
+
+    def get_profile(self, profile_id: str) -> ProfileRecord | None:
+        return self._profiles.get(profile_id)
+
+    def list_profiles(
+        self,
+        account: AccountKey | None = None,
+        *,
+        harness_id: str | None = None,
+        status: str | None = None,
+    ) -> list[ProfileRecord]:
+        records = list(self._profiles.values())
+        if account is not None:
+            records = [record for record in records if record.account_key() == account]
+        if harness_id is not None:
+            records = [record for record in records if record.harnessId == harness_id]
+        if status is not None:
+            records = [record for record in records if record.status == status]
+        records.sort(key=lambda record: (record.harnessId, record.version), reverse=True)
+        return records
 
     # --- SessionStore ---------------------------------------------------
 
@@ -342,6 +523,10 @@ class MemoryStore:
 
     def put_invocation(self, invocation: InvocationRecord) -> InvocationRecord:
         self._invocations[invocation.id] = invocation
+        if invocation.status in {"failed", "incomplete", "interrupted", "cancelled"}:
+            self._close_pending_interactions_in_memory(
+                invocation.id, resolved_at_ms=invocation.completedAtMs or self._clock_ms()
+            )
         return invocation
 
     def put_turn(self, turn: TurnRecord) -> TurnRecord:
@@ -356,9 +541,7 @@ class MemoryStore:
 
     # --- DelegationStore -----------------------------------------------
 
-    def put_delegated_session(
-        self, record: DelegatedSessionRecord
-    ) -> DelegatedSessionRecord:
+    def put_delegated_session(self, record: DelegatedSessionRecord) -> DelegatedSessionRecord:
         existing = self._delegated_sessions.get(record.id)
         created_at = existing.createdAtMs if existing is not None else record.createdAtMs
         saved = replace(record, createdAtMs=created_at, updatedAtMs=_now_ms())
@@ -367,9 +550,7 @@ class MemoryStore:
         self._delegated_by_haas_session[saved.haasSessionId] = saved.id
         return saved
 
-    def get_delegated_session(
-        self, delegated_session_id: str
-    ) -> DelegatedSessionRecord | None:
+    def get_delegated_session(self, delegated_session_id: str) -> DelegatedSessionRecord | None:
         return self._delegated_sessions.get(delegated_session_id)
 
     def get_delegated_session_by_manager(
@@ -398,6 +579,14 @@ class MemoryStore:
 
     def put_approval(self, approval: ApprovalRecord) -> ApprovalRecord:
         existing = self._approvals.get(approval.id)
+        if existing is not None and existing.nativeRequestId is not None:
+            if (
+                existing.nativeRequestId == approval.nativeRequestId
+                and existing.adapterGeneration == approval.adapterGeneration
+                and existing.invocationId == approval.invocationId
+            ):
+                return existing
+            raise ApprovalStateConflictError(approval.id)
         created_at = existing.createdAtMs if existing is not None else approval.createdAtMs
         record = replace(approval, createdAtMs=created_at)
         self._approvals[record.id] = record
@@ -406,13 +595,19 @@ class MemoryStore:
     def get_approval(self, approval_id: str) -> ApprovalRecord | None:
         return self._approvals.get(approval_id)
 
-    def resolve_approval(
-        self, approval_id: str, decision: dict[str, Any]
-    ) -> ApprovalRecord:
+    def list_approvals(self, session_id: str, *, status: str | None = None) -> list[ApprovalRecord]:
+        records = [record for record in self._approvals.values() if record.sessionId == session_id]
+        if status is not None:
+            records = [record for record in records if record.status == status]
+        return sorted(records, key=lambda record: (record.createdAtMs, record.id))
+
+    def resolve_approval(self, approval_id: str, decision: dict[str, Any]) -> ApprovalRecord:
         record = self.get_approval(approval_id)
         if record is None:
             raise ApprovalNotFoundError(approval_id)
         if record.status != "waiting":
+            if record.status == decision.get("decision") and record.decision == decision:
+                return record
             raise ApprovalStateConflictError(approval_id)
         status = str(decision.get("decision") or "")
         resolved = replace(
@@ -422,6 +617,91 @@ class MemoryStore:
             resolvedAtMs=_now_ms(),
         )
         self._approvals[approval_id] = resolved
+        return resolved
+
+    def close_pending_interactions(
+        self, invocation_id: str, *, resolved_at_ms: int | None = None
+    ) -> tuple[list[ApprovalRecord], list[InputRequestRecord]]:
+        return self._close_pending_interactions_in_memory(
+            invocation_id,
+            resolved_at_ms=self._clock_ms() if resolved_at_ms is None else resolved_at_ms,
+        )
+
+    def _close_pending_interactions_in_memory(
+        self, invocation_id: str, *, resolved_at_ms: int
+    ) -> tuple[list[ApprovalRecord], list[InputRequestRecord]]:
+        approvals: list[ApprovalRecord] = []
+        inputs: list[InputRequestRecord] = []
+        for approval_id, approval in list(self._approvals.items()):
+            if approval.invocationId == invocation_id and approval.status == "waiting":
+                closed_approval = replace(
+                    approval, status="cancelled", resolvedAtMs=resolved_at_ms
+                )
+                self._approvals[approval_id] = closed_approval
+                approvals.append(closed_approval)
+        for request_id, request in list(self._input_requests.items()):
+            if request.invocationId == invocation_id and request.status == "waiting":
+                closed_request = replace(
+                    request, status="cancelled", resolvedAtMs=resolved_at_ms
+                )
+                self._input_requests[request_id] = closed_request
+                inputs.append(closed_request)
+        return approvals, inputs
+
+    def reconcile_pending_interactions(self, session_id: str) -> None:
+        invocation_ids = {
+            record.invocationId
+            for records in (self._approvals.values(), self._input_requests.values())
+            for record in records
+            if record.sessionId == session_id and record.status == "waiting"
+        }
+        for invocation_id in invocation_ids:
+            invocation = self.get_invocation(invocation_id)
+            if invocation is not None and invocation.status in {
+                "failed",
+                "incomplete",
+                "interrupted",
+                "cancelled",
+            }:
+                self.close_pending_interactions(
+                    invocation_id,
+                    resolved_at_ms=invocation.completedAtMs or self._clock_ms(),
+                )
+
+    def put_input_request(self, request: InputRequestRecord) -> InputRequestRecord:
+        existing = self._input_requests.get(request.id)
+        if existing is not None:
+            if existing == request:
+                return existing
+            raise InputRequestStateConflictError(request.id)
+        self._input_requests[request.id] = request
+        return request
+
+    def get_input_request(self, request_id: str) -> InputRequestRecord | None:
+        return self._input_requests.get(request_id)
+
+    def list_input_requests(
+        self, session_id: str, *, status: str | None = None
+    ) -> list[InputRequestRecord]:
+        records = [
+            record for record in self._input_requests.values() if record.sessionId == session_id
+        ]
+        if status is not None:
+            records = [record for record in records if record.status == status]
+        return sorted(records, key=lambda record: (record.createdAtMs, record.id))
+
+    def resolve_input_request(self, request_id: str, answers: dict[str, Any]) -> InputRequestRecord:
+        record = self.get_input_request(request_id)
+        if record is None:
+            raise InputRequestNotFoundError(request_id)
+        if record.status != "waiting":
+            if record.status == "answered" and record.answers == answers:
+                return record
+            raise InputRequestStateConflictError(request_id)
+        resolved = replace(
+            record, status="answered", answers=answers, resolvedAtMs=self._clock_ms()
+        )
+        self._input_requests[request_id] = resolved
         return resolved
 
     def acquire_workspace_lock(
@@ -453,9 +733,7 @@ class MemoryStore:
             expiresAtMs=lease.expiresAtMs,
         )
 
-    def release_workspace_lock(
-        self, canonical_workspace: str, delegated_session_id: str
-    ) -> None:
+    def release_workspace_lock(self, canonical_workspace: str, delegated_session_id: str) -> None:
         existing = self._workspace_locks.get(canonical_workspace)
         if existing is not None and existing.holder == delegated_session_id:
             self._workspace_locks.pop(canonical_workspace, None)
@@ -473,9 +751,7 @@ class MemoryStore:
         self._leases[key] = lease
         return lease
 
-    def renew_lease(
-        self, key: SessionKey, holder: str, token: int, ttl_ms: int = 30_000
-    ) -> Lease:
+    def renew_lease(self, key: SessionKey, holder: str, token: int, ttl_ms: int = 30_000) -> Lease:
         self.assert_lease(key, holder, token)
         lease = Lease(holder=holder, expiresAtMs=_now_ms() + ttl_ms, token=token)
         self._leases[key] = lease
@@ -503,10 +779,19 @@ class MemoryStore:
 
     # --- EventLogStore --------------------------------------------------
 
+    def next_event_id(self) -> str:
+        event_id = f"evt_{self._next_event_number:013d}"
+        self._next_event_number += 1
+        return event_id
+
     def append(self, event: CanonicalEventRecord) -> None:
+        match = re.fullmatch(r"evt_(\d+)", event.eventId)
+        if match is not None:
+            self._next_event_number = max(self._next_event_number, int(match.group(1)) + 1)
         session_key = (event.appName, event.userId, event.sessionId)
-        invocation_key = (*session_key, event.invocationId)
-        self._events_by_invocation.setdefault(invocation_key, []).append(event)
+        if event.invocationId is not None:
+            invocation_key = (*session_key, event.invocationId)
+            self._events_by_invocation.setdefault(invocation_key, []).append(event)
         self._events_by_session.setdefault(session_key, []).append(event)
 
     def read_invocation(
@@ -517,9 +802,7 @@ class MemoryStore:
     ) -> list[CanonicalEventRecord]:
         events = self._events_by_invocation.get((*key, invocation_id), [])
         return [
-            e
-            for e in sorted(events, key=lambda e: e.sequenceNumber)
-            if e.sequenceNumber > after
+            e for e in sorted(events, key=lambda e: e.sequenceNumber) if e.sequenceNumber > after
         ]
 
     def read_session(
@@ -561,30 +844,68 @@ class MemoryStore:
     def reserve(self, key_hash: str, request_hash: str) -> IdempotencyReservation:
         existing = self._idempotency.get(key_hash)
         if existing is not None and not existing.released:
+            self._expire_idempotency_result(existing)
+            if existing.tombstone:
+                assert existing.expiresAtMs is not None
+                raise IdempotencyExpiredError(key_hash, existing.invocationId, existing.expiresAtMs)
             if existing.requestHash != request_hash:
                 raise IdempotencyConflictError(key_hash)
             return IdempotencyReservation(keyHash=key_hash, replay=True, result=existing.result)
-        record = IdempotencyRecord(keyHash=key_hash, requestHash=request_hash)
+        record = IdempotencyRecord(
+            keyHash=key_hash, requestHash=request_hash, createdAtMs=self._clock_ms()
+        )
         self._idempotency[key_hash] = record
         return IdempotencyReservation(keyHash=key_hash, replay=False, result=None)
 
-    def complete(self, key_hash: str, result: Any) -> None:
+    def accept(
+        self, key_hash: str, invocation_id: str, *, accepted_at_ms: int | None = None
+    ) -> IdempotencyRecord:
+        record = self._idempotency.get(key_hash)
+        if record is None or record.released:
+            raise KeyError(key_hash)
+        accepted_at = self._clock_ms() if accepted_at_ms is None else accepted_at_ms
+        record.accepted = True
+        record.invocationId = invocation_id
+        record.acceptedAtMs = accepted_at
+        record.expiresAtMs = accepted_at + self._idempotency_ttl_ms
+        return record
+
+    def complete(self, key_hash: str, result: Any, *, completed_at_ms: int | None = None) -> None:
         record = self._idempotency.get(key_hash)
         if record is not None:
             record.result = result
+            record.completedAtMs = self._clock_ms() if completed_at_ms is None else completed_at_ms
 
     def replay(self, key_hash: str) -> Any | None:
         record = self._idempotency.get(key_hash)
         if record is None or record.released:
+            return None
+        self._expire_idempotency_result(record)
+        if record.tombstone:
             return None
         return record.result
 
     def is_pending(self, key_hash: str) -> bool:
         """True while a reservation is in-flight (not completed, not released)."""
         record = self._idempotency.get(key_hash)
-        return record is not None and not record.released and record.result is None
+        return (
+            record is not None
+            and not record.released
+            and not record.tombstone
+            and record.result is None
+        )
 
     def release(self, key_hash: str) -> None:
         record = self._idempotency.get(key_hash)
         if record is not None:
             record.released = True
+
+    def _expire_idempotency_result(self, record: IdempotencyRecord) -> None:
+        if (
+            record.accepted
+            and record.result is not None
+            and record.expiresAtMs is not None
+            and self._clock_ms() >= record.expiresAtMs
+        ):
+            record.result = None
+            record.tombstone = True

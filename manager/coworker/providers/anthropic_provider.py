@@ -45,6 +45,7 @@ def _usage_from(usage: Any) -> Optional[TokenUsage]:
         cache_write=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
     )
 
+
 # Required by the Messages API; a ceiling, not a spend target. Sized for file
 # generation, not just chat: a coworker writing a self-contained HTML report ships the
 # whole file inside one tool call's arguments, and 16k proved too small in the field
@@ -108,6 +109,7 @@ def _raise_on_refusal(stop_reason: Any, raw: Any) -> None:
         + " — try rephrasing, or switch model and press Retry."
     )
 
+
 # Anthropic stop_reason → the engine's OpenAI-shaped finish_reason vocabulary.
 _STOP_REASON_MAP = {
     "end_turn": "stop",
@@ -132,13 +134,9 @@ _SETTINGS_WHITELIST = {
 # Sampling knobs the API rejects alongside extended thinking (temperature must stay 1).
 _THINKING_INCOMPATIBLE = ("temperature", "top_p", "top_k")
 
-_DATA_URL_RE = re.compile(
-    r"^data:(image/[a-z0-9.+-]+);base64,(.+)$", re.IGNORECASE | re.DOTALL
-)
+_DATA_URL_RE = re.compile(r"^data:(image/[a-z0-9.+-]+);base64,(.+)$", re.IGNORECASE | re.DOTALL)
 
-_PDF_DATA_URL_RE = re.compile(
-    r"^data:application/pdf;base64,(.+)$", re.IGNORECASE | re.DOTALL
-)
+_PDF_DATA_URL_RE = re.compile(r"^data:application/pdf;base64,(.+)$", re.IGNORECASE | re.DOTALL)
 
 
 def resolve_api_key(secrets: Any = None) -> Optional[str]:
@@ -223,16 +221,12 @@ def _user_blocks(content: Any) -> list[dict[str, Any]]:
             url = (part.get("image_url") or {}).get("url") or ""
             block = _image_block(url)
             blocks.append(
-                block
-                if block
-                else {"type": "text", "text": "[unsupported image attachment]"}
+                block if block else {"type": "text", "text": "[unsupported image attachment]"}
             )
         elif kind == "file":
             block = _document_block(part)
             blocks.append(
-                block
-                if block
-                else {"type": "text", "text": "[unsupported file attachment]"}
+                block if block else {"type": "text", "text": "[unsupported file attachment]"}
             )
     return blocks
 
@@ -264,9 +258,7 @@ def convert_messages(
                 converted.append(
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "text", "text": f"<system>\n{text}\n</system>"}
-                        ],
+                        "content": [{"type": "text", "text": f"<system>\n{text}\n</system>"}],
                     }
                 )
         elif role == "user":
@@ -317,9 +309,7 @@ def convert_messages(
     if not folded:
         raise ValueError("no convertible messages for the Anthropic Messages API")
     if folded[0]["role"] != "user":
-        folded.insert(
-            0, {"role": "user", "content": [{"type": "text", "text": "(continued)"}]}
-        )
+        folded.insert(0, {"role": "user", "content": [{"type": "text", "text": "(continued)"}]})
 
     return ("\n\n".join(system_parts) or None), folded
 
@@ -370,9 +360,7 @@ def _add_cache_breakpoints(kwargs: dict[str, Any]) -> None:
 
 def _reasoning_text(thinking_blocks: list[dict[str, Any]]) -> Optional[str]:
     """Display text for the GUI's disclosure — thinking text only (redacted stays opaque)."""
-    text = "".join(
-        b.get("thinking", "") for b in thinking_blocks if b.get("type") == "thinking"
-    )
+    text = "".join(b.get("thinking", "") for b in thinking_blocks if b.get("type") == "thinking")
     return text or None
 
 
@@ -569,8 +557,7 @@ class AnthropicProvider(ProviderClient):
             if kind == "message_start":
                 # Prompt-side counts (input + cache split) ride the opening event.
                 usage = (
-                    _usage_from(getattr(getattr(event, "message", None), "usage", None))
-                    or usage
+                    _usage_from(getattr(getattr(event, "message", None), "usage", None)) or usage
                 )
             elif kind == "content_block_start":
                 block = getattr(event, "content_block", None)
@@ -623,9 +610,7 @@ class AnthropicProvider(ProviderClient):
                 if reason:
                     stop_reason = reason
                 # Final (cumulative) output-token count rides message_delta.usage.
-                out = int(
-                    getattr(getattr(event, "usage", None), "output_tokens", 0) or 0
-                )
+                out = int(getattr(getattr(event, "usage", None), "output_tokens", 0) or 0)
                 if out:
                     usage = usage or TokenUsage()
                     usage.output = out
@@ -635,9 +620,7 @@ class AnthropicProvider(ProviderClient):
         for index in sorted(tool_accum):
             acc = tool_accum[index]
             tool_calls.append(
-                ToolCall(
-                    id=acc["id"], name=acc["name"], arguments=_parse_args(acc["json"])
-                )
+                ToolCall(id=acc["id"], name=acc["name"], arguments=_parse_args(acc["json"]))
             )
         thinking_blocks = [thinking_accum[i] for i in sorted(thinking_accum)]
 

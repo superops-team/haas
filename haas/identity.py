@@ -1,4 +1,5 @@
 """Identity boundary: bearer -> Principal and scope checks (specs/identity/)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -50,7 +51,7 @@ class StaticTokenIdentityProvider:
             raise MissingCredentialError("missing credential")
         if not authorization.startswith("Bearer "):
             raise InvalidCredentialError("invalid credential")
-        token = authorization[len("Bearer "):].strip()
+        token = authorization[len("Bearer ") :].strip()
         principal = self._tokens.get(token)
         if principal is None:
             raise InvalidCredentialError("invalid credential")

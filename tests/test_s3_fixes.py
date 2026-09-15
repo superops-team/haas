@@ -1,4 +1,5 @@
 """Regression tests for S3 review fixes: adapter errors, cursor expiry, idempotency concurrency."""
+
 import asyncio
 
 import httpx
@@ -16,8 +17,11 @@ pytestmark = pytest.mark.adk
 
 TOKEN = "fix-token"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
-BODY = {"appName": "chrn_codex_default", "userId": "u_1",
-        "newMessage": {"role": "user", "parts": [{"text": "hi"}]}}
+BODY = {
+    "appName": "chrn_codex_default",
+    "userId": "u_1",
+    "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+}
 
 
 class RaisingAdapter(FakeAdapter):
@@ -31,8 +35,9 @@ def make_client(**kwargs: object) -> TestClient:
     adapter = kwargs.pop("adapter", None) or FakeAdapter()
     app = build_app(
         adapter=adapter,
-        identity_tokens={TOKEN: Principal(principalId="p_1", tenantId="t1",
-                                          userIds=frozenset({"u_1"}))},
+        identity_tokens={
+            TOKEN: Principal(principalId="p_1", tenantId="t1", userIds=frozenset({"u_1"}))
+        },
         run_quota=int(kwargs.get("run_quota", 20)),
         rate_limit=int(kwargs.get("rate_limit", 100)),
     )
@@ -41,9 +46,7 @@ def make_client(**kwargs: object) -> TestClient:
 
 def test_adapter_error_returns_502_with_terminal_failed_event() -> None:
     client = make_client(adapter=RaisingAdapter())
-    resp = client.post(
-        "/run", json={**BODY, "sessionId": "hsess_err"}, headers=HEADERS
-    )
+    resp = client.post("/run", json={**BODY, "sessionId": "hsess_err"}, headers=HEADERS)
     assert resp.status_code == 502
     assert resp.json()["haasError"]["code"] == "haas_adapter_error"
 
@@ -91,7 +94,8 @@ def test_patch_session_invalid_delta_400() -> None:
     client.post("/run", json={**BODY, "sessionId": "hsess_patch"}, headers=HEADERS)
     resp = client.patch(
         "/apps/chrn_codex_default/users/u_1/sessions/hsess_patch",
-        json={"stateDelta": "not-a-dict"}, headers=HEADERS,
+        json={"stateDelta": "not-a-dict"},
+        headers=HEADERS,
     )
     assert resp.status_code == 400
     assert resp.json()["haasError"]["code"] == "invalid_input"
@@ -101,9 +105,11 @@ async def test_idempotency_in_flight_replays_first_result() -> None:
     adapter = BlockingFakeAdapter()
     app = build_app(
         adapter=adapter,
-        identity_tokens={TOKEN: Principal(principalId="p_1", tenantId="t1",
-                                          userIds=frozenset({"u_1"}))},
-        run_quota=20, rate_limit=100,
+        identity_tokens={
+            TOKEN: Principal(principalId="p_1", tenantId="t1", userIds=frozenset({"u_1"}))
+        },
+        run_quota=20,
+        rate_limit=100,
     )
     transport = httpx.ASGITransport(app=app)
     headers = {**HEADERS, "Idempotency-Key": "dup-key"}

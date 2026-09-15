@@ -60,9 +60,7 @@ class PersonaConnectionStore:
         NOT seed; use :meth:`defaults_for` to seed from a manifest."""
         return dict(self._rows.get(persona_id, {}))
 
-    def defaults_for(
-        self, persona_id: str, manifest, *, connected: set[str]
-    ) -> dict[str, bool]:
+    def defaults_for(self, persona_id: str, manifest, *, connected: set[str]) -> dict[str, bool]:
         """The persona's default connector map, seeding it from the manifest on first read.
 
         Seeding rule: a ``recommends`` item of kind ``connector`` with ``tier == "core"`` defaults

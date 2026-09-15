@@ -4,6 +4,7 @@ Default tests are offline (roadmap §8.1): they exercise the pure drift
 comparison and fixture loading without invoking the real ``codex`` binary.
 Real schema re-generation is gated behind ``HAAS_E2E_CODEX=1``.
 """
+
 from __future__ import annotations
 
 import json

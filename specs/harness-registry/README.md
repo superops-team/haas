@@ -3,14 +3,24 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-30
-Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
+Last reviewed: 2026-09-10
+Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Profile](../harness-profile/README.md), [Harness Adapter](../harness-adapter/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
 
-The Harness Registry maintains the catalog of configured harnesses that HaaS can run. It answers which harnesses (ADK apps) a tenant or workspace may currently select, which models, tools, MCP servers, and skills each harness may use, and whether those capabilities are actually available.
+The Harness Registry maintains the catalog of configured harnesses that HaaS can
+run. It answers which harnesses (ADK apps) a tenant or workspace may currently
+select, which profile each harness has active, and whether those capabilities are
+actually available.
 
-In ADK terminology, `appName` is the configured harness `id` (`chrn_...`); `/run` MAY also resolve the human-readable `name` as an alias. `base` is an open string: the initial release uses `codex`, and future registration of `pi`, `opencode`, `amp`, or another harness requires no change to the public task API.
+In ADK terminology, `appName` is the configured harness `id` (`chrn_...`);
+`/run` MAY also resolve the human-readable `name` as an alias. `base` is an open
+string: the initial release uses `codex`, and future registration of `pi`,
+`opencode`, `amp`, or another harness requires no change to the public task API.
+Mutable provider, MCP, skills, AGENTS.md, workspace/policy, and budget
+configuration belongs to [Harness Profile](../harness-profile/README.md). The
+registry stores only harness identity, scope, base, and the active-profile
+pointer.
 
 ## 2. Sources and Rationale
 
@@ -18,6 +28,7 @@ In ADK terminology, `appName` is the configured harness `id` (`chrn_...`); `/run
 |--------|------------------|
 | ADK 2.0 | `appName` = harness `id`; `/list-apps` lists app names |
 | `mpa-codex-worker` profile controller | Profile draft/active lifecycle, session freezing, runtime policy |
+| Harness Profile | Versioned provider/MCP/skills/AGENTS.md/workspace/policy/budget configuration |
 | Model Proxy | Provider routing and model availability |
 | Component overview | Configured harness catalog and appName/base/capability/model/provider discovery |
 | Manager Delegation | Manager and HaaS both reference providers by provider id, model id, and `credentialRef`; raw keys are never copied into delegated-session contracts |
@@ -37,22 +48,21 @@ In ADK terminology, `appName` is the configured harness `id` (`chrn_...`); `/run
 
 Responsibilities:
 
-- Store stable configured harness configuration.
-- Compute the effective view of harness, base, model, provider, MCP, skill, and tool restrictions.
+- Store stable configured harness identity and the active-profile pointer.
+- Compute the effective view of harness, base, active profile, model, provider, MCP, skill, and tool restrictions.
 - Resolve `appName`: first by exact `id`, then by `name`; return 404 for multiple matches or no match.
 - Return harnesses within the caller's scope; return not found for cross-scope access.
-- Freeze the effective harness configuration when a session is created; later harness updates MUST NOT change existing sessions.
+- Resolve the active profile for session creation and pass the effective profile to Session Runtime for freezing; later profile activations MUST NOT change existing sessions.
 - Check adapter availability for `base`.
-- Store and validate provider routing configuration (`baseUrl`/`wireApi`/`credentialRef`); URLs MUST pass the allowlist.
-- Validate availability of `defaultModel` and the requested `model`, or apply an explicit fallback.
-- Store skill folder bundles and preserve every file across a round trip.
+- Delegate storage and validation of provider routes, MCP, skills, AGENTS.md, workspace/policy, and budgets to Harness Profile.
+- Validate availability of the active profile's `defaultModel` and the requested `model`, or apply an explicit fallback.
 
 Non-responsibilities:
 
 - Does not execute a harness directly.
 - Does not store raw credentials; it stores only references or delegates them to a secret store/vault.
 - Does not execute MCP/tool calls.
-- Does not modify the frozen configuration of an existing session.
+- Does not modify the frozen profile/configuration of an existing session.
 - Does not force a harness's native tool names into a hard contract shared by all harnesses.
 
 ## 5. Core Interfaces
@@ -62,11 +72,14 @@ Non-responsibilities:
 | Method | Path | Description |
 |--------|------|------|
 | GET | `/list-apps` | Lists harness app names within the caller's scope (an array of id strings) |
+| GET | `/v1/haas/capabilities` | Contributes caller-visible configured-harness snapshots to the protocol-owned capability response |
 | GET | `/v1/haas/harnesses` | Lists configured harness details within the caller's scope |
 | GET | `/v1/haas/harnesses/{harness_id}` | Reads one configured harness |
 | POST | `/v1/haas/harnesses` | Creates a configured harness |
 | PUT | `/v1/haas/harnesses/{harness_id}` | Replaces mutable configuration; `id`, `base`, and `createdAtMs` are immutable |
 | DELETE | `/v1/haas/harnesses/{harness_id}` | Marks a harness as deleted without deleting historical sessions |
+| GET/POST | `/v1/haas/profiles` | Owned by Harness Profile; Registry maintains harness lookup and active-pointer consistency |
+| GET/PUT/POST | `/v1/haas/profiles/{profile_id}`, `/validate`, `/activate` | Owned by Harness Profile; activation atomically updates the harness active pointer |
 | GET | `/v1/haas/models` | Returns the global backend/model catalog |
 | GET | `/v1/haas/harnesses/{harness_id}/skills/{skill_id}/files` | Reads the complete skill folder bundle |
 
@@ -101,10 +114,12 @@ No dedicated error code is introduced. An immutable-field conflict is a request-
 async def resolve_app(principal, app_name: str) -> HarnessConfig: ...
 async def resolve_default_app(principal) -> HarnessConfig: ...
 async def resolve_model(harness: HarnessConfig, requested_model: str | None) -> ModelResolution: ...
-async def snapshot_for_session(harness: HarnessConfig) -> EffectiveHarnessConfig: ...
+async def resolve_active_profile(principal, harness: HarnessConfig) -> HarnessProfile: ...
+async def snapshot_for_session(harness: HarnessConfig, profile: HarnessProfile) -> EffectiveHarnessProfile: ...
 async def validate_harness_config(input: HarnessCreate) -> ValidationResult: ...
 async def list_bases(principal) -> list[HarnessBase]: ...
 async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRoute: ...
+async def capability_snapshot(principal, probes: dict[str, AdapterProbe]) -> list[HarnessCapabilitySnapshot]: ...
 ```
 
 ## 6. Data Model
@@ -118,13 +133,17 @@ async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRou
   "name": "Codex default",
   "base": "codex",
   "baseLabel": "Codex",
+  "activeProfileId": "hprof_abc",
+  "activeProfileVersion": 12,
+  "activeProfileFingerprint": "sha256:profile",
   "defaultModel": "gpt-5.6-terra",
   "systemPrompt": "",
   "mcpServers": [],
   "skills": [],
   "disabledTools": [],
   "provider": {
-    "name": "openai-compatible",
+    "providerId": "openai",
+    "name": "openai",
     "baseUrl": "https://provider.example.com/v1",
     "wireApi": "responses",
     "credentialRef": "secret://tenant/workspace/provider/default",
@@ -146,6 +165,12 @@ async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRou
   "updatedAtMs": 1786400000000
 }
 ```
+
+`defaultModel`, `systemPrompt`, `mcpServers`, `skills`, `disabledTools`,
+`provider`, `maxStep`, and `timeoutSeconds` are legacy-compatible projection
+fields. The write source of truth for new implementations is Harness Profile.
+Reads MAY inline an active profile summary for older manager clients, but those
+fields MUST NOT bypass profile validation.
 
 ### 6.2 HarnessBase
 
@@ -216,29 +241,36 @@ when endpoints, credential source, billing region, or API shape differ:
 | `ark-agent-plan-cn` | `https://ark.cn-beijing.volces.com/api/plan/v3` | Agent Plan API | Volcengine Ark Agent Plan identity; not interchangeable with the standard data plane. |
 
 Manager-local execution and HaaS delegated execution both pass provider selection as
-`providerId + model + credentialRef`. The registry stores the provider route and
-credential reference/fingerprint only; the Model Proxy resolves real credentials at
-request time.
+`providerId + model + credentialRef`. The provider route keeps both `providerId`
+(stable identity) and `name` (human-readable alias). `wireApi` declares the protocol:
+`openai-compatible` is the OpenAI-compatible protocol family, `responses` requires the
+OpenAI Responses protocol type within that family, and `agent-plan` is the Ark Agent
+Plan protocol. The registry stores the provider route and credential
+reference/fingerprint only; the Model Proxy resolves real credentials at request time.
 
 ## 7. Runtime Model and State Machine
 
 ```text
-draft -> validated -> active -> superseded -> deleted
-           |             |
-           |             +-> snapshotted into session
-           v
-        rejected
+draft -> active -> retired
 ```
 
 Rules:
 
-- Any mutable field may be changed in `draft`.
-- `validated` means that the schema, adapter base, provider URL, MCP URL, skill bundle, and policy have passed validation.
-- An `active` harness may be used by sessions; `appName` resolution matches only active harnesses.
-- `superseded` preserves history and is no longer selected by default for new sessions.
-- `deleted` cannot be selected for a new task, but historical sessions remain auditable.
+- `draft` may change mutable harness identity metadata; executable configuration
+  fields use the versioned lifecycle owned by Harness Profile.
+- `active` means harness identity, adapter base, and active-profile pointer have
+  passed validation and may be used by sessions; `appName` resolution matches only
+  active harnesses, and an active profile MUST exist.
+- `retired` preserves history for audit and is no longer selected for new sessions.
+  A retired harness is never re-activated; historical sessions remain readable.
 
-Sessions use a frozen `EffectiveHarnessConfig` snapshot and do not read the live harness object while continuing an existing task.
+Sessions use a frozen `EffectiveHarnessProfile` snapshot and do not read the live
+harness or active-profile object while continuing an existing task. Capability
+discovery is a live caller-scoped snapshot and MUST include the current active
+profile version/fingerprint, but MUST NOT mutate or replace frozen session
+configuration. Registry supplies only visible harness identity, active-profile
+pointer, and configuration facts; HaaS Protocol owns the public schema, and
+adapter/runtime components supply availability/mechanism/enforcement facts.
 
 ## 8. Security and Authorization
 
@@ -275,13 +307,15 @@ Log fields contain only id, base, model, capability, fingerprint, and a safe rea
 | Provider id does not match its endpoint/API shape | `haas_provider_source_invalid` |
 | Skill bundle lacks `SKILL.md` | Configuration validation fails; activation is rejected |
 | MCP URL fails the allowlist | `haas_mcp_source_invalid` |
+| Active profile is missing or unvalidated | `409 haas_profile_conflict`; the harness cannot start new sessions |
+| Session request asks for a profile that differs from the frozen snapshot | `409 haas_profile_rebind_required`; no invocation starts |
 | Registry store unavailable | Create/update fails closed; frozen sessions continue executing |
 | Harness deleted | New tasks fail; historical sessions remain readable |
 
 ## 11. Test Plan and Acceptance Criteria
 
-- Unit: appName resolution (id precedence / name fallback / multiple-match assertion), scope filtering, model fallback, provider URL allowlist, and skill path validation.
-- Integration: `GET /list-apps`, `GET/POST/PUT/DELETE /v1/haas/harnesses`, and `GET /v1/haas/models`.
+- Unit: appName resolution (id precedence / name fallback / multiple-match assertion), scope filtering, active-profile pointers, model fallback, provider URL allowlist, and skill path validation.
+- Integration: `GET /list-apps`, `GET /v1/haas/capabilities`, `GET/POST/PUT/DELETE /v1/haas/harnesses`, and `GET /v1/haas/models`; capability harnesses exactly match caller-visible active configured harnesses and include active profile version/fingerprint.
 - Compatibility: ADK client `list-apps` returns an array; `/run` resolves both harness id and name.
 - Security: two principals receive 404 when reading each other's harnesses; secret/credential references do not appear in responses.
-- Regression: updating a harness name does not lose skill files; updating an active harness does not affect existing session snapshots.
+- Regression: updating a harness name does not lose the active-profile pointer; activating a new profile does not affect existing session snapshots unless explicit rebind is used.

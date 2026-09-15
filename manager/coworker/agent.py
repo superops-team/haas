@@ -135,9 +135,7 @@ and skip all of this when the user already gave you a task."""
 def _enabled_connector_tools(secrets: SecretStore) -> tuple[set[str], set[str]]:
     connectors = {c["name"]: c for c in connector_list(secrets)}
     enabled_connectors = {
-        name
-        for name, c in connectors.items()
-        if c.get("connected") and c.get("enabled")
+        name for name, c in connectors.items() if c.get("connected") and c.get("enabled")
     }
     enabled_tools = {
         tool["name"]
@@ -266,9 +264,7 @@ def build_engine(
     config = load_config(ws, workspace_trusted=workspace_trusted)
     executor = LocalExecutor(cwd=ws) if ws is not None else None
     todo = TodoList()
-    context = AgentContext(
-        workspace=ws, executor=executor, todo=todo, roots=root_list or None
-    )
+    context = AgentContext(workspace=ws, executor=executor, todo=todo, roots=root_list or None)
 
     registry = ToolRegistry()
     registry.register_all(agent.build_tools(context))
@@ -282,9 +278,7 @@ def build_engine(
         registry.register(make_send_message_tool(secrets))
         # send_file (§34): hand deliverables into the chat — same targets, but its OWN
         # approval surface (a thread's standing send_message grant never covers uploads).
-        registry.register(
-            make_send_file_tool(secrets, workspace=ws, roots=root_list or None)
-        )
+        registry.register(make_send_file_tool(secrets, workspace=ws, roots=root_list or None))
         # Channel subscriptions (inbound): listen to a channel, catch up, (un)subscribe. The agent
         # obtains a channel via ask_user or from a channel message it's reacting to.
         if subscription_store is not None and channel_buffer is not None and session_id:
@@ -372,9 +366,7 @@ def build_engine(
     # The user's own standing instructions, read once here: like the memories below,
     # they're session-stable knowledge. Edits apply to NEW conversations (the Settings
     # copy says exactly that), never mid-conversation.
-    rules_block = format_user_rules(
-        (user_rules() if callable(user_rules) else user_rules) or ""
-    )
+    rules_block = format_user_rules((user_rules() if callable(user_rules) else user_rules) or "")
     if rules_block:
         instructions = f"{instructions}\n\n{rules_block}"
 
@@ -428,9 +420,7 @@ def build_engine(
     # before-save rule holds without any bespoke plumbing. Bundled files may only come from
     # this session's roots.
     registry.register(
-        save_skill_tool(
-            allowed_dirs=[r.path for r in (root_list or [])] or ([ws] if ws else [])
-        )
+        save_skill_tool(allowed_dirs=[r.path for r in (root_list or [])] or ([ws] if ws else []))
     )
 
     # User-local risk overrides (relax a plugin / tighten anything) + OPE-136 trust
@@ -535,9 +525,7 @@ def build_engine(
         approver=approver,
         # Stop kills the in-flight foreground shell command, not just the loop.
         interrupt_hooks=[executor.interrupt_now] if executor is not None else None,
-        max_iterations=(
-            max_iterations if max_iterations is not None else config.max_iterations
-        ),
+        max_iterations=(max_iterations if max_iterations is not None else config.max_iterations),
         model_settings=model_settings,
         messages=messages,
         audit_sink=audit_sink,

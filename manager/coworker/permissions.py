@@ -30,14 +30,44 @@ _SEPARATORS = ("&&", "||", ";", "|&", "|", "&", "\n", "\r")
 # Programs that run *another* program named in their arguments. A prefix rule on the outer
 # program can never vouch for the inner one, so these always fall through to approval.
 _ARG_EXECUTORS = {
-    "xargs", "env", "nohup", "nice", "stdbuf", "timeout", "watch", "sudo", "doas",
-    "ssh", "docker", "podman", "kubectl", "npx", "pnpx", "bunx", "uvx",
+    "xargs",
+    "env",
+    "nohup",
+    "nice",
+    "stdbuf",
+    "timeout",
+    "watch",
+    "sudo",
+    "doas",
+    "ssh",
+    "docker",
+    "podman",
+    "kubectl",
+    "npx",
+    "pnpx",
+    "bunx",
+    "uvx",
 }
 # Interpreters carrying inline code, e.g. `python -c "..."`, `node -e "..."`.
 _INLINE_CODE_FLAGS = {"-c", "-e", "--eval", "--command", "-Command", "-EncodedCommand"}
 _INTERPRETERS = {
-    "sh", "bash", "zsh", "dash", "ksh", "fish", "powershell", "pwsh", "cmd",
-    "python", "python3", "node", "deno", "bun", "ruby", "perl", "php",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "powershell",
+    "pwsh",
+    "cmd",
+    "python",
+    "python3",
+    "node",
+    "deno",
+    "bun",
+    "ruby",
+    "perl",
+    "php",
 }
 # Flags that turn a search/list tool into an execution or deletion tool.
 _DANGEROUS_FLAGS = {"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprintf"}
@@ -147,9 +177,7 @@ def _host_of(url_or_domain: str) -> str:
 # Patch/diff tools carry their paths inside the blob instead — extracted in `write_paths`.
 _PATH_ARG: dict[str, str] = {"write_file": "path", "replace_in_file": "path"}
 # apply_patch (Codex format) file headers, and unified-diff `+++ b/<path>` headers.
-_APPLY_PATCH_FILE = re.compile(
-    r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE
-)
+_APPLY_PATCH_FILE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE)
 _APPLY_PATCH_MOVE = re.compile(r"^\*\*\* Move to: (.+)$", re.MULTILINE)
 _UNIFIED_DIFF_FILE = re.compile(r"^\+\+\+ (?:b/)?(.+?)\s*$", re.MULTILINE)
 
@@ -177,6 +205,7 @@ def write_paths(tool_name: str, arguments: dict[str, Any]) -> tuple[list[str], b
     # Unknown write tool (e.g. one promoted to write via a user override): we cannot locate
     # its path, so it cannot be auto-scoped.
     return ([], False)
+
 
 from .risk import (  # re-exported for back-compat (manager.py imports WRITE_TOOLS)
     SHELL_TOOL,
@@ -212,9 +241,7 @@ MODE_LABELS = {
 
 class Mode(str, Enum):
     DISCUSS = "discuss"  # read-only conversation: no edits, no planning workflow
-    PLAN = (
-        "plan"  # read-only + the planning contract (explore → propose_plan → execute)
-    )
+    PLAN = "plan"  # read-only + the planning contract (explore → propose_plan → execute)
     INTERACTIVE = "interactive"  # ask for approval (default)
     # Renamed from "auto" (spec §1.5, 2026-08-12): "bypass" names the action — switching a
     # safety system off — and can't be confused with AUTO_APPROVE in a picker. Deliberately
@@ -337,9 +364,7 @@ class PermissionEngine:
             out.append((Path(p).expanduser().resolve(), w))
         return out
 
-    def evaluate(
-        self, tool_name: str, arguments: dict[str, Any], metadata: Any = None
-    ) -> Decision:
+    def evaluate(self, tool_name: str, arguments: dict[str, Any], metadata: Any = None) -> Decision:
         arguments = arguments or {}
         is_connector = getattr(metadata, "category", "") == "connector"
         risk = classify(tool_name, metadata, self.risk_overrides)
@@ -352,9 +377,7 @@ class PermissionEngine:
         # OPE-117 comment below always promised "read-only modes still hard-deny above
         # this"; the OPE-136 gate-order pin caught that the class-based check alone
         # didn't deliver it (save_skill in Discuss reached the human-only card).
-        consequential = (
-            is_consequential(risk) or tool_name in PERSISTENT_AUTHORITY_TOOLS
-        )
+        consequential = is_consequential(risk) or tool_name in PERSISTENT_AUTHORITY_TOOLS
 
         # SELF-PROTECTION FLOOR — runs before mode, allowlists and every auto-approve path,
         # because the escalation it blocks happens in the DEFAULT mode. No verdict below can
@@ -371,9 +394,7 @@ class PermissionEngine:
 
         # Discuss / plan modes: read-only.
         if self.mode in READ_ONLY_MODES and consequential:
-            return Decision(
-                False, f"{self.mode.value} mode is read-only", needs_user=False
-            )
+            return Decision(False, f"{self.mode.value} mode is read-only", needs_user=False)
 
         # Path scoping for writes (all modes): every path the write touches must land in a
         # writable root. A write whose path can't be located is not scoped-able, so it fails
@@ -390,9 +411,7 @@ class PermissionEngine:
                 )
             for path in paths:
                 if not self._under_writable_root(path):
-                    return Decision(
-                        False, f"path is not in a writable directory: {path}"
-                    )
+                    return Decision(False, f"path is not in a writable directory: {path}")
                 # In-project files that run on a later action (git hooks, CI configs) may be
                 # edited, but never by an auto-approve path — a human must see it.
                 if _is_protected_in_project(self._candidate(path)):
@@ -442,11 +461,7 @@ class PermissionEngine:
             command = str(arguments.get("command", ""))
             if self._command_allowed(command):
                 return Decision(True, "command on allowlist")
-            if (
-                honor_session_grants
-                and command
-                and command in self.session_allow_commands
-            ):
+            if honor_session_grants and command and command in self.session_allow_commands:
                 return Decision(True, "command allowed for session")
             # Also a session grant, so §1.5 applies: in Auto-Approve the reviewer judges
             # these rather than the classifier waving them through.
@@ -466,11 +481,7 @@ class PermissionEngine:
             url = str(arguments.get("url", ""))
             if self._domain_allowed(url, include_session=honor_session_grants):
                 return Decision(True, "domain on allowlist")
-        if (
-            honor_session_grants
-            and tool_name in self.session_allow_tools
-            and not is_connector
-        ):
+        if honor_session_grants and tool_name in self.session_allow_tools and not is_connector:
             return Decision(True, "tool allowed for session")
         # Run grant (OPE-136 "Allow for this request"): same checkpoint, shorter life —
         # and no connector exclusion, because EXTERNAL is exactly who it exists for.
@@ -488,10 +499,7 @@ class PermissionEngine:
         # Deliberately NOT honored in AUTO_APPROVE: v1 keeps §1.5 conservative — the
         # reviewer judges trusted MCP calls (falling through to needs_user routes
         # there); only hand-authored config allowlists skip the judge.
-        if (
-            getattr(metadata, "category", "") == "mcp"
-            and self.mode is not Mode.AUTO_APPROVE
-        ):
+        if getattr(metadata, "category", "") == "mcp" and self.mode is not Mode.AUTO_APPROVE:
             if self.trust_overrides is not None and self.trust_overrides(tool_name):
                 return Decision(True, "trusted MCP tool (user trust rule)")
             if not bool(getattr(metadata, "requires_approval", True)):
@@ -503,9 +511,7 @@ class PermissionEngine:
         # (candidate extraction is external-risk-only), and additive on top of the mode:
         # read-only modes already returned before this point.
         if tool_name in self.task_rules:
-            target = standing_rule_candidate(
-                tool_name, arguments, metadata, self.risk_overrides
-            )
+            target = standing_rule_candidate(tool_name, arguments, metadata, self.risk_overrides)
             if target and target in self.task_rules[tool_name]:
                 rule = f"{tool_name} → {target}"
                 return Decision(True, f"allowed by standing rule: {rule}", rule=rule)

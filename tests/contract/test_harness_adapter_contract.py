@@ -3,6 +3,7 @@
 Every concrete adapter must pass this suite; it is parametrized over the
 in-process fakes for S3 and reused for real adapters in later stages.
 """
+
 import pytest
 
 from haas.harnesses.base import (
@@ -33,8 +34,11 @@ async def test_contract_prepare_and_start(adapter: FakeAdapter) -> None:
 
     handle = await adapter.start_turn(
         StartTurnRequest(
-            invocationId="inv_1", sessionId="hsess_1", turnId="turn_1",
-            appName="chrn_1", input=[{"text": "hi"}],
+            invocationId="inv_1",
+            sessionId="hsess_1",
+            turnId="turn_1",
+            appName="chrn_1",
+            input=[{"text": "hi"}],
         )
     )
     assert handle.turnId == "turn_1"
@@ -43,8 +47,11 @@ async def test_contract_prepare_and_start(adapter: FakeAdapter) -> None:
 async def test_contract_stream_and_terminal(adapter: FakeAdapter) -> None:
     handle = await adapter.start_turn(
         StartTurnRequest(
-            invocationId="inv_1", sessionId="hsess_1", turnId="turn_1",
-            appName="chrn_1", input=[{"text": "hi"}],
+            invocationId="inv_1",
+            sessionId="hsess_1",
+            turnId="turn_1",
+            appName="chrn_1",
+            input=[{"text": "hi"}],
         )
     )
     events = [event async for event in adapter.stream_events(handle)]

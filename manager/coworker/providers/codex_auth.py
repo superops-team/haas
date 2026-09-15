@@ -147,9 +147,7 @@ def _token_post(data: dict[str, str], timeout: float = 30.0) -> Any:
     """One POST to the token endpoint (module-level so tests stub the wire here)."""
     import httpx
 
-    return httpx.post(
-        TOKEN_URL, data=data, headers={"Accept": "application/json"}, timeout=timeout
-    )
+    return httpx.post(TOKEN_URL, data=data, headers={"Accept": "application/json"}, timeout=timeout)
 
 
 def exchange_code(code: str, verifier: str, timeout: float = 30.0) -> dict[str, Any]:
@@ -166,9 +164,7 @@ def exchange_code(code: str, verifier: str, timeout: float = 30.0) -> dict[str, 
         timeout,
     )
     if resp.status_code >= 300:
-        raise CodexAuthError(
-            f"Sign-in failed — token exchange returned HTTP {resp.status_code}."
-        )
+        raise CodexAuthError(f"Sign-in failed — token exchange returned HTTP {resp.status_code}.")
     return resp.json()
 
 
@@ -270,9 +266,7 @@ class CodexTokenStore:
             )
         self.save(resp.json())
         data = self._data()
-        return (data.get("tokens") or {}).get("access_token") or "", (
-            data.get("account_id") or ""
-        )
+        return (data.get("tokens") or {}).get("access_token") or "", (data.get("account_id") or "")
 
 
 # -- interactive sign-in flow -------------------------------------------------------

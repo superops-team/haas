@@ -12,9 +12,7 @@ def default_global_agents_path() -> Path:
     return state_dir() / "AGENTS.md"
 
 
-def load_agents_md(
-    workspace: str | Path, *, global_path: Optional[str | Path] = None
-) -> str:
+def load_agents_md(workspace: str | Path, *, global_path: Optional[str | Path] = None) -> str:
     """Return a system-prompt block from the global and project AGENTS.md files.
 
     v1 loads global (`<state-dir>/AGENTS.md`) + project-root `AGENTS.md` only;
@@ -33,8 +31,5 @@ def load_agents_md(
     if not parts:
         return ""
 
-    blocks = [
-        f"<{label} AGENTS.md>\n{text.strip()}\n</{label} AGENTS.md>"
-        for label, text in parts
-    ]
+    blocks = [f"<{label} AGENTS.md>\n{text.strip()}\n</{label} AGENTS.md>" for label, text in parts]
     return "Project conventions:\n" + "\n\n".join(blocks)

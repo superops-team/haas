@@ -44,24 +44,18 @@ def default_install(secrets: SecretStore) -> str:
     return next(iter(installs), "")
 
 
-def resolve(
-    secrets: SecretStore, install: str = ""
-) -> tuple[str, dict[str, Any] | None]:
+def resolve(secrets: SecretStore, install: str = "") -> tuple[str, dict[str, Any] | None]:
     """(installation_id, profile) for the requested — or default — installation.
     Accepts the id or the account login (what agents see in results)."""
     installs = list_installs(secrets)
     wanted = _norm(install) or default_install(secrets)
     for installation_id, profile in installs:
-        if wanted and (
-            installation_id == wanted or _norm(profile.get("account_login")) == wanted
-        ):
+        if wanted and (installation_id == wanted or _norm(profile.get("account_login")) == wanted):
             return installation_id, profile
     return "", None
 
 
-def managed_connect_install(
-    secrets: SecretStore, form: dict[str, Any]
-) -> dict[str, Any]:
+def managed_connect_install(secrets: SecretStore, form: dict[str, Any]) -> dict[str, Any]:
     """Store a managed GitHub App install from the broker's form-POST.
 
     Writes `github:install:<id>` (metadata only — the loopback POST carries no

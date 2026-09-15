@@ -19,9 +19,7 @@ from zoneinfo import ZoneInfo
 from .models import ScheduledTask, TaskRun
 
 
-def compute_next_run(
-    task: ScheduledTask, *, after: Optional[float] = None
-) -> Optional[float]:
+def compute_next_run(task: ScheduledTask, *, after: Optional[float] = None) -> Optional[float]:
     """Next fire time (epoch seconds), or None if the task is exhausted/one-shot-past."""
     sched = task.schedule
     now = after if after is not None else _epoch_now()
@@ -132,9 +130,7 @@ class TaskStore:
 
     def delete(self, task_id: str) -> bool:
         with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM scheduled_tasks WHERE id=?", (task_id,)
-            )
+            cur = self._conn.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
             self._conn.execute("DELETE FROM task_runs WHERE task_id=?", (task_id,))
             self._conn.commit()
             return cur.rowcount > 0

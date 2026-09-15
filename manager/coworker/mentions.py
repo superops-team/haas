@@ -60,9 +60,7 @@ class MentionSessionStore:
                     t.channel = channel
                     self._save()
                     return t
-            rec = MentionThread(
-                thread_target=thread_target, session_id=session_id, channel=channel
-            )
+            rec = MentionThread(thread_target=thread_target, session_id=session_id, channel=channel)
             self._threads.append(rec)
             self._save()
             return rec

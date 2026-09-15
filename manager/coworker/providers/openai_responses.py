@@ -226,9 +226,7 @@ def _sidecar_extras(items: list[dict[str, Any]]) -> dict[str, Any]:
     persisting when something beyond plain answer text needs continuity.
     """
     kept = [
-        item
-        for item in items
-        if item.get("type") != "reasoning" or item.get("encrypted_content")
+        item for item in items if item.get("type") != "reasoning" or item.get("encrypted_content")
     ]
     if any(item.get("type") in ("reasoning", "function_call") for item in kept):
         return {"_openai": {"items": kept}}

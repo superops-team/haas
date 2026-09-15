@@ -62,6 +62,55 @@ test("scrolling up mid-stream pins the viewport; jump-to-latest re-engages", asy
   expect(done.height - done.top - done.client).toBeLessThan(80);
 });
 
+test("submitting from older history follows the new prompt and initial waiting progress", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByText("Draft the launch note").first().click();
+  const box = page.getByPlaceholder(/Ask the coworker/);
+
+  // First produce enough committed history to make the transcript independently scrollable.
+  await box.fill("stream the epic");
+  await box.press("Enter");
+  await expect(page.getByText("The epic concludes.").first()).toBeVisible({ timeout: 10_000 });
+  await page.locator(".main-scroll").evaluate((el) => {
+    el.scrollTop = 0;
+    el.dispatchEvent(new Event("scroll"));
+  });
+  await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
+
+  // A foreground send starts a fresh follow epoch. This fixture emits turn_start and then stays
+  // silent, so the first visible progress is the WaitingForAgent row driven only by running.
+  await box.fill("silent start scroll follow");
+  await box.press("Enter");
+  await page.waitForTimeout(100);
+  const foregroundVisible = await page.locator(".main-scroll").evaluate((scroller) => {
+    const prompts = scroller.querySelectorAll(".bubble-user");
+    const prompt = prompts.item(prompts.length - 1);
+    const waiting = scroller.querySelector(".waiting-row");
+    if (!(prompt instanceof HTMLElement) || !(waiting instanceof HTMLElement)) return false;
+    const viewport = scroller.getBoundingClientRect();
+    const promptBox = prompt.getBoundingClientRect();
+    const waitingBox = waiting.getBoundingClientRect();
+    return (
+      promptBox.top >= viewport.top &&
+      promptBox.bottom <= viewport.bottom &&
+      waitingBox.top >= viewport.top &&
+      waitingBox.bottom <= viewport.bottom
+    );
+  });
+  expect(foregroundVisible).toBe(true);
+  await page.waitForFunction(
+    () => {
+      const el = document.querySelector(".main-scroll");
+      return !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    },
+    { timeout: 3_000 },
+  );
+  await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
+  await expect(page.getByText("Silent start follow completed.")).toBeVisible({ timeout: 5_000 });
+});
+
 test("bubbles carry hover copy + timestamp without layout shift", async ({ page }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();

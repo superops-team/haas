@@ -1,4 +1,5 @@
 """Identity boundary tests (specs/identity/README.md)."""
+
 import pytest
 
 from haas.identity import (

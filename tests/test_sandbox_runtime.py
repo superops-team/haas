@@ -1,4 +1,5 @@
 """Sandbox Runtime projection tests: narrow-only spec compile + egress projection."""
+
 from __future__ import annotations
 
 import pytest

@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-10
 Related specs: [Harness Registry](../harness-registry/README.md), [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Sandbox Runtime](../sandbox-runtime/README.md)
 
 ## 1. Component Role
@@ -38,7 +38,7 @@ The initial release MUST implement the `codex-app-server` adapter. Future adapte
 Responsibilities:
 
 - Provide the same typed async interface for every harness base.
-- Convert HaaS `EffectiveHarnessConfig` into native harness configuration.
+- Convert the HaaS `EffectiveHarnessProfile` snapshot into native harness configuration.
 - Convert input items, files, instructions, model, budget, and policy into a format understood by the harness.
 - Normalize native progress, text, reasoning, tool, usage, and terminal data into canonical events.
 - Map native errors to HaaS error codes and safe reasons.
@@ -74,18 +74,54 @@ class HarnessAdapter:
     def sandbox_declaration(self) -> HarnessSandboxDecl: ...
 ```
 
+`cancel_turn` is the adapter's neutral native-interrupt primitive. It
+acknowledges dispatch but does not choose the product intent. The adapter
+preserves a native `interrupted` terminal as `harness.turn.interrupted`; Session
+Runtime maps the recorded control intent to resumable pause or irreversible
+cancel. `resume_session` only validates/restores native session continuity. A
+user Continue still creates a new HaaS invocation/turn through Session Runtime.
+
 ### 5.1 Capability Matrix
 
 | Capability | Type | Description |
 |------------|------|------|
 | `streaming` | bool | Whether incremental events can be produced (corresponding to ADK `streaming:true`) |
 | `sessionContinuation` | `native` / `emulated` / `unsupported` | Session continuation mechanism |
+| `pausing` | `native` / `emulated` / `unsupported` | Whether a running turn can reach a resumable interrupted terminal and continue as a linked new turn |
 | `cancellation` | `hard` / `best_effort` / `unsupported` | Cancellation semantics |
 | `toolRestriction` | `hard` / `advisory` / `unsupported` | Enforcement strength for disabled tools |
 | `mcp` | `native` / `proxy` / `advisory` / `unsupported` | MCP integration mechanism |
 | `skills` | `native` / `instructions` / `unsupported` | Skill materialization mechanism |
 | `files` | `native` / `workspace_scan` / `unsupported` | Artifact collection mechanism |
 | `usage` | `native` / `estimated` / `unavailable` | Source of token usage |
+| `approval` | `human_bridge` / `unattended_only` / `unsupported` | Approval mechanism available through this adapter |
+
+### 5.1.1 Public Capability Projection
+
+Adapter declarations are internal mechanism facts. HaaS Protocol projects them into
+`CapabilityState` without exposing adapter identity or transport:
+
+| Adapter declaration | Public status | Public mode | Public enforcement |
+|---------------------|---------------|-------------|--------------------|
+| `streaming=true` | `available` | `native` | `hard` |
+| `sessionContinuation=native` | `available` | `native` | `hard` |
+| `sessionContinuation=emulated` | `available` | `emulated` | `hard` |
+| `pausing=native` | `available` | `native` | `hard` |
+| `pausing=emulated` | `degraded` | `emulated` | `advisory` |
+| `cancellation=hard` | `available` | `native` | `hard` |
+| `cancellation=best_effort` | `available` | `best_effort` | `hard` |
+| `toolRestriction=advisory` | `degraded` | `advisory` | `advisory` |
+| `mcp=proxy` | `available` | `proxy` | `hard` |
+| `mcp=advisory` | `degraded` | `advisory` | `advisory` |
+| `skills=instructions` | `degraded` | `instructions` | `advisory` |
+| `files=workspace_scan` | `available` | `workspace_scan` | `hard` |
+| `usage=estimated` | `degraded` | `estimated` | `none` |
+| `usage=unavailable` | `unsupported` | `none` | `none` |
+| `approval=unattended_only` | `available` | `unattended_only` | `hard` |
+| Any `unsupported` declaration | `unsupported` | `none` | `none` |
+
+A failed runtime probe changes an implemented capability to `unavailable` while
+retaining its declared mode/enforcement. It MUST NOT silently change to `unsupported`.
 
 ### 5.2 Adapter Phases
 
@@ -118,7 +154,8 @@ class HarnessAdapter:
     "mcp": "native",
     "skills": "native",
     "files": "workspace_scan",
-    "usage": "native"
+    "usage": "native",
+    "approval": "unattended_only"
   },
   "safeDetails": {}
 }
@@ -173,7 +210,7 @@ class HarnessAdapter:
 }
 ```
 
-Event Log projects `HarnessEvent` as an ADK `Event`, removing internal fields while retaining `id`/`invocationId`/`author`/`timestamp`/`content`/`actions`/`longRunningToolIds`/`nodeInfo`/`output`.
+Event Log maps normalized `HarnessEvent.type` through the stable catalog in Event Log & SSE §6.3, persists the resulting `haas.*` canonical type, and can project the record as either ADK `Event` or public `CanonicalHaasEvent`. `nativeType` is discarded after normalization and MUST NOT be persisted or exposed. Adapter-provided arbitrary type strings never become public event types.
 
 ## 7. Runtime Model and State Machine
 
@@ -200,13 +237,13 @@ queued -> starting -> running -> failed
 State-machine rules:
 
 - If the adapter `probe` does not pass, the registry MUST NOT mark that base as `ready`.
-- If `stream_events` raises an exception, Session Runtime MUST converge on a terminal state.
+- If `start_turn`, `stream_events`, or `finalize_turn` fails after invocation acceptance, Session Runtime MUST converge on exactly one terminal event; the ADK HTTP/SSE surface remains HTTP 200.
 - After a terminal event, the adapter MUST NOT emit further events that change invocation state.
 - A session MUST have no more than one active turn at any time.
 
 ## 8. Security and Authorization
 
-- Adapter input MUST already have passed protocol schema validation, admission, and policy validation.
+- Adapter input MUST already have passed protocol schema validation, admission, policy validation, and the durable InvocationRecord acceptance write. Adapter turn execution MUST NOT begin before that write.
 - An adapter may receive only a secret reference or short-TTL token; it MUST NOT receive a long-lived raw provider key.
 - Adapter event payloads MUST be redacted before being passed to Event Log.
 - If a native harness configuration file MUST contain a token, it may use only an ephemeral session directory, and that path MUST NOT be included in an artifact/archive.
@@ -231,17 +268,17 @@ Metric dimensions MUST have low cardinality: `adapterId`, `base`, `status`, `err
 
 | Scenario | Behavior |
 |------|------|
-| Runtime binary missing | Adapter sets `probe.status=unavailable`; harness is not marked ready |
-| Native schema incompatible | Fail closed and return `haas_adapter_incompatible` |
-| Native event cannot be parsed | Write a safe `haas.adapter.event_unparsed` event; if the terminal state cannot be determined, the turn fails |
-| Adapter process/connection lost | Attempt reconnection; if recovery is impossible, the invocation is failed or incomplete |
+| Runtime binary/probe unavailable before acceptance | Adapter sets `probe.status=unavailable`; harness is not marked ready; request may return pre-acceptance `haas_adapter_unavailable` |
+| Native schema incompatible during preflight | Fail closed before acceptance and return `haas_adapter_incompatible` |
+| Native event cannot be parsed | Map to normalized `harness.adapter.event_unparsed`; Event Log persists public `haas.adapter.event_unparsed` with typed safe metadata only; if terminal state cannot be determined, the turn fails |
+| Adapter process/connection lost after acceptance | Attempt reconnection; if recovery is impossible, persist failed/incomplete terminal events and keep `/run`/`/run_sse` HTTP 200 |
 | Cancellation unsupported | Mark the capability `unsupported`; the API returns `haas_cancel_unsupported` |
 | Session cannot be resumed | `non_resumable` or `session_expired` |
 
 ## 11. Test Plan and Acceptance Criteria
 
-- Contract tests: every adapter MUST pass the same fake-harness test suite.
-- Golden events: every adapter maintains mapping tests from native event fixtures to ADK Event projections.
+- Contract tests: every adapter MUST pass the same fake-harness test suite, including no turn side effects before durable invocation acceptance, HTTP-200 terminal convergence for accepted start/stream/finalize failures, and projection of every declared mechanism into the protocol `CapabilityState` status/mode/enforcement model.
+- Golden events: every adapter maintains mapping tests from native fixtures to normalized `HarnessEvent`, stable `haas.*` type, ADK projection, and native `CanonicalHaasEvent`; tests prove `nativeType` never persists or escapes.
 - Cancellation: an adapter that supports cancellation MUST prove that the final state is `cancelled`; returning only 200 is insufficient.
 - Recovery: session inspection and stored-state semantics are explicit after an adapter crash/restart.
 - Sandbox: Sandbox Runtime correctly projects adapter declarations, and widening is rejected.

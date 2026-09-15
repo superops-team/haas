@@ -4,6 +4,7 @@ AGENTS.md requires >=95% on policy / redaction / proxy-token paths. These
 tests target the widening-rejection and URL-classification branches that
 enforce those guarantees.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -33,9 +34,7 @@ _COUNTER = iter(range(1000))
 
 
 def _resolve(*layers: PolicyLayer):
-    return PolicyController().compile(
-        PolicyCompileInput(scope=PolicyScope(), layers=list(layers))
-    )
+    return PolicyController().compile(PolicyCompileInput(scope=PolicyScope(), layers=list(layers)))
 
 
 def _base_layer(**kw) -> PolicyLayer:
@@ -47,10 +46,8 @@ def _base_layer(**kw) -> PolicyLayer:
 
 def test_workspace_mode_narrowing_is_allowed() -> None:
     result = _resolve(
-        _base_layer(workspace=WorkspacePolicy(mode="workspace-write",
-                                              writableRoots=["/w"])),
-        _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                              writableRoots=["/w"])),
+        _base_layer(workspace=WorkspacePolicy(mode="workspace-write", writableRoots=["/w"])),
+        _base_layer(workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"])),
     )
     assert result.workspace.mode == "read-only"
 
@@ -58,10 +55,8 @@ def test_workspace_mode_narrowing_is_allowed() -> None:
 def test_workspace_mode_widening_is_rejected() -> None:
     with pytest.raises(PolicyWideningRejected, match="workspace mode widened"):
         _resolve(
-            _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                                  writableRoots=["/w"])),
-            _base_layer(workspace=WorkspacePolicy(mode="danger-full-access",
-                                                  writableRoots=["/w"])),
+            _base_layer(workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"])),
+            _base_layer(workspace=WorkspacePolicy(mode="danger-full-access", writableRoots=["/w"])),
         )
 
 
@@ -71,8 +66,9 @@ def test_workspace_widening_allowed_after_delegation() -> None:
             workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
             delegation=True,
         ),
-        _base_layer(workspace=WorkspacePolicy(mode="workspace-write",
-                                              writableRoots=["/w", "/extra"])),
+        _base_layer(
+            workspace=WorkspacePolicy(mode="workspace-write", writableRoots=["/w", "/extra"])
+        ),
     )
     assert result.workspace.mode == "workspace-write"
     assert "/extra" in result.workspace.writableRoots
@@ -81,19 +77,15 @@ def test_workspace_widening_allowed_after_delegation() -> None:
 def test_writable_root_widening_is_rejected() -> None:
     with pytest.raises(PolicyWideningRejected, match="writable root widened"):
         _resolve(
-            _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                                  writableRoots=["/w"])),
-            _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                                  writableRoots=["/w", "/etc"])),
+            _base_layer(workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"])),
+            _base_layer(workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w", "/etc"])),
         )
 
 
 def test_writable_root_subset_narrows() -> None:
     result = _resolve(
-        _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                              writableRoots=["/w", "/x"])),
-        _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                              writableRoots=["/w"])),
+        _base_layer(workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w", "/x"])),
+        _base_layer(workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"])),
     )
     assert result.workspace.writableRoots == ["/w"]
 
@@ -101,10 +93,8 @@ def test_writable_root_subset_narrows() -> None:
 def test_unknown_workspace_mode_is_invalid() -> None:
     with pytest.raises(PolicyInvalid, match="unknown workspace mode"):
         _resolve(
-            _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                                  writableRoots=["/w"])),
-            _base_layer(workspace=WorkspacePolicy(mode="bogus",
-                                                  writableRoots=["/w"])),
+            _base_layer(workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"])),
+            _base_layer(workspace=WorkspacePolicy(mode="bogus", writableRoots=["/w"])),
         )
 
 
@@ -114,9 +104,10 @@ def test_unknown_workspace_mode_is_invalid() -> None:
 def test_network_default_action_widening_is_rejected() -> None:
     with pytest.raises(PolicyWideningRejected, match="defaultAction widened"):
         _resolve(
-            _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                                  writableRoots=["/w"]),
-                        network=NetworkPolicy(defaultAction="deny", allow=[])),
+            _base_layer(
+                workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+                network=NetworkPolicy(defaultAction="deny", allow=[]),
+            ),
             _base_layer(network=NetworkPolicy(defaultAction="allow", allow=[])),
         )
 
@@ -124,20 +115,20 @@ def test_network_default_action_widening_is_rejected() -> None:
 def test_network_allow_widening_is_rejected() -> None:
     with pytest.raises(PolicyWideningRejected, match="network allow widened"):
         _resolve(
-            _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                                  writableRoots=["/w"]),
-                        network=NetworkPolicy(defaultAction="deny", allow=["a.com"])),
-            _base_layer(network=NetworkPolicy(defaultAction="deny",
-                                              allow=["a.com", "evil.com"])),
+            _base_layer(
+                workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+                network=NetworkPolicy(defaultAction="deny", allow=["a.com"]),
+            ),
+            _base_layer(network=NetworkPolicy(defaultAction="deny", allow=["a.com", "evil.com"])),
         )
 
 
 def test_network_allow_subset_narrows() -> None:
     result = _resolve(
-        _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                              writableRoots=["/w"]),
-                    network=NetworkPolicy(defaultAction="deny",
-                                          allow=["a.com", "b.com"])),
+        _base_layer(
+            workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+            network=NetworkPolicy(defaultAction="deny", allow=["a.com", "b.com"]),
+        ),
         _base_layer(network=NetworkPolicy(defaultAction="deny", allow=["a.com"])),
     )
     assert result.network.allow == ["a.com"]
@@ -146,9 +137,10 @@ def test_network_allow_subset_narrows() -> None:
 def test_unknown_network_default_action_is_invalid() -> None:
     with pytest.raises(PolicyInvalid, match="unknown network defaultAction"):
         _resolve(
-            _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                                  writableRoots=["/w"]),
-                        network=NetworkPolicy(defaultAction="maybe", allow=[])),
+            _base_layer(
+                workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+                network=NetworkPolicy(defaultAction="maybe", allow=[]),
+            ),
         )
 
 
@@ -158,48 +150,51 @@ def test_unknown_network_default_action_is_invalid() -> None:
 def test_tool_disable_accumulates_and_approval_widening_rejected() -> None:
     with pytest.raises(PolicyWideningRejected, match="approvalMode widened"):
         _resolve(
-            _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                                  writableRoots=["/w"]),
-                        tools=ToolsPolicy(disabled=["shell"], approvalMode="always")),
-            _base_layer(tools=ToolsPolicy(disabled=["net"], approvalMode="never")),
+            _base_layer(
+                workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+                tools=ToolsPolicy(disabled=["shell"], approvalMode="never"),
+            ),
+            _base_layer(tools=ToolsPolicy(disabled=["net"], approvalMode="always")),
         )
 
 
 def test_tool_approval_narrowing_and_disable_union() -> None:
     result = _resolve(
-        _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                              writableRoots=["/w"]),
-                    tools=ToolsPolicy(disabled=["shell"], approvalMode="never")),
-        _base_layer(tools=ToolsPolicy(disabled=["net", "shell"],
-                                      approvalMode="always")),
+        _base_layer(
+            workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+            tools=ToolsPolicy(disabled=["shell"], approvalMode="always"),
+        ),
+        _base_layer(tools=ToolsPolicy(disabled=["net", "shell"], approvalMode="never")),
     )
-    assert result.tools.approvalMode == "always"
+    assert result.tools.approvalMode == "never"
     assert set(result.tools.disabled) == {"shell", "net"}
 
 
 def test_unknown_approval_mode_is_invalid() -> None:
     with pytest.raises(PolicyInvalid, match="unknown approvalMode"):
         _resolve(
-            _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                                  writableRoots=["/w"]),
-                        tools=ToolsPolicy(disabled=[], approvalMode="sometimes")),
+            _base_layer(
+                workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+                tools=ToolsPolicy(disabled=[], approvalMode="sometimes"),
+            ),
         )
 
 
 def test_model_allow_widening_rejected_and_subset_narrows() -> None:
     with pytest.raises(PolicyWideningRejected, match="model allow widened"):
         _resolve(
-            _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                                  writableRoots=["/w"]),
-                        model=ModelPolicy(allowedModels=["m1"], fallbackModel=None)),
-            _base_layer(model=ModelPolicy(allowedModels=["m1", "m2"],
-                                          fallbackModel=None)),
+            _base_layer(
+                workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+                model=ModelPolicy(allowedModels=["m1"], fallbackModel=None),
+            ),
+            _base_layer(model=ModelPolicy(allowedModels=["m1", "m2"], fallbackModel=None)),
         )
 
     result = _resolve(
-        _base_layer(workspace=WorkspacePolicy(mode="read-only",
-                                              writableRoots=["/w"]),
-                    model=ModelPolicy(allowedModels=["m1", "m2"], fallbackModel="f")),
+        _base_layer(
+            workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
+            model=ModelPolicy(allowedModels=["m1", "m2"], fallbackModel="f"),
+        ),
         _base_layer(model=ModelPolicy(allowedModels=["m1"], fallbackModel=None)),
     )
     assert result.model.allowedModels == ["m1"]
@@ -264,10 +259,10 @@ def test_loopback_https_follows_scheme_allowlist(url_policy: UrlPolicy) -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        "https://10.0.0.5/meta",       # private
-        "https://169.254.169.254/",    # link-local (cloud metadata)
-        "https://224.0.0.1/",          # multicast
-        "https://240.0.0.1/",          # reserved
+        "https://10.0.0.5/meta",  # private
+        "https://169.254.169.254/",  # link-local (cloud metadata)
+        "https://224.0.0.1/",  # multicast
+        "https://240.0.0.1/",  # reserved
     ],
 )
 def test_private_and_special_networks_blocked(url: str, url_policy: UrlPolicy) -> None:

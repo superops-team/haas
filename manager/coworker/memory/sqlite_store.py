@@ -34,10 +34,7 @@ class SQLiteMemoryStore(MemoryStore):
             """)
         # Databases created before the summary column existed: rows without one fall
         # back to a truncated first line of content at render time (no data migration).
-        cols = {
-            row["name"]
-            for row in self._conn.execute("PRAGMA table_info(memories)").fetchall()
-        }
+        cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(memories)").fetchall()}
         if "summary" not in cols:
             self._conn.execute("ALTER TABLE memories ADD COLUMN summary TEXT")
         self._conn.commit()
@@ -66,9 +63,7 @@ class SQLiteMemoryStore(MemoryStore):
 
     def get(self, item_id: int) -> Optional[MemoryItem]:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM memories WHERE id = ?", (item_id,)
-            ).fetchone()
+            row = self._conn.execute("SELECT * FROM memories WHERE id = ?", (item_id,)).fetchone()
         return _row_to_item(row) if row else None
 
     def list(

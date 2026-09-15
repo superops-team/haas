@@ -19,6 +19,7 @@
 - `haas-protocol/*.openapi.yaml`
 - `haas-protocol/ERROR-CODES.md`
 - `harness-registry/README.md`
+- `harness-profile/README.md`
 - `harness-adapter/README.md`
 - `codex-app-server-adapter/README.md`
 - `session-runtime/README.md`
@@ -51,7 +52,7 @@
 - 保持 ADK 兼容端点、事件、对象结构和错误码与 `specs/haas-protocol/` 一致。
 - 公共 API 与持久化 schema 优先采用增量变更。
 - HTTP 合同字段、路由、Header 或错误发生变化时，更新 OpenAPI 骨架。
-- 记录对 ADK 兼容 API 与 HaaS 原生 API 的兼容性影响。旧 `/v1/codex-worker/*` shim 不在本项目范围内（见 specs/README 3.1.1）。
+- 记录对 ADK 兼容 API 与 HaaS 原生 API 的兼容性影响。
 - 将 adapter 专属细节限制在对应 adapter 规格内。
 - 所有示例必须不含 secret。
 
@@ -59,7 +60,7 @@
 
 - 对公共字段、路径、事件类型、状态值或错误码做破坏性修改或重命名。
 - 将选定的北向协议从 ADK 2.0 兼容协议改为其他协议。
-- 将 Docker 基础镜像族从 OpenSandbox AIO 改为其他镜像。
+- 修改已批准的镜像矩阵：Lite slim（amd64/arm64、Docker CLI）与可选 OpenSandbox AIO（amd64）。
 
 绝不：
 

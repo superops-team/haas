@@ -7,13 +7,15 @@ Supports three transports behind one async interface:
 - ``stdio``: subprocess with newline-delimited JSON (NDJSON) over
   stdin/stdout, for tests and minimal smoke.
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from websockets.asyncio.client import ClientConnection, connect, unix_connect
@@ -22,6 +24,10 @@ from websockets.asyncio.client import ClientConnection, connect, unix_connect
 # socket; this is the handshake URI it expects for that path.
 UDS_WEBSOCKET_HANDSHAKE_URL = "ws://localhost/rpc"
 WEBSOCKET_MAX_MESSAGE_SIZE = 128 << 20  # 128 MiB
+# Codex emits one NDJSON line per app-server message. A supported 8 MiB decoded
+# evidence payload can expand under JSON escaping and also carries an RPC
+# envelope, so the bounded transport frame must be larger than the evidence.
+CODEX_STDIO_FRAME_LIMIT = 64 << 20  # 64 MiB
 DEFAULT_OPEN_TIMEOUT = 30.0
 LOOPBACK_WEBSOCKET_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 CODEX_APP_SERVER_ENV_ALLOWLIST = frozenset(
@@ -68,7 +74,7 @@ def unix_socket_path(listen_url: str) -> str:
     prefix = "unix://"
     if not listen_url.startswith(prefix):
         raise CodexTransportError(f"invalid unix listen URL: {listen_url!r}")
-    path = listen_url[len(prefix):]
+    path = listen_url[len(prefix) :]
     if not path:
         raise CodexTransportError("empty unix socket path")
     return path
@@ -85,11 +91,7 @@ def codex_app_server_env(source: Mapping[str, str] | None = None) -> dict[str, s
     """
     if source is None:
         source = os.environ
-    env = {
-        key: source[key]
-        for key in CODEX_APP_SERVER_ENV_ALLOWLIST
-        if key in source
-    }
+    env = {key: source[key] for key in CODEX_APP_SERVER_ENV_ALLOWLIST if key in source}
     env.setdefault("PATH", os.defpath)
     return env
 
@@ -137,6 +139,7 @@ class StdioTransport:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=codex_app_server_env(),
+            limit=CODEX_STDIO_FRAME_LIMIT,
         )
         return cls(proc)
 
@@ -164,9 +167,7 @@ class StdioTransport:
                 await self._proc.wait()
 
 
-async def _connect_websocket(
-    endpoint: CodexEndpoint, *, open_timeout: float
-) -> WebSocketTransport:
+async def _connect_websocket(endpoint: CodexEndpoint, *, open_timeout: float) -> WebSocketTransport:
     if endpoint.transport == "unix_websocket":
         path = unix_socket_path(endpoint.listen_url)
         ws = await unix_connect(

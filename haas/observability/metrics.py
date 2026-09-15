@@ -1,4 +1,5 @@
 """Low-cardinality metrics (specs/observability/README.md §4)."""
+
 from __future__ import annotations
 
 

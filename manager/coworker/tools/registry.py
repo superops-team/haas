@@ -39,9 +39,7 @@ class ToolRegistry:
         meta = metadata or getattr(func, "__aisuite_tool_metadata__", None)
         # Allow an explicit schema override (param or a `__coworker_schema__` attribute)
         # for tools whose signature can't be auto-converted to a valid JSON schema.
-        resolved_schema = (
-            schema or getattr(func, "__coworker_schema__", None) or _schema_for(func)
-        )
+        resolved_schema = schema or getattr(func, "__coworker_schema__", None) or _schema_for(func)
         spec = ToolSpec(name=name, schema=resolved_schema, func=func, metadata=meta)
         self._tools[name] = spec
         return spec

@@ -128,9 +128,7 @@ def extract_text(file_data: str) -> Optional[str]:
     return _cached((_digest(file_data), "text"), compute)
 
 
-def _encode_png(
-    width: int, height: int, pixels: bytes, stride: int, channels: int
-) -> bytes:
+def _encode_png(width: int, height: int, pixels: bytes, stride: int, channels: int) -> bytes:
     """Minimal PNG writer (RGB/RGBA, 8-bit) so we don't ship Pillow just for this —
     the packaged sidecar deliberately excludes PIL (bundle size, signing surface)."""
     import struct
@@ -222,9 +220,7 @@ def adapt_content(content: list[dict[str, Any]], caps: Any) -> list[dict[str, An
                         "text": f"[Attached PDF: {name} — {len(images)} page image(s), rendered locally]",
                     }
                 )
-                out.extend(
-                    {"type": "image_url", "image_url": {"url": url}} for url in images
-                )
+                out.extend({"type": "image_url", "image_url": {"url": url}} for url in images)
                 continue
 
         text = extract_text(file_data)

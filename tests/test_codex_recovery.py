@@ -3,6 +3,7 @@
 Loopback integration tests simulate app-server restart (thread loss) and
 verify generation bumping, thread/resume validation, and non_resumable.
 """
+
 from __future__ import annotations
 
 import json
@@ -103,8 +104,11 @@ async def test_thread_not_found_recreates_thread() -> None:
         # First turn creates thr_1.
         handle = await adapter.start_turn(
             StartTurnRequest(
-                invocationId="inv_1", sessionId="hsess_1", turnId="turn_1",
-                appName="chrn_1", input=[{"text": "hi"}],
+                invocationId="inv_1",
+                sessionId="hsess_1",
+                turnId="turn_1",
+                appName="chrn_1",
+                input=[{"text": "hi"}],
             )
         )
         _ = [event async for event in adapter.stream_events(handle)]
@@ -116,8 +120,11 @@ async def test_thread_not_found_recreates_thread() -> None:
         # Second turn must thread/resume (not found) then re-create via thread/start.
         handle2 = await adapter.start_turn(
             StartTurnRequest(
-                invocationId="inv_2", sessionId="hsess_1", turnId="turn_2",
-                appName="chrn_1", input=[{"text": "hi"}],
+                invocationId="inv_2",
+                sessionId="hsess_1",
+                turnId="turn_2",
+                appName="chrn_1",
+                input=[{"text": "hi"}],
             )
         )
         _ = [event async for event in adapter.stream_events(handle2)]
@@ -163,8 +170,11 @@ async def test_inspect_session_reports_non_resumable() -> None:
         await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
         await adapter.start_turn(
             StartTurnRequest(
-                invocationId="inv_1", sessionId="hsess_1", turnId="turn_1",
-                appName="chrn_1", input=[{"text": "hi"}],
+                invocationId="inv_1",
+                sessionId="hsess_1",
+                turnId="turn_1",
+                appName="chrn_1",
+                input=[{"text": "hi"}],
             )
         )
         inspection = await adapter.inspect_session(InspectSessionRequest(sessionId="hsess_1"))
@@ -173,6 +183,8 @@ async def test_inspect_session_reports_non_resumable() -> None:
 
 @pytest.mark.integration
 async def test_resume_session_restores_thread() -> None:
+    resume_params: list[dict[str, Any]] = []
+
     async def handler(ws: Any) -> None:
         async for raw in ws:
             msg = json.loads(raw)
@@ -182,6 +194,7 @@ async def test_resume_session_restores_thread() -> None:
             elif method == "initialized":
                 continue
             elif method == "thread/resume":
+                resume_params.append(msg["params"])
                 resume_resp = {
                     "jsonrpc": "2.0",
                     "id": msg["id"],
@@ -200,3 +213,6 @@ async def test_resume_session_restores_thread() -> None:
             ResumeSessionRequest(sessionId="hsess_1", opaque={"threadId": "thr_1"})
         )
         assert prepared.nativeRef.get("threadId") == "thr_1"
+        assert resume_params == [
+            {"threadId": "thr_1", "cwd": "/workspace", "excludeTurns": True}
+        ]

@@ -3,6 +3,7 @@
 The secret regex table is shared with the pre-commit scanner via
 ``haas/security/patterns.json`` (single source of truth).
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -25,16 +26,13 @@ def _load_patterns() -> tuple[list[tuple[str, re.Pattern[str]]], re.Pattern[str]
         data = json.load(fh)
 
     token_patterns = [
-        (item["name"], re.compile(item["pattern"]))
-        for item in data["token_patterns"]
+        (item["name"], re.compile(item["pattern"])) for item in data["token_patterns"]
     ]
 
     generic_source: str = data["generic_key"]
     suffix = r"\s*[:=]"
     field_source = (
-        generic_source[: -len(suffix)]
-        if generic_source.endswith(suffix)
-        else generic_source
+        generic_source[: -len(suffix)] if generic_source.endswith(suffix) else generic_source
     )
     credential_field = re.compile(field_source)
 
@@ -42,12 +40,16 @@ def _load_patterns() -> tuple[list[tuple[str, re.Pattern[str]]], re.Pattern[str]
 
 
 _TOKEN_PATTERNS, _CREDENTIAL_FIELD = _load_patterns()
-
-_ABSOLUTE_PATH_RE = re.compile(r"\b/(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]*\b")
-
-_HEADER_FIELD_NAMES = frozenset(
-    {"authorization", "proxy-authorization", "cookie", "set-cookie"}
+_INLINE_CREDENTIAL_VALUE = re.compile(
+    r"(?i)(\b(?:password|passwd|pwd|client[_-]?secret|api[_-]?key|apikey|"
+    r"access[_-]?(?:token|key)|secret[_-]?key|private[_-]?key|auth[_-]?token|"
+    r"session[_-]?token|refresh[_-]?token)\b\s*[:=]\s*)([\"']?)"
+    r"([^\s,;&\"'}\]]+)(\2)"
 )
+
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]*\b")
+
+_HEADER_FIELD_NAMES = frozenset({"authorization", "proxy-authorization", "cookie", "set-cookie"})
 
 
 def _is_secret_field(key: str) -> bool:
@@ -104,7 +106,10 @@ def redact(value: object, context: RedactionContext | None = None) -> object:
 
 
 def _redact_text(text: str, ctx: RedactionContext) -> str:
-    out = text
+    out = _INLINE_CREDENTIAL_VALUE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}{match.group(4)}",
+        text,
+    )
     for name, regex in _TOKEN_PATTERNS:
         replacement = REDACTED_URL if name == "presigned_url" else REDACTED
         out = regex.sub(replacement, out)
@@ -163,14 +168,13 @@ def validate_artifact_path(container_root: str, requested: str) -> Path:
     root = Path(container_root).resolve()
     target = (root / requested).resolve()
     if not target.is_relative_to(root):
-        raise ArtifactPathTraversalError(
-            f"path escapes container root: {requested!r}"
-        )
+        raise ArtifactPathTraversalError(f"path escapes container root: {requested!r}")
     return target
 
 
 def assert_no_secret_surface(surface: object) -> None:
     """Raise if a value destined for a public surface still contains secrets."""
+
     def walk(node: object) -> None:
         if isinstance(node, str):
             for name, regex in _TOKEN_PATTERNS:
@@ -186,6 +190,7 @@ def assert_no_secret_surface(surface: object) -> None:
                 walk(item)
 
     walk(surface)
+
 
 MAX_UPSTREAM_BODY = 512
 
@@ -205,3 +210,28 @@ def safe_upstream_body(text: str, limit: int = MAX_UPSTREAM_BODY) -> str:
     if len(safe) > limit:
         return safe[:limit] + "...<truncated>"
     return safe
+
+
+def bounded_redacted_preview(
+    value: str, *, max_lines: int = 20, max_bytes: int = 4096
+) -> tuple[str, int]:
+    """Return a redacted head/tail preview and the number of omitted lines."""
+    safe = redact(value)
+    text = safe if isinstance(safe, str) else str(safe)
+    lines = text.splitlines()
+    omitted = max(0, len(lines) - max_lines)
+    if len(lines) > max_lines:
+        head_count = max_lines // 2
+        visible = [*lines[:head_count], *lines[-(max_lines - head_count) :]]
+    else:
+        visible = lines
+    bounded = "\n".join(visible)
+    encoded = bounded.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return bounded, omitted
+    marker = b"\n...\n"
+    head_bytes = (max_bytes - len(marker)) // 2
+    tail_bytes = max_bytes - len(marker) - head_bytes
+    head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore")
+    return head + marker.decode() + tail, omitted

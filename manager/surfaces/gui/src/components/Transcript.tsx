@@ -1,8 +1,12 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { getI18n, useTranslation } from "react-i18next";
-import type { ApprovalDecision, Item } from "../types";
+import type { ApprovalDecision, Item, ModelCallStage, TaskOutcome } from "../types";
+import type { ExecutionEvidence } from "../api";
 import { shortArgs } from "./ApprovalCard";
 import { humanizeAsk, humanizeTool, type HumanLine } from "../humanize";
+import { projectToolActivity, type ToolActivity } from "../activity";
+import { formatTokens } from "../usage";
 import { Markdown } from "./Markdown";
 import { BoardWakeCard } from "./BoardWakeCard";
 import { ConnectorMessageCard } from "./ConnectorMessageCard";
@@ -157,6 +161,522 @@ function buildRows(items: TurnItem[]): TurnRow[] {
     }
   }
   return rows;
+}
+
+function ActivityMark({ status }: { status: ToolActivity["status"] }) {
+  if (status === "running") return <span className="activity-spinner" aria-label="Running" />;
+  if (status === "waiting") return <span aria-label="Waiting">○</span>;
+  if (status === "failed") return <span aria-label="Failed">✕</span>;
+  if (status === "cancelled") return <span aria-label="Cancelled">−</span>;
+  if (status === "succeeded") return <span aria-label="Succeeded">✓</span>;
+  return <span aria-label="Pending">·</span>;
+}
+
+function ActivityInspector({
+  activity,
+  loadExecutionEvidence,
+  sourceRef,
+  focusHeading,
+  onClose,
+}: {
+  activity: ToolActivity;
+  loadExecutionEvidence?: (invocationId: string, toolCallId: string, evidenceRef: string) => Promise<ExecutionEvidence>;
+  sourceRef: React.MutableRefObject<HTMLButtonElement | null>;
+  focusHeading: boolean;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const [evidence, setEvidence] = useState<ExecutionEvidence | null>(null);
+  const [evidenceState, setEvidenceState] = useState<"idle" | "loading" | "expired" | "unavailable">("idle");
+  useEffect(() => {
+    if (focusHeading) headingRef.current?.focus();
+  }, [activity.id, focusHeading]);
+  useEffect(() => {
+    let active = true;
+    setEvidence(null);
+    setEvidenceState("idle");
+    if (!loadExecutionEvidence || !activity.invocationId || !activity.evidenceRef) return () => { active = false; };
+    setEvidenceState("loading");
+    loadExecutionEvidence(activity.invocationId, activity.id, activity.evidenceRef)
+      .then((value) => {
+        if (!active) return;
+        setEvidence(value);
+        setEvidenceState("idle");
+      })
+      .catch((error) => {
+        if (!active) return;
+        setEvidenceState(error?.status === 410 || error?.code === "haas_execution_evidence_expired" ? "expired" : "unavailable");
+      });
+    return () => { active = false; };
+  }, [activity.id, activity.invocationId, activity.evidenceRef, loadExecutionEvidence]);
+  const close = () => {
+    onClose();
+    requestAnimationFrame(() => sourceRef.current?.focus());
+  };
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  });
+  return (
+    <aside
+      className="activity-inspector"
+      data-testid="activity-inspector"
+      aria-labelledby={`activity-inspector-${activity.id}`}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") close();
+      }}
+    >
+      <div className="activity-inspector-head">
+        <div>
+          <div className="activity-kicker">{t("transcript.activity.details")}</div>
+          <h3 id={`activity-inspector-${activity.id}`} ref={headingRef} tabIndex={-1}>
+            {activity.title}
+          </h3>
+        </div>
+        <button type="button" className="activity-close" aria-label={t("transcript.activity.close")} onClick={close}>
+          <Icon name="x" size={16} />
+        </button>
+      </div>
+      <div className={`activity-inspector-status is-${activity.status}`}>
+        <ActivityMark status={activity.status} />
+        <span>{t(`transcript.activity.status.${activity.status}`)}</span>
+      </div>
+      {activity.summary && <p className="activity-inspector-summary">{activity.summary}</p>}
+      {(activity.durationMs !== undefined || activity.exitCode !== undefined) && (
+        <dl className="activity-facts">
+          {activity.durationMs !== undefined && (
+            <div><dt>{t("transcript.activity.duration")}</dt><dd>{activity.durationMs} ms</dd></div>
+          )}
+          {activity.exitCode !== undefined && (
+            <div><dt>{t("transcript.activity.exit_code")}</dt><dd>{activity.exitCode}</dd></div>
+          )}
+        </dl>
+      )}
+      {activity.safeReason && (
+        <div className="activity-safe-reason">{activity.safeReason}</div>
+      )}
+      {evidenceState === "loading" && (
+        <div className="activity-evidence-state" role="status">{t("transcript.activity.evidence_loading")}</div>
+      )}
+      {evidenceState === "expired" && (
+        <div className="activity-evidence-state" role="status">{t("transcript.activity.evidence_expired")}</div>
+      )}
+      {evidenceState === "unavailable" && (
+        <div className="activity-evidence-state" role="status">{t("transcript.activity.evidence_unavailable")}</div>
+      )}
+      {evidence && (
+        <div className="activity-evidence" data-testid="execution-evidence">
+          <div className="activity-output">
+            <div className="activity-section-title">{t("transcript.activity.command")}</div>
+            <pre>{evidence.command}</pre>
+          </div>
+          <dl className="activity-facts">
+            <div><dt>{t("transcript.activity.working_directory")}</dt><dd><code>{evidence.workingDirectory}</code></dd></div>
+          </dl>
+          {evidence.output && (
+            <div className="activity-output">
+              <div className="activity-section-title">{t("transcript.activity.complete_output")}</div>
+              <pre>{evidence.output}</pre>
+            </div>
+          )}
+          {evidence.links.length > 0 && (
+            <div className="activity-evidence-links">
+              <div className="activity-section-title">{t("transcript.activity.links")}</div>
+              {evidence.links.map((link, index) => (
+                <a
+                  key={`${link.url}-${index}`}
+                  href={link.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  referrerPolicy="no-referrer"
+                >
+                  {link.url}
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {activity.preview && (
+        <div className="activity-output">
+          <div className="activity-section-title">{t("transcript.activity.output")}</div>
+          <pre>{activity.preview}</pre>
+          {activity.omittedLineCount > 0 && (
+            <div className="activity-omitted">
+              {t("transcript.activity.omitted", { count: activity.omittedLineCount })}
+            </div>
+          )}
+        </div>
+      )}
+    </aside>
+  );
+}
+
+function HaasActivityRow({
+  activity,
+  selected,
+  onSelect,
+}: {
+  activity: ToolActivity;
+  selected: boolean;
+  onSelect: (source: HTMLButtonElement, keyboard: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const category = t(`transcript.activity.kind.${activity.kind}`);
+  const title = activity.commandPreview || activity.summary || category;
+  const summary = title === category ? "" : category;
+  const keyResult = compactKeyResult(activity.preview);
+  const meta = [
+    t(`transcript.activity.status.${activity.status}`),
+    activity.durationMs === undefined ? "" : `${activity.durationMs} ms`,
+    activity.exitCode === undefined ? "" : t("transcript.activity.exit_code_value", { code: activity.exitCode }),
+  ].filter(Boolean).join(" · ");
+  return (
+    <button
+      type="button"
+      className={`activity-row is-${activity.status}${selected ? " is-selected" : ""}`}
+      aria-pressed={selected}
+      onClick={(event) => onSelect(event.currentTarget, event.detail === 0)}
+    >
+      <span className="activity-status-mark"><ActivityMark status={activity.status} /></span>
+      <span className="activity-row-copy">
+        <span className="activity-row-title">{title}</span>
+        {summary && <span className="activity-row-summary">{summary}</span>}
+        {keyResult && <span className="activity-row-result">{keyResult}</span>}
+      </span>
+      {meta && <span className="activity-row-meta">{meta}</span>}
+      <Icon name="chevronRight" size={14} className="activity-row-chevron" />
+    </button>
+  );
+}
+
+function compactKeyResult(preview: string): string {
+  const text = preview
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("\n");
+  if (text.length <= 240) return text;
+  return `${text.slice(0, 237)}…`;
+}
+
+function HaasTurnGroup({
+  items,
+  live,
+  streamingText,
+  reasoningText,
+  modelStages,
+  taskPhase,
+  taskOutcome,
+  onRetry,
+  inspectorHost,
+  inspectorActive,
+  onInspectorActivate,
+  loadExecutionEvidence,
+}: {
+  items: TurnItem[];
+  live?: boolean;
+  streamingText?: string;
+  reasoningText?: string;
+  modelStages?: ModelCallStage[];
+  taskPhase?: string;
+  taskOutcome?: TaskOutcome;
+  onRetry?: () => void;
+  inspectorHost?: HTMLElement | null;
+  inspectorActive: boolean;
+  onInspectorActivate: (active: boolean) => void;
+  loadExecutionEvidence?: (invocationId: string, toolCallId: string, evidenceRef: string) => Promise<ExecutionEvidence>;
+}) {
+  const { t } = useTranslation();
+  const activities = items.filter((item): item is ToolItem => item.kind === "tool").map(projectToolActivity);
+  const completed = taskPhase === "completed";
+  const phase = live ? "running" : taskPhase || "running";
+  const stateKey = live
+    ? "working"
+    : ["completed", "failed", "incomplete", "cancelled", "verifying"].includes(phase)
+      ? phase
+      : "working";
+  const nonSuccess = ["failed", "incomplete", "cancelled"].includes(phase);
+  const [expanded, setExpanded] = useState(!completed);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [focusInspector, setFocusInspector] = useState(false);
+  const selected = inspectorActive
+    ? activities.find((activity) => activity.id === selectedId) ?? null
+    : null;
+  const sourceRef = useRef<HTMLButtonElement | null>(null);
+  const completedRef = useRef(false);
+  const hasModelStages = !!modelStages?.length;
+  const showModelStages = hasModelStages && (live || expanded);
+  const showCompactActivities = activities.length > 0 && (!hasModelStages || (!live && !expanded));
+
+  useEffect(() => {
+    if (completed && !completedRef.current) {
+      setExpanded(false);
+      if (selected?.status === "succeeded" && !selected.recoveryGroupId) {
+        setSelectedId(null);
+      }
+    }
+    completedRef.current = completed;
+  }, [completed]);
+
+  return (
+    <section className={`activity-stream${selected ? " has-inspector" : ""}`} data-testid="activity-stream">
+      <div className="activity-stream-head">
+        <div className="activity-stream-state" aria-live="polite">
+          {stateKey === "working" || stateKey === "verifying" ? (
+            <span className="activity-spinner" aria-hidden />
+          ) : stateKey === "completed" ? (
+            <span className="activity-complete-mark">✓</span>
+          ) : (
+            <span className="activity-failure-mark">{stateKey === "cancelled" ? "−" : "✕"}</span>
+          )}
+          <span>
+            {t(`transcript.activity.${stateKey}`, { count: activities.length })}
+          </span>
+        </div>
+        {completed && (
+          <button type="button" className="activity-disclosure" onClick={() => setExpanded((value) => !value)}>
+            {expanded ? t("transcript.activity.hide") : t("transcript.activity.show")}
+            <Icon name="chevronDown" size={14} className={expanded ? "rotate-180" : ""} />
+          </button>
+        )}
+      </div>
+      {nonSuccess && (taskOutcome?.safeReason || taskOutcome?.code) && (
+        <div className="activity-task-error" role="alert" data-testid="activity-task-error">
+          <div className="activity-task-error-title">{t(`transcript.activity.${phase}_title`)}</div>
+          <div>{taskOutcome.safeReason || taskOutcome.code}</div>
+          {taskOutcome.safeReason && taskOutcome.code && <code>{taskOutcome.code}</code>}
+          {taskOutcome.retryable && onRetry && (
+            <button type="button" className="activity-retry" onClick={onRetry}>
+              {t("transcript.retry")}
+            </button>
+          )}
+        </div>
+      )}
+      {reasoningText && (!modelStages || modelStages.length === 0) && (live || expanded) && (
+        <div className="activity-progress" data-testid="activity-progress">
+          <Icon name="sparkle" size={13} />
+          <div>
+            <div className="activity-progress-label">{t("transcript.activity.progress")}</div>
+            <div>{reasoningText}</div>
+          </div>
+        </div>
+      )}
+      {showModelStages && (
+        <ModelStageTimeline
+          stages={modelStages!}
+          activities={activities}
+          onActivitySelect={(activityId, source, keyboard) => {
+            sourceRef.current = source;
+            setFocusInspector(keyboard);
+            setSelectedId(activityId);
+            onInspectorActivate(true);
+          }}
+        />
+      )}
+      {showCompactActivities && (
+        <div className="activity-list">
+          {activities.map((activity) => (
+            <HaasActivityRow
+              key={activity.id}
+              activity={activity}
+              selected={selectedId === activity.id}
+              onSelect={(source, keyboard) => {
+                sourceRef.current = source;
+                setFocusInspector(keyboard);
+                setSelectedId(activity.id);
+                onInspectorActivate(true);
+              }}
+            />
+          ))}
+        </div>
+      )}
+      {streamingText && (
+        <div className="activity-live-answer" data-testid="turn-live-stream">
+          <Markdown text={streamingText} />
+          <span className="stream-cursor">▍</span>
+        </div>
+      )}
+      {selected &&
+        (inspectorHost
+          ? createPortal(
+              <ActivityInspector activity={{ ...selected, title: t(`transcript.activity.kind.${selected.kind}`) }} loadExecutionEvidence={loadExecutionEvidence} sourceRef={sourceRef} focusHeading={focusInspector} onClose={() => { setSelectedId(null); onInspectorActivate(false); }} />,
+              inspectorHost,
+            )
+          : <ActivityInspector activity={{ ...selected, title: t(`transcript.activity.kind.${selected.kind}`) }} loadExecutionEvidence={loadExecutionEvidence} sourceRef={sourceRef} focusHeading={focusInspector} onClose={() => { setSelectedId(null); onInspectorActivate(false); }} />)}
+    </section>
+  );
+}
+
+function ModelStageTimeline({
+  stages,
+  activities,
+  onActivitySelect,
+}: {
+  stages: ModelCallStage[];
+  activities: ToolActivity[];
+  onActivitySelect: (activityId: string, source: HTMLButtonElement, keyboard: boolean) => void;
+}) {
+  const activityById = new Map(activities.map((activity) => [activity.id, activity]));
+  return (
+    <div className="model-stage-list" data-testid="model-stage-list">
+      {stages.map((stage, index) => (
+        <ModelStageCard
+          key={stage.modelCallId}
+          stage={stage}
+          index={index}
+          activityById={activityById}
+          onActivitySelect={onActivitySelect}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ModelStageCard({
+  stage,
+  index,
+  activityById,
+  onActivitySelect,
+}: {
+  stage: ModelCallStage;
+  index: number;
+  activityById: Map<string, ToolActivity>;
+  onActivitySelect: (activityId: string, source: HTMLButtonElement, keyboard: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(stage.status !== "completed");
+  const priorStatus = useRef(stage.status);
+  useEffect(() => {
+    if (stage.status !== priorStatus.current) {
+      setOpen(stage.status !== "completed");
+      priorStatus.current = stage.status;
+    }
+  }, [stage.status]);
+  const usage = stage.usage;
+  const reasoningPreview = (text: string, projected?: string) =>
+    Array.from(projected ?? text).slice(0, 240).join("");
+  return (
+    <details
+      className={`model-stage is-${stage.status}`}
+      data-testid="model-call-stage"
+      open={open}
+    >
+      <summary
+        className="model-stage-head"
+        onClick={(event) => {
+          event.preventDefault();
+          setOpen((value) => !value);
+        }}
+      >
+              <span className="model-stage-title">
+                {stage.status === "completed" ? "✓ " : ""}
+                {t("transcript.activity.stage", { number: index + 1 })}
+                {" · "}
+                {t("transcript.turn.steps_label", { count: stage.steps.length })}
+              </span>
+              {usage ? (
+                <span className="model-stage-usage">
+                  <span>↓ {formatTokens(usage.inputTokens)}</span>
+                  <span>↑ {formatTokens(usage.outputTokens)}</span>
+                  {typeof usage.reasoningOutputTokens === "number" && (
+                    <span>{t("transcript.activity.reasoning_tokens")} {formatTokens(usage.reasoningOutputTokens)}</span>
+                  )}
+                  {typeof usage.cacheReadTokens === "number" && (
+                    <span>{t("transcript.activity.cache_tokens")} {formatTokens(usage.cacheReadTokens)}</span>
+                  )}
+                  {typeof usage.cacheWriteTokens === "number" && usage.cacheWriteTokens > 0 && (
+                    <span>{t("transcript.activity.cache_write_tokens")} {formatTokens(usage.cacheWriteTokens)}</span>
+                  )}
+                </span>
+              ) : (
+                <span className="model-stage-usage is-missing">
+                  {t(stage.status === "running"
+                    ? "transcript.activity.tokens_pending"
+                    : "transcript.activity.tokens_unreported")}
+                </span>
+              )}
+      </summary>
+      <div className="model-stage-rail">
+              {stage.steps.map((step) => {
+                const activity = step.kind === "tool" ? activityById.get(step.activityId) : undefined;
+                const label = step.kind === "output_pending"
+                  ? "result_streaming"
+                  : step.kind === "reasoning_summary"
+                    ? "reasoning_summary"
+                    : step.kind === "tool"
+                      ? "action"
+                      : step.kind;
+                const stepText = "text" in step ? step.text : "";
+                const previewText = step.kind === "reasoning_summary"
+                  ? reasoningPreview(step.text, step.previewText)
+                  : stepText;
+                const hasReasoningDetail = step.kind === "reasoning_summary" && step.text !== previewText;
+                const body = (
+                  <>
+                    <div className="model-stage-step-label">{t(`transcript.activity.step.${label}`)}</div>
+                    <div
+                      className={activity?.commandPreview
+                        ? "model-stage-command"
+                        : step.kind === "reasoning_summary"
+                          ? "model-stage-step-text model-stage-reasoning-preview"
+                          : "model-stage-step-text"}
+                      data-testid={step.kind === "reasoning_summary" ? "reasoning-preview" : undefined}
+                    >
+                      {activity?.commandPreview || activity?.summary || previewText || t("transcript.activity.kind.tool")}
+                    </div>
+                    {hasReasoningDetail && (
+                      <details className="model-stage-reasoning-detail" data-testid="reasoning-detail">
+                        <summary>{t("transcript.activity.complete_reasoning_summary")}</summary>
+                        <div className="model-stage-reasoning-full">{step.text}</div>
+                      </details>
+                    )}
+                    {activity && compactKeyResult(activity.preview) && (
+                      <div className="model-stage-key-result">
+                        {compactKeyResult(activity.preview)}
+                      </div>
+                    )}
+                    {activity && (
+                      <div className="model-stage-action-meta">
+                        {[
+                          t(`transcript.activity.status.${activity.status}`),
+                          activity.durationMs === undefined ? "" : `${activity.durationMs} ms`,
+                          activity.exitCode === undefined
+                            ? ""
+                            : t("transcript.activity.exit_code_value", { code: activity.exitCode }),
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    )}
+                    <div className="model-stage-accounting">
+                      {t("transcript.activity.included_in_stage", { number: index + 1 })}
+                    </div>
+                  </>
+                );
+                return activity ? (
+                  <button
+                    type="button"
+                    className={`model-stage-step model-stage-action is-${step.kind}`}
+                    key={step.stepId}
+                    onClick={(event) =>
+                      onActivitySelect(activity.id, event.currentTarget, event.detail === 0)
+                    }
+                  >
+                    {body}
+                  </button>
+                ) : (
+                  <div className={`model-stage-step is-${step.kind}`} key={step.stepId}>
+                    {body}
+                  </div>
+                );
+              })}
+      </div>
+    </details>
+  );
 }
 
 function originChip(origin: string | undefined, note: string | undefined, grant?: string) {
@@ -356,7 +876,21 @@ function StepRow({
   );
 }
 
-function TurnGroup({
+function TurnGroup(props: Parameters<typeof LegacyTurnGroup>[0]) {
+  const { items, modelStages } = props;
+  if (modelStages?.length || items.some((item) => item.kind === "tool" && item.source === "haas")) {
+    return (
+      <HaasTurnGroup
+        {...props}
+        inspectorActive={!!props.inspectorActive}
+        onInspectorActivate={props.onInspectorActivate || (() => {})}
+      />
+    );
+  }
+  return <LegacyTurnGroup {...props} />;
+}
+
+function LegacyTurnGroup({
   items,
   live,
   streamingText,
@@ -367,6 +901,15 @@ function TurnGroup({
   // Sub-threshold streamed text belongs to THIS group (§33 ref #3): collapsed → it rides
   // the header as the live line; expanded → the small quiet line under the steps.
   streamingText?: string;
+  reasoningText?: string;
+  modelStages?: ModelCallStage[];
+  taskPhase?: string;
+  taskOutcome?: TaskOutcome;
+  onRetry?: () => void;
+  inspectorHost?: HTMLElement | null;
+  inspectorActive?: boolean;
+  onInspectorActivate?: (active: boolean) => void;
+  loadExecutionEvidence?: (invocationId: string, toolCallId: string, evidenceRef: string) => Promise<ExecutionEvidence>;
   onAllowAnyway?: (name: string, args: any) => void;
 }) {
   const { t } = useTranslation();
@@ -462,6 +1005,13 @@ interface Props {
   running?: boolean;
   // Sub-threshold streamed text (streamGate mode "quiet") — handed to the live turn group.
   streamingText?: string;
+  reasoningText?: string;
+  modelStages?: ModelCallStage[];
+  taskPhase?: string;
+  taskOutcome?: TaskOutcome;
+  inspectorHost?: HTMLElement | null;
+  onInspectorOpenChange?: (open: boolean) => void;
+  loadExecutionEvidence?: (invocationId: string, toolCallId: string, evidenceRef: string) => Promise<ExecutionEvidence>;
   // Re-run the failed turn (no new user message). Offered only on a retriable notice that
   // is the transcript tail of an idle session — anywhere else the error is history.
   onRetry?: () => void;
@@ -531,28 +1081,44 @@ function McpNotice({
 }
 
 
-export function Transcript({ items, running, streamingText, onRetry, onOpenConnectors, onUndoMemory, onAllowAnyway }: Props) {
+export function Transcript({ items, running, streamingText, reasoningText, modelStages, taskPhase, taskOutcome, inspectorHost, onInspectorOpenChange, loadExecutionEvidence, onRetry, onOpenConnectors, onUndoMemory, onAllowAnyway }: Props) {
   const { t } = useTranslation();
+  const [activeInspectorTurn, setActiveInspectorTurn] = useState<number | null>(null);
+  useEffect(() => {
+    onInspectorOpenChange?.(activeInspectorTurn !== null);
+  }, [activeInspectorTurn, onInspectorOpenChange]);
+  useEffect(() => () => onInspectorOpenChange?.(false), [onInspectorOpenChange]);
   // §33 grouping: a turn = the maximal run of assistant/tool/resolved-approval items between
   // breakers (user, connector, notices, plan/dir requests…). Trailing assistant texts are the
   // ANSWER and render as bubbles after the group; interior assistant texts are narration and
   // stay inside. A run with no activity at all is just bubbles (unchanged chat behavior).
-  const blocks: Array<{ turn: TurnItem[]; live?: boolean } | { item: Item; i: number }> = [];
+  const blocks: Array<{ turn: TurnItem[]; live?: boolean; reasoningText?: string; modelStages?: ModelCallStage[] } | { item: Item; i: number }> = [];
   let run: TurnItem[] = [];
   const flush = (live = false) => {
     if (!run.length) return;
     const turn = [...run];
     run = [];
     const answers: AssistantItem[] = [];
+    const savedReasoning = [...turn].reverse().find((item): item is AssistantItem => item.kind === "assistant" && !!item.reasoning)?.reasoning;
+    const savedStages = [...turn].reverse().find((item): item is AssistantItem => item.kind === "assistant" && !!item.modelStages?.length)?.modelStages;
+    const hasHaasActivity =
+      !!savedStages?.length || turn.some((item) => item.kind === "tool" && item.source === "haas");
     // A live run with tool activity keeps its trailing text inside as the status line;
     // a live run with NO activity is a plain streaming reply — bubbles, as ever.
     const keepTrailing = live && turn.some((it) => it.kind !== "assistant");
     if (!keepTrailing)
       while (turn.length && turn[turn.length - 1].kind === "assistant")
         answers.unshift(turn.pop() as AssistantItem);
-    if (turn.some((it) => it.kind !== "assistant")) blocks.push({ turn, live });
+    if (turn.some((it) => it.kind !== "assistant") || savedStages?.length)
+      blocks.push({ turn, live, reasoningText: savedReasoning, modelStages: savedStages });
     else turn.forEach((t) => blocks.push({ item: t, i: -1 }));
-    answers.forEach((a) => blocks.push({ item: a, i: -1 }));
+    answers.forEach((answer) => {
+      const visibleAnswer = hasHaasActivity && answer.reasoning
+        ? { ...answer, reasoning: undefined }
+        : answer;
+      if (visibleAnswer.text || visibleAnswer.reasoning)
+        blocks.push({ item: visibleAnswer, i: -1 });
+    });
   };
   items.forEach((item, i) => {
     if (item.kind === "tool" || item.kind === "assistant" || (item.kind === "approval" && item.resolved))
@@ -571,21 +1137,38 @@ export function Transcript({ items, running, streamingText, onRetry, onOpenConne
     }
   });
   flush(!!running);
+  if (running && modelStages?.length && !blocks.some((block) => "turn" in block && block.live))
+    blocks.push({ turn: [], live: true, modelStages });
 
   const lastTurnIndex = blocks.reduce((acc, b, i) => ("turn" in b ? i : acc), -1);
   return (
     <div className="transcript">
       {blocks.map((block, bi) => {
         if ("turn" in block)
+          {
+          const historicalOutcome = [...block.turn]
+            .reverse()
+            .find((item): item is ToolItem => item.kind === "tool" && !!item.taskOutcome)
+            ?.taskOutcome;
           return (
             <TurnGroup
               items={block.turn}
               live={block.live}
               streamingText={block.live && bi === lastTurnIndex ? streamingText : undefined}
+              reasoningText={(bi === lastTurnIndex ? reasoningText : undefined) || block.reasoningText}
+              modelStages={(bi === lastTurnIndex ? modelStages : undefined) || block.modelStages}
+              taskPhase={historicalOutcome?.phase || (bi === lastTurnIndex ? taskPhase : "completed")}
+              taskOutcome={historicalOutcome || (bi === lastTurnIndex ? taskOutcome : undefined)}
+              onRetry={onRetry}
+              inspectorHost={inspectorHost}
+              inspectorActive={activeInspectorTurn === bi}
+              onInspectorActivate={(active) => setActiveInspectorTurn(active ? bi : null)}
+              loadExecutionEvidence={loadExecutionEvidence}
               onAllowAnyway={onAllowAnyway}
               key={bi}
             />
           );
+          }
         const { item } = block;
         switch (item.kind) {
           case "connector":
@@ -727,6 +1310,11 @@ export function Transcript({ items, running, streamingText, onRetry, onOpenConne
             return null;
         }
       })}
+      {running && reasoningText && !modelStages?.length && lastTurnIndex < 0 && (
+        <div>
+          <ThinkingBlock text={reasoningText} live />
+        </div>
+      )}
     </div>
   );
 }

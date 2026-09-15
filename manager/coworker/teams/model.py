@@ -62,7 +62,7 @@ class Actor:
 
 
 LINK_KINDS = ("parent", "blocks")  # link(src, "parent", dst): dst is src's parent
-                                   # link(src, "blocks", dst): src blocks dst
+# link(src, "blocks", dst): src blocks dst
 
 # `note` is any observation — the journal is not only for investigations. `raw` is
 # a capture (log excerpt, command output); reads skip raw unless asked, and large

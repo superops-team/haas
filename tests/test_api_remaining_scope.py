@@ -5,19 +5,34 @@ Covers specs/config §5.1 (adapter assembly), specs/haas-protocol
 specs/harness-registry §5.1 / specs/mcp-tool-skill-runtime §8 (skill bundle
 files and path safety).
 """
+
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from haas.api import build_app
 from haas.config import AppConfig, create_app
+from haas.harnesses import FakeAdapter
+from haas.harnesses.base import (
+    AdapterTurnResult,
+    CancelResult,
+    CancelTurnRequest,
+    HarnessEvent,
+    PreparedSession,
+    ResumeSessionRequest,
+    StartTurnRequest,
+    TurnHandle,
+)
 from haas.identity import Principal
 from haas.runtime import FakeDelegatedContainerRuntime
-from haas.stores import ApprovalRecord, SessionRecord
+from haas.stores import ApprovalRecord, InputRequestRecord, InvocationRecord, SessionRecord
 
 pytestmark = pytest.mark.adk
 
@@ -87,6 +102,279 @@ def _delegated_body(**overrides: Any) -> dict[str, Any]:
     return body
 
 
+class _LifecycleAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.interrupt_acknowledged = asyncio.Event()
+        self.release_terminal = asyncio.Event()
+        self.first_invocation_id: str | None = None
+        self.resumed = False
+
+    async def start_turn(self, request: StartTurnRequest) -> TurnHandle:
+        if self.first_invocation_id is None:
+            self.first_invocation_id = request.invocationId
+        return await super().start_turn(request)
+
+    async def stream_events(self, handle: TurnHandle) -> AsyncIterator[HarnessEvent]:
+        if handle.invocationId == self.first_invocation_id:
+            self.started.set()
+            await self.release_terminal.wait()
+            status = "interrupted"
+        else:
+            status = "completed"
+        yield HarnessEvent(
+            type=f"harness.turn.{status}",
+            invocationId=handle.invocationId,
+            sessionId=handle.sessionId,
+            turnId=handle.turnId,
+            author=self.base,
+            content={"role": "model", "parts": []},
+            actions={"stateDelta": {"status": status}},
+        )
+
+    async def cancel_turn(self, request: CancelTurnRequest) -> CancelResult:
+        self.interrupt_acknowledged.set()
+        return CancelResult(status="accepted")
+
+    async def resume_session(self, request: ResumeSessionRequest) -> PreparedSession:
+        self.resumed = True
+        return PreparedSession(sessionId=request.sessionId, nativeRef={"resumed": True})
+
+    async def finalize_turn(self, handle: TurnHandle) -> AdapterTurnResult:
+        status = "interrupted" if handle.invocationId == self.first_invocation_id else "completed"
+        return AdapterTurnResult(status=status)
+
+
+class _RejectingLifecycleAdapter(_LifecycleAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupt_attempts = 0
+
+    async def cancel_turn(self, request: CancelTurnRequest) -> CancelResult:
+        del request
+        self.interrupt_attempts += 1
+        raise RuntimeError("native interrupt rejected")
+
+
+class _ResumeFailureAdapter(_LifecycleAdapter):
+    async def resume_session(self, request: ResumeSessionRequest) -> PreparedSession:
+        del request
+        raise RuntimeError("native resume rejected")
+
+
+@pytest.mark.asyncio
+async def test_pause_and_continue_http_lifecycle_uses_authoritative_terminal() -> None:
+    adapter = _LifecycleAdapter()
+    app = build_app(
+        adapter=adapter,
+        identity_tokens={
+            TOKEN_A: Principal(
+                principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"})
+            )
+        },
+    )
+    transport = httpx.ASGITransport(app=app)
+    session_id = "hsess_http_pause"
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        run_task = asyncio.create_task(
+            client.post(
+                "/run",
+                json={
+                    "appName": "chrn_codex_default",
+                    "userId": "u_1",
+                    "sessionId": session_id,
+                    "newMessage": {"role": "user", "parts": []},
+                },
+                headers=AUTH_A,
+            )
+        )
+        await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
+        invocation_id = next(iter(app.state.runtime.sessions._active))
+        pause_task = asyncio.create_task(
+            client.post(
+                f"/v1/haas/sessions/{session_id}/invocations/{invocation_id}/pause",
+                headers={**AUTH_A, "Idempotency-Key": "pause-http-1"},
+            )
+        )
+        await asyncio.wait_for(adapter.interrupt_acknowledged.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        assert pause_task.done() is False
+        adapter.release_terminal.set()
+        pause_response = await asyncio.wait_for(pause_task, timeout=0.5)
+        await asyncio.wait_for(run_task, timeout=0.5)
+
+        assert pause_response.status_code == 200, pause_response.text
+        paused = pause_response.json()["data"]
+        assert paused["status"] == "interrupted"
+        assert paused["sessionControl"] == {
+            "controlState": "paused",
+            "supportsResume": True,
+            "resumableInvocationId": invocation_id,
+        }
+
+        stopped = await client.post(
+            f"/v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel",
+            headers={**AUTH_A, "Idempotency-Key": "stop-paused-http-1"},
+        )
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()["data"]["sessionControl"] == {
+            "controlState": "cancelled",
+            "supportsResume": False,
+            "resumableInvocationId": None,
+        }
+
+        # Re-create the paused source projection to exercise Continue below; the
+        # irreversible paused-Stop behavior itself is asserted by the response.
+        session = app.state.runtime.store.get_session(
+            ("chrn_codex_default", "u_1", session_id)
+        )
+        assert session is not None
+        session.controlState = "paused"
+        session.supportsResume = True
+        session.resumableInvocationId = invocation_id
+        app.state.runtime.store.put_session(session)
+
+        replacement = await client.post(
+            "/run",
+            json={
+                "appName": "chrn_codex_default",
+                "userId": "u_1",
+                "sessionId": session_id,
+                "newMessage": {"role": "user", "parts": [{"text": "wrong path"}]},
+            },
+            headers=AUTH_A,
+        )
+        assert replacement.status_code == 409, replacement.text
+        assert replacement.json()["haasError"]["code"] == "haas_resume_required"
+
+        continue_response = await client.post(
+            f"/v1/haas/sessions/{session_id}/invocations/{invocation_id}/continue",
+            json={"additionalInstruction": "Continue"},
+            headers={**AUTH_A, "Idempotency-Key": "continue-http-1"},
+        )
+        assert continue_response.status_code == 200, continue_response.text
+        assert continue_response.headers["content-type"].startswith("text/event-stream")
+        continued_id = continue_response.headers["X-HaaS-Invocation-ID"]
+        assert continued_id != invocation_id
+        readback = await client.get(
+            f"/v1/haas/sessions/{session_id}/invocations/{continued_id}",
+            headers=AUTH_A,
+        )
+        assert readback.status_code == 200
+        data = readback.json()["data"]
+        assert data["continuedFromInvocationId"] == invocation_id
+        assert data["sessionControl"]["controlState"] == "idle"
+        assert adapter.resumed is True
+
+
+@pytest.mark.parametrize("action", ["pause", "cancel"])
+async def test_lifecycle_http_maps_rejected_native_interrupt_and_releases_idempotency(
+    action: str,
+) -> None:
+    adapter = _RejectingLifecycleAdapter()
+    app = build_app(
+        adapter=adapter,
+        identity_tokens={
+            TOKEN_A: Principal(
+                principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"})
+            )
+        },
+    )
+    session_id = f"hsess_http_{action}_rejected"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run_task = asyncio.create_task(
+            client.post(
+                "/run",
+                json={
+                    "appName": "chrn_codex_default",
+                    "userId": "u_1",
+                    "sessionId": session_id,
+                    "newMessage": {"role": "user", "parts": []},
+                },
+                headers=AUTH_A,
+            )
+        )
+        await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
+        invocation_id = next(iter(app.state.runtime.sessions._active))
+        url = f"/v1/haas/sessions/{session_id}/invocations/{invocation_id}/{action}"
+        headers = {**AUTH_A, "Idempotency-Key": f"{action}-rejected-http-1"}
+
+        rejected = await client.post(url, headers=headers)
+        retried = await client.post(url, headers=headers)
+
+        assert rejected.status_code == 502, rejected.text
+        assert rejected.json()["haasError"]["code"] == "haas_adapter_error"
+        assert rejected.json()["haasError"]["safeReason"] == "adapter_error"
+        assert rejected.json()["haasError"]["retryable"] is True
+        assert retried.status_code == 502, retried.text
+        assert adapter.interrupt_attempts == 2
+        session = app.state.runtime.store.get_session(
+            ("chrn_codex_default", "u_1", session_id)
+        )
+        assert session is not None
+        assert session.controlState == "running"
+
+        adapter.release_terminal.set()
+        await asyncio.wait_for(run_task, timeout=0.5)
+
+
+async def test_continue_sse_closes_cleanly_after_accepted_terminal_failure() -> None:
+    adapter = _ResumeFailureAdapter()
+    app = build_app(
+        adapter=adapter,
+        identity_tokens={
+            TOKEN_A: Principal(
+                principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"})
+            )
+        },
+    )
+    session_id = "hsess_continue_failure"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run_task = asyncio.create_task(
+            client.post(
+                "/run",
+                json={
+                    "appName": "chrn_codex_default",
+                    "userId": "u_1",
+                    "sessionId": session_id,
+                    "newMessage": {"role": "user", "parts": []},
+                },
+                headers=AUTH_A,
+            )
+        )
+        await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
+        invocation_id = next(iter(app.state.runtime.sessions._active))
+        pause_task = asyncio.create_task(
+            client.post(
+                f"/v1/haas/sessions/{session_id}/invocations/{invocation_id}/pause",
+                headers=AUTH_A,
+            )
+        )
+        await asyncio.wait_for(adapter.interrupt_acknowledged.wait(), timeout=0.5)
+        adapter.release_terminal.set()
+        assert (await asyncio.wait_for(pause_task, timeout=0.5)).status_code == 200
+        await asyncio.wait_for(run_task, timeout=0.5)
+
+        continued = await client.post(
+            f"/v1/haas/sessions/{session_id}/invocations/{invocation_id}/continue",
+            json={},
+            headers={**AUTH_A, "Idempotency-Key": "continue-failure-http-1"},
+        )
+
+        assert continued.status_code == 200, continued.text
+        frames = [
+            json.loads(line.removeprefix("data: "))
+            for line in continued.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert len(frames) == 1
+        assert frames[0]["actions"]["stateDelta"]["status"] == "failed"
+
+
 # --- adapter assembly (specs/config §5.1) -----------------------------------
 
 
@@ -112,6 +400,10 @@ def test_create_app_does_not_require_live_harness() -> None:
     client = TestClient(app)
     # /health is process liveness only and must stay ok.
     assert client.get("/v1/haas/health").json()["data"]["status"] == "ok"
+    # Control readiness must stay available for bootstrap/profile operations.
+    control = client.get("/v1/haas/ready?scope=control")
+    assert control.status_code == 200
+    assert control.json()["data"] == {"status": "ready", "scope": "control"}
     # execution readiness must honestly report not_ready.
     response = client.get("/v1/haas/ready?scope=execution")
     assert response.status_code == 503
@@ -202,9 +494,7 @@ def test_list_sessions_is_scoped_to_caller() -> None:
 def test_list_sessions_filters_by_app() -> None:
     client = _client()
     _run(client, "hsess_1")
-    hit = client.get(
-        "/v1/haas/sessions?app=chrn_codex_default", headers=AUTH_A
-    ).json()
+    hit = client.get("/v1/haas/sessions?app=chrn_codex_default", headers=AUTH_A).json()
     miss = client.get("/v1/haas/sessions?app=chrn_other", headers=AUTH_A).json()
     assert len(hit["data"]) == 1
     assert miss["data"] == []
@@ -290,16 +580,12 @@ def test_skill_files_round_trip() -> None:
 def test_skill_files_unknown_skill_is_404() -> None:
     client = _client()
     harness_id = _harness_with_skill(client, SKILL)
-    resp = client.get(
-        f"/v1/haas/harnesses/{harness_id}/skills/skill_nope/files", headers=AUTH_A
-    )
+    resp = client.get(f"/v1/haas/harnesses/{harness_id}/skills/skill_nope/files", headers=AUTH_A)
     assert resp.status_code == 404
 
 
 def test_skill_files_unknown_harness_is_404() -> None:
-    resp = _client().get(
-        "/v1/haas/harnesses/chrn_missing/skills/s/files", headers=AUTH_A
-    )
+    resp = _client().get("/v1/haas/harnesses/chrn_missing/skills/s/files", headers=AUTH_A)
     assert resp.status_code == 404
 
 
@@ -407,24 +693,23 @@ def test_delegated_session_uses_configured_default_policy() -> None:
 
 def test_delegated_session_reuses_existing_manager_binding() -> None:
     client = _client()
-    first = client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    )
+    first = client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A)
     assert first.status_code == 200
     delegated_id = first.json()["data"]["id"]
 
-    second = client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    )
+    second = client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A)
     assert second.status_code == 200
     assert second.json()["data"]["id"] == delegated_id
 
 
 def test_delegated_session_rejects_conflicting_manager_binding() -> None:
     client = _client()
-    assert client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    ).status_code == 200
+    assert (
+        client.post(
+            "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
+        ).status_code
+        == 200
+    )
 
     conflict = client.post(
         "/v1/haas/delegated-sessions",
@@ -460,14 +745,13 @@ def test_delegated_session_accepts_unpinned_local_image_only_with_override() -> 
     assert denied.status_code == 400
 
     cfg = AppConfig()
+    cfg.store.backend = "memory"
     cfg.delegation.allow_unpinned_local_image = True
     client = TestClient(
         build_app(
             config=cfg,
             identity_tokens={
-                TOKEN_A: Principal(
-                    principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"})
-                )
+                TOKEN_A: Principal(principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"}))
             },
         )
     )
@@ -490,14 +774,10 @@ def test_delegated_session_rejects_unsafe_primary_mounts(host_path: str) -> None
 
 def test_delegated_session_restore_fails_closed_until_container_runtime_exists() -> None:
     client = _client()
-    created = client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    )
+    created = client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A)
     delegated_id = created.json()["data"]["id"]
 
-    restored = client.post(
-        f"/v1/haas/delegated-sessions/{delegated_id}/restore", headers=AUTH_A
-    )
+    restored = client.post(f"/v1/haas/delegated-sessions/{delegated_id}/restore", headers=AUTH_A)
     assert restored.status_code == 503
     body = restored.json()
     assert body["haasError"]["code"] == "haas_delegation_backend_unavailable"
@@ -524,14 +804,10 @@ def test_delegated_session_restore_redacts_backend_failure_detail() -> None:
             },
         )
     )
-    created = client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    )
+    created = client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A)
     delegated_id = created.json()["data"]["id"]
 
-    restored = client.post(
-        f"/v1/haas/delegated-sessions/{delegated_id}/restore", headers=AUTH_A
-    )
+    restored = client.post(f"/v1/haas/delegated-sessions/{delegated_id}/restore", headers=AUTH_A)
 
     assert restored.status_code == 503
     body = restored.json()
@@ -550,14 +826,10 @@ def test_delegated_session_restore_uses_injected_runtime() -> None:
             },
         )
     )
-    created = client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    )
+    created = client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A)
     delegated_id = created.json()["data"]["id"]
 
-    restored = client.post(
-        f"/v1/haas/delegated-sessions/{delegated_id}/restore", headers=AUTH_A
-    )
+    restored = client.post(f"/v1/haas/delegated-sessions/{delegated_id}/restore", headers=AUTH_A)
     assert restored.status_code == 200, restored.text
     runtime = restored.json()["data"]["runtime"]
     assert runtime["status"] == "running"
@@ -576,9 +848,7 @@ def test_delete_session_destroys_delegated_runtime_handle() -> None:
             },
         )
     )
-    created = client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    )
+    created = client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A)
     delegated_id = created.json()["data"]["id"]
     client.post(f"/v1/haas/delegated-sessions/{delegated_id}/restore", headers=AUTH_A)
 
@@ -606,37 +876,33 @@ def test_delegated_restore_enforces_single_rw_workspace_lock() -> None:
     first = client.post(
         "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
     ).json()["data"]["id"]
-    second_body = _delegated_body(
-        managerSessionId="mgr_2", haasSessionId="hsess_delegate_2"
-    )
-    second = client.post(
-        "/v1/haas/delegated-sessions", json=second_body, headers=AUTH_A
-    ).json()["data"]["id"]
+    second_body = _delegated_body(managerSessionId="mgr_2", haasSessionId="hsess_delegate_2")
+    second = client.post("/v1/haas/delegated-sessions", json=second_body, headers=AUTH_A).json()[
+        "data"
+    ]["id"]
 
-    assert client.post(
-        f"/v1/haas/delegated-sessions/{first}/restore", headers=AUTH_A
-    ).status_code == 200
-    blocked = client.post(
-        f"/v1/haas/delegated-sessions/{second}/restore", headers=AUTH_A
+    assert (
+        client.post(f"/v1/haas/delegated-sessions/{first}/restore", headers=AUTH_A).status_code
+        == 200
     )
+    blocked = client.post(f"/v1/haas/delegated-sessions/{second}/restore", headers=AUTH_A)
     assert blocked.status_code == 409
     assert blocked.json()["haasError"]["code"] == "haas_workspace_lock_busy"
 
-    assert client.delete(
-        "/apps/chrn_codex_default/users/u_1/sessions/hsess_delegate",
-        headers=AUTH_A,
-    ).status_code == 204
-    unblocked = client.post(
-        f"/v1/haas/delegated-sessions/{second}/restore", headers=AUTH_A
+    assert (
+        client.delete(
+            "/apps/chrn_codex_default/users/u_1/sessions/hsess_delegate",
+            headers=AUTH_A,
+        ).status_code
+        == 204
     )
+    unblocked = client.post(f"/v1/haas/delegated-sessions/{second}/restore", headers=AUTH_A)
     assert unblocked.status_code == 200
 
 
 def test_delegated_session_policy_update_is_explicit() -> None:
     client = _client()
-    created = client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    )
+    created = client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A)
     delegated_id = created.json()["data"]["id"]
 
     policy = {
@@ -657,7 +923,7 @@ def test_delegated_session_policy_update_is_explicit() -> None:
     assert updated.json()["data"]["delegationPolicySnapshot"] == policy
 
 
-def test_delegated_session_policy_update_destroys_live_runtime() -> None:
+def test_delegated_session_policy_update_defers_live_runtime() -> None:
     delegated_runtime = FakeDelegatedContainerRuntime()
     client = TestClient(
         build_app(
@@ -667,13 +933,9 @@ def test_delegated_session_policy_update_destroys_live_runtime() -> None:
             },
         )
     )
-    created = client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    )
+    created = client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A)
     delegated_id = created.json()["data"]["id"]
-    restored = client.post(
-        f"/v1/haas/delegated-sessions/{delegated_id}/restore", headers=AUTH_A
-    )
+    restored = client.post(f"/v1/haas/delegated-sessions/{delegated_id}/restore", headers=AUTH_A)
     assert restored.status_code == 200, restored.text
 
     policy = {
@@ -690,24 +952,26 @@ def test_delegated_session_policy_update_destroys_live_runtime() -> None:
         json={"delegationPolicySnapshot": policy},
         headers=AUTH_A,
     )
-    assert updated.status_code == 200, updated.text
-    assert delegated_runtime.destroyed == [f"{delegated_id}:policy_updated"]
-    assert updated.json()["data"]["runtime"]["status"] == "destroyed"
+    assert updated.status_code == 202, updated.text
+    assert delegated_runtime.destroyed == []
+    data = updated.json()["data"]
+    assert data["runtime"]["status"] == "running"
+    assert data["desiredRevision"] == 2
+    assert data["appliedRevision"] == 1
+    assert data["pendingPolicyUpdate"]["revision"] == 2
     session = client.get(
         "/apps/chrn_codex_default/users/u_1/sessions/hsess_delegate", headers=AUTH_A
     )
     assert session.status_code == 200
-    assert session.json()["delegatedSessionRef"]["runtimeStatus"] == "destroyed"
+    assert session.json()["delegatedSessionRef"]["runtimeStatus"] == "running"
 
-    second_body = _delegated_body(
-        managerSessionId="mgr_2", haasSessionId="hsess_delegate_2"
-    )
-    second = client.post(
-        "/v1/haas/delegated-sessions", json=second_body, headers=AUTH_A
-    ).json()["data"]["id"]
-    assert client.post(
-        f"/v1/haas/delegated-sessions/{second}/restore", headers=AUTH_A
-    ).status_code == 200
+    second_body = _delegated_body(managerSessionId="mgr_2", haasSessionId="hsess_delegate_2")
+    second = client.post("/v1/haas/delegated-sessions", json=second_body, headers=AUTH_A).json()[
+        "data"
+    ]["id"]
+    blocked = client.post(f"/v1/haas/delegated-sessions/{second}/restore", headers=AUTH_A)
+    assert blocked.status_code == 409
+    assert blocked.json()["haasError"]["code"] == "haas_workspace_lock_busy"
 
 
 def test_run_sse_for_delegated_session_uses_container_runtime() -> None:
@@ -716,15 +980,11 @@ def test_run_sse_for_delegated_session_uses_container_runtime() -> None:
         build_app(
             delegated_containers=delegated_runtime,
             identity_tokens={
-                TOKEN_A: Principal(
-                    principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"})
-                )
+                TOKEN_A: Principal(principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"}))
             },
         )
     )
-    created = client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    )
+    created = client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A)
     assert created.status_code == 200, created.text
 
     async def fail_stream():
@@ -747,9 +1007,11 @@ def test_run_sse_for_delegated_session_uses_container_runtime() -> None:
         headers=AUTH_A,
     ) as resp:
         assert resp.status_code == 200, resp.text
+        assert resp.headers["X-HaaS-Session-ID"] == "hsess_delegate"
+        assert resp.headers["X-HaaS-Invocation-ID"].startswith("inv_")
         lines = [line for line in resp.iter_lines() if line.startswith("data: ")]
 
-    events = [json.loads(line[len("data: "):]) for line in lines]
+    events = [json.loads(line[len("data: ") :]) for line in lines]
     assert events[0]["content"]["parts"][0]["text"] == "delegated"
     assert events[-1]["actions"]["stateDelta"]["status"] == "completed"
     assert delegated_runtime.restored
@@ -762,15 +1024,16 @@ def test_run_for_delegated_session_uses_container_runtime() -> None:
         build_app(
             delegated_containers=delegated_runtime,
             identity_tokens={
-                TOKEN_A: Principal(
-                    principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"})
-                )
+                TOKEN_A: Principal(principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"}))
             },
         )
     )
-    assert client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    ).status_code == 200
+    assert (
+        client.post(
+            "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
+        ).status_code
+        == 200
+    )
     resp = client.post(
         "/run",
         json={
@@ -789,7 +1052,7 @@ def test_run_for_delegated_session_uses_container_runtime() -> None:
     assert delegated_runtime.runs
 
 
-def test_run_for_delegated_session_enforces_workspace_lock() -> None:
+def test_cancel_running_delegated_invocation_routes_to_container_runtime() -> None:
     delegated_runtime = FakeDelegatedContainerRuntime()
     client = TestClient(
         build_app(
@@ -801,24 +1064,195 @@ def test_run_for_delegated_session_enforces_workspace_lock() -> None:
             },
         )
     )
+    created = client.post(
+        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
+    ).json()["data"]
+    store = client.app.state.runtime.store
+    store.put_session(
+        SessionRecord(
+            id="hsess_delegate",
+            appName="chrn_codex_default",
+            userId="u_1",
+        )
+    )
+    store.put_invocation(
+        InvocationRecord(
+            id="inv_delegated_cancel",
+            sessionId="hsess_delegate",
+            appName="chrn_codex_default",
+            userId="u_1",
+            turnId="turn_delegated_cancel",
+            status="running",
+        )
+    )
+
+    response = client.post(
+        "/v1/haas/sessions/hsess_delegate/invocations/inv_delegated_cancel/cancel",
+        headers={**AUTH_A, "Idempotency-Key": "mgr-cancel:inv_delegated_cancel"},
+    )
+    replay = client.post(
+        "/v1/haas/sessions/hsess_delegate/invocations/inv_delegated_cancel/cancel",
+        headers={**AUTH_A, "Idempotency-Key": "mgr-cancel:inv_delegated_cancel"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == response.json()
+    assert delegated_runtime.cancelled == [(created["id"], "inv_delegated_cancel")]
+    assert response.json()["data"]["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_run_sse_cancel_for_delegated_session_emits_cancelled_terminal() -> None:
+    class BlockingDelegatedRuntime(FakeDelegatedContainerRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancel_signal = asyncio.Event()
+
+        async def cancel(self, session, execution_id: str) -> None:
+            await super().cancel(session, execution_id)
+            self.cancel_signal.set()
+
+        async def run_stream(
+            self, session, body: dict[str, object]
+        ) -> AsyncIterator[dict[str, object]]:
+            self.runs.append({"delegatedSessionId": session.id, "body": body})
+            self.started.set()
+            await self.cancel_signal.wait()
+            yield {
+                "content": {"role": "model", "parts": []},
+                "actions": {"stateDelta": {"status": "cancelled"}},
+            }
+
+    async def asgi_post(
+        app, path: str, *, body: dict[str, object] | None = None, headers=()
+    ) -> tuple[int, dict[str, str], bytes]:
+        request_sent = False
+        messages: list[dict[str, object]] = []
+
+        async def receive() -> dict[str, object]:
+            nonlocal request_sent
+            if not request_sent:
+                request_sent = True
+                payload = json.dumps(body or {}).encode()
+                return {"type": "http.request", "body": payload, "more_body": False}
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def send(message: dict[str, object]) -> None:
+            messages.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "headers": list(headers),
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+        await app(scope, receive, send)
+        start = next(message for message in messages if message["type"] == "http.response.start")
+        response_headers = {
+            key.decode().lower(): value.decode() for key, value in start["headers"]
+        }
+        response_body = b"".join(
+            message.get("body", b"")
+            for message in messages
+            if message["type"] == "http.response.body"
+        )
+        return int(start["status"]), response_headers, response_body
+
+    runtime = BlockingDelegatedRuntime()
+    app = build_app(
+        delegated_containers=runtime,
+        identity_tokens={
+            TOKEN_A: Principal(
+                principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"})
+            )
+        },
+    )
+    client = TestClient(app)
+    assert client.post(
+        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
+    ).status_code == 200
+    run_headers = (
+        (b"authorization", f"Bearer {TOKEN_A}".encode()),
+        (b"content-type", b"application/json"),
+        (b"idempotency-key", b"delegated-cancel-run"),
+    )
+    run_task = asyncio.create_task(
+        asgi_post(
+            app,
+            "/run_sse",
+            body={
+                "appName": "chrn_codex_default",
+                "userId": "u_1",
+                "sessionId": "hsess_delegate",
+                "newMessage": {"role": "user", "parts": [{"text": "wait"}]},
+            },
+            headers=run_headers,
+        )
+    )
+    await asyncio.wait_for(runtime.started.wait(), timeout=1)
+    invocation_id = str(runtime.runs[0]["body"]["executionId"])
+
+    cancel_status, _, _ = await asgi_post(
+        app,
+        f"/v1/haas/sessions/hsess_delegate/invocations/{invocation_id}/cancel",
+        headers=((b"authorization", f"Bearer {TOKEN_A}".encode()),),
+    )
+    run_status, response_headers, stream_body = await asyncio.wait_for(run_task, timeout=1)
+
+    assert cancel_status == 200
+    assert run_status == 200
+    assert response_headers["x-haas-invocation-id"] == invocation_id
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in stream_body.decode().splitlines()
+        if line.startswith("data: ")
+    ]
+    assert frames[-1]["actions"]["stateDelta"]["status"] == "cancelled"
+    invocation = app.state.runtime.store.get_invocation(invocation_id)
+    assert invocation is not None
+    assert invocation.status == "cancelled"
+
+
+def test_run_for_delegated_session_enforces_workspace_lock() -> None:
+    delegated_runtime = FakeDelegatedContainerRuntime()
+    client = TestClient(
+        build_app(
+            delegated_containers=delegated_runtime,
+            identity_tokens={
+                TOKEN_A: Principal(principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"}))
+            },
+        )
+    )
     first = client.post(
         "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
     ).json()["data"]["id"]
-    second_body = _delegated_body(
-        managerSessionId="mgr_2", haasSessionId="hsess_delegate_2"
-    )
+    second_body = _delegated_body(managerSessionId="mgr_2", haasSessionId="hsess_delegate_2")
     client.post("/v1/haas/delegated-sessions", json=second_body, headers=AUTH_A)
 
-    assert client.post(
-        "/run",
-        json={
-            "appName": "chrn_codex_default",
-            "userId": "u_1",
-            "sessionId": "hsess_delegate",
-            "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
-        },
-        headers=AUTH_A,
-    ).status_code == 200
+    assert (
+        client.post(
+            "/run",
+            json={
+                "appName": "chrn_codex_default",
+                "userId": "u_1",
+                "sessionId": "hsess_delegate",
+                "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+            },
+            headers=AUTH_A,
+        ).status_code
+        == 200
+    )
     blocked = client.post(
         "/run",
         json={
@@ -836,7 +1270,25 @@ def test_run_for_delegated_session_enforces_workspace_lock() -> None:
 
 
 def test_approval_resolution_is_explicit_and_single_use() -> None:
-    client = _client()
+    class CountingAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            self.responses = 0
+
+        async def respond_interaction(self, record, payload) -> None:
+            del record, payload
+            self.responses += 1
+
+    adapter = CountingAdapter()
+    client = TestClient(
+        build_app(
+            adapter=adapter,
+            identity_tokens={
+                TOKEN_A: Principal(
+                    principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"})
+                )
+            },
+        )
+    )
     client.app.state.runtime.store.put_session(
         SessionRecord(id="hsess_approval", appName="chrn_codex_default", userId="u_1")
     )
@@ -847,24 +1299,107 @@ def test_approval_resolution_is_explicit_and_single_use() -> None:
             invocationId="inv_1",
             turnId="turn_1",
             request={"kind": "tool", "safeSummary": "Run command"},
+                nativeRequestId=1,
+                adapterGeneration=1,
         )
     )
 
     approved = client.post(
         "/v1/haas/sessions/hsess_approval/approvals/appr_1",
-        json={"decision": "approved"},
-        headers=AUTH_A,
+        json={"decision": "approved", "scope": "action"},
+        headers={**AUTH_A, "Idempotency-Key": "approval-answer-1"},
     )
     assert approved.status_code == 200, approved.text
     assert approved.json()["data"]["status"] == "approved"
+    replay = client.post(
+        "/v1/haas/sessions/hsess_approval/approvals/appr_1",
+        json={"decision": "approved", "scope": "action"},
+        headers={**AUTH_A, "Idempotency-Key": "approval-answer-1"},
+    )
+    assert replay.status_code == 200
+    assert replay.json() == approved.json()
+    same_decision_without_original_key = client.post(
+        "/v1/haas/sessions/hsess_approval/approvals/appr_1",
+        json={"decision": "approved", "scope": "action"},
+        headers=AUTH_A,
+    )
+    assert same_decision_without_original_key.status_code == 200
+    assert same_decision_without_original_key.json()["data"] == approved.json()["data"]
+    assert adapter.responses == 1
 
     denied = client.post(
         "/v1/haas/sessions/hsess_approval/approvals/appr_1",
-        json={"decision": "denied"},
+        json={"decision": "denied", "scope": "action"},
         headers=AUTH_A,
     )
     assert denied.status_code == 409
     assert denied.json()["haasError"]["code"] == "haas_approval_state_conflict"
+
+
+def test_approval_resolution_requires_action_scope() -> None:
+    client = _client()
+    client.app.state.runtime.store.put_session(
+        SessionRecord(id="hsess_approval", appName="chrn_codex_default", userId="u_1")
+    )
+    client.app.state.runtime.store.put_approval(
+        ApprovalRecord(
+            id="appr_scope",
+            sessionId="hsess_approval",
+            invocationId="inv_scope",
+            turnId="turn_scope",
+            request={"kind": "tool", "availableScopes": ["action"]},
+        )
+    )
+
+    for body in ({"decision": "approved"}, {"decision": "approved", "scope": "session"}):
+        response = client.post(
+            "/v1/haas/sessions/hsess_approval/approvals/appr_scope",
+            json=body,
+            headers=AUTH_A,
+        )
+        assert response.status_code == 400
+        assert response.json()["haasError"]["code"] == "invalid_input"
+
+
+def test_terminal_invocation_is_not_listed_as_waiting_interaction() -> None:
+    client = _client()
+    store = client.app.state.runtime.store
+    store.put_session(
+        SessionRecord(id="hsess_terminal", appName="chrn_codex_default", userId="u_1")
+    )
+    store.put_invocation(
+        InvocationRecord(
+            id="inv_terminal",
+            sessionId="hsess_terminal",
+            appName="chrn_codex_default",
+            userId="u_1",
+            turnId="turn_terminal",
+            status="failed",
+        )
+    )
+    store.put_approval(
+        ApprovalRecord(
+            id="appr_stale",
+            sessionId="hsess_terminal",
+            invocationId="inv_terminal",
+            turnId="turn_terminal",
+        )
+    )
+
+    listed = client.get(
+        "/v1/haas/sessions/hsess_terminal/approvals?status=waiting", headers=AUTH_A
+    )
+
+    assert listed.status_code == 200
+    assert listed.json()["data"] == []
+    assert store.get_approval("appr_stale").status == "cancelled"
+    stale = client.post(
+        "/v1/haas/sessions/hsess_terminal/approvals/appr_stale",
+        json={"decision": "approved", "scope": "action"},
+        headers=AUTH_A,
+    )
+    assert stale.status_code == 409
+    assert stale.json()["haasError"]["code"] == "haas_approval_state_conflict"
 
 
 def test_approval_resolution_cross_user_hidden() -> None:
@@ -890,11 +1425,92 @@ def test_approval_resolution_cross_user_hidden() -> None:
     assert hidden.json()["haasError"]["code"] == "haas_approval_not_found"
 
 
+def test_approval_idempotency_key_cannot_replay_across_principals() -> None:
+    client = _client()
+    store = client.app.state.runtime.store
+    store.put_session(
+        SessionRecord(id="hsess_approval", appName="chrn_codex_default", userId="u_1")
+    )
+    store.put_approval(
+        ApprovalRecord(
+            id="appr_1",
+            sessionId="hsess_approval",
+            invocationId="inv_1",
+            turnId="turn_1",
+        )
+    )
+    body = {"decision": "approved", "scope": "action"}
+    key = "shared-client-generated-key"
+    approved = client.post(
+        "/v1/haas/sessions/hsess_approval/approvals/appr_1",
+        json=body,
+        headers={**AUTH_A, "Idempotency-Key": key},
+    )
+    assert approved.status_code == 200
+
+    hidden = client.post(
+        "/v1/haas/sessions/hsess_approval/approvals/appr_1",
+        json=body,
+        headers={**AUTH_B, "Idempotency-Key": key},
+    )
+    assert hidden.status_code == 404
+    assert hidden.json()["haasError"]["code"] == "haas_approval_not_found"
+
+
+def test_pending_interactions_list_and_input_answer_is_single_use() -> None:
+    client = _client()
+    client.app.state.runtime.store.put_session(
+        SessionRecord(id="hsess_input", appName="chrn_codex_default", userId="u_1")
+    )
+    client.app.state.runtime.store.put_input_request(
+        InputRequestRecord(
+            id="inreq_1",
+            sessionId="hsess_input",
+            invocationId="inv_1",
+            turnId="turn_1",
+            questions=[{"id": "scope", "question": "Which?", "secret": False}],
+            nativeRequestId=17,
+            adapterGeneration=3,
+        )
+    )
+
+    listed = client.get(
+        "/v1/haas/sessions/hsess_input/input-requests?status=waiting", headers=AUTH_A
+    )
+    assert listed.status_code == 200
+    assert listed.json()["data"][0]["inputRequestId"] == "inreq_1"
+    answered = client.post(
+        "/v1/haas/sessions/hsess_input/input-requests/inreq_1",
+        json={"answers": {"scope": {"values": ["Current diff"]}}},
+        headers={**AUTH_A, "Idempotency-Key": "input-answer-1"},
+    )
+    assert answered.status_code == 200
+    replay = client.post(
+        "/v1/haas/sessions/hsess_input/input-requests/inreq_1",
+        json={"answers": {"scope": {"values": ["Current diff"]}}},
+        headers={**AUTH_A, "Idempotency-Key": "input-answer-1"},
+    )
+    assert replay.status_code == 200
+    assert replay.json() == answered.json()
+    same_answer_without_original_key = client.post(
+        "/v1/haas/sessions/hsess_input/input-requests/inreq_1",
+        json={"answers": {"scope": {"values": ["Current diff"]}}},
+        headers=AUTH_A,
+    )
+    assert same_answer_without_original_key.status_code == 200
+    assert same_answer_without_original_key.json()["data"] == answered.json()["data"]
+    duplicate = client.post(
+        "/v1/haas/sessions/hsess_input/input-requests/inreq_1",
+        json={"answers": {"scope": {"values": ["Other"]}}},
+        headers=AUTH_A,
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["haasError"]["code"] == "haas_input_request_state_conflict"
+
+
 def test_delegated_session_cross_user_hidden() -> None:
     client = _client()
-    created = client.post(
-        "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
-    )
+    created = client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A)
     delegated_id = created.json()["data"]["id"]
     hidden = client.get(f"/v1/haas/delegated-sessions/{delegated_id}", headers=AUTH_B)
     assert hidden.status_code == 404
@@ -904,8 +1520,12 @@ def test_delegated_session_cross_user_hidden() -> None:
 def test_skill_requires_skill_md() -> None:
     """spec §10: an enabled skill bundle without SKILL.md fails validation."""
     client = _client()
-    skill = {"id": "s1", "name": "no-md", "enabled": True,
-             "files": [{"path": "notes.md", "content": "x"}]}
+    skill = {
+        "id": "s1",
+        "name": "no-md",
+        "enabled": True,
+        "files": [{"path": "notes.md", "content": "x"}],
+    }
     resp = client.post(
         "/v1/haas/harnesses",
         json={"base": "codex", "name": "bad", "skills": [skill]},
@@ -930,8 +1550,8 @@ def test_skill_binary_content_is_preserved_byte_for_byte() -> None:
         ],
     }
     harness_id = _harness_with_skill(client, skill)
-    data = client.get(
-        f"/v1/haas/harnesses/{harness_id}/skills/s_bin/files", headers=AUTH_A
-    ).json()["data"]
+    data = client.get(f"/v1/haas/harnesses/{harness_id}/skills/s_bin/files", headers=AUTH_A).json()[
+        "data"
+    ]
     blob = next(f for f in data["files"] if f["path"] == "blob.bin")
     assert base64.b64decode(blob["contentB64"]) == raw

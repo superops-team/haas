@@ -1,4 +1,5 @@
 """Model Proxy relay tests: auth, credential injection, URL policy, usage."""
+
 from __future__ import annotations
 
 import httpx
@@ -24,7 +25,12 @@ def _policy(allow: list[str]) -> object:
     return PolicyController().compile(
         PolicyCompileInput(
             scope=PolicyScope(tenantId="t1"),
-            layers=[PolicyLayer("tenant", network=NetworkPolicy(allow=allow))],
+            layers=[
+                PolicyLayer(
+                    "tenant",
+                    network=NetworkPolicy(defaultAction="deny", allow=allow),
+                )
+            ],
         )
     )
 
@@ -61,7 +67,10 @@ async def test_proxy_injects_credential_and_normalizes_usage() -> None:
         credentialRef="secret://tenant/provider",
     )
     data, usage = await proxy.proxy_responses(
-        route, {"input": "hi"}, authorization=f"Bearer {token}", policy=_policy(["http://127.0.0.1:18080"])
+        route,
+        {"input": "hi"},
+        authorization=f"Bearer {token}",
+        policy=_policy(["http://127.0.0.1:18080"]),
     )
     assert seen["authorization"] == "Bearer sk-real-key"
     assert seen["url"].endswith("/responses")
@@ -85,7 +94,12 @@ async def test_proxy_rejects_invalid_token() -> None:
 async def test_proxy_rejects_unlisted_provider_url() -> None:
     proxy, tokens = _proxy(lambda r: httpx.Response(200, json={}), allow=["https://api.openai.com"])
     token = tokens.issue(RuntimeTokenScope(sessionId="s_1"))
-    route = ModelRoute(provider="openai-compatible", baseUrl="http://evil.com/v1", model="gpt-x", credentialRef="secret://x")
+    route = ModelRoute(
+        provider="openai-compatible",
+        baseUrl="http://evil.com/v1",
+        model="gpt-x",
+        credentialRef="secret://x",
+    )
     with pytest.raises(ModelProxyError, match="provider_url_not_allowed"):
         await proxy.proxy_responses(
             route, {}, authorization=f"Bearer {token}", policy=_policy(["https://api.openai.com"])
@@ -94,9 +108,7 @@ async def test_proxy_rejects_unlisted_provider_url() -> None:
 
 async def test_proxy_rejects_model_outside_scope() -> None:
     proxy, tokens = _proxy(lambda r: httpx.Response(200, json={}), allow=["http://127.0.0.1:18080"])
-    token = tokens.issue(
-        RuntimeTokenScope(sessionId="s_1", allowedModels=["gpt-a"])
-    )
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1", allowedModels=["gpt-a"]))
     route = ModelRoute(
         provider="openai-compatible",
         baseUrl="http://127.0.0.1:18080/v1",

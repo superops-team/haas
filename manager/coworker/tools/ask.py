@@ -77,7 +77,7 @@ _ASK_SCHEMA = {
                     "type": "boolean",
                     "description": (
                         "Keep a free-text answer available even when options exist (default true; "
-                        "the \"Other / type your own\" escape). Set false only when the options "
+                        'the "Other / type your own" escape). Set false only when the options '
                         "are exhaustive."
                     ),
                 },
@@ -87,7 +87,7 @@ _ASK_SCHEMA = {
                 },
                 "header": {
                     "type": "string",
-                    "description": "Short (≤ ~12 char) chip label for the card, e.g. \"Region\".",
+                    "description": 'Short (≤ ~12 char) chip label for the card, e.g. "Region".',
                 },
                 "questions": {
                     "type": "array",
@@ -232,8 +232,7 @@ def question_item_fields(args: dict) -> dict | None:
         # Strings pass through untouched (simple asks keep rendering as today's pills);
         # rich objects are canonicalized so downstream never meets a half-filled dict.
         "options": [
-            o if isinstance(o, str) else normalize_option(o)
-            for o in args.get("options") or []
+            o if isinstance(o, str) else normalize_option(o) for o in args.get("options") or []
         ],
         "allow_text": bool(args.get("allow_text", True)),
         "multi": bool(args.get("multi", False)),

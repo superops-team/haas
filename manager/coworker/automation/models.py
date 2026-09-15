@@ -72,9 +72,7 @@ class Schedule:
     kind: str  # "cron" | "once"
     cron: Optional[str] = None
     fire_at: Optional[str] = None  # ISO datetime for one-time
-    timezone: str = (
-        "local"  # 'local' = the machine's clock (a local-first tool default)
-    )
+    timezone: str = "local"  # 'local' = the machine's clock (a local-first tool default)
 
     def human(self) -> str:
         """Best-effort human label ('Every day at ~7:10 PM'); falls back to the raw cron."""

@@ -104,9 +104,7 @@ def format_memories(items: list[MemoryItem]) -> str:
     return "Known memories (from earlier sessions):\n" + "\n".join(lines)
 
 
-def format_memory_index(
-    items: list[MemoryItem], *, full_newest: int = INDEX_FULL_NEWEST
-) -> str:
+def format_memory_index(items: list[MemoryItem], *, full_newest: int = INDEX_FULL_NEWEST) -> str:
     """Index rendering: newest `full_newest` in full, one-line summaries for the rest,
     plus the fetch-before-acting note for memory_read."""
     if not items:
@@ -116,11 +114,7 @@ def format_memory_index(
         f"- [#{item.id}] {item.content}" if item.id in newest else _index_line(item)
         for item in items
     ]
-    return (
-        "Known memories (from earlier sessions):\n"
-        + "\n".join(lines)
-        + f"\n{_INDEX_NOTE}"
-    )
+    return "Known memories (from earlier sessions):\n" + "\n".join(lines) + f"\n{_INDEX_NOTE}"
 
 
 def render_memory_block(

@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-10
 Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -46,6 +46,7 @@ Observability 提供 HaaS 的运行可见性：health、ready、status、结构�
 - 不直接读取 secret value。
 - 不直接执行 adapter 或 provider request。
 - 不作为业务事实源；业务事实来自 Registry、Session Runtime、Event Log 或 Artifact Store。
+- 不拥有稳定 feature discovery。`GET /v1/haas/capabilities` 由 HaaS Protocol 持有，并组合 registry、adapter、runtime 事实；client 不得从 `/status` 推断支持。
 
 ## 5. 核心接口
 
@@ -57,7 +58,7 @@ Observability 提供 HaaS 的运行可见性：health、ready、status、结构�
 | GET | `/v1/haas/ready?scope=control` | 可接控制面请求 |
 | GET | `/v1/haas/ready?scope=execution` | 可开始 harness turn |
 | GET | `/v1/haas/ready?scope=capability` | 可选能力（MCP/skill/browser）warmup 完成 |
-| GET | `/v1/haas/status` | 运行状态摘要 |
+| GET | `/v1/haas/status` | 运行状态摘要；不是稳定 capability-discovery 合同 |
 | GET | `/v1/haas/diagnostics` | 脱敏诊断摘要 |
 
 ### 5.2 Internal API
@@ -106,7 +107,7 @@ def write_verification_report(change_id: str, report_type: str, report: dict) ->
   "version": "dev",
   "uptimeSeconds": 120,
   "protocol": {
-    "haasVersion": "2026-08-26",
+    "haasVersion": "2026-09-10",
     "adkProtocol": "2.0",
     "capability": "run/run_sse/sessions"
   },
@@ -158,12 +159,15 @@ Baseline metrics:
 - `haas_mcp_probe_total{transport,status}`
 - `haas_event_log_lag_ms`
 - `haas_container_startup_duration_ms{phase,status}`
+- `haas_lifecycle_control_total{action,stage,status}`
+- `haas_lifecycle_control_duration_ms{action,status}`
 
 Baseline logs:
 
 - JSON structured logs to stdout/stderr by default.
 - Every log line should carry `traceId` when request-scoped.
 - Access logs must use route templates, not raw path with query strings.
+- Lifecycle 日志只携带安全 session/invocation/operation id、action 与 stage；不得包含 continuation instruction 或 native thread id。
 
 ## 10. 失败与恢复
 

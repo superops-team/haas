@@ -18,12 +18,8 @@ from .server import FakeSlack
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="coworker.testing.fake_slack")
-    parser.add_argument(
-        "--port", type=int, default=8910, help="port to bind (default 8910)"
-    )
-    parser.add_argument(
-        "--host", default="127.0.0.1", help="host to bind (default 127.0.0.1)"
-    )
+    parser.add_argument("--port", type=int, default=8910, help="port to bind (default 8910)")
+    parser.add_argument("--host", default="127.0.0.1", help="host to bind (default 127.0.0.1)")
     args = parser.parse_args()
 
     fake = FakeSlack(host=args.host, port=args.port)
@@ -35,9 +31,7 @@ def main() -> None:
     print()
     print("Point the app at it:")
     print(f"  export SLACK_API_URL={base}/api/")
-    print(
-        "  # then start openworker-server and connect Slack with any xoxb-/xapp- tokens"
-    )
+    print("  # then start openworker-server and connect Slack with any xoxb-/xapp- tokens")
     print()
     print("Drive scenarios via the control API:")
     print(f"  curl -X POST {ctl}/users -H 'content-type: application/json' \\")
@@ -51,18 +45,14 @@ def main() -> None:
         '       -d \'{"channel":"C1","user":"U1","username":"alice",'
         '"message_ts":"1700000001.000001","action_id":"ocw_0","value":"..."}\''
     )
-    print(
-        f"  curl {ctl}/outbound          # inspect recorded chat.postMessage/chat.update"
-    )
+    print(f"  curl {ctl}/outbound          # inspect recorded chat.postMessage/chat.update")
     print(f"  curl -X POST {ctl}/reset     # clean slate")
     print(f"  curl {ctl}/health")
     print()
 
     # Port is fixed here, so apps.connections.open can answer with the right ws:// URL without
     # waiting on an ephemeral bind. Serve blocking (handles signals).
-    uvicorn.run(
-        fake.app, host=args.host, port=args.port, log_level="info", lifespan="off"
-    )
+    uvicorn.run(fake.app, host=args.host, port=args.port, log_level="info", lifespan="off")
 
 
 if __name__ == "__main__":

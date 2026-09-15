@@ -78,8 +78,9 @@ def _vet(url: str) -> tuple[Optional[str], Optional[str]]:
         return (f"refusing to fetch {host}: {reason}" if reason else None), None
 
     try:
-        infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80),
-                                   proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(
+            host, parts.port or (443 if parts.scheme == "https" else 80), proto=socket.IPPROTO_TCP
+        )
     except OSError as exc:
         return f"could not resolve {host}: {exc}", None
 

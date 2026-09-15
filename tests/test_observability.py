@@ -1,4 +1,5 @@
 """Observability tests: metrics, structured log redaction, status snapshot."""
+
 from __future__ import annotations
 
 import json

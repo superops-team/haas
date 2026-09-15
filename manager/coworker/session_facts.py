@@ -107,9 +107,7 @@ class KnownWorld:
         """
         lines = ["KNOWN WORLD (frozen when this session started)"]
         for path, writable in self.roots:
-            lines.append(
-                f"  folder   {path}  [{'read-write' if writable else 'read-only'}]"
-            )
+            lines.append(f"  folder   {path}  [{'read-write' if writable else 'read-only'}]")
         for name, url in self.remotes:
             lines.append(f"  remote   {name} -> {url}")
         return "\n".join(lines) if len(lines) > 1 else ""
@@ -124,8 +122,7 @@ def capture(
     """Take the snapshot. Called once, at session start, before the agent has acted."""
     root_list = list(roots or [])
     rendered_roots = tuple(
-        (str(getattr(r, "path", r)), bool(getattr(r, "writable", False)))
-        for r in root_list
+        (str(getattr(r, "path", r)), bool(getattr(r, "writable", False))) for r in root_list
     )
 
     cwd = workspace

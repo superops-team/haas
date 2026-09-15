@@ -36,9 +36,7 @@ class Field:
 @dataclass
 class ValidationResult:
     ok: bool
-    identity: Optional[str] = (
-        None  # e.g. "@mybot" — shown back to the user, never a secret
-    )
+    identity: Optional[str] = None  # e.g. "@mybot" — shown back to the user, never a secret
     error: Optional[str] = None
 
 
@@ -99,15 +97,11 @@ def _validate_telegram(creds: dict) -> ValidationResult:
 
     token = creds.get("bot_token", "")
     try:
-        data = httpx.get(
-            f"https://api.telegram.org/bot{token}/getMe", timeout=15
-        ).json()
+        data = httpx.get(f"https://api.telegram.org/bot{token}/getMe", timeout=15).json()
     except Exception as exc:
         return ValidationResult(False, error=str(exc))
     if data.get("ok"):
-        return ValidationResult(
-            True, identity="@" + str(data["result"].get("username", "bot"))
-        )
+        return ValidationResult(True, identity="@" + str(data["result"].get("username", "bot")))
     return ValidationResult(False, error=data.get("description") or "invalid bot token")
 
 
@@ -517,18 +511,14 @@ DESCRIPTORS: list[ConnectorDescriptor] = [
                 help="Only needed for providers we don't auto-detect.",
                 placeholder="imap.example.com",
             ),
-            Field(
-                "imap_port", "IMAP port (advanced)", required=False, placeholder="993"
-            ),
+            Field("imap_port", "IMAP port (advanced)", required=False, placeholder="993"),
             Field(
                 "smtp_host",
                 "SMTP host (advanced)",
                 required=False,
                 placeholder="smtp.example.com",
             ),
-            Field(
-                "smtp_port", "SMTP port (advanced)", required=False, placeholder="587"
-            ),
+            Field("smtp_port", "SMTP port (advanced)", required=False, placeholder="587"),
         ],
         instructions=[
             "Gmail: turn on 2-Step Verification, then create an app password at myaccount.google.com/apppasswords.",
@@ -600,9 +590,7 @@ DESCRIPTORS: list[ConnectorDescriptor] = [
         brand_color="#0ea5e9",
         logo="browser",
         fields=[],
-        instructions=[
-            "No setup required. Browser tools are available to Cowork sessions."
-        ],
+        instructions=["No setup required. Browser tools are available to Cowork sessions."],
         available=True,
     ),
     ConnectorDescriptor(
@@ -1365,9 +1353,7 @@ DESCRIPTORS: list[ConnectorDescriptor] = [
         auth="api_token",
         two_way=False,
         fields=[
-            Field(
-                "api_key", "API key", secret=True, help="Project Settings → API Keys."
-            ),
+            Field("api_key", "API key", secret=True, help="Project Settings → API Keys."),
             Field("secret_key", "Secret key", secret=True),
         ],
         instructions=[
@@ -1387,9 +1373,7 @@ DESCRIPTORS: list[ConnectorDescriptor] = [
         auth="api_token",
         two_way=False,
         fields=[
-            Field(
-                "api_key", "API key", secret=True, help="Settings → Integrations → API."
-            ),
+            Field("api_key", "API key", secret=True, help="Settings → Integrations → API."),
             Field(
                 "label",
                 "Account label",
@@ -1415,9 +1399,7 @@ DESCRIPTORS: list[ConnectorDescriptor] = [
         auth="api_token",
         two_way=False,
         fields=[
-            Field(
-                "api_key", "API key", secret=True, help="hunter.io → API → API keys."
-            ),
+            Field("api_key", "API key", secret=True, help="hunter.io → API → API keys."),
         ],
         instructions=[
             "In Hunter, open API → API keys and copy your key.",

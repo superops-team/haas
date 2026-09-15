@@ -71,11 +71,7 @@ def capabilities_for(model: str) -> ModelCapabilities:
     if name.startswith(
         ("deepseek", "glm", "kimi", "minimax", "qwen", "grok", "mistral", "magistral")
     ):
-        return ModelCapabilities(
-            tools=True, vision=False, parallel_tool_calls=True, streaming=True
-        )
+        return ModelCapabilities(tools=True, vision=False, parallel_tool_calls=True, streaming=True)
 
     # Conservative default for unknown models.
-    return ModelCapabilities(
-        tools=True, vision=False, parallel_tool_calls=False, streaming=True
-    )
+    return ModelCapabilities(tools=True, vision=False, parallel_tool_calls=False, streaming=True)

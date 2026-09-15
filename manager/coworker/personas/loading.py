@@ -39,8 +39,7 @@ def consent_summary(m: PersonaManifest) -> dict:
         # Recommended connectors/MCP with reasons + tiers — the consent screen shows
         # these so the user knows what the coworker hopes to use (sharing v1).
         "recommends": [
-            {"kind": r.kind, "ref": r.ref, "reason": r.reason, "tier": r.tier}
-            for r in m.recommends
+            {"kind": r.kind, "ref": r.ref, "reason": r.reason, "tier": r.tier} for r in m.recommends
         ],
         "version": m.version,
         "source": m.source,
@@ -69,9 +68,7 @@ def capability_set(m: PersonaManifest) -> set[str]:
     return caps
 
 
-def git_clone(
-    url: str, dest: Path
-) -> None:  # pragma: no cover - exercised via injection
+def git_clone(url: str, dest: Path) -> None:  # pragma: no cover - exercised via injection
     """Shallow-clone a persona repo. Injectable so tests don't touch the network."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(

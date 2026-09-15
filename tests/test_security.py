@@ -1,4 +1,5 @@
 """Security Boundary primitive tests (specs/security-boundary/README.md)."""
+
 import pytest
 
 from haas.security import (
@@ -11,6 +12,7 @@ from haas.security import (
     validate_artifact_path,
     validate_url,
 )
+from haas.security.redact import bounded_redacted_preview
 
 
 def test_redact_credential_field_and_token() -> None:
@@ -26,12 +28,26 @@ def test_redact_credential_field_and_token() -> None:
     assert out["keep"] == "plain value"
 
 
+def test_preview_redacts_inline_generic_credentials() -> None:
+    preview, omitted = bounded_redacted_preview(
+        "password=hunter2\napi_key=abcdefghijklmnop\nstatus=ok"
+    )
+    assert omitted == 0
+    assert "hunter2" not in preview
+    assert "abcdefghijklmnop" not in preview
+    assert "password=[REDACTED]" in preview  # haas-secret-ignore - expected redaction
+    assert "api_key=[REDACTED]" in preview  # haas-secret-ignore - expected redaction
+
+
 def test_redact_presigned_url_and_absolute_path() -> None:
     url = "https://example.com/x?X-Amz-Signature=deadbeef"  # haas-secret-ignore
     assert "[REDACTED_URL]" in redact(url)
 
     path_text = "wrote /workspace/tmp/out.json"
     assert "[REDACTED_PATH]" in redact(path_text)
+    assert redact("cat specs/event-log-sse/README.md") == (
+        "cat specs/event-log-sse/README.md"
+    )
 
     # host-path redaction can be disabled via context
     kept = redact(path_text, RedactionContext(redact_host_path=False))

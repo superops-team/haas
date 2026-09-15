@@ -105,16 +105,12 @@ class Scheduler:
             return None
         return await self._run_claimed(task, trigger=trigger)
 
-    async def _run_claimed(
-        self, task: ScheduledTask, *, trigger: str
-    ) -> Optional[TaskRun]:
+    async def _run_claimed(self, task: ScheduledTask, *, trigger: str) -> Optional[TaskRun]:
         try:
             run = await self.runner(task, trigger)
         except Exception as exc:
             logger.exception("task %s run failed", task.id)
-            run = TaskRun(
-                task_id=task.id, status="error", error=str(exc), trigger=trigger
-            )
+            run = TaskRun(task_id=task.id, status="error", error=str(exc), trigger=trigger)
             self.store.add_run(run)
         finally:
             self._running_ids.discard(task.id)

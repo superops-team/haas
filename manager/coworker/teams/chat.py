@@ -82,8 +82,7 @@ class ChatStore:
         }
         with self._lock:
             self._conn.execute(
-                "INSERT INTO chat_groups (group_id, name, members, created_ts)"
-                " VALUES (?, ?, ?, ?)",
+                "INSERT INTO chat_groups (group_id, name, members, created_ts) VALUES (?, ?, ?, ?)",
                 (
                     group["group_id"],
                     group["name"],
@@ -119,11 +118,7 @@ class ChatStore:
             raise BoardError("message text is required")
         handles = {m["name"] for m in group["members"]}
         mentions = sorted(
-            {
-                m.group(1)
-                for m in re.finditer(r"@([\w.-]+)", text)
-                if m.group(1) in handles
-            }
+            {m.group(1) for m in re.finditer(r"@([\w.-]+)", text) if m.group(1) in handles}
         )
         message = {
             "group_id": group_id,
@@ -155,8 +150,7 @@ class ChatStore:
     ) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM chat_messages WHERE group_id = ? AND seq > ?"
-                " ORDER BY seq LIMIT ?",
+                "SELECT * FROM chat_messages WHERE group_id = ? AND seq > ? ORDER BY seq LIMIT ?",
                 (group_id, since_seq, max(1, min(int(limit or 200), 2000))),
             ).fetchall()
         return [_row_to_message(row) for row in rows]

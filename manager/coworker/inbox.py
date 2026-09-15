@@ -67,9 +67,7 @@ class InboxItem:
     title: str
     body: str = ""
     state: str = STATE_PENDING
-    resolution: Optional[str] = (
-        None  # approval: "allow"/"deny"/"always"; question: answer text
-    )
+    resolution: Optional[str] = None  # approval: "allow"/"deny"/"always"; question: answer text
     inbox: str = "default"  # named inbox / delivery binding (Phase 3 routing)
     created_at: str = field(default_factory=_now)
     resolved_at: Optional[str] = None
@@ -82,9 +80,7 @@ class InboxItem:
     # An option is a plain string OR a rich {label, description, recommended, preview} object
     # (OPE-51); old persisted items hold strings and stay valid.
     options: list = field(default_factory=list)
-    allow_text: bool = (
-        True  # accept a typed answer even when options exist (the "Other" escape)
-    )
+    allow_text: bool = True  # accept a typed answer even when options exist (the "Other" escape)
     multi: bool = False  # allow choosing more than one option
     header: str = ""  # short chip label for the card ("Region")
     # Grouped form (OPE-51): up to 4 {question, header, options, allow_text, multi} entries
@@ -347,9 +343,7 @@ class InboxStore:
             waiter.set()
         return True
 
-    def resolve_session(
-        self, session_id: str, resolution: str = "session deleted"
-    ) -> int:
+    def resolve_session(self, session_id: str, resolution: str = "session deleted") -> int:
         """Resolve every still-pending item of a session (called when the session is deleted —
         an orphaned approval/question can never be meaningfully answered). Releases any waiter
         the usual way; returns how many items were closed."""

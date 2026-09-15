@@ -9,6 +9,7 @@
 #
 # Prerequisites (mirrors build_windows.ps1's header):
 #   - Rust (rustup) + Node/npm, and the GUI deps installed (npm ci in surfaces/gui).
+#   - COWORKER_CODEX_BIN points to a native Codex 0.152.1 binary for the build host.
 #   - A Python venv at .venv (repo root) with this package installed editable, plus the
 #     build-only deps:
 #       python3 -m venv .venv

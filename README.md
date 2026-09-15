@@ -22,6 +22,21 @@ models, tools, and credentials share one service boundary.
 > adapter. Pi, OpenCode, and AMP remain planned. Real Codex, OpenSandbox, and
 > provider checks are gated behind explicit E2E switches.
 
+## Install OpenHarness on macOS
+
+OpenHarness v0.2.1 is an Apple Silicon macOS release. Copy and run this command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/superops-team/haas/v0.2.1/scripts/install.sh | VERSION=v0.2.1 sh
+```
+
+The versioned installer downloads the DMG and its SHA-256 file from the same
+GitHub release, verifies it before mounting, installs to `/Applications`, and
+removes `com.apple.quarantine` only from `OpenHarness.app`. The current build is
+unsigned, so review the script before running it if your environment requires a
+signed or notarized application. An existing installation is restored if the
+replacement fails. The installer does not launch the app automatically.
+
 ## HaaS in 30 seconds
 
 ### One protocol, isolated runtimes
@@ -62,7 +77,7 @@ stable service contract.
 
 HaaS implements only the ADK 2.0 **REST API protocol layer**. It does not embed
 the ADK execution engine, graph workflows, BaseAgent / WorkflowGraph, or ADK Web
-UI. The legacy /v1/codex-worker/* migration shim is explicitly out of scope.
+UI. HaaS-specific control-plane capabilities are exposed under `/v1/haas/*`.
 
 ## System architecture
 
@@ -94,7 +109,7 @@ The architecture follows four dependency rules:
 | Codex app-server | Implemented | WebSocket / Unix socket / stdio transports, schema drift, cancel/recovery |
 | Policy and security | Implemented | Workspace/network/tool policy, SSRF and path traversal protection, redaction |
 | Model / MCP / skills | Foundation implemented | Loopback model proxy, MCP validation, skill materialization |
-| OpenSandbox AIO | Foundation implemented | Sandbox policy projection, AIO-derived linux/amd64 image, health/ready |
+| Container runtime | AIO baseline implemented; Lite target spec-only | Current AIO linux/amd64 image and health/ready exist; default Lite linux/arm64+amd64 remains an implementation/release gate |
 | Pi / OpenCode / AMP | Planned | Reuse the Harness Adapter contract without changing the northbound API |
 
 ## /run_sse request flow
@@ -128,7 +143,7 @@ Key runtime semantics:
 | GET/PATCH/DELETE | /apps/{app}/users/{user}/sessions/{sid} | Read, merge state into, or delete a session |
 
 appName identifies a configured harness (chrn_...); name may be used as an alias.
-The [OpenAPI document](specs/haas-protocol/haas-2026-08-26.openapi.yaml) is the
+The [OpenAPI document](specs/haas-protocol/haas-2026-09-10.openapi.yaml) is the
 schema source of truth. See [ERROR-CODES.md](specs/haas-protocol/ERROR-CODES.md)
 for the error catalog.
 

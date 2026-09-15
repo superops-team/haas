@@ -46,9 +46,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="ocw", description="OpenWorker team board + journal CLI."
-    )
+    parser = argparse.ArgumentParser(prog="ocw", description="OpenWorker team board + journal CLI.")
     sub = parser.add_subparsers(dest="group")
 
     board = sub.add_parser("board", help="work-item board verbs")
@@ -118,14 +116,10 @@ def _parser() -> argparse.ArgumentParser:
 
     # `token` manages the serving machine's registry file directly — it takes no
     # backing/identity flags of its own (minting is what CREATES identities).
-    p = board_sub.add_parser(
-        "token", help="mint/list/revoke board join tokens (serving machine)"
-    )
+    p = board_sub.add_parser("token", help="mint/list/revoke board join tokens (serving machine)")
     p.add_argument("action", choices=("mint", "list", "revoke"))
     p.add_argument("--actor", default="", help="callname the token binds (mint)")
-    p.add_argument(
-        "--role", choices=("worker", "lead", "user"), default="worker"
-    )
+    p.add_argument("--role", choices=("worker", "lead", "user"), default="worker")
     p.add_argument("--label", default="", help="what this token is for (mint)")
     p.add_argument("--prefix", default="", help="token prefix to revoke")
     p.add_argument("--db", default="", help="state dir holding the registry")
@@ -254,9 +248,7 @@ def _local_cli_token() -> str:
 def _cmd_list(args) -> int:
     dialect = _dialect(args)
     assignee = args.assignee or (dialect.whoami()["actor"] if args.mine else "")
-    items = dialect.list_items(
-        _space(args), state=args.state or None, assignee=assignee or None
-    )
+    items = dialect.list_items(_space(args), state=args.state or None, assignee=assignee or None)
     if args.json:
         print(json.dumps(items, indent=2))
         return 0
@@ -329,11 +321,7 @@ def _cmd_comment(args) -> int:
 
 def _cmd_assign(args) -> int:
     item = _dialect(args).assign(_space(args), args.id, args.assignee)
-    print(
-        json.dumps(item, indent=2)
-        if args.json
-        else f"#{item['id']} → @{item['assignee']}"
-    )
+    print(json.dumps(item, indent=2) if args.json else f"#{item['id']} → @{item['assignee']}")
     return 0
 
 
@@ -345,9 +333,7 @@ def _cmd_attach(args) -> int:
     result = _dialect(args).attach(
         _space(args), args.id, source.read_bytes(), source.name, caption=args.caption
     )
-    ref = result.get("ref") or next(
-        (r for r in (result.get("payload") or {}).get("refs", [])), ""
-    )
+    ref = result.get("ref") or next((r for r in (result.get("payload") or {}).get("refs", [])), "")
     print(json.dumps(result, indent=2) if args.json else f"attached → {ref}")
     return 0
 
@@ -357,8 +343,10 @@ def _cmd_attachment(args) -> int:
 
     stored = stored_name(args.ref) or args.ref
     data, _mime = _dialect(args).attachment(_space(args), stored)
-    out = Path(args.out) if args.out else Path(
-        args.ref.rsplit("#", 1)[-1] if "#" in args.ref else stored
+    out = (
+        Path(args.out)
+        if args.out
+        else Path(args.ref.rsplit("#", 1)[-1] if "#" in args.ref else stored)
     )
     out.write_bytes(data)
     print(str(out))
@@ -389,8 +377,10 @@ def _cmd_pending(args) -> int:
         print(json.dumps(events, indent=2))
     else:
         for event in events:
-            print(f"[{event['seq']}] {event['kind']} #{event.get('item_id')}"
-                  f" from {event['actor']}: {json.dumps(event['payload'])}")
+            print(
+                f"[{event['seq']}] {event['kind']} #{event.get('item_id')}"
+                f" from {event['actor']}: {json.dumps(event['payload'])}"
+            )
         if not events:
             print("nothing pending")
     if args.consume and events:
@@ -479,8 +469,7 @@ def _cmd_read(args) -> int:
         print(json.dumps(entries, indent=2))
         return 0
     for entry in entries:
-        print(f"[{entry['ts']}] {entry['author']} {entry['kind']}:"
-              f" {entry.get('body') or ''}")
+        print(f"[{entry['ts']}] {entry['author']} {entry['kind']}: {entry.get('body') or ''}")
     if not entries:
         print("no entries")
     return 0

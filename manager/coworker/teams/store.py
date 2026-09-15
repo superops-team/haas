@@ -297,11 +297,7 @@ class TeamStore:
         if case_id is not None:
             where.append("case_id = ?")
             params.append(case_id)
-        sql = (
-            "SELECT * FROM team_events WHERE "
-            + " AND ".join(where)
-            + " ORDER BY seq LIMIT ?"
-        )
+        sql = "SELECT * FROM team_events WHERE " + " AND ".join(where) + " ORDER BY seq LIMIT ?"
         params.append(max(1, min(int(limit or 500), 2000)))
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
@@ -313,8 +309,7 @@ class TeamStore:
         """Everything addressed to one agent, in order — the delivery projection."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM team_events WHERE recipient = ? AND seq > ?"
-                " ORDER BY seq LIMIT ?",
+                "SELECT * FROM team_events WHERE recipient = ? AND seq > ? ORDER BY seq LIMIT ?",
                 (recipient, since_seq, max(1, min(int(limit or 200), 2000))),
             ).fetchall()
         return [_row_to_event(row) for row in rows]
@@ -329,9 +324,7 @@ class TeamStore:
     # durable-until-consumed (a crash before consume replays on the next drain);
     # coalescing happens at dequeue. "Mailbox" is banned as a concept.
 
-    def feed_for(
-        self, space: str, actor_id: str, *, limit: int = 200
-    ) -> list[dict[str, Any]]:
+    def feed_for(self, space: str, actor_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
         """Unconsumed events this actor is subscribed to, in order: everything on
         its current slice, plus assignment events that START its interest (newly
         assigned to it) or END it (just reassigned away — it hears that, then
@@ -411,9 +404,7 @@ class TeamStore:
 
     def spaces(self) -> list[str]:
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT space FROM team_meta ORDER BY space"
-            ).fetchall()
+            rows = self._conn.execute("SELECT space FROM team_meta ORDER BY space").fetchall()
         return [row["space"] for row in rows]
 
     def verify_chain(self, space: str) -> int:
@@ -450,8 +441,7 @@ class TeamStore:
             self._conn.execute("DELETE FROM team_items WHERE space = ?", (space,))
             self._conn.execute("DELETE FROM team_links WHERE space = ?", (space,))
             self._conn.execute(
-                "DELETE FROM team_attachment_refs"
-                " WHERE space = ? AND event_seq != 0",
+                "DELETE FROM team_attachment_refs WHERE space = ? AND event_seq != 0",
                 (space,),
             )
             rows = self._conn.execute(
@@ -496,8 +486,7 @@ class TeamStore:
             raise BoardError("title is required")
         if not (criteria or "").strip():
             raise BoardError(
-                "acceptance criteria are required — they are what gets verified at"
-                " review"
+                "acceptance criteria are required — they are what gets verified at review"
             )
         with self._lock:
             if parent is not None:
@@ -508,9 +497,7 @@ class TeamStore:
                         f"no visible item #{parent} in space {space!r}"
                     ) from None
                 if not self._item_visible_to(space, actor, parent_item):
-                    raise BoardNotFoundError(
-                        f"no visible item #{parent} in space {space!r}"
-                    )
+                    raise BoardNotFoundError(f"no visible item #{parent} in space {space!r}")
                 if case is None:
                     case = parent_item["case_id"] or None
             item_id = self._next_item_id(space)
@@ -555,9 +542,7 @@ class TeamStore:
             params.append(assignee)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM team_items WHERE "
-                + " AND ".join(where)
-                + " ORDER BY id",
+                "SELECT * FROM team_items WHERE " + " AND ".join(where) + " ORDER BY id",
                 params,
             ).fetchall()
             items = [_row_to_item(row) for row in rows]
@@ -598,22 +583,16 @@ class TeamStore:
             try:
                 item = self._item(space, item_id)
             except BoardError:
-                raise BoardNotFoundError(
-                    f"no visible item #{item_id} in space {space!r}"
-                ) from None
+                raise BoardNotFoundError(f"no visible item #{item_id} in space {space!r}") from None
             if not self._item_visible_to(space, actor, item):
-                raise BoardNotFoundError(
-                    f"no visible item #{item_id} in space {space!r}"
-                )
+                raise BoardNotFoundError(f"no visible item #{item_id} in space {space!r}")
             item["links"] = self._links_of(space, item_id)
             item["comments"] = self.comments(space, item_id)
         if seq is not None:
             item["seq"] = seq
         return item
 
-    def require_attachment_access(
-        self, space: str, actor: Actor, stored: str
-    ) -> None:
+    def require_attachment_access(self, space: str, actor: Actor, stored: str) -> None:
         """Require an actor-visible item to carry an authoritative attachment."""
         stored = validate_stored_name(stored)
         with self._lock:
@@ -668,9 +647,7 @@ class TeamStore:
         stored = validate_stored_name(stored)
         with self._lock:
             item = self._item(space, item_id)
-            if actor.role == Role.WORKER and item_id not in self._worker_slice(
-                space, actor.id
-            ):
+            if actor.role == Role.WORKER and item_id not in self._worker_slice(space, actor.id):
                 raise AuthorityError(
                     f"worker {actor.id} may only comment on its assigned items"
                     " and items linked to them"
@@ -705,9 +682,7 @@ class TeamStore:
             item = self._item(space, item_id)
             current = ItemState(item["state"])
             if target not in EDGES[current]:
-                raise BoardError(
-                    f"illegal transition {current.value} → {target.value}"
-                )
+                raise BoardError(f"illegal transition {current.value} → {target.value}")
             self._check_transition_authority(actor, item, current, target)
             # No per-event addressing: delivery is the FEED projection — interest
             # follows the assignment relation (see feed_for), so a send-back, an
@@ -743,9 +718,7 @@ class TeamStore:
             raise BoardError("comment body is required")
         with self._lock:
             item = self._item(space, item_id)
-            if actor.role == Role.WORKER and item_id not in self._worker_slice(
-                space, actor.id
-            ):
+            if actor.role == Role.WORKER and item_id not in self._worker_slice(space, actor.id):
                 raise AuthorityError(
                     f"worker {actor.id} may only comment on its assigned items"
                     " and items linked to them"
@@ -760,9 +733,7 @@ class TeamStore:
                 taint=taint,
             )
 
-    def assign(
-        self, space: str, actor: Actor, item_id: int, assignee: str
-    ) -> dict[str, Any]:
+    def assign(self, space: str, actor: Actor, item_id: int, assignee: str) -> dict[str, Any]:
         """Set the assignee. Not a message: the feed projection delivers it — the
         new assignee's interest starts with this event, and the previous
         assignee's interest ends with it (both hear it; see feed_for)."""
@@ -773,9 +744,7 @@ class TeamStore:
             item = self._item(space, item_id)
             state = ItemState(item["state"])
             if state in (ItemState.DONE, ItemState.CANCELED):
-                raise BoardError(
-                    f"cannot assign an item in state {state.value} — reopen it first"
-                )
+                raise BoardError(f"cannot assign an item in state {state.value} — reopen it first")
             event = self.append_event(
                 space,
                 ITEM_ASSIGNED,
@@ -805,19 +774,15 @@ class TeamStore:
         with self._lock:
             if actor.role == Role.WORKER and self.policy(space)["claims"] != "open":
                 raise AuthorityError(
-                    "claims are lead-only on this board — ask the lead to assign"
-                    " the item to you"
+                    "claims are lead-only on this board — ask the lead to assign the item to you"
                 )
             item = self._item(space, item_id)
             if ItemState(item["state"]) is not ItemState.OPEN:
                 raise BoardError(
-                    f"item #{item_id} is {item['state']} — only open items can be"
-                    " claimed"
+                    f"item #{item_id} is {item['state']} — only open items can be claimed"
                 )
             if item["assignee"]:
-                raise BoardError(
-                    f"item #{item_id} is already claimed by {item['assignee']}"
-                )
+                raise BoardError(f"item #{item_id} is already claimed by {item['assignee']}")
             event = self.append_event(
                 space,
                 ITEM_ASSIGNED,
@@ -848,9 +813,7 @@ class TeamStore:
         infrastructure the log doesn't narrate."""
         self._require(actor, {Role.USER, Role.LEAD}, "set_policy")
         if claims not in CLAIM_POLICIES:
-            raise BoardError(
-                f"unknown claim policy: {claims} (use one of {CLAIM_POLICIES})"
-            )
+            raise BoardError(f"unknown claim policy: {claims} (use one of {CLAIM_POLICIES})")
         with self._lock:
             self._conn.execute(
                 "INSERT INTO team_settings (space, claims) VALUES (?, ?)"
@@ -860,9 +823,7 @@ class TeamStore:
             self._conn.commit()
         return {"claims": claims}
 
-    def link(
-        self, space: str, actor: Actor, src: int, kind: str, dst: int
-    ) -> dict[str, Any]:
+    def link(self, space: str, actor: Actor, src: int, kind: str, dst: int) -> dict[str, Any]:
         self._require(actor, {Role.USER, Role.LEAD}, "link")
         if kind not in LINK_KINDS:
             raise BoardError(f"unknown link kind: {kind} (use one of {LINK_KINDS})")
@@ -885,9 +846,7 @@ class TeamStore:
         """Attributed comments on an item — standalone comments plus the notes
         carried on transitions (a `blocked` explanation lives with its event)."""
         out = []
-        for event in self.events(
-            space, kinds=[ITEM_COMMENTED, ITEM_TRANSITIONED], item_id=item_id
-        ):
+        for event in self.events(space, kinds=[ITEM_COMMENTED, ITEM_TRANSITIONED], item_id=item_id):
             body = (
                 event["payload"].get("body")
                 if event["kind"] == ITEM_COMMENTED
@@ -953,26 +912,21 @@ class TeamStore:
                 )
         elif kind == ITEM_TRANSITIONED:
             self._conn.execute(
-                "UPDATE team_items SET state = ?, updated_seq = ?"
-                " WHERE space = ? AND id = ?",
+                "UPDATE team_items SET state = ?, updated_seq = ? WHERE space = ? AND id = ?",
                 (payload.get("to"), seq, space, item_id),
             )
             self._merge_refs(space, item_id, payload.get("refs"))
         elif kind == ITEM_COMMENTED:
             self._merge_refs(space, item_id, payload.get("refs"))
-            self._merge_attachment_refs(
-                space, item_id, payload.get("attachments"), seq
-            )
+            self._merge_attachment_refs(space, item_id, payload.get("attachments"), seq)
         elif kind == ITEM_ASSIGNED:
             self._conn.execute(
-                "UPDATE team_items SET assignee = ?, updated_seq = ?"
-                " WHERE space = ? AND id = ?",
+                "UPDATE team_items SET assignee = ?, updated_seq = ? WHERE space = ? AND id = ?",
                 (payload.get("assignee") or "", seq, space, item_id),
             )
         elif kind == ITEM_LINKED:
             self._conn.execute(
-                "INSERT OR IGNORE INTO team_links (space, src, kind, dst)"
-                " VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO team_links (space, src, kind, dst) VALUES (?, ?, ?, ?)",
                 (space, payload.get("src"), payload.get("kind"), payload.get("dst")),
             )
         # Comment bodies and journal entries have no materialized state: their
@@ -980,9 +934,7 @@ class TeamStore:
         # refs a comment carries fold onto the item; authoritative attachment
         # markers also fold into their indexed projection.
 
-    def _merge_refs(
-        self, space: str, item_id: Optional[int], refs: Optional[list]
-    ) -> None:
+    def _merge_refs(self, space: str, item_id: Optional[int], refs: Optional[list]) -> None:
         if not refs or item_id is None:
             return
         row = self._conn.execute(
@@ -1021,9 +973,7 @@ class TeamStore:
         grandfathered at upgrade use event_seq=0 so rebuild preserves that fixed
         compatibility boundary; refs added after the migration are never inferred.
         """
-        rows = self._conn.execute(
-            "SELECT space, id, refs FROM team_items"
-        ).fetchall()
+        rows = self._conn.execute("SELECT space, id, refs FROM team_items").fetchall()
         for row in rows:
             try:
                 refs = json.loads(row["refs"] or "[]")
@@ -1050,14 +1000,11 @@ class TeamStore:
             raise AuthorityError("system events cannot transition items")
         if target == ItemState.DONE and actor.role == Role.WORKER:
             raise AuthorityError(
-                "workers finish by moving to review — done is the verdict after"
-                " verification"
+                "workers finish by moving to review — done is the verdict after verification"
             )
         if actor.role == Role.WORKER:
             if item["assignee"] != actor.id:
-                raise AuthorityError(
-                    f"worker {actor.id} is not assigned item #{item['id']}"
-                )
+                raise AuthorityError(f"worker {actor.id} is not assigned item #{item['id']}")
             if target not in WORKER_TARGETS:
                 raise AuthorityError(
                     f"workers may move their item to"
@@ -1068,8 +1015,7 @@ class TeamStore:
         # Assigned items, items the worker filed itself, and items directly
         # linked to either — its slice of the board, nothing more.
         rows = self._conn.execute(
-            "SELECT id FROM team_items WHERE space = ?"
-            " AND (assignee = ? OR creator = ?)",
+            "SELECT id FROM team_items WHERE space = ? AND (assignee = ? OR creator = ?)",
             (space, worker_id, worker_id),
         ).fetchall()
         mine = {row["id"] for row in rows}
@@ -1104,16 +1050,11 @@ class TeamStore:
             return True
         if claims_open is None:
             claims_open = self.policy(space)["claims"] == "open"
-        return (
-            claims_open
-            and item["state"] == ItemState.OPEN.value
-            and not item["assignee"]
-        )
+        return claims_open and item["state"] == ItemState.OPEN.value and not item["assignee"]
 
     def _links_of(self, space: str, item_id: int) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT src, kind, dst FROM team_links WHERE space = ?"
-            " AND (src = ? OR dst = ?)",
+            "SELECT src, kind, dst FROM team_links WHERE space = ? AND (src = ? OR dst = ?)",
             (space, item_id, item_id),
         ).fetchall()
         out = []
@@ -1131,8 +1072,7 @@ class TeamStore:
         current, hops = dst, 0
         while hops < 1000:
             row = self._conn.execute(
-                "SELECT dst FROM team_links WHERE space = ? AND src = ?"
-                " AND kind = 'parent'",
+                "SELECT dst FROM team_links WHERE space = ? AND src = ? AND kind = 'parent'",
                 (space, current),
             ).fetchone()
             if row is None:
@@ -1200,8 +1140,7 @@ class TeamStore:
                     }
                     record["hash"] = _hash(record)
                     self._conn.execute(
-                        "UPDATE team_events SET space = ?, prev_hash = ?, hash = ? "
-                        "WHERE seq = ?",
+                        "UPDATE team_events SET space = ?, prev_hash = ?, hash = ? WHERE seq = ?",
                         (new, prev, record["hash"], row["seq"]),
                     )
                     prev = record["hash"]
@@ -1211,9 +1150,7 @@ class TeamStore:
                     "team_attachment_refs",
                     "team_settings",
                 ):
-                    self._conn.execute(
-                        f"UPDATE {table} SET space = ? WHERE space = ?", (new, old)
-                    )
+                    self._conn.execute(f"UPDATE {table} SET space = ? WHERE space = ?", (new, old))
                 # Cursor keys embed the space as a suffix ("feed:<actor>:<space>",
                 # "sub:<sub>:<space>") — rewrite the suffix, keep consumed positions.
                 cur_rows = self._conn.execute(
@@ -1223,17 +1160,14 @@ class TeamStore:
                 for crow in cur_rows:
                     new_key = crow["cursor_key"][: -len(old)] + new
                     self._conn.execute(
-                        "UPDATE OR REPLACE team_cursors SET cursor_key = ? "
-                        "WHERE cursor_key = ?",
+                        "UPDATE OR REPLACE team_cursors SET cursor_key = ? WHERE cursor_key = ?",
                         (new_key, crow["cursor_key"]),
                     )
                 meta = self._conn.execute(
                     "SELECT watermark FROM team_meta WHERE space = ?", (old,)
                 ).fetchone()
                 if meta is not None and rows:
-                    self._conn.execute(
-                        "DELETE FROM team_meta WHERE space = ?", (old,)
-                    )
+                    self._conn.execute("DELETE FROM team_meta WHERE space = ?", (old,))
                     self._conn.execute(
                         "INSERT INTO team_meta (space, head_hash, watermark) "
                         "VALUES (?, ?, ?) ON CONFLICT(space) DO UPDATE SET "

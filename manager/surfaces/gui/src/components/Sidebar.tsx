@@ -1166,7 +1166,7 @@ export function Sidebar(props: Props) {
 
           <button
             className={
-              "w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[13px] text-left " +
+              "w-full min-h-10 flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[13px] text-left " +
               (appMenuOpen ? "bg-chromeHover text-ink" : "hover:bg-chromeHover")
             }
             data-testid="account-row"
@@ -1178,19 +1178,19 @@ export function Sidebar(props: Props) {
             aria-label={t("sidebar.app_menu_aria")}
           >
             <span
-              className="w-6 h-6 rounded-full grid place-items-center text-[11px] font-semibold shrink-0 bg-accentSoft text-accent"
+              className="w-7 h-7 rounded-full grid place-items-center text-[11px] font-semibold shrink-0 bg-accentSoft text-accent"
               aria-hidden
             >
               <Icon name="logo" size={14} />
             </span>
-            <span className="truncate">
+            <span className="truncate leading-none">
               {t("sidebar.app_menu")}
             </span>
             <span className="flex-1" />
             {inboxUnlocked && (
               <span
                 className={
-                  "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] shrink-0 cursor-pointer " +
+                  "h-7 min-w-7 inline-flex items-center justify-center gap-1 rounded-full px-2 text-[12px] shrink-0 cursor-pointer " +
                   (totalAttention > 0
                     ? "bg-accentSoft text-accent font-semibold"
                     : "text-faint hover:text-ink")
@@ -1212,11 +1212,13 @@ export function Sidebar(props: Props) {
                 {totalAttention > 0 ? totalAttention : null}
               </span>
             )}
-            <Icon
-              name="chevronDown"
-              size={14}
-              className={"text-faint shrink-0 transition-transform " + (appMenuOpen ? "" : "rotate-180")}
-            />
+            <span className="w-7 h-7 grid place-items-center shrink-0">
+              <Icon
+                name="chevronDown"
+                size={14}
+                className={"text-faint transition-transform " + (appMenuOpen ? "" : "rotate-180")}
+              />
+            </span>
           </button>
         </div>
       </div>

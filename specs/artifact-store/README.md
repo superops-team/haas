@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-10
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Container Runtime](../container-runtime/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
@@ -56,13 +56,13 @@ Non-responsibilities:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/v1/haas/files` | Upload one input file and return a `file` object |
+| POST | `/v1/haas/files` | Upload one input file with optional `Idempotency-Key` and return a `file` object |
 | GET | `/v1/haas/sessions/{session_id}/artifacts` | List all artifacts for a session |
 | GET | `/v1/haas/sessions/{session_id}/artifacts/archive` | Download an artifact ZIP archive |
 | GET | `/v1/haas/files/{file_id}/content` | Download artifact bytes |
 | GET | `/v1/haas/files/{file_id}/pdf` | Optional PDF preview (when unimplemented, return `501 haas_preview_unavailable`) |
 
-Inline files are passed through ADK `newMessage.parts[].inlineData`, not through the upload endpoint. Referencing an uploaded file by `fileId` is a HaaS extension.
+Inline files are passed through ADK `newMessage.parts[].inlineData`, not through the upload endpoint. Referencing an uploaded file by `fileId` is a HaaS extension. For multipart upload idempotency, the request hash includes normalized metadata and the uploaded byte digest. Reusing a key with the same hash returns the first `File`; reusing it with different bytes or metadata returns `409 haas_idempotency_conflict`.
 
 ### 5.2 Internal API
 
@@ -199,6 +199,7 @@ Metrics:
 
 - Unit: path canonicalization, symlink rejection, size/count limits, and MIME inference.
 - Integration: upload -> task input materialization -> artifact list -> download.
+- Idempotency: repeating an upload with the same key and byte/metadata hash returns the first `File`; changing bytes or metadata with the same key returns `409 haas_idempotency_conflict` and creates no second file.
 - Security: encoded `../` traversal and cross-principal file access return not found/rejected.
 - Compatibility: ADK inline-file (`inlineData`) round trip, download, and archive behavior.
 - E2E: Codex writes a file under an allowed output root and the response annotation can download it.

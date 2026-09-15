@@ -90,6 +90,7 @@ class BoardDialect(Protocol):
     def attachment(self, space: str, stored: str) -> tuple[bytes, str]:
         """Read a blob referenced by an actor-visible item in ``space``."""
         ...
+
     def policy(self, space: str) -> dict[str, Any]: ...
     def set_policy(self, space: str, *, claims: str) -> dict[str, Any]: ...
     def pending(self, space: str, *, limit: int = 200) -> list[dict[str, Any]]: ...
@@ -182,9 +183,7 @@ class LocalDialect:
         comment: str = "",
         refs: Optional[list[str]] = None,
     ) -> dict[str, Any]:
-        return self.store.transition(
-            space, self.actor, item_id, to, comment=comment, refs=refs
-        )
+        return self.store.transition(space, self.actor, item_id, to, comment=comment, refs=refs)
 
     def comment(
         self,
@@ -327,24 +326,22 @@ class RemoteDialect:
         return self._unwrap(response)
 
     def _post(self, path: str, body: dict) -> Any:
-        response = self._client.post(
-            path, json={k: v for k, v in body.items() if v is not None}
-        )
+        response = self._client.post(path, json={k: v for k, v in body.items() if v is not None})
         return self._unwrap(response)
 
     @staticmethod
     def _unwrap(response: Any) -> Any:
         if response.status_code == 401:
-            raise BoardError("board token was not accepted (401) — mint one with"
-                             " `ocw board token` on the serving machine")
+            raise BoardError(
+                "board token was not accepted (401) — mint one with"
+                " `ocw board token` on the serving machine"
+            )
         try:
             data = response.json()
         except ValueError:
             data = {}
         if response.status_code >= 400:
-            raise BoardError(
-                str(data.get("error") or data.get("detail") or response.text)
-            )
+            raise BoardError(str(data.get("error") or data.get("detail") or response.text))
         return data
 
     # -- verbs -----------------------------------------------------------------
@@ -435,9 +432,7 @@ class RemoteDialect:
         return self._post("/v1/board/items/claim", {"space": space, "id": item_id})
 
     def link(self, space: str, src: int, kind: str, dst: int) -> dict[str, Any]:
-        return self._post(
-            "/v1/board/link", {"space": space, "src": src, "kind": kind, "dst": dst}
-        )
+        return self._post("/v1/board/link", {"space": space, "src": src, "kind": kind, "dst": dst})
 
     def attach(
         self,
@@ -462,14 +457,10 @@ class RemoteDialect:
         )
 
     def attachment(self, space: str, stored: str) -> tuple[bytes, str]:
-        response = self._client.get(
-            "/v1/board/attachment", params={"space": space, "name": stored}
-        )
+        response = self._client.get("/v1/board/attachment", params={"space": space, "name": stored})
         if response.status_code >= 400:
             self._unwrap(response)  # raises with the server's message
-        return response.content, response.headers.get(
-            "content-type", "application/octet-stream"
-        )
+        return response.content, response.headers.get("content-type", "application/octet-stream")
 
     def policy(self, space: str) -> dict[str, Any]:
         return self._get("/v1/board/policy", {"space": space})
@@ -478,9 +469,7 @@ class RemoteDialect:
         return self._post("/v1/board/policy", {"space": space, "claims": claims})
 
     def pending(self, space: str, *, limit: int = 200) -> list[dict[str, Any]]:
-        return self._get("/v1/board/pending", {"space": space, "limit": limit})[
-            "events"
-        ]
+        return self._get("/v1/board/pending", {"space": space, "limit": limit})["events"]
 
     def consume(self, space: str, upto_seq: int) -> None:
         self._post("/v1/board/consume", {"space": space, "upto_seq": int(upto_seq)})
@@ -540,9 +529,7 @@ class RemoteDialect:
         self._client.close()
 
 
-def local_dialect(
-    db_dir, *, actor: str = "user", role: str = "user"
-) -> LocalDialect:
+def local_dialect(db_dir, *, actor: str = "user", role: str = "user") -> LocalDialect:
     """Open the state dir's stores directly as one bound identity — the headless
     backing for the CLI and MCP server when no OpenWorker server is running."""
     from pathlib import Path

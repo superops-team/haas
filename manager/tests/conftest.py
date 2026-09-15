@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
-
 from coworker.testing.fake_slack import FakeSlack
 
 
@@ -24,6 +23,9 @@ def _isolated_state_dir(tmp_path, monkeypatch):
     # Universal scratch provisions a per-session dir for EVERY session — without this,
     # tests would mkdir under the developer's real ~/OpenWorker.
     monkeypatch.setenv("COWORKER_SCRATCH_BASE", str(tmp_path / "coworker-scratch"))
+    # Legacy/local engine tests must opt out explicitly now that the product
+    # default is the HaaS backend. HaaS-specific tests supply their own config.
+    monkeypatch.setenv("COWORKER_HAAS_BACKEND_PREFERENCE", "local")
     monkeypatch.delenv("COWORKER_API_TOKEN", raising=False)
 
 

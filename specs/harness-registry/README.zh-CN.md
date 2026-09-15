@@ -3,14 +3,14 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-30
-Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
+Last reviewed: 2026-09-10
+Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
 
-Harness Registry 维护 HaaS 可运行的 configured harness catalog。它回答“这个租户/工作区当前可以选择哪些 harness（ADK app）、每个 harness 能用哪些模型、工具、MCP 和 skill，以及这些能力是否真的可用”。
+Harness Registry 维护 HaaS 可运行的 configured harness catalog。它回答“这个租户/工作区当前可以选择哪些 harness（ADK app）、每个 harness 当前激活哪个 profile，以及这些能力是否真的可用”。
 
-`appName`（ADK 术语）就是 configured harness 的 `id`（`chrn_...`），`name` 作为可读别名可被 `/run` 解析。`base` 是开放字符串：首期 `codex`，后续注册 `pi`、`opencode`、`amp` 或其他 harness，不需要修改 public task API。
+`appName`（ADK 术语）就是 configured harness 的 `id`（`chrn_...`），`name` 作为可读别名可被 `/run` 解析。`base` 是开放字符串：首期 `codex`，后续注册 `pi`、`opencode`、`amp` 或其他 harness，不需要修改 public task API。Provider、MCP、skills、AGENTS.md、workspace/policy 和 budget 的可变配置归 [Harness Profile](../harness-profile/README.zh-CN.md) 所有；Registry 只保存 harness identity、scope、base 和 active profile pointer。
 
 ## 2. 来源与依据
 
@@ -18,6 +18,7 @@ Harness Registry 维护 HaaS 可运行的 configured harness catalog。它回答
 |------|----------|
 | ADK 2.0 | `appName` = harness `id`，`/list-apps` 列出 app 名 |
 | `mpa-codex-worker` profile controller | profile draft/active、session 冻结、runtime policy |
+| Harness Profile | provider/MCP/skills/AGENTS.md/workspace/policy/budget 的版本化配置 |
 | Model Proxy | provider 路由与 model availability |
 | 本组件总览 | configured harness catalog、appName/base/capability/model/provider discovery |
 | Manager Delegation | manager 与 HaaS 都通过 provider id、model id 和 `credentialRef` 引用 provider；raw key 不复制进 delegated-session contract |
@@ -37,22 +38,21 @@ Harness Registry 维护 HaaS 可运行的 configured harness catalog。它回答
 
 负责：
 
-- 保存 configured harness 的稳定配置。
-- 计算 harness、base、model、provider、MCP、skill 和 tool restriction 的有效视图。
+- 保存 configured harness 的稳定 identity 与 active profile pointer。
+- 计算 harness、base、active profile、model、provider、MCP、skill 和 tool restriction 的有效视图。
 - 解析 `appName`：先按 `id` 精确匹配，再按 `name` 匹配；多命中或未命中返回 404。
 - 返回 caller scope 内的 harness；跨 scope 访问返回 not found。
-- 冻结 session 创建时的 effective harness config，后续 harness 更新不改变已存在 session。
+- 为 session 创建解析 active profile，并将 effective profile 交给 Session Runtime 冻结；后续 profile 激活不改变已存在 session。
 - 对 `base` 做 adapter availability 检查。
-- 保存并校验 provider 路由配置（`baseUrl`/`wireApi`/`credentialRef`），URL 必须过 allowlist。
-- 对 `defaultModel` 和 requested `model` 做可用性校验或显式 fallback。
-- 保存 skill folder bundle，保证 round-trip 不丢文件。
+- 委托 Harness Profile 保存并校验 provider route、MCP、skills、AGENTS.md、workspace/policy 和 budget。
+- 对 active profile 的 `defaultModel` 与 requested `model` 做可用性校验或显式 fallback。
 
 不负责：
 
 - 不直接执行 harness。
 - 不保存 raw credential；credential 只保存引用或交给 secret store/vault。
 - 不执行 MCP/tool 调用。
-- 不修改已存在 session 的 frozen config。
+- 不修改已存在 session 的 frozen profile/config。
 - 不把某个 harness 的原生工具名强行标准化成所有 harness 的 hard contract。
 
 ## 5. 核心接口
@@ -62,11 +62,14 @@ Harness Registry 维护 HaaS 可运行的 configured harness catalog。它回答
 | Method | Path | 说明 |
 |--------|------|------|
 | GET | `/list-apps` | 列出 caller scope 内 harness 的 app 名（id 字符串数组） |
+| GET | `/v1/haas/capabilities` | 为 protocol-owned capability response 提供 caller-visible configured-harness snapshot |
 | GET | `/v1/haas/harnesses` | 列出 caller scope 内 configured harness 详情 |
 | GET | `/v1/haas/harnesses/{harness_id}` | 读取一个 configured harness |
 | POST | `/v1/haas/harnesses` | 创建 configured harness |
 | PUT | `/v1/haas/harnesses/{harness_id}` | 替换 mutable config，`id`、`base`、`createdAtMs` 不可变 |
 | DELETE | `/v1/haas/harnesses/{harness_id}` | 标记删除，不删除历史 session |
+| GET/POST | `/v1/haas/profiles` | Harness Profile 组件拥有；Registry 为 harness lookup 与 active pointer 提供一致性 |
+| GET/PUT/POST | `/v1/haas/profiles/{profile_id}`、`/validate`、`/activate` | Harness Profile 组件拥有；activation 原子更新 harness active pointer |
 | GET | `/v1/haas/models` | 全局 backend/model catalog |
 | GET | `/v1/haas/harnesses/{harness_id}/skills/{skill_id}/files` | 读取完整 skill folder bundle |
 
@@ -112,10 +115,12 @@ Harness Registry 维护 HaaS 可运行的 configured harness catalog。它回答
 async def resolve_app(principal, app_name: str) -> HarnessConfig: ...
 async def resolve_default_app(principal) -> HarnessConfig: ...
 async def resolve_model(harness: HarnessConfig, requested_model: str | None) -> ModelResolution: ...
-async def snapshot_for_session(harness: HarnessConfig) -> EffectiveHarnessConfig: ...
+async def resolve_active_profile(principal, harness: HarnessConfig) -> HarnessProfile: ...
+async def snapshot_for_session(harness: HarnessConfig, profile: HarnessProfile) -> EffectiveHarnessProfile: ...
 async def validate_harness_config(input: HarnessCreate) -> ValidationResult: ...
 async def list_bases(principal) -> list[HarnessBase]: ...
 async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRoute: ...
+async def capability_snapshot(principal, probes: dict[str, AdapterProbe]) -> list[HarnessCapabilitySnapshot]: ...
 ```
 
 ## 6. 数据模型
@@ -129,13 +134,17 @@ async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRou
   "name": "Codex default",
   "base": "codex",
   "baseLabel": "Codex",
+  "activeProfileId": "hprof_abc",
+  "activeProfileVersion": 12,
+  "activeProfileFingerprint": "sha256:profile",
   "defaultModel": "gpt-5.6-terra",
   "systemPrompt": "",
   "mcpServers": [],
   "skills": [],
   "disabledTools": [],
   "provider": {
-    "name": "openai-compatible",
+    "providerId": "openai",
+    "name": "openai",
     "baseUrl": "https://provider.example.com/v1",
     "wireApi": "responses",
     "credentialRef": "secret://tenant/workspace/provider/default",
@@ -157,6 +166,11 @@ async def resolve_provider_route(harness: HarnessConfig, model: str) -> ModelRou
   "updatedAtMs": 1786400000000
 }
 ```
+
+`defaultModel`、`systemPrompt`、`mcpServers`、`skills`、`disabledTools`、
+`provider`、`maxStep` 和 `timeoutSeconds` 是 legacy-compatible projection
+字段。新实现的写入事实源是 Harness Profile。读取 `Harness` 时可以内联
+active profile 摘要以兼容旧 manager client，但这些字段不得绕过 profile validation。
 
 ### 6.2 HarnessBase
 
@@ -225,32 +239,31 @@ Provider identity 是稳定配置身份。endpoint、credential source、billing
 | `volcengine-ark` | `https://ark.cn-beijing.volces.com/api/v3` | OpenAI-compatible data plane | 火山方舟中国区标准数据面 identity。 |
 | `ark-agent-plan-cn` | `https://ark.cn-beijing.volces.com/api/plan/v3` | Agent Plan API | 火山方舟 Agent Plan identity；不得与标准数据面互换。 |
 
-manager 本地执行与 HaaS 委派执行都通过 `providerId + model + credentialRef` 传递 provider selection。Registry 只保存 provider route 与 credential reference/fingerprint；真实 credential 由 Model Proxy 在请求时解析。
+manager 本地执行与 HaaS 委派执行都通过 `providerId + model + credentialRef` 传递 provider selection。provider route 同时保留 `providerId`（稳定身份）与 `name`（可读别名）。`wireApi` 声明协议：`openai-compatible` 是 OpenAI 兼容协议族，`responses` 要求使用该族里的 OpenAI Responses 协议类型，`agent-plan` 是 Ark Agent Plan 协议。Registry 只保存 provider route 与 credential reference/fingerprint；真实 credential 由 Model Proxy 在请求时解析。
 
 ## 7. 运行模型与状态机
 
 ```text
-draft -> validated -> active -> superseded -> deleted
-           |             |
-           |             +-> snapshotted into session
-           v
-        rejected
+draft -> active -> retired
 ```
 
 规则：
 
-- `draft` 可以修改任意 mutable field。
-- `validated` 表示 schema、adapter base、provider URL、MCP URL、skill bundle 和 policy 通过校验。
-- `active` 可被 session 使用；`appName` 解析只命中 active harness。
-- `superseded` 保留历史，不再被新 session 默认选择。
-- `deleted` 不可被新任务选择，但历史 session 仍可审计。
+- `draft` 可以修改 harness identity 的 mutable metadata；执行配置字段的版本化生命周期属于 Harness Profile。
+- `active` 表示 harness identity、adapter base 和 active profile pointer 通过校验，可被 session 使用；`appName` 解析只命中 active harness，且必须存在 active profile。
+- `retired` 保留历史供审计，不再被新 session 选择；retired harness 不再被重新激活，历史 session 仍可读。
 
-Session 使用 `EffectiveHarnessConfig` frozen snapshot，不读取 live harness 对象继续执行旧任务。
+Session 使用 `EffectiveHarnessProfile` frozen snapshot，不读取 live harness 或
+active profile 对象继续执行旧任务。Capability discovery 是 caller-scoped live snapshot，
+必须包含当前 active profile 的 version/fingerprint，但不得修改或替换 frozen
+session config。Registry 只提供可见 harness identity、active profile pointer 与配置事实；
+HaaS Protocol 持有 public schema，adapter/runtime 组件提供 availability/mechanism/enforcement
+事实。
 
 ## 8. 安全与权限
 
 - Registry 只保存 credential ref、fingerprint 和 safe metadata，不保存 raw secret。
-- provider URL 与 MCP URL 必须通过 allowlist 和 SSRF 校验后才可进入 active harness。
+- active profile 中的 provider URL 与 MCP URL 必须通过 allowlist 和 SSRF 校验后才可被新 session 使用。
 - 不同 tenant/workspace 的 harness 不可互读；越权统一返回 `404 haas_harness_not_found`（app 解析也返回 `404 app_not_found`）。
 - Skill 文件拒绝 path traversal、绝对路径、控制字符和过大 bundle。
 - `disabledTools` 的 enforcement 必须按 base 如实暴露为 `hard`、`advisory` 或 `unsupported`。
@@ -282,13 +295,15 @@ Registry 必须产出以下安全日志/指标：
 | provider id 与 endpoint/API shape 不匹配 | `haas_provider_source_invalid` |
 | skill bundle 无 `SKILL.md` | config validation failed，拒绝 active |
 | MCP URL 未通过 allowlist | `haas_mcp_source_invalid` |
+| active profile 缺失或未验证 | `409 haas_profile_conflict`，该 harness 不可用于新 session |
+| session 请求的 profile 与 frozen snapshot 不一致 | `409 haas_profile_rebind_required`，不启动 invocation |
 | registry store 不可用 | 创建/更新 fail closed；已冻结 session 继续执行 |
 | harness 被删除 | 新任务失败；历史 session 可读 |
 
 ## 11. 测试计划与验收
 
-- Unit：appName 解析（id 优先 / name fallback / 多命中断言）、scope filtering、model fallback、provider URL allowlist、skill path validation。
-- Integration：`GET /list-apps`、`GET/POST/PUT/DELETE /v1/haas/harnesses`、`GET /v1/haas/models`。
+- Unit：appName 解析（id 优先 / name fallback / 多命中断言）、scope filtering、active profile pointer、model fallback、provider URL allowlist、skill path validation。
+- Integration：`GET /list-apps`、`GET /v1/haas/capabilities`、`GET/POST/PUT/DELETE /v1/haas/harnesses`、`GET /v1/haas/models`；capability harness 列表必须与 caller-visible active configured harness 完全一致，并包含 active profile version/fingerprint。
 - Compatibility：ADK client `list-apps` 返回数组；`/run` 用 harness id 和 name 均能解析。
 - Security：两 principal 互相读取 harness 返回 404；secret/credential ref 不在 response 中出现。
-- Regression：更新 harness 名称不能丢 skill files；更新 active harness 不影响既有 session snapshot。
+- Regression：更新 harness 名称不能丢 active profile pointer；激活新 profile 不影响既有 session snapshot，除非显式 rebind。

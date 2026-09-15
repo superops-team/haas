@@ -4,6 +4,7 @@ Every concrete adapter must satisfy the same interface contract
 (specs/harness-adapter §11). CodexAdapter is driven here through a loopback
 fake app-server; no real Codex or external network is required.
 """
+
 from __future__ import annotations
 
 import json
@@ -97,7 +98,9 @@ async def fake_server_port() -> Any:
 @pytest.fixture
 def adapter(fake_server_port: int) -> CodexAdapter:
     return CodexAdapter(
-        CodexEndpoint(transport="loopback_websocket", listen_url=f"ws://127.0.0.1:{fake_server_port}")
+        CodexEndpoint(
+            transport="loopback_websocket", listen_url=f"ws://127.0.0.1:{fake_server_port}"
+        )
     )
 
 
@@ -120,8 +123,11 @@ async def test_contract_prepare_and_start(adapter: CodexAdapter) -> None:
 
     handle = await adapter.start_turn(
         StartTurnRequest(
-            invocationId="inv_1", sessionId="hsess_1", turnId="turn_1",
-            appName="chrn_1", input=[{"text": "hi"}],
+            invocationId="inv_1",
+            sessionId="hsess_1",
+            turnId="turn_1",
+            appName="chrn_1",
+            input=[{"text": "hi"}],
         )
     )
     assert handle.turnId == "turn_1"
@@ -131,8 +137,11 @@ async def test_contract_prepare_and_start(adapter: CodexAdapter) -> None:
 async def test_contract_stream_and_terminal(adapter: CodexAdapter) -> None:
     handle = await adapter.start_turn(
         StartTurnRequest(
-            invocationId="inv_1", sessionId="hsess_1", turnId="turn_1",
-            appName="chrn_1", input=[{"text": "hi"}],
+            invocationId="inv_1",
+            sessionId="hsess_1",
+            turnId="turn_1",
+            appName="chrn_1",
+            input=[{"text": "hi"}],
         )
     )
     events = [event async for event in adapter.stream_events(handle)]

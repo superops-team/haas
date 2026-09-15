@@ -38,9 +38,7 @@ def telegram_message_to_event(msg: Any) -> Optional[MessageEvent]:
     chat = msg.chat
     user = getattr(msg, "from_user", None)
     chat_type = (
-        "dm"
-        if str(getattr(chat, "type", "private")).lower().endswith("private")
-        else "group"
+        "dm" if str(getattr(chat, "type", "private")).lower().endswith("private") else "group"
     )
     thread = getattr(msg, "message_thread_id", None)
     source = SessionSource(
@@ -51,14 +49,10 @@ def telegram_message_to_event(msg: Any) -> Optional[MessageEvent]:
         chat_type=chat_type,
         thread_id=str(thread) if thread else None,
     )
-    return MessageEvent(
-        text=text, source=source, message_id=str(getattr(msg, "message_id", ""))
-    )
+    return MessageEvent(text=text, source=source, message_id=str(getattr(msg, "message_id", "")))
 
 
-def slack_event_to_event(
-    event: dict, bot_user_id: Optional[str]
-) -> Optional[MessageEvent]:
+def slack_event_to_event(event: dict, bot_user_id: Optional[str]) -> Optional[MessageEvent]:
     # Skip bot echoes / message edits / joins etc. (reply-loop guard).
     if event.get("bot_id") or event.get("subtype"):
         return None
@@ -77,9 +71,7 @@ def slack_event_to_event(
     )
     # Mention detection runs on the RAW text (the `<@U…>` token form, legacy `<@U…|name>`
     # included) — callers rewrite mentions to @display-name only after mapping.
-    mentions_me = bool(
-        bot_user_id and re.search(rf"<@{re.escape(bot_user_id)}(?:\|[^>]*)?>", text)
-    )
+    mentions_me = bool(bot_user_id and re.search(rf"<@{re.escape(bot_user_id)}(?:\|[^>]*)?>", text))
     return MessageEvent(
         text=text, source=source, message_id=event.get("ts"), mentions_me=mentions_me
     )
@@ -98,9 +90,7 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             from telegram.ext import Application, MessageHandler, filters
         except ImportError:
-            logger.warning(
-                "python-telegram-bot not installed — `pip install coworker[messaging]`"
-            )
+            logger.warning("python-telegram-bot not installed — `pip install coworker[messaging]`")
             return False
 
         self._app = Application.builder().token(self.token).build()
@@ -110,9 +100,7 @@ class TelegramAdapter(BasePlatformAdapter):
             if event is not None:
                 await self.handle_message(event)
 
-        self._app.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, _on_update)
-        )
+        self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_update))
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
@@ -129,9 +117,7 @@ class TelegramAdapter(BasePlatformAdapter):
         finally:
             self._app = None
 
-    async def send(
-        self, chat_id: str, text: str, *, thread_id: Optional[str] = None
-    ) -> SendResult:
+    async def send(self, chat_id: str, text: str, *, thread_id: Optional[str] = None) -> SendResult:
         return _send_telegram(self.token, chat_id, text, thread_id)
 
 
@@ -159,24 +145,20 @@ class SlackAdapter(BasePlatformAdapter):
         self._task: Optional[asyncio.Task] = None
         self._watchdog_task: Optional[asyncio.Task] = None
         self._closing = False
-        self._reconnects = (
-            0  # observable: how many times the watchdog revived the connection
-        )
+        self._reconnects = 0  # observable: how many times the watchdog revived the connection
         self._watchdog_interval = (
-            watchdog_interval
-            if watchdog_interval is not None
-            else self._WATCHDOG_INTERVAL
+            watchdog_interval if watchdog_interval is not None else self._WATCHDOG_INTERVAL
         )
         # slack_sdk's own reconnect stays on in production (seamless on Slack's graceful cycling);
         # tests turn it off so the watchdog is the sole, deterministic recovery path.
         self._auto_reconnect = auto_reconnect
         self._bot_user_id: Optional[str] = None
-        self._name_cache: dict[str, str] = (
-            {}
-        )  # user_id → display name (resolved once via users.info)
-        self._channel_cache: dict[str, str] = (
-            {}
-        )  # chat_id → channel name (resolved once via conversations.info)
+        self._name_cache: dict[
+            str, str
+        ] = {}  # user_id → display name (resolved once via users.info)
+        self._channel_cache: dict[
+            str, str
+        ] = {}  # chat_id → channel name (resolved once via conversations.info)
 
     async def connect(self) -> bool:
         try:
@@ -186,9 +168,7 @@ class SlackAdapter(BasePlatformAdapter):
             from slack_bolt.async_app import AsyncApp
             from slack_sdk.web.async_client import AsyncWebClient
         except ImportError:
-            logger.warning(
-                "slack-bolt not installed — `pip install coworker[messaging]`"
-            )
+            logger.warning("slack-bolt not installed — `pip install coworker[messaging]`")
             return False
 
         # Base-URL override so tests (and the FakeSlack harness) can redirect every Web API
@@ -212,14 +192,10 @@ class SlackAdapter(BasePlatformAdapter):
                 # Slack message events carry only the user id; resolve a friendly name so recent
                 # senders / the allow-list don't read "unknown".
                 if not mapped.source.user_name:
-                    mapped.source.user_name = await self._display_name(
-                        mapped.source.user_id
-                    )
+                    mapped.source.user_name = await self._display_name(mapped.source.user_id)
                 # ...and a friendly channel/DM name so the GUI card shows "#ocw-test", not "C…".
                 if not mapped.source.chat_name:
-                    mapped.source.chat_name = await self._channel_name(
-                        mapped.source.chat_id
-                    )
+                    mapped.source.chat_name = await self._channel_name(mapped.source.chat_id)
                 # ...and rewrite <@U…> mention tokens in the text to @name ("@ocw hi", not
                 # "<@U0BDKMA4DFF> hi").
                 mapped.text = await self._resolve_mentions(mapped.text)
@@ -279,15 +255,11 @@ class SlackAdapter(BasePlatformAdapter):
                 alive = False
             if alive:
                 continue
-            logger.warning(
-                "slack socket mode connection down — reconnecting (watchdog)"
-            )
+            logger.warning("slack socket mode connection down — reconnecting (watchdog)")
             try:
                 await client.connect_to_new_endpoint(force=True)
                 self._reconnects += 1
-                logger.info(
-                    "slack socket mode reconnected (watchdog, #%d)", self._reconnects
-                )
+                logger.info("slack socket mode reconnected (watchdog, #%d)", self._reconnects)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -366,15 +338,11 @@ class SlackAdapter(BasePlatformAdapter):
             self._task.cancel()
             self._task = None
 
-    async def send(
-        self, chat_id: str, text: str, *, thread_id: Optional[str] = None
-    ) -> SendResult:
+    async def send(self, chat_id: str, text: str, *, thread_id: Optional[str] = None) -> SendResult:
         # The stateless senders use blocking httpx; offload so an outbound from the event loop
         # (e.g. mirror_inbox_item / _on_interaction, which await this directly) never blocks the
         # server loop on the Slack round-trip.
-        return await asyncio.to_thread(
-            _send_slack, self.bot_token, chat_id, text, thread_id
-        )
+        return await asyncio.to_thread(_send_slack, self.bot_token, chat_id, text, thread_id)
 
     async def send_interactive(
         self, chat_id: str, text: str, buttons, *, thread_id: Optional[str] = None
@@ -388,9 +356,7 @@ class SlackAdapter(BasePlatformAdapter):
         if self._app is None or not message_id:
             return
         try:
-            await self._app.client.chat_update(
-                channel=chat_id, ts=message_id, text=text, blocks=[]
-            )
+            await self._app.client.chat_update(channel=chat_id, ts=message_id, text=text, blocks=[])
         except Exception:
             logger.debug("slack chat_update failed", exc_info=True)
 
@@ -471,10 +437,6 @@ def make_adapter(
         from .relay_client import RelayHub
 
         hub = relay_hub or RelayHub(relay_url, token_provider)
-        installs = (
-            {iid: prof for iid, prof in list_installs(secrets)} if secrets else {}
-        )
-        return GitHubRelayAdapter(
-            hub, installs=installs, token_client=github_token_client
-        )
+        installs = {iid: prof for iid, prof in list_installs(secrets)} if secrets else {}
+        return GitHubRelayAdapter(hub, installs=installs, token_client=github_token_client)
     return None

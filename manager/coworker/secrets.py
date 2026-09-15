@@ -156,9 +156,7 @@ class SecretStore:
         def _walk(v: Any) -> Any:
             if isinstance(v, str):
                 return _REF.sub(
-                    lambda m: os.environ.get(m.group(1))
-                    or env.get(m.group(1))
-                    or m.group(0),
+                    lambda m: os.environ.get(m.group(1)) or env.get(m.group(1)) or m.group(0),
                     v,
                 )
             if isinstance(v, dict):

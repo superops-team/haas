@@ -19,6 +19,19 @@ runtime，并统一处理 session、事件、策略、sandbox、模型与工具�
 > 和 AIO 容器启动链路。Codex 是当前首个实现的生产 adapter；Pi、OpenCode 和 AMP
 > 仍处于规划阶段。真实 Codex/OpenSandbox/provider 验证由显式 E2E 开关控制。
 
+## 在 macOS 安装 OpenHarness
+
+OpenHarness v0.2.1 当前提供 Apple Silicon macOS 版本。复制并执行以下命令即可安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/superops-team/haas/v0.2.1/scripts/install.sh | VERSION=v0.2.1 sh
+```
+
+带版本的安装器会从同一个 GitHub Release 下载 DMG 和 SHA-256 文件，在挂载前完成
+校验，然后安装到 `/Applications`，并且只对 `OpenHarness.app` 移除
+`com.apple.quarantine`。当前构建未签名；如果你的环境要求签名或公证，请先审阅脚本
+再执行。替换失败时会恢复已有安装，安装完成后不会自动启动 App。
+
 ## 30 秒了解 HaaS
 
 ### 一套协议，隔离多种 runtime
@@ -56,8 +69,8 @@ HaaS 把这些差异封装在 adapter 内，让上游只依赖稳定服务合同
 | 不同运行环境难以形成一致边界 | Policy Controller 将约束投影到 OpenSandbox AIO |
 
 HaaS 只兼容 ADK 2.0 的 **REST API 协议层**，不引入 ADK 执行引擎、图工作流、
-BaseAgent / WorkflowGraph 或 ADK Web UI。旧 /v1/codex-worker/* 迁移 shim
-明确不在本项目范围内。
+BaseAgent / WorkflowGraph 或 ADK Web UI。HaaS 专属控制面能力统一位于
+`/v1/haas/*`。
 
 ## 系统架构
 
@@ -87,7 +100,7 @@ BaseAgent / WorkflowGraph 或 ADK Web UI。旧 /v1/codex-worker/* 迁移 shim
 | Codex app-server | 已实现 | WebSocket / Unix socket / stdio transport、schema drift、cancel/recovery |
 | Policy 与 security | 已实现 | workspace/network/tool policy、SSRF/path traversal 防护、redaction |
 | Model / MCP / skills | 已实现基础链路 | loopback model proxy、MCP 校验、skill materialization |
-| OpenSandbox AIO | 已实现基础链路 | sandbox policy projection、AIO-derived linux/amd64 image、health/ready |
+| Container runtime | AIO 基线已实现；Lite 仍为 spec-only | 当前已有 AIO linux/amd64 image 与 health/ready；默认 Lite linux/arm64+amd64 仍需实现和准出 |
 | Pi / OpenCode / AMP | 规划中 | 复用 Harness Adapter contract，不改变 northbound API |
 
 ## /run_sse 请求链路
@@ -120,7 +133,7 @@ BaseAgent / WorkflowGraph 或 ADK Web UI。旧 /v1/codex-worker/* 迁移 shim
 | GET/PATCH/DELETE | /apps/{app}/users/{user}/sessions/{sid} | 读取、合并状态或删除 session |
 
 appName 对应 configured harness id（chrn_...，name 可作为别名）。完整 schema 以
-[OpenAPI](specs/haas-protocol/haas-2026-08-26.openapi.yaml) 为准，错误目录见
+[OpenAPI](specs/haas-protocol/haas-2026-09-10.openapi.yaml) 为准，错误目录见
 [ERROR-CODES.md](specs/haas-protocol/ERROR-CODES.zh-CN.md)。
 
 ### HaaS control plane
@@ -177,7 +190,7 @@ make full-check         # 最终本机准出
 HAAS_DOCKER_BUILD=1 make docker-check
 ```
 
-所有镜像必须显式构建和运行在 linux/amd64；默认 base image 使用 digest pin。
+Lite 镜像发布 linux/arm64 与 linux/amd64，Mac Apple Silicon 用 Docker CLI 运行 arm64；AIO 仍只交付 linux/amd64。所有 release base/image manifest 必须 digest pin。
 镜像构建统一走 make docker-build，不要让主机架构隐式决定交付产物。
 
 ## 仓库结构

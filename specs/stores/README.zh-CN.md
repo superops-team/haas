@@ -3,8 +3,8 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-07
-Related specs: [Session Runtime](../session-runtime/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
+Last reviewed: 2026-09-10
+Related specs: [Session Runtime](../session-runtime/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -18,7 +18,7 @@ Stores 是 HaaS 的持久化事实源。它统一定义 registry、session、eve
 |------|----------|
 | Session Runtime | session/invocation/turn record、approval wait、lease、idempotency reservation |
 | Event Log & SSE | canonical event 持久化与 cursor read |
-| Harness Registry | harness config 持久化 |
+| Harness Registry / Harness Profile | harness identity、active profile pointer、profile revision 持久化 |
 | Admission Control | 共享配额/速率计数，要求「部署内共享」 |
 | Manager Delegation | delegated-session contract、policy snapshot、mount manifest、runtime generation 和 workspace lock |
 
@@ -64,6 +64,10 @@ class RegistryStore(Protocol):
     async def get_harness(self, harness_id: str) -> HarnessRecord | None: ...
     async def list_harnesses(self, account: AccountKey) -> list[HarnessRecord]: ...
     async def delete_harness(self, harness_id: str) -> None: ...
+    async def save_profile(self, p: HarnessProfileRecord) -> HarnessProfileRecord: ...
+    async def get_profile(self, profile_id: str) -> HarnessProfileRecord | None: ...
+    async def list_profiles(self, account: AccountKey, harness_id: str | None, status: str | None, cursor: str | None, limit: int) -> ProfilePage: ...
+    async def activate_profile(self, harness_id: str, profile_id: str, expected_version: int | None) -> HarnessRecord: ...
 
 > `AccountKey` = `(tenantId, workspaceId)`，两者均可为 `None`（未绑定租户的
 > 单节点部署）。Store 只按 key 做等值过滤，不做授权判断；scope 语义与越权
@@ -76,6 +80,7 @@ class SessionStore(Protocol):
     async def delete_session(self, key: SessionKey) -> None: ...
     async def count_sessions(self) -> int: ...
     async def put_invocation(self, inv: InvocationRecord) -> InvocationRecord: ...
+    async def get_invocation(self, invocation_id: str) -> InvocationRecord | None: ...
     async def put_turn(self, t: TurnRecord) -> TurnRecord: ...
     async def acquire_lease(self, key: SessionKey, holder: str, ttl_ms: int) -> Lease: ...
     async def renew_lease(self, key: SessionKey, holder: str, token: int, ttl_ms: int) -> Lease: ...
@@ -85,13 +90,34 @@ class SessionStore(Protocol):
 class EventLogStore(Protocol):
     async def append(self, e: CanonicalEventRecord) -> None: ...
     async def read_invocation(self, key: SessionKey, invocation_id: str, after: int) -> list[CanonicalEventRecord]: ...
-    async def read_session(self, key: SessionKey, after_cursor: str | None) -> list[CanonicalEventRecord]: ...
+    async def read_session(self, key: SessionKey, after_cursor: str | None, limit: int) -> EventPage: ...
 
 class IdempotencyStore(Protocol):
     async def reserve(self, key_hash: str, request_hash: str) -> IdempotencyReservation: ...
     async def replay(self, key_hash: str) -> IdempotencyResult | None: ...
     async def complete(self, key_hash: str, result: IdempotencyResult) -> None: ...
     async def release(self, key_hash: str) -> None: ...
+
+Session store 独立于 profile 历史保留私有非 secret `effectiveProfile` snapshot 及其解析时间；公开投影不得包含其内容。Invocation store 同样保留用于精确 Pause/Continue 恢复的私有非 secret `executionContext` 快照；它包含生效 sandbox、policy 与 principal identity，但不得包含 credential、raw prompt 或完整 tool arguments，公开投影不得包含其内容。Profile-rebind 幂等性按 principal、完整 session identity 和 operation 隔离，严格匹配请求并重放原响应。
+
+Execution mutation 的 `IdempotencyResult` 是持久协议状态：
+
+```json
+{
+  "accepted": true,
+  "invocationId": "inv_abc",
+  "httpStatus": 200,
+  "events": [],
+  "error": null,
+  "completedAtMs": 1786401000000
+}
+```
+
+接受前 reservation 可释放且不保留 result。接受后，正常
+completed/failed/incomplete/interrupted/cancelled result 一律使用 `httpStatus=200` 并保留有序 ADK
+event sequence。若接受后 terminal event 持久化失败，则保留 `accepted=true`、
+invocation id、`httpStatus=503` 与安全 `haas_store_unavailable` error，确保 replay 不会
+启动第二次执行。Store 不得把 accepted adapter failure 持久化为 HTTP 502。
 
 class AdmissionStore(Protocol):
     async def incr_window(self, bucket: str, now_ms: int, window_ms: int) -> int: ...
@@ -115,13 +141,17 @@ class DelegationStore(Protocol):
     async def update_runtime_generation(self, delegated_session_id: str, runtime: DelegatedRuntimeRecord) -> None: ...
     async def put_approval(self, approval: ApprovalRecord) -> ApprovalRecord: ...
     async def resolve_approval(self, approval_id: str, decision: ApprovalDecision) -> ApprovalRecord: ...
+    async def list_approvals(self, key: SessionKey, status: str, cursor: str | None, limit: int) -> ApprovalPage: ...
     async def acquire_workspace_lock(self, canonical_workspace: str, delegated_session_id: str, access: str, ttl_ms: int) -> WorkspaceLockResult: ...
     async def release_workspace_lock(self, canonical_workspace: str, delegated_session_id: str) -> None: ...
 ```
 
 ## 6. 数据模型
 
-每个持久化 record 携带统一的元数据：
+每个持久化 record 携带统一 metadata。`CanonicalEventRecord` 还要持久化稳定
+`type` 和经过校验的 type-specific `haas` metadata；不得持久化 adapter
+`nativeType`。Public native projection 会剥离内部 `userId`、`adapterId`、
+`schemaVersion`、`redactionApplied`：
 
 ```json
 {
@@ -138,16 +168,35 @@ Retention 默认值：
 | Event | 与 session 保留期同或按配置 |
 | Session | TTL 可配，默认 30 天；`expiresAtMs` 过期不可读 |
 | Delegated session contract | 与 session 保留期同；idle container TTL 不得删除它 |
+| Harness profile revision | 删除 harness 后仍按审计保留期保留；active/retired revision 不原地修改 |
 | Approval record | 与 invocation/event 保留期同 |
 | Workspace lock | lease-backed；只在确认 terminal/cleanup 状态后或 lock TTL takeover 后过期 |
-| Idempotency key | 24 小时或请求终态后释放 |
+| Idempotency reservation/result | 接受前失败释放 reservation；一旦 accepted，terminal result 或 integrity-failure envelope 默认保留 24 小时 |
 | Admission 计数 | 滚动窗口（窗口大小即维度定义） |
 
 时间戳一律使用**毫秒 epoch（integer）**，与 ADK 公开 float 秒的转换只发生在投影层（见 `specs/README.md` 全局约定）。
 
+`CanonicalEventRecord` 使用 schema version 2。Version 1 到 version 2 的 forward
+migration 由 Event Log & SSE §6.3.1 定义，必须在提供 native event replay 前完成。
+Migration 必须幂等，保留原 id/order/content/actions；语义不明确的历史 record 映射为
+`haas.adapter.event_unparsed`，不得虚构语义。
+
+未发布 2026-08-26 baseline 的 invocation/delegation migration 也只向前：
+
+- 旧 invocation 有 `startedAtMs` 时用它填充 `acceptedAtMs`，否则使用 record
+  `createdAtMs`；保留 terminal/running status；
+- 旧 `haas_bound` delegated contract 使用同一 HaaS session 最早持久 invocation 作为
+  `acceptedInvocationId`，并使用其 acceptance timestamp；
+- 若不存在 invocation，则迁移为 `prepared`，不得保留 `haas_bound`；
+- 歧义/不一致 record 必须使 migration 失败，不得虚构 accepted work。
+- 生命周期字段只做加法：session 缺少 `controlState` 时默认 `idle`，但存在 active invocation 时必须先对账；invocation/turn 缺少 continuation link 时默认为 null。`interrupted` 与其他 terminal record 使用相同 retention 和不可变保证。
+
 Event log 记录的 session 读取索引必须使用完整 `SessionKey`
 `(appName, userId, sessionId)`；invocation 读取索引必须使用
-`(appName, userId, sessionId, invocationId)`。caller-supplied 的裸
+`(appName, userId, sessionId, invocationId)`。Invocation-scoped record 要求非空
+invocation/turn id 与 gapless invocation sequence；session-scoped lifecycle record 使用
+null invocation/turn id 和独立 gapless session-lifecycle sequence。Session replay 通过
+session-scoped `eventId` 对两个 namespace 排序。caller-supplied 的裸
 `sessionId` 不具备全局唯一性，禁止作为 event replay 的 store key。
 
 ## 7. 运行模型与状态机
@@ -173,9 +222,26 @@ process id、socket path 或 port allocation 都不是持久事实。容器被 i
 Stores 仍保留 delegated-session contract、policy snapshot、mount manifest、approval
 history、HaaS session id、native session reference 和 container generation。
 
+Harness profile revision 是运行配置事实源。Store 必须以 append-only revision 保存
+profile 内容、version、status、fingerprint 和安全 validation findings；`version`
+只递增、不回滚。`activate_profile` 必须在同一事务中校验目标 profile 已通过 validation、
+更新 harness active profile pointer、并把旧 active revision 标为 `retired`。无法留档历史的
+部署可以每个 harness 只保留最新 revision。`EffectiveHarnessProfile` snapshot 存在
+SessionRecord 中，后续 active pointer 变化不得改写已有 session。
+
 Workspace lock 按 canonical host workspace 与 access mode 建模。对 `rw` delegated
 session，同一时间只允许一个 active holder；`ro` lock 可共享。过期接管前必须确认
 前 holder 已进入 terminal 或 cleanup 状态，否则 fail closed。
+
+### 7.1 配置与恢复事务
+
+持久化完整解析 desired/applied 配置、内容引用、授权证据、desiredRevision/appliedRevision、pending update 和 lastPolicyUpdateResult，public pending summary 不能代替真实目标。接受更新原子推进 desiredRevision 并写 receipt；fenced runtime 验证成功后才推进 appliedRevision。Update id/request hash receipt 保留到 session 删除，防止旧重试覆盖新配置。重启自动 reconciliation，不依赖下一 turn；见 Manager Delegation §5.1.1。
+
+执行幂等结果在 acceptedAtMs 后 24h 过期，暴露 idempotencyExpiresAtMs/Idempotency-Expires-At。非终态 reservation 不驱逐；结果过期后 scoped key-hash/invocation/expiry tombstone 保留至 session retention，旧 key 返回 410 haas_idempotency_expired。新 attempt 使用新 key。按 principal/operation 隔离 key，policy/approval mutation 不套执行 auto-new-turn。
+
+Session volume 跨 TTL/重建保留 native state 和完整材料化内容；control store 保存 worker execution/generation mapping 与去重 receipt。Profile 清理不能删除 pending/applied session 引用的内容。Artifact Store 独立于 worker lifetime 保存发布字节。Delete 先撤销 visibility/admission，收敛 writer 后清 volume/content；不确定清理保持 fencing。Private native 文件遵循 Security Boundary §7.1，不属于 public event-log storage。
+
+旧 delegated record 仅在解析确切配置并确认 native state 后迁移为 desiredRevision=appliedRevision=1；证据缺失 fail closed，不绑定任意当前 profile。新字段/receipt 前向迁移及重启测试通过前，不能宣称 2026-09-10 conformance。
 
 ## 8. 安全与权限
 
@@ -206,20 +272,24 @@ Logs：
 | 场景 | 行为 |
 |------|------|
 | store 不可用 | 新请求 fail closed；已冻结 session 的 read 可降级为不可用 |
-| event append 失败 | invocation 不得宣称 completed（Session Runtime 写 failure evidence） |
+| event append 失败 | invocation 不得宣称 completed；Session Runtime 在权威状态 store 持久化 `failed`，用安全错误 envelope 完成幂等记录，并在 Event Log 之外记录 fallback diagnostics |
 | migration 失败 | startup fail closed，不裸跑旧 schema |
 | lease 过期 | 仅允许使用更新的 fencing token 接管；过期 holder 不能 append event 或覆盖 record，接管者必须先 inspect/explain 前 holder 状态 |
 | delegated runtime record 缺失 | restore fail closed；不得从 live container 反推配置 |
 | workspace lock holder 不明确 | 不授予第二个 `rw` lock；返回 `haas_workspace_lock_busy` 或 timeout |
-| approval decision 与已解析记录冲突 | 返回 `haas_approval_state_conflict` |
+| approval decision 与已存储的已解析决定相同 | 幂等返回既有记录，不重复回复 native request |
+| approval decision 与已解析或 terminal-cancelled 记录冲突 | 返回 `haas_approval_state_conflict` |
+| invocation 进入 `failed`、`incomplete`、`interrupted` 或 `cancelled` | 在同一 store 临界区内取消该 invocation 所有仍 waiting 的 approval/input，避免 restart/replay 暴露 stale interaction card |
 | 部分写入 | 事务回滚；无跨 store 的分布式事务保证，必要时用 Outbox 补 |
 
 ## 11. 测试计划与验收
 
-- Unit：各 record UPSERT、cursor read、lease acquire/renew/assert/release（含 fencing 拒绝）、idempotency replay/release。
+- Unit：各 record UPSERT、稳定 event type/typed metadata 持久化、native type 泄漏拒绝、invocation/session-lifecycle sequence 分配、cursor read、lease acquire/renew/assert/release（含 fencing 拒绝）、idempotency replay/release。 Accepted failure result 持久化/replay HTTP 200 与相同 events；pre-acceptance reservation 释放；integrity-failure envelope replay HTTP 503 且不重复执行。
+- Unit：profile revision append-only、activate pointer 原子性、profile fingerprint 稳定、非 draft 更新拒绝、session snapshot 不随 active pointer 漂移。
 - Integration：in-memory store 跑通 S2 协议与 S3 fake adapter 全链路。
 - Recovery：写入后重启进程，session/event/idempotency 可从 store 恢复。
 - Recovery：idle TTL 清理和进程重启后，delegated-session contract、policy snapshot、approval wait 和 workspace-lock state 可恢复。
 - Concurrency：store-backed workspace lock 阻止同一 canonical workspace 的两个 active `rw` delegated session。
-- Schema：forward migration 后旧数据可读；rollback 明确不支持。
+- Schema：forward migration 后旧数据可读；rollback 明确不支持。 Event schema v1 fixture 必须确定性迁移到 v2，包括安全 unparsed fallback。
+- Lifecycle schema：以加法方式迁移缺失的 `controlState` 与 continuation link；重启和 retention 后仍保留 interrupted 源记录及关联后继记录；operation receipt 保证重复 pause/continue key 不触发第二次 native action。
 - Security：store 全量审计不包含明文 secret（构造输入后反向断言）。

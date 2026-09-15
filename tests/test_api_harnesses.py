@@ -4,6 +4,7 @@ Covers specs/harness-registry §5.1 / §5.1.1 / §5.1.2 / §5.1.3 / §10 and the
 OpenAPI `Harness` / `HarnessEnvelope` / `HarnessListEnvelope` /
 `ModelCatalogEnvelope` shapes.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -72,9 +73,7 @@ def test_create_rejects_missing_base() -> None:
 
 def test_create_rejects_unregistered_base() -> None:
     """spec §5.1.2: base must be a registered adapter, else 422."""
-    resp = _client().post(
-        "/v1/haas/harnesses", json={"base": "not-a-harness"}, headers=AUTH_A
-    )
+    resp = _client().post("/v1/haas/harnesses", json={"base": "not-a-harness"}, headers=AUTH_A)
     assert resp.status_code == 422
     assert resp.json()["haasError"]["code"] == "haas_unsupported_base"
 
@@ -94,11 +93,28 @@ def test_create_conflicting_idempotency_key_is_409() -> None:
     client = _client()
     headers = {**AUTH_A, "Idempotency-Key": "hk-2"}
     client.post("/v1/haas/harnesses", json={"base": "codex", "name": "x"}, headers=headers)
-    resp = client.post(
-        "/v1/haas/harnesses", json={"base": "codex", "name": "y"}, headers=headers
-    )
+    resp = client.post("/v1/haas/harnesses", json={"base": "codex", "name": "y"}, headers=headers)
     assert resp.status_code == 409
     assert resp.json()["haasError"]["code"] == "haas_idempotency_conflict"
+
+
+def test_create_idempotency_key_is_scoped_to_principal() -> None:
+    client = _client()
+    key = {"Idempotency-Key": "shared-caller-key"}
+
+    first = client.post(
+        "/v1/haas/harnesses",
+        json={"base": "codex", "name": "tenant-a"},
+        headers={**AUTH_A, **key},
+    )
+    second = client.post(
+        "/v1/haas/harnesses",
+        json={"base": "codex", "name": "tenant-b"},
+        headers={**AUTH_B, **key},
+    )
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["data"]["id"] != second.json()["data"]["id"]
 
 
 def test_create_does_not_echo_credential_material() -> None:
@@ -107,8 +123,11 @@ def test_create_does_not_echo_credential_material() -> None:
         _client(),
         AUTH_A,
         provider={
+            "providerId": "openai",
             "name": "openai-compatible",
             "baseUrl": "https://provider.example.com/v1",
+            "wireApi": "responses",
+            "apiType": "responses",
             "credentialRef": "secret://tenant/provider/default",
         },
     )
@@ -202,9 +221,7 @@ def test_update_accepts_matching_immutable_fields() -> None:
     created = _create(client, AUTH_A)
     echoed = dict(created)
     echoed["name"] = "renamed"
-    resp = client.put(
-        f"/v1/haas/harnesses/{created['id']}", json=echoed, headers=AUTH_A
-    )
+    resp = client.put(f"/v1/haas/harnesses/{created['id']}", json=echoed, headers=AUTH_A)
     assert resp.status_code == 200
     assert resp.json()["data"]["name"] == "renamed"
 
@@ -217,9 +234,7 @@ def test_update_rejects_conflicting_immutable_field(field: str) -> None:
     conflicting[field] = "chrn_other" if field != "createdAtMs" else 1
     if field == "base":
         conflicting[field] = "fake"
-    resp = client.put(
-        f"/v1/haas/harnesses/{created['id']}", json=conflicting, headers=AUTH_A
-    )
+    resp = client.put(f"/v1/haas/harnesses/{created['id']}", json=conflicting, headers=AUTH_A)
     assert resp.status_code == 400
     assert resp.json()["haasError"]["code"] == "invalid_input"
     # Must not partially apply.
@@ -240,9 +255,7 @@ def test_update_ignores_caller_supplied_updated_at() -> None:
 
 
 def test_update_unknown_is_404() -> None:
-    resp = _client().put(
-        "/v1/haas/harnesses/chrn_missing", json={"base": "codex"}, headers=AUTH_A
-    )
+    resp = _client().put("/v1/haas/harnesses/chrn_missing", json={"base": "codex"}, headers=AUTH_A)
     assert resp.status_code == 404
     assert resp.json()["haasError"]["code"] == "haas_harness_not_found"
 
@@ -282,16 +295,17 @@ def test_delete_removes_from_resolution_but_keeps_sessions() -> None:
     assert client.get(f"/v1/haas/harnesses/{created['id']}", headers=AUTH_A).status_code == 404
     resp = client.post(
         "/run",
-        json={"appName": created["id"], "userId": "u_1",
-              "newMessage": {"role": "user", "parts": []}},
+        json={
+            "appName": created["id"],
+            "userId": "u_1",
+            "newMessage": {"role": "user", "parts": []},
+        },
         headers=AUTH_A,
     )
     assert resp.status_code == 404
     assert resp.json()["haasError"]["code"] == "app_not_found"
     # Historical session is still readable.
-    session = client.get(
-        f"/apps/{created['id']}/users/u_1/sessions/hsess_keep", headers=AUTH_A
-    )
+    session = client.get(f"/apps/{created['id']}/users/u_1/sessions/hsess_keep", headers=AUTH_A)
     assert session.status_code == 200
     assert session.json()["events"]
 
@@ -318,8 +332,11 @@ def test_run_resolves_created_harness_by_name() -> None:
     _create(client, AUTH_A, name="by-name")
     resp = client.post(
         "/run",
-        json={"appName": "by-name", "userId": "u_1",
-              "newMessage": {"role": "user", "parts": [{"text": "hi"}]}},
+        json={
+            "appName": "by-name",
+            "userId": "u_1",
+            "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+        },
         headers=AUTH_A,
     )
     assert resp.status_code == 200
@@ -330,8 +347,11 @@ def test_run_cannot_use_other_tenant_harness() -> None:
     theirs = _create(client, AUTH_B, name="theirs")
     resp = client.post(
         "/run",
-        json={"appName": theirs["id"], "userId": "u_1",
-              "newMessage": {"role": "user", "parts": []}},
+        json={
+            "appName": theirs["id"],
+            "userId": "u_1",
+            "newMessage": {"role": "user", "parts": []},
+        },
         headers=AUTH_A,
     )
     assert resp.status_code == 404

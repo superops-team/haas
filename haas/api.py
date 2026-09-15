@@ -1,4 +1,5 @@
 """HaaS HTTP/SSE API: ADK-compatible surface + HaaS native health/ready."""
+
 from __future__ import annotations
 
 import asyncio
@@ -25,7 +26,9 @@ from haas.artifacts import (
 )
 from haas.config import AppConfig
 from haas.events import HEARTBEAT_FRAME, EventLog
+from haas.execution_evidence import ExecutionEvidenceStore
 from haas.harnesses import FakeAdapter, HarnessAdapter
+from haas.harnesses.codex_app_server.rpc import CodexConnectionError
 from haas.identity import (
     IdentityProvider,
     InvalidCredentialError,
@@ -34,6 +37,13 @@ from haas.identity import (
     StaticTokenIdentityProvider,
 )
 from haas.observability import Metrics, StatusSnapshot, StructuredLogger
+from haas.profiles import (
+    HarnessProfileService,
+    ProfileConflictError,
+    ProfileNotFoundError,
+    execution_intent_fingerprint,
+    profile_to_dict,
+)
 from haas.registry import (
     AppNotFoundError,
     HarnessNotFoundError,
@@ -46,9 +56,15 @@ from haas.registry import (
 )
 from haas.runtime import DelegatedContainerRuntime, DelegatedContainerUnavailable
 from haas.runtime.delegation import DisabledDelegatedContainerRuntime
+from haas.runtime.reconciler import reconcile_delegated_policy
 from haas.sessions import (
     AdapterTurnError,
     InvocationNotFoundError,
+    InvocationNotResumableError,
+    InvocationNotRunningError,
+    PolicyRevisionConflictError,
+    PolicyUpdateInvalidError,
+    ResumeRequiredError,
     RunRequest,
     SessionBusyError,
     SessionNotFoundError,
@@ -63,12 +79,17 @@ from haas.stores import (
     DelegatedSessionRecord,
     HarnessRecord,
     IdempotencyConflictError,
+    IdempotencyExpiredError,
+    InputRequestNotFoundError,
+    InputRequestStateConflictError,
     InvocationRecord,
     LeaseConflictError,
     MemoryStore,
     SessionRecord,
     TurnRecord,
 )
+
+SSE_HEARTBEAT_SECONDS = 15.0
 
 DEFAULT_TOKEN = "dev-token"
 
@@ -154,6 +175,8 @@ def _delegation_policy_from_config(config: AppConfig) -> dict[str, Any]:
         "restorePolicy": d.restore_policy,
         "policyChangeMode": d.policy_change_mode,
         "mountPolicy": d.mount_policy,
+        "network": {"defaultAction": "allow", "allow": []},
+        "tools": {"disabled": [], "approvalMode": "on-request"},
     }
 
 
@@ -174,6 +197,22 @@ def _validate_delegation_policy(policy: dict[str, Any]) -> None:
         raise ValueError("unsupported workspace concurrency")
     if policy["queuePolicy"] != "fifo" or policy["restorePolicy"] != "fail_closed":
         raise ValueError("unsupported delegation policy")
+    network = policy.get("network", {"defaultAction": "deny", "allow": []})
+    if (
+        not isinstance(network, dict)
+        or network.get("defaultAction") not in {"deny", "allow"}
+        or not isinstance(network.get("allow", []), list)
+        or not all(isinstance(item, str) for item in network.get("allow", []))
+    ):
+        raise ValueError("invalid delegation network policy")
+    tools = policy.get("tools", {"disabled": [], "approvalMode": "never"})
+    if (
+        not isinstance(tools, dict)
+        or tools.get("approvalMode") not in {"never", "on-request", "always"}
+        or not isinstance(tools.get("disabled", []), list)
+        or not all(isinstance(item, str) for item in tools.get("disabled", []))
+    ):
+        raise ValueError("invalid delegation tools policy")
 
 
 def _validate_mount_entry(entry: Any, *, primary: bool) -> None:
@@ -221,14 +260,14 @@ def _validate_mount_manifest(manifest: dict[str, Any]) -> None:
         _validate_mount_entry(entry, primary=False)
 
 
-def _delegated_session_from_body(
-    body: dict[str, Any], config: AppConfig
-) -> DelegatedSessionRecord:
+def _delegated_session_from_body(body: dict[str, Any], config: AppConfig) -> DelegatedSessionRecord:
     for key in ("managerSessionId", "haasSessionId", "haasUserId", "harnessId"):
         if not isinstance(body.get(key), str) or not body[key]:
             raise ValueError(f"missing {key}")
     image = body.get("image")
     provider = body.get("provider")
+    profile_ref = body.get("profileRef")
+    workspace_mode = body.get("workspaceMode", "bind_mount")
     mount_manifest = body.get("mountManifest")
     policy = body.get("delegationPolicySnapshot") or _delegation_policy_from_config(config)
     if not isinstance(image, dict) or not isinstance(image.get("reference"), str):
@@ -249,6 +288,12 @@ def _delegated_session_from_body(
         or not isinstance(provider.get("credentialRef"), str)
     ):
         raise ValueError("invalid provider")
+    if profile_ref is not None:
+        _validate_profile_ref(profile_ref)
+    else:
+        profile_ref = {}
+    if not isinstance(workspace_mode, str) or not workspace_mode:
+        raise ValueError("invalid workspace mode")
     credential_ref = provider["credentialRef"]
     if not credential_ref.startswith("secret://"):
         raise ValueError("invalid credential ref")
@@ -266,7 +311,9 @@ def _delegated_session_from_body(
         harnessId=body["harnessId"],
         harnessBase=str(body.get("harnessBase") or "codex"),
         image=image,
+        profileRef=profile_ref,
         provider=provider,
+        workspaceMode=workspace_mode,
         mountManifest=mount_manifest,
         delegationPolicySnapshot=policy,
     )
@@ -285,35 +332,45 @@ def _delegated_session_ref(record: DelegatedSessionRecord) -> dict[str, Any]:
     }
 
 
-def _delegated_session_matches_body(
-    record: DelegatedSessionRecord, body: dict[str, Any]
-) -> bool:
+def _delegated_session_matches_body(record: DelegatedSessionRecord, body: dict[str, Any]) -> bool:
     return (
         record.haasSessionId == body.get("haasSessionId")
         and record.haasUserId == body.get("haasUserId")
         and record.harnessId == body.get("harnessId")
         and record.harnessBase == str(body.get("harnessBase") or "codex")
         and record.image == body.get("image")
+        and record.profileRef == body.get("profileRef", record.profileRef)
         and record.provider == body.get("provider")
+        and record.workspaceMode == body.get("workspaceMode", "bind_mount")
         and record.mountManifest == body.get("mountManifest")
         and record.delegationPolicySnapshot
         == (body.get("delegationPolicySnapshot") or record.delegationPolicySnapshot)
     )
 
 
+def _validate_profile_ref(profile_ref: Any) -> None:
+    if not isinstance(profile_ref, dict):
+        raise ValueError("invalid profile ref")
+    if (
+        not isinstance(profile_ref.get("profileId"), str)
+        or not profile_ref["profileId"]
+        or not isinstance(profile_ref.get("profileVersion"), int)
+        or profile_ref["profileVersion"] < 1
+        or not isinstance(profile_ref.get("profileFingerprint"), str)
+        or not profile_ref["profileFingerprint"]
+    ):
+        raise ValueError("invalid profile ref")
+
+
 def _ensure_delegated_access(
     runtime: _Runtime, principal: Principal, record: DelegatedSessionRecord
 ) -> None:
     if not runtime.identity.owns(principal, user_id=record.haasUserId):
-        raise HaasError(
-            404, "invalid_request_error", "haas_delegated_session_not_found"
-        )
+        raise HaasError(404, "invalid_request_error", "haas_delegated_session_not_found")
     try:
         runtime.registry.get_scoped(principal, record.harnessId)
     except HarnessNotFoundError as exc:
-        raise HaasError(
-            404, "invalid_request_error", "haas_delegated_session_not_found"
-        ) from exc
+        raise HaasError(404, "invalid_request_error", "haas_delegated_session_not_found") from exc
 
 
 def _has_session_access(runtime: _Runtime, principal: Principal, session_id: str) -> bool:
@@ -343,11 +400,58 @@ def _session_to_adk(
     if include_events:
         data["events"] = [
             runtime.event_log.project_adk(e)
-            for e in runtime.event_log.read_session(
-                session.appName, session.userId, session.id
-            )
+            for e in runtime.event_log.read_session(session.appName, session.userId, session.id)
         ]
     return data
+
+
+def _session_control(session: SessionRecord) -> dict[str, Any]:
+    return {
+        "controlState": session.controlState,
+        "supportsResume": session.supportsResume,
+        "resumableInvocationId": session.resumableInvocationId,
+    }
+
+
+def _session_policy_revision(session: SessionRecord) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "sessionId": session.id,
+        "desiredRevision": session.desiredRevision,
+        "appliedRevision": session.appliedRevision,
+        "status": session.policyStatus,
+        "desiredPolicy": session.desiredPolicy,
+        "appliedPolicy": session.appliedPolicy,
+    }
+    result = session.lastPolicyUpdateResult or {}
+    if session.policyStatus == "failed":
+        data["code"] = result.get("code", "haas_internal_error")
+        data["safeReason"] = result.get("safeReason", "policy_apply_failed")
+    return data
+
+
+def _invocation_envelope(runtime: _Runtime, invocation: InvocationRecord) -> dict[str, Any]:
+    session = runtime.store.get_session(
+        (invocation.appName, invocation.userId, invocation.sessionId)
+    )
+    if session is None:
+        raise HaasError(404, "invalid_request_error", "haas_invocation_not_found")
+    return {
+        "data": {
+            "id": invocation.id,
+            "sessionId": invocation.sessionId,
+            "turnId": invocation.turnId,
+            "appName": invocation.appName,
+            "status": invocation.status,
+            "continuedFromInvocationId": invocation.continuedFromInvocationId,
+            "continuedFromTurnId": invocation.continuedFromTurnId,
+            "sessionControl": _session_control(session),
+            "acceptedAtMs": invocation.acceptedAtMs,
+            "startedAtMs": invocation.startedAtMs,
+            "completedAtMs": invocation.completedAtMs,
+            "idempotencyExpiresAtMs": invocation.idempotencyExpiresAtMs,
+        },
+        "traceId": _trace_id(),
+    }
 
 
 async def _json_object(request: Request) -> dict[str, Any]:
@@ -373,6 +477,8 @@ class _Runtime:
     delegated_containers: DelegatedContainerRuntime
     metrics: Metrics
     logger: StructuredLogger
+    profiles: HarnessProfileService
+    execution_evidence: ExecutionEvidenceStore
 
 
 def build_app(
@@ -381,6 +487,7 @@ def build_app(
     adapter: HarnessAdapter | None = None,
     identity_tokens: dict[str, Principal] | None = None,
     delegated_containers: DelegatedContainerRuntime | None = None,
+    store: MemoryStore | None = None,
     run_quota: int = 20,
     rate_limit: int = 100,
     max_file_bytes: int | None = None,
@@ -388,6 +495,7 @@ def build_app(
     session_lease_renew_interval_ms: int | None = None,
     session_turn_timeout_s: float | None = None,
 ) -> FastAPI:
+    config_provided = config is not None
     config = config if config is not None else AppConfig()
     if session_lease_ttl_ms is None:
         session_lease_ttl_ms = config.session_runtime.lease_ttl_ms
@@ -395,8 +503,19 @@ def build_app(
         session_lease_renew_interval_ms = config.session_runtime.lease_renew_interval_ms
     if session_turn_timeout_s is None:
         session_turn_timeout_s = config.session_runtime.turn_timeout_seconds
-    store = MemoryStore()
+    if store is None and config_provided:
+        from haas.config import build_store
+
+        store = build_store(config)
+    store = store or MemoryStore()
     adapter = adapter or FakeAdapter()
+    bind_interaction_store = getattr(adapter, "bind_interaction_store", None)
+    if callable(bind_interaction_store):
+        bind_interaction_store(store)
+    execution_evidence = ExecutionEvidenceStore()
+    bind_evidence_store = getattr(adapter, "bind_execution_evidence_store", None)
+    if callable(bind_evidence_store):
+        bind_evidence_store(execution_evidence)
     identity = StaticTokenIdentityProvider(
         {DEFAULT_TOKEN: Principal(principalId="p_dev")}
         if identity_tokens is None
@@ -437,6 +556,8 @@ def build_app(
         delegated_containers=delegated_containers or DisabledDelegatedContainerRuntime(),
         metrics=Metrics(),
         logger=StructuredLogger(),
+        profiles=HarnessProfileService(store=store, registry=registry),
+        execution_evidence=execution_evidence,
     )
 
     app = FastAPI(title="Harness As A Service", version="2026-08-26")
@@ -445,7 +566,18 @@ def build_app(
 
     @app.exception_handler(HaasError)
     async def haas_error_handler(request: Request, exc: HaasError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content=_haas_error_content(exc))
+        evidence_error = exc.code in {
+            "haas_execution_evidence_not_found",
+            "haas_execution_evidence_expired",
+        }
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_haas_error_content(exc),
+            headers=(
+                {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+                if evidence_error else None
+            ),
+        )
 
     @app.get("/v1/haas/health")
     async def health() -> dict[str, Any]:
@@ -454,6 +586,12 @@ def build_app(
     probe_cache: dict[str, Any] = {"result": None, "at": 0.0}
 
     async def _execution_ready() -> tuple[str, str | None]:
+        if adapter.base == "codex":
+            if not store.list_profiles(status="active"):
+                return "not_ready", "profile_not_configured"
+            proxy = sessions.model_proxy
+            if proxy is None or not proxy.base_url or not proxy.resolver.available:
+                return "not_ready", "model_proxy_unavailable"
         now = time.monotonic()
         if probe_cache["result"] is None or now - probe_cache["at"] > 30.0:
             try:
@@ -476,7 +614,12 @@ def build_app(
 
     @app.get("/v1/haas/ready")
     async def ready(scope: str = "control") -> dict[str, Any]:
-        if scope in {"control", "execution"}:
+        if scope == "control":
+            return {
+                "data": {"status": "ready", "scope": scope},
+                "traceId": "tr_local",
+            }
+        if scope == "execution":
             status, reason = await _execution_ready()
             if status != "ready":
                 raise HaasError(
@@ -497,6 +640,107 @@ def build_app(
     async def health_alias() -> dict[str, Any]:
         return await health()
 
+    @app.get("/v1/haas/capabilities")
+    async def capabilities(request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        records = runtime.registry.list_active(principal)
+        await _execution_ready()
+        probe = probe_cache["result"]
+        raw = getattr(probe, "capabilities", {}) if probe is not None else {}
+
+        def state(
+            value: Any, *, enforcement: str = "none", unavailable: str = "unsupported"
+        ) -> dict[str, Any]:
+            allowed_modes = {
+                "native",
+                "proxy",
+                "emulated",
+                "best_effort",
+                "advisory",
+                "instructions",
+                "workspace_scan",
+                "estimated",
+                "unattended_only",
+                "human_bridge",
+                "none",
+            }
+            if value is True:
+                mode = "native"
+            elif value in {None, False, "unsupported", "unavailable"}:
+                mode = "none"
+            else:
+                mode = str(value)
+            if mode == "hard":
+                mode, enforcement = "native", "hard"
+            elif mode not in allowed_modes:
+                mode = "none"
+            return {
+                "status": (
+                    "available"
+                    if mode != "none"
+                    else "unavailable"
+                    if value == "unavailable"
+                    else unavailable
+                ),
+                "mode": mode,
+                "enforcement": enforcement,
+            }
+
+        harness_caps = {
+            "streaming": state(raw.get("streaming")),
+            "sessionContinuation": state(raw.get("sessionContinuation")),
+            "pausing": state(raw.get("pausing")),
+            "cancellation": state(raw.get("cancellation")),
+            "approval": state(raw.get("approval")),
+            "input": state(raw.get("input")),
+            "toolRestriction": state(raw.get("toolRestriction"), enforcement="advisory"),
+            "mcp": state(raw.get("mcp")),
+            "skills": state(raw.get("skills")),
+            "files": state(raw.get("files")),
+            "usage": state(raw.get("usage")),
+        }
+        interaction = (
+            "human_bridge" if raw.get("approval") == raw.get("input") == "human_bridge" else "none"
+        )
+        return {
+            "data": {
+                "object": "haas_capabilities",
+                "protocolVersion": app.version,
+                "adkProtocolVersion": "2.0",
+                "features": {
+                    "runSse": state(True),
+                    "delegatedSessions": state(True),
+                    "modelProxy": state(sessions.model_proxy is not None, enforcement="hard"),
+                    "mcpProxy": state(False),
+                    "skillMaterialization": state(False),
+                    "approvalHandling": state(interaction),
+                    "inputHandling": state(interaction),
+                    "artifacts": state(True),
+                },
+                "workspaceModes": [
+                    {
+                        "id": "bind_mount",
+                        **state("native", enforcement="hard"),
+                    }
+                ],
+                "harnesses": [
+                    {
+                        "id": record.id,
+                        "base": record.base,
+                        "status": (
+                            "available"
+                            if probe is not None and probe.status == "ready"
+                            else "unavailable"
+                        ),
+                        "capabilities": harness_caps,
+                    }
+                    for record in records
+                ],
+                "generatedAtMs": int(time.time() * 1000),
+            },
+            "traceId": _trace_id(),
+        }
+
     @app.get("/ready")
     async def ready_alias(scope: str = "control") -> dict[str, Any]:
         return await ready(scope)
@@ -513,6 +757,15 @@ def build_app(
     @app.post("/run_sse")
     async def run_sse(request: Request) -> StreamingResponse:
         return cast(StreamingResponse, await _run(runtime, request, streaming=True))
+
+    @app.get("/v1/haas/sessions/{session_id}/invocations/{invocation_id}")
+    async def get_invocation(
+        session_id: str, invocation_id: str, request: Request
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        invocation = _resolve_visible_invocation(runtime, principal, session_id, invocation_id)
+        invocation = runtime.sessions.reconcile_invocation_readback(session_id, invocation.id)
+        return _invocation_envelope(runtime, invocation)
 
     @app.get("/apps/{app_name}/users/{user_id}/sessions/{session_id}")
     async def get_session(
@@ -542,8 +795,13 @@ def build_app(
             session = runtime.sessions.apply_state_delta(app_name, user_id, session_id, delta)
         except SessionNotFoundError as exc:
             raise HaasError(404, "invalid_request_error", "session_not_found") from exc
-        return {"id": session.id, "appName": session.appName, "userId": session.userId,
-                "state": session.state, "lastUpdateTime": session.updatedAtMs / 1000.0}
+        return {
+            "id": session.id,
+            "appName": session.appName,
+            "userId": session.userId,
+            "state": session.state,
+            "lastUpdateTime": session.updatedAtMs / 1000.0,
+        }
 
     @app.delete("/apps/{app_name}/users/{user_id}/sessions/{session_id}")
     async def delete_session(
@@ -564,6 +822,7 @@ def build_app(
                 if isinstance(workspace_path, str):
                     runtime.store.release_workspace_lock(workspace_path, delegated.id)
             runtime.sessions.delete_session(app_name, user_id, session_id)
+            runtime.execution_evidence.delete_session(session_id)
         except SessionNotFoundError as exc:
             raise HaasError(404, "invalid_request_error", "session_not_found") from exc
         return JSONResponse(status_code=204, content=None)
@@ -572,21 +831,216 @@ def build_app(
     async def cancel_invocation(
         session_id: str, invocation_id: str, request: Request
     ) -> dict[str, Any]:
-        await _authenticate(runtime.identity, request)
+        principal = await _authenticate(runtime.identity, request)
+        invocation = _resolve_visible_invocation(
+            runtime, principal, session_id, invocation_id
+        )
+        key_hash, replay = await _reserve_mutation(runtime.store, request, {}, principal)
+        if replay is not None:
+            return replay
         try:
-            invocation = await runtime.sessions.cancel_invocation(session_id, invocation_id)
-        except InvocationNotFoundError as exc:
+            delegated = runtime.store.get_delegated_session_by_haas_session(session_id)
+            if delegated is not None and invocation.status == "running":
+                _ensure_delegated_access(runtime, principal, delegated)
+                await runtime.delegated_containers.cancel(delegated, invocation_id)
+            else:
+                invocation = await runtime.sessions.cancel_invocation(session_id, invocation_id)
+        except DelegatedContainerUnavailable as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
             raise HaasError(
-                404, "invalid_request_error", "haas_invocation_not_found"
+                503,
+                "invalid_request_error",
+                "haas_delegation_backend_unavailable",
+                safe_reason="delegation_cancel_unavailable",
+                retryable=True,
             ) from exc
-        return {
-            "data": {
-                "sessionId": session_id,
-                "invocationId": invocation_id,
-                "status": invocation.status,
-            },
-            "traceId": f"tr_{_hash(invocation_id)[:16]}",
-        }
+        except InvocationNotFoundError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(404, "invalid_request_error", "haas_invocation_not_found") from exc
+        except SessionBusyError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(409, "invalid_request_error", "session_busy", retryable=True) from exc
+        except AdapterTurnError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                502,
+                "invalid_request_error",
+                "haas_adapter_error",
+                safe_reason="adapter_error",
+                retryable=True,
+            ) from exc
+        except HaasError:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise
+        envelope = _invocation_envelope(runtime, invocation)
+        if key_hash:
+            runtime.store.complete(key_hash, envelope)
+        return envelope
+
+    @app.post("/v1/haas/sessions/{session_id}/invocations/{invocation_id}/pause")
+    async def pause_invocation(
+        session_id: str, invocation_id: str, request: Request
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        _resolve_visible_invocation(runtime, principal, session_id, invocation_id)
+        key_hash, replay = await _reserve_mutation(runtime.store, request, {}, principal)
+        if replay is not None:
+            return replay
+        try:
+            invocation = await runtime.sessions.pause_invocation(session_id, invocation_id)
+        except InvocationNotFoundError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(404, "invalid_request_error", "haas_invocation_not_found") from exc
+        except InvocationNotRunningError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                409, "invalid_request_error", "haas_invocation_not_running"
+            ) from exc
+        except AdapterTurnError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                502,
+                "invalid_request_error",
+                "haas_adapter_error",
+                safe_reason="adapter_error",
+                retryable=True,
+            ) from exc
+        envelope = _invocation_envelope(runtime, invocation)
+        if key_hash:
+            runtime.store.complete(key_hash, envelope)
+        return envelope
+
+    @app.post("/v1/haas/sessions/{session_id}/invocations/{invocation_id}/continue")
+    async def continue_invocation(
+        session_id: str, invocation_id: str, request: Request
+    ) -> StreamingResponse:
+        principal = await _authenticate(runtime.identity, request)
+        _resolve_visible_invocation(runtime, principal, session_id, invocation_id)
+        body = await _json_object(request)
+        instruction = body.get("additionalInstruction")
+        if instruction is not None and (
+            not isinstance(instruction, str) or len(instruction) > 4000
+        ):
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+        key_hash, replay = await _reserve_mutation(runtime.store, request, body, principal)
+        if replay is not None:
+            return cast(StreamingResponse, _render_cached(replay, streaming=True))
+        try:
+            stream = runtime.sessions.continue_stream(
+                session_id, invocation_id, instruction=instruction
+            )
+            first = await stream.__anext__()
+        except InvocationNotFoundError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(404, "invalid_request_error", "haas_invocation_not_found") from exc
+        except InvocationNotResumableError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                409, "invalid_request_error", "haas_invocation_not_resumable"
+            ) from exc
+        except SessionBusyError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(409, "invalid_request_error", "session_busy", retryable=True) from exc
+        except StopAsyncIteration as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                502, "invalid_request_error", "haas_adapter_error"
+            ) from exc
+
+        if first.invocationId is None:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(503, "service_unavailable", "haas_store_unavailable")
+        expires_at_ms = _accept_idempotency(runtime, key_hash, first.invocationId)
+        headers = _accepted_headers(
+            invocation_id=first.invocationId,
+            session_id=first.sessionId,
+            expires_at_ms=expires_at_ms,
+        )
+        adk_events = [runtime.event_log.project_adk(first)]
+
+        async def frames() -> Any:
+            yield runtime.event_log.sse_frame(first)
+            try:
+                try:
+                    async for event in stream:
+                        adk_events.append(runtime.event_log.project_adk(event))
+                        yield runtime.event_log.sse_frame(event)
+                except AdapterTurnError:
+                    # The runtime persists and yields the accepted invocation's
+                    # failed terminal before raising. Once SSE headers are sent,
+                    # that terminal is the protocol result; close cleanly.
+                    pass
+            finally:
+                if key_hash:
+                    runtime.store.complete(
+                        key_hash,
+                        {
+                            "events": adk_events,
+                            "idempotency_expires_at_ms": expires_at_ms,
+                            "invocation_id": first.invocationId,
+                            "session_id": first.sessionId,
+                        },
+                    )
+
+        return StreamingResponse(frames(), media_type="text/event-stream", headers=headers)
+
+    @app.post("/v1/haas/sessions/{session_id}/policy")
+    async def update_session_policy(session_id: str, request: Request) -> Response:
+        principal = await _authenticate(runtime.identity, request)
+        body = await _json_object(request)
+        if not request.headers.get("Idempotency-Key"):
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+        key_hash, replay = await _reserve_mutation(runtime.store, request, body, principal)
+        if replay is not None:
+            data = replay.get("data", {})
+            status_code = 200 if data.get("status") == "applied" else 202
+            return JSONResponse(status_code=status_code, content=replay)
+        try:
+            session = _resolve_visible_session(runtime, principal, session_id)
+            expected_revision = body.get("expectedRevision")
+            policy = body.get("policy")
+            if (
+                not isinstance(expected_revision, int)
+                or isinstance(expected_revision, bool)
+                or expected_revision < 1
+                or not isinstance(policy, dict)
+            ):
+                raise PolicyUpdateInvalidError(session_id)
+            updated = runtime.sessions.update_policy(
+                session, expected_revision=expected_revision, delta=policy
+            )
+        except PolicyRevisionConflictError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                409, "invalid_request_error", "haas_policy_revision_conflict"
+            ) from exc
+        except PolicyUpdateInvalidError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(400, "invalid_request_error", "invalid_input") from exc
+        except HaasError:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise
+        envelope = {"data": _session_policy_revision(updated), "traceId": _trace_id()}
+        if key_hash:
+            runtime.store.complete(key_hash, envelope)
+        status_code = 200 if updated.policyStatus == "applied" else 202
+        return JSONResponse(status_code=status_code, content=envelope)
 
     @app.post("/v1/haas/sessions/{session_id}/approvals/{approval_id}")
     async def resolve_approval(
@@ -594,29 +1048,180 @@ def build_app(
     ) -> dict[str, Any]:
         principal = await _authenticate(runtime.identity, request)
         body = await _json_object(request)
-        decision = body.get("decision")
-        if decision not in {"approved", "denied"}:
-            raise HaasError(400, "invalid_request_error", "invalid_input")
-        approval = runtime.store.get_approval(approval_id)
-        if approval is None or approval.sessionId != session_id:
-            raise HaasError(404, "invalid_request_error", "haas_approval_not_found")
-        if not _has_session_access(runtime, principal, session_id):
-            raise HaasError(404, "invalid_request_error", "haas_approval_not_found")
+        key_hash, replay = await _reserve_mutation(runtime.store, request, body, principal)
+        if replay is not None:
+            return replay
         try:
+            decision = body.get("decision")
+            runtime.store.reconcile_pending_interactions(session_id)
+            approval = runtime.store.get_approval(approval_id)
+            if approval is None or approval.sessionId != session_id:
+                raise HaasError(404, "invalid_request_error", "haas_approval_not_found")
+            if not _has_session_access(runtime, principal, session_id):
+                raise HaasError(404, "invalid_request_error", "haas_approval_not_found")
+            if decision not in {"approved", "denied"} or body.get("scope") != "action":
+                raise HaasError(400, "invalid_request_error", "invalid_input")
+            if approval.status != "waiting":
+                if approval.status == decision and approval.decision == body:
+                    envelope = {"data": approval.to_dict(), "traceId": _trace_id()}
+                    if key_hash:
+                        runtime.store.complete(key_hash, envelope)
+                    return envelope
+                raise HaasError(409, "invalid_request_error", "haas_approval_state_conflict")
+            responder = getattr(runtime.adapter, "respond_interaction", None)
+            if callable(responder) and approval.nativeRequestId is not None:
+                await responder(approval, body)
             resolved = runtime.store.resolve_approval(approval_id, body)
+        except HaasError:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise
+        except CodexConnectionError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(409, "invalid_request_error", "haas_approval_state_conflict") from exc
         except ApprovalNotFoundError as exc:
-            raise HaasError(
-                404, "invalid_request_error", "haas_approval_not_found"
-            ) from exc
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(404, "invalid_request_error", "haas_approval_not_found") from exc
         except ApprovalStateConflictError as exc:
-            raise HaasError(
-                409, "invalid_request_error", "haas_approval_state_conflict"
-            ) from exc
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(409, "invalid_request_error", "haas_approval_state_conflict") from exc
         runtime.logger.event(
             "haas.approval.resolved",
             {"approvalId": approval_id, "sessionId": session_id, "status": resolved.status},
         )
-        return {"data": resolved.to_dict(), "traceId": _trace_id()}
+        session = _resolve_visible_session(runtime, principal, session_id)
+        runtime.event_log.append_typed(
+            type_="haas.approval.resolved",
+            app_name=session.appName,
+            user_id=session.userId,
+            invocation_id=resolved.invocationId,
+            session_id=session_id,
+            turn_id=resolved.turnId,
+            harness_id=session.appName,
+            adapter_id=runtime.adapter.adapter_id,
+            author="haas",
+            content={"role": "model", "parts": []},
+            actions={},
+            haas={"approvalId": approval_id, "status": resolved.status},
+        )
+        envelope = {"data": resolved.to_dict(), "traceId": _trace_id()}
+        if key_hash:
+            runtime.store.complete(key_hash, envelope)
+        return envelope
+
+    @app.get("/v1/haas/sessions/{session_id}/approvals")
+    async def list_approvals(
+        session_id: str, request: Request, status: str = "waiting"
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        _resolve_visible_session(runtime, principal, session_id)
+        runtime.store.reconcile_pending_interactions(session_id)
+        return {
+            "data": [
+                record.to_dict()
+                for record in runtime.store.list_approvals(session_id, status=status)
+            ],
+            "traceId": _trace_id(),
+        }
+
+    @app.get("/v1/haas/sessions/{session_id}/input-requests")
+    async def list_input_requests(
+        session_id: str, request: Request, status: str = "waiting"
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        _resolve_visible_session(runtime, principal, session_id)
+        runtime.store.reconcile_pending_interactions(session_id)
+        return {
+            "data": [
+                record.to_dict()
+                for record in runtime.store.list_input_requests(session_id, status=status)
+            ],
+            "traceId": _trace_id(),
+        }
+
+    @app.post("/v1/haas/sessions/{session_id}/input-requests/{input_request_id}")
+    async def answer_input_request(
+        session_id: str, input_request_id: str, request: Request
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        _resolve_visible_session(runtime, principal, session_id)
+        body = await _json_object(request)
+        key_hash, replay = await _reserve_mutation(runtime.store, request, body, principal)
+        if replay is not None:
+            return replay
+        try:
+            answers = body.get("answers")
+            if not isinstance(answers, dict):
+                raise HaasError(400, "invalid_request_error", "invalid_input")
+            runtime.store.reconcile_pending_interactions(session_id)
+            record = runtime.store.get_input_request(input_request_id)
+            if record is None or record.sessionId != session_id:
+                raise HaasError(404, "invalid_request_error", "haas_input_request_not_found")
+            expected_ids = {str(question.get("id")) for question in record.questions}
+            if set(answers) != expected_ids or any(
+                not isinstance(answer, dict)
+                or (
+                    not isinstance(answer.get("values"), list)
+                    and not isinstance(answer.get("secretRef"), str)
+                )
+                for answer in answers.values()
+            ):
+                raise HaasError(400, "invalid_request_error", "invalid_input")
+            if record.status != "waiting":
+                if record.status == "answered" and record.answers == body:
+                    envelope = {"data": record.to_dict(), "traceId": _trace_id()}
+                    if key_hash:
+                        runtime.store.complete(key_hash, envelope)
+                    return envelope
+                raise HaasError(
+                    409, "invalid_request_error", "haas_input_request_state_conflict"
+                )
+            responder = getattr(runtime.adapter, "respond_interaction", None)
+            if callable(responder):
+                await responder(record, body)
+            resolved = runtime.store.resolve_input_request(input_request_id, body)
+        except HaasError:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise
+        except CodexConnectionError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                409, "invalid_request_error", "haas_input_request_state_conflict"
+            ) from exc
+        except InputRequestNotFoundError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(404, "invalid_request_error", "haas_input_request_not_found") from exc
+        except InputRequestStateConflictError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                409, "invalid_request_error", "haas_input_request_state_conflict"
+            ) from exc
+        session = _resolve_visible_session(runtime, principal, session_id)
+        runtime.event_log.append_typed(
+            type_="haas.input.resolved",
+            app_name=session.appName,
+            user_id=session.userId,
+            invocation_id=resolved.invocationId,
+            session_id=session_id,
+            turn_id=resolved.turnId,
+            harness_id=session.appName,
+            adapter_id=runtime.adapter.adapter_id,
+            author="haas",
+            content={"role": "model", "parts": []},
+            actions={},
+            haas={"inputRequestId": input_request_id, "status": resolved.status},
+        )
+        envelope = {"data": resolved.to_dict(), "traceId": _trace_id()}
+        if key_hash:
+            runtime.store.complete(key_hash, envelope)
+        return envelope
 
     @app.get("/v1/haas/sessions/{session_id}/events")
     async def session_events(
@@ -629,9 +1234,7 @@ def build_app(
                 session.appName, session.userId, session.id, after_event_id
             )
         except CursorNotFoundError as exc:
-            raise HaasError(
-                410, "invalid_request_error", "haas_offset_expired"
-            ) from exc
+            raise HaasError(410, "invalid_request_error", "haas_offset_expired") from exc
 
         async def frames() -> Any:
             for event in events:
@@ -640,14 +1243,36 @@ def build_app(
 
         return StreamingResponse(frames(), media_type="text/event-stream")
 
+    @app.get("/v1/haas/sessions/{session_id}/events-page")
+    async def session_events_page(
+        session_id: str,
+        request: Request,
+        after_event_id: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        if limit < 1 or limit > 1000:
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+        session = _resolve_visible_session(runtime, principal, session_id)
+        try:
+            events = runtime.event_log.read_session(
+                session.appName, session.userId, session.id, after_event_id
+            )
+        except CursorNotFoundError as exc:
+            raise HaasError(410, "invalid_request_error", "haas_offset_expired") from exc
+        page = events[:limit]
+        return {
+            "data": [runtime.event_log.project_haas(event) for event in page],
+            "nextCursor": page[-1].eventId if len(events) > limit else None,
+            "traceId": _trace_id(),
+        }
+
     @app.get("/v1/haas/sessions/{session_id}/invocations/{invocation_id}/events")
     async def invocation_events(
         session_id: str, invocation_id: str, request: Request
     ) -> StreamingResponse:
         principal = await _authenticate(runtime.identity, request)
-        invocation = _resolve_visible_invocation(
-            runtime, principal, session_id, invocation_id
-        )
+        invocation = _resolve_visible_invocation(runtime, principal, session_id, invocation_id)
         events = runtime.event_log.read_invocation(
             invocation.appName, invocation.userId, invocation.sessionId, invocation_id
         )
@@ -658,6 +1283,43 @@ def build_app(
             yield HEARTBEAT_FRAME
 
         return StreamingResponse(frames(), media_type="text/event-stream")
+
+    @app.get(
+        "/v1/haas/sessions/{session_id}/invocations/{invocation_id}/tools/{tool_call_id}/evidence"
+    )
+    async def get_execution_evidence(
+        session_id: str,
+        invocation_id: str,
+        tool_call_id: str,
+        evidence_ref: str,
+        request: Request,
+    ) -> JSONResponse:
+        principal = await _authenticate(runtime.identity, request)
+        invocation = _resolve_visible_invocation(runtime, principal, session_id, invocation_id)
+        record = runtime.execution_evidence.get(evidence_ref)
+        if (
+            record is None
+            or record.principalId != principal.principalId
+            or record.appName != invocation.appName
+            or record.userId != invocation.userId
+            or record.sessionId != session_id
+            or record.invocationId != invocation_id
+            or record.toolCallId != tool_call_id
+        ):
+            raise HaasError(
+                404, "invalid_request_error", "haas_execution_evidence_not_found"
+            )
+        if runtime.execution_evidence.expired(record):
+            raise HaasError(
+                410, "invalid_request_error", "haas_execution_evidence_expired"
+            )
+        return JSONResponse(
+            {"data": record.public(), "traceId": _trace_id()},
+            headers={
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
 
     # --- Observability: status / diagnostics (specs/observability §5.1) ----
 
@@ -681,9 +1343,11 @@ def build_app(
             "capability": "run/run_sse/sessions",
         }
         data["adapters"] = [
-            {"adapterId": runtime.adapter.adapter_id,
-             "base": runtime.adapter.base,
-             "status": exec_status}
+            {
+                "adapterId": runtime.adapter.adapter_id,
+                "base": runtime.adapter.base,
+                "status": exec_status,
+            }
         ]
         data["lastErrorSafeReason"] = exec_reason
         return {"data": data, "traceId": f"tr_{uuid.uuid4().hex[:16]}"}
@@ -723,12 +1387,7 @@ def build_app(
             raise HaasError(413, "invalid_request_error", "haas_file_too_large")
         filename = file.filename or ""
         try:
-            if (
-                not filename
-                or filename in {".", ".."}
-                or "/" in filename
-                or "\\" in filename
-            ):
+            if not filename or filename in {".", ".."} or "/" in filename or "\\" in filename:
                 raise ArtifactPathRejected("absolute_path_rejected")
             record = runtime.artifacts.register(
                 session_id="",
@@ -738,9 +1397,7 @@ def build_app(
             )
         except ArtifactPathRejected as exc:
             if "too_large" in str(exc):
-                raise HaasError(
-                    413, "invalid_request_error", "haas_file_too_large"
-                ) from exc
+                raise HaasError(413, "invalid_request_error", "haas_file_too_large") from exc
             raise HaasError(400, "invalid_request_error", "invalid_input") from exc
         runtime.metrics.incr("haas_file_upload_total")
         record.mediaType = file.content_type or record.mediaType
@@ -750,9 +1407,7 @@ def build_app(
     async def download_file(file_id: str, request: Request) -> Response:
         principal = await _authenticate(runtime.identity, request)
         try:
-            record = runtime.artifacts.get(
-                file_id, owner_principal_id=principal.principalId
-            )
+            record = runtime.artifacts.get(file_id, owner_principal_id=principal.principalId)
             content = runtime.artifacts.read_content(
                 file_id, owner_principal_id=principal.principalId
             )
@@ -780,13 +1435,9 @@ def build_app(
         raise HaasError(501, "invalid_request_error", "haas_preview_unavailable")
 
     @app.get("/v1/haas/sessions/{session_id}/artifacts")
-    async def list_session_artifacts(
-        session_id: str, request: Request
-    ) -> dict[str, Any]:
+    async def list_session_artifacts(session_id: str, request: Request) -> dict[str, Any]:
         principal = await _authenticate(runtime.identity, request)
-        records = runtime.artifacts.list(
-            session_id, owner_principal_id=principal.principalId
-        )
+        records = runtime.artifacts.list(session_id, owner_principal_id=principal.principalId)
         return {
             "data": {"artifacts": [r.to_dict() for r in records]},
             "traceId": f"tr_{uuid.uuid4().hex[:16]}",
@@ -795,9 +1446,7 @@ def build_app(
     @app.get("/v1/haas/sessions/{session_id}/artifacts/archive")
     async def download_session_archive(session_id: str, request: Request) -> Response:
         principal = await _authenticate(runtime.identity, request)
-        records = runtime.artifacts.list(
-            session_id, owner_principal_id=principal.principalId
-        )
+        records = runtime.artifacts.list(session_id, owner_principal_id=principal.principalId)
         if not records:
             raise HaasError(404, "invalid_request_error", "haas_file_not_found")
         buffer = io.BytesIO()
@@ -855,14 +1504,15 @@ def build_app(
         idempotency_key = request.headers.get("Idempotency-Key")
         key_hash: str | None = None
         if idempotency_key:
-            key_hash = _hash(idempotency_key)
-            request_hash = _hash(json.dumps(body, sort_keys=True, default=str))
+            key_hash = _hash(f"{principal.principalId}:{idempotency_key}")
+            request_hash = _hash(
+                f"{request.method}:{request.url.path}:"
+                + json.dumps(body, sort_keys=True, default=str)
+            )
             try:
                 reservation = runtime.store.reserve(key_hash, request_hash)
             except IdempotencyConflictError as exc:
-                raise HaasError(
-                    409, "invalid_request_error", "haas_idempotency_conflict"
-                ) from exc
+                raise HaasError(409, "invalid_request_error", "haas_idempotency_conflict") from exc
             if reservation.replay:
                 result = reservation.result
                 if result is None:
@@ -875,15 +1525,11 @@ def build_app(
         except UnsupportedBaseError as exc:
             if key_hash:
                 runtime.store.release(key_hash)
-            raise HaasError(
-                422, "invalid_request_error", "haas_unsupported_base"
-            ) from exc
+            raise HaasError(422, "invalid_request_error", "haas_unsupported_base") from exc
         except SkillBundleInvalidError as exc:
             if key_hash:
                 runtime.store.release(key_hash)
-            raise HaasError(
-                422, "invalid_request_error", "haas_skill_source_invalid"
-            ) from exc
+            raise HaasError(422, "invalid_request_error", "haas_skill_source_invalid") from exc
         except (ValueError, TypeError) as exc:
             if key_hash:
                 runtime.store.release(key_hash)
@@ -902,9 +1548,7 @@ def build_app(
         try:
             record = runtime.registry.get_scoped(principal, harness_id)
         except HarnessNotFoundError as exc:
-            raise HaasError(
-                404, "invalid_request_error", "haas_harness_not_found"
-            ) from exc
+            raise HaasError(404, "invalid_request_error", "haas_harness_not_found") from exc
         return _harness_envelope(record)
 
     @app.put("/v1/haas/harnesses/{harness_id}")
@@ -914,21 +1558,15 @@ def build_app(
         try:
             record = runtime.registry.update(principal, harness_id, body)
         except HarnessNotFoundError as exc:
-            raise HaasError(
-                404, "invalid_request_error", "haas_harness_not_found"
-            ) from exc
+            raise HaasError(404, "invalid_request_error", "haas_harness_not_found") from exc
         except ImmutableFieldError as exc:
             # Immutable-field conflict is a body validation failure; no new
             # error code is introduced (specs/harness-registry §5.1.1).
             raise HaasError(400, "invalid_request_error", "invalid_input") from exc
         except UnsupportedBaseError as exc:
-            raise HaasError(
-                422, "invalid_request_error", "haas_unsupported_base"
-            ) from exc
+            raise HaasError(422, "invalid_request_error", "haas_unsupported_base") from exc
         except SkillBundleInvalidError as exc:
-            raise HaasError(
-                422, "invalid_request_error", "haas_skill_source_invalid"
-            ) from exc
+            raise HaasError(422, "invalid_request_error", "haas_skill_source_invalid") from exc
         except (ValueError, TypeError) as exc:
             raise HaasError(400, "invalid_request_error", "invalid_input") from exc
         runtime.logger.event("haas.harness.updated", {"id": record.id})
@@ -940,9 +1578,7 @@ def build_app(
         try:
             runtime.registry.delete(principal, harness_id)
         except HarnessNotFoundError as exc:
-            raise HaasError(
-                404, "invalid_request_error", "haas_harness_not_found"
-            ) from exc
+            raise HaasError(404, "invalid_request_error", "haas_harness_not_found") from exc
         runtime.logger.event("haas.harness.deleted", {"id": harness_id})
         return {"data": {"deleted": True}, "traceId": f"tr_{uuid.uuid4().hex[:16]}"}
 
@@ -964,6 +1600,108 @@ def build_app(
             "traceId": f"tr_{uuid.uuid4().hex[:16]}",
         }
 
+    # --- Harness Profile CRUD (specs/harness-profile §5.1) --------------
+
+    def _profile_envelope(record: Any) -> dict[str, Any]:
+        return {"data": profile_to_dict(record), "traceId": _trace_id()}
+
+    @app.get("/v1/haas/profiles")
+    async def list_profiles(
+        request: Request,
+        harnessId: str | None = None,
+        status: str | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        if limit < 1 or limit > 100 or cursor is not None:
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+        try:
+            records = runtime.profiles.list(principal, harness_id=harnessId, status=status)
+        except ValueError as exc:
+            raise HaasError(400, "invalid_request_error", "invalid_input") from exc
+        return {
+            "data": [profile_to_dict(record) for record in records[:limit]],
+            "nextCursor": None,
+            "traceId": _trace_id(),
+        }
+
+    @app.post("/v1/haas/profiles")
+    async def create_profile(request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        body = await _json_object(request)
+        idempotency_key = request.headers.get("Idempotency-Key")
+        key_hash: str | None = None
+        if idempotency_key:
+            key_hash = _hash(f"{principal.principalId}:{idempotency_key}")
+            request_hash = _hash(
+                f"{request.method}:{request.url.path}:"
+                + json.dumps(body, sort_keys=True, default=str)
+            )
+            try:
+                reservation = runtime.store.reserve(key_hash, request_hash)
+            except IdempotencyConflictError as exc:
+                raise HaasError(409, "invalid_request_error", "haas_idempotency_conflict") from exc
+            if reservation.replay:
+                result = reservation.result
+                if result is None:
+                    result = await _wait_for_idempotency(runtime.store, key_hash)
+                if result is not None:
+                    return dict(result)
+        try:
+            envelope = _profile_envelope(runtime.profiles.create(principal, body))
+        except ProfileNotFoundError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(404, "invalid_request_error", "haas_harness_not_found") from exc
+        except (TypeError, ValueError) as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(422, "invalid_request_error", "invalid_input") from exc
+        if key_hash:
+            runtime.store.complete(key_hash, envelope)
+        return envelope
+
+    @app.get("/v1/haas/profiles/{profile_id}")
+    async def get_profile(profile_id: str, request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        try:
+            return _profile_envelope(runtime.profiles.get(principal, profile_id))
+        except ProfileNotFoundError as exc:
+            raise HaasError(404, "invalid_request_error", "haas_profile_not_found") from exc
+
+    @app.put("/v1/haas/profiles/{profile_id}")
+    async def update_profile(profile_id: str, request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        body = await _json_object(request)
+        try:
+            return _profile_envelope(runtime.profiles.update(principal, profile_id, body))
+        except ProfileNotFoundError as exc:
+            raise HaasError(404, "invalid_request_error", "haas_profile_not_found") from exc
+        except ProfileConflictError as exc:
+            raise HaasError(409, "invalid_request_error", "haas_profile_conflict") from exc
+        except (TypeError, ValueError) as exc:
+            raise HaasError(422, "invalid_request_error", "invalid_input") from exc
+
+    @app.post("/v1/haas/profiles/{profile_id}/validate")
+    async def validate_profile(profile_id: str, request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        try:
+            validation = runtime.profiles.validate(principal, profile_id)
+        except ProfileNotFoundError as exc:
+            raise HaasError(404, "invalid_request_error", "haas_profile_not_found") from exc
+        return {"data": validation, "traceId": _trace_id()}
+
+    @app.post("/v1/haas/profiles/{profile_id}/activate")
+    async def activate_profile(profile_id: str, request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        try:
+            return _profile_envelope(runtime.profiles.activate(principal, profile_id))
+        except ProfileNotFoundError as exc:
+            raise HaasError(404, "invalid_request_error", "haas_profile_not_found") from exc
+        except ProfileConflictError as exc:
+            raise HaasError(409, "invalid_request_error", "haas_profile_conflict") from exc
+
     @app.post("/v1/haas/delegated-sessions")
     async def create_delegated_session(request: Request) -> dict[str, Any]:
         principal = await _authenticate(runtime.identity, request)
@@ -971,23 +1709,22 @@ def build_app(
         idempotency_key = request.headers.get("Idempotency-Key")
         key_hash: str | None = None
         if idempotency_key:
-            key_hash = _hash(idempotency_key)
-            request_hash = _hash(json.dumps(body, sort_keys=True, default=str))
+            key_hash = _hash(f"{principal.principalId}:{idempotency_key}")
+            request_hash = _hash(
+                f"{request.method}:{request.url.path}:"
+                + json.dumps(body, sort_keys=True, default=str)
+            )
             try:
                 reservation = runtime.store.reserve(key_hash, request_hash)
             except IdempotencyConflictError as exc:
-                raise HaasError(
-                    409, "invalid_request_error", "haas_idempotency_conflict"
-                ) from exc
+                raise HaasError(409, "invalid_request_error", "haas_idempotency_conflict") from exc
             if reservation.replay:
                 result = reservation.result
                 if result is None:
                     result = await _wait_for_idempotency(runtime.store, key_hash)
                 if result is not None:
                     return dict(result)
-                raise HaasError(
-                    409, "invalid_request_error", "session_busy", retryable=True
-                )
+                raise HaasError(409, "invalid_request_error", "session_busy", retryable=True)
 
         try:
             record = _delegated_session_from_body(body, config)
@@ -995,15 +1732,11 @@ def build_app(
             try:
                 harness = runtime.registry.get_scoped(principal, record.harnessId)
             except HarnessNotFoundError as exc:
-                raise HaasError(
-                    404, "invalid_request_error", "haas_harness_not_found"
-                ) from exc
+                raise HaasError(404, "invalid_request_error", "haas_harness_not_found") from exc
             if harness.base != record.harnessBase:
                 raise HaasError(400, "invalid_request_error", "invalid_input")
 
-            existing = runtime.store.get_delegated_session_by_manager(
-                record.managerSessionId
-            )
+            existing = runtime.store.get_delegated_session_by_manager(record.managerSessionId)
             if existing is not None:
                 _ensure_delegated_access(runtime, principal, existing)
                 if not _delegated_session_matches_body(existing, body):
@@ -1058,15 +1791,11 @@ def build_app(
         return envelope
 
     @app.get("/v1/haas/delegated-sessions/{delegated_session_id}")
-    async def get_delegated_session(
-        delegated_session_id: str, request: Request
-    ) -> dict[str, Any]:
+    async def get_delegated_session(delegated_session_id: str, request: Request) -> dict[str, Any]:
         principal = await _authenticate(runtime.identity, request)
         record = runtime.store.get_delegated_session(delegated_session_id)
         if record is None:
-            raise HaasError(
-                404, "invalid_request_error", "haas_delegated_session_not_found"
-            )
+            raise HaasError(404, "invalid_request_error", "haas_delegated_session_not_found")
         _ensure_delegated_access(runtime, principal, record)
         return _delegated_session_envelope(record)
 
@@ -1079,9 +1808,7 @@ def build_app(
             await _json_object(request)
         record = runtime.store.get_delegated_session(delegated_session_id)
         if record is None:
-            raise HaasError(
-                404, "invalid_request_error", "haas_delegated_session_not_found"
-            )
+            raise HaasError(404, "invalid_request_error", "haas_delegated_session_not_found")
         _ensure_delegated_access(runtime, principal, record)
         try:
             _validate_mount_manifest(record.mountManifest)
@@ -1097,8 +1824,7 @@ def build_app(
             primary_workspace["hostPathCanonical"],
             record.id,
             primary_workspace["access"],
-            ttl_ms=record.delegationPolicySnapshot["maxContainerLifetimeSeconds"]
-            * 1000,
+            ttl_ms=record.delegationPolicySnapshot["maxContainerLifetimeSeconds"] * 1000,
         )
         if not lock.acquired:
             raise HaasError(
@@ -1111,9 +1837,7 @@ def build_app(
         try:
             restored_runtime = await runtime.delegated_containers.restore(record)
         except DelegatedContainerUnavailable as exc:
-            runtime.store.release_workspace_lock(
-                primary_workspace["hostPathCanonical"], record.id
-            )
+            runtime.store.release_workspace_lock(primary_workspace["hostPathCanonical"], record.id)
             runtime.store.update_delegated_runtime(
                 delegated_session_id,
                 DelegatedRuntimeRecord(
@@ -1124,16 +1848,21 @@ def build_app(
                     lastActiveAtMs=record.runtime.lastActiveAtMs,
                 ),
             )
+            unsupported = str(exc) == "haas_policy_unsupported"
             raise HaasError(
-                503,
+                422 if unsupported else 503,
                 "invalid_request_error",
-                "haas_delegation_backend_unavailable",
-                safe_reason="delegation_backend_unavailable",
-                retryable=True,
+                "haas_policy_unsupported"
+                if unsupported
+                else "haas_delegation_backend_unavailable",
+                safe_reason=(
+                    "network_policy_unsupported"
+                    if unsupported
+                    else "delegation_backend_unavailable"
+                ),
+                retryable=not unsupported,
             ) from exc
-        restored = runtime.store.update_delegated_runtime(
-            delegated_session_id, restored_runtime
-        )
+        restored = runtime.store.update_delegated_runtime(delegated_session_id, restored_runtime)
         session = runtime.store.get_session(
             _session_key(restored.harnessId, restored.haasUserId, restored.haasSessionId)
         )
@@ -1153,25 +1882,91 @@ def build_app(
     @app.post("/v1/haas/delegated-sessions/{delegated_session_id}/policy")
     async def update_delegated_session_policy(
         delegated_session_id: str, request: Request
-    ) -> dict[str, Any]:
+    ) -> Response:
         principal = await _authenticate(runtime.identity, request)
         body = await _json_object(request)
+        idempotency_key = request.headers.get("Idempotency-Key")
+        key_hash: str | None = None
+        if idempotency_key:
+            key_hash = _hash(f"{principal.principalId}:{idempotency_key}")
+            request_hash = _hash(
+                f"{request.method}:{request.url.path}:"
+                + json.dumps(body, sort_keys=True, default=str)
+            )
+            try:
+                reservation = runtime.store.reserve(key_hash, request_hash)
+            except IdempotencyConflictError as exc:
+                raise HaasError(409, "invalid_request_error", "haas_idempotency_conflict") from exc
+            if reservation.replay:
+                result = reservation.result
+                if result is None:
+                    result = await _wait_for_idempotency(runtime.store, key_hash)
+                if result is not None:
+                    data = cast(dict[str, Any], result).get("data", {})
+                    status = (
+                        200 if data.get("desiredRevision") == data.get("appliedRevision") else 202
+                    )
+                    return JSONResponse(status_code=status, content=dict(result))
+                raise HaasError(409, "invalid_request_error", "session_busy", retryable=True)
         record = runtime.store.get_delegated_session(delegated_session_id)
         if record is None:
-            raise HaasError(
-                404, "invalid_request_error", "haas_delegated_session_not_found"
-            )
-        _ensure_delegated_access(runtime, principal, record)
-        policy = body.get("delegationPolicySnapshot")
-        if not isinstance(policy, dict):
-            raise HaasError(400, "invalid_request_error", "invalid_input")
-        mount_manifest = body.get("mountManifest", record.mountManifest)
-        if not isinstance(mount_manifest, dict):
-            raise HaasError(400, "invalid_request_error", "invalid_input")
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(404, "invalid_request_error", "haas_delegated_session_not_found")
         try:
+            _ensure_delegated_access(runtime, principal, record)
+        except HaasError:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise
+        expected_revision = body.get("expectedRevision")
+        if expected_revision is not None and (
+            not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision != record.desiredRevision
+        ):
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                409, "invalid_request_error", "haas_policy_revision_conflict"
+            )
+        domains = {
+            "profileRef",
+            "delegationPolicySnapshot",
+            "mountManifest",
+            "image",
+        }
+        supplied_domains = domains.intersection(body)
+        if not supplied_domains:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+
+        profile_ref = body.get("profileRef", record.profileRef)
+        policy = body.get("delegationPolicySnapshot", record.delegationPolicySnapshot)
+        mount_manifest = body.get("mountManifest", record.mountManifest)
+        image = body.get("image", record.image)
+        try:
+            if "profileRef" in supplied_domains:
+                _validate_profile_ref(profile_ref)
+            if not isinstance(policy, dict) or not isinstance(mount_manifest, dict):
+                raise ValueError("invalid policy domain")
+            if not isinstance(image, dict) or not isinstance(image.get("reference"), str):
+                raise ValueError("invalid image")
+            digest = image.get("digest")
+            if not isinstance(digest, str):
+                raise ValueError("invalid image digest")
+            if (
+                not digest
+                and "@sha256:" not in image["reference"]
+                and not config.delegation.allow_unpinned_local_image
+            ):
+                raise ValueError("invalid image digest")
             _validate_delegation_policy(policy)
             _validate_mount_manifest(mount_manifest)
         except MountManifestInvalid as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
             raise HaasError(
                 403,
                 "invalid_request_error",
@@ -1179,49 +1974,58 @@ def build_app(
                 safe_reason="delegation_mount_invalid",
             ) from exc
         except ValueError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
             raise HaasError(400, "invalid_request_error", "invalid_input") from exc
-        old_primary_workspace = record.mountManifest["primaryWorkspace"]
-        runtime_after_policy = record.runtime
-        if record.runtime.containerId is not None and record.runtime.status in {
-            "running",
-            "idle",
-            "restoring",
-        }:
-            try:
-                runtime_after_policy = await runtime.delegated_containers.destroy(
-                    record, reason="policy_updated"
-                )
-            except DelegatedContainerUnavailable as exc:
-                raise HaasError(
-                    503,
-                    "invalid_request_error",
-                    "haas_delegation_backend_unavailable",
-                    safe_reason="delegation_backend_unavailable",
-                    retryable=True,
-                ) from exc
-            runtime.store.release_workspace_lock(
-                old_primary_workspace["hostPathCanonical"], record.id
-            )
+
+        revision = record.desiredRevision + 1
+        update_id = f"dgpupd_{uuid.uuid4().hex[:16]}"
+        pending = {
+            "updateId": update_id,
+            "revision": revision,
+            "requestedAtMs": int(time.time() * 1000),
+            "fields": sorted(supplied_domains),
+        }
         updated = runtime.store.put_delegated_session(
-            DelegatedSessionRecord(
-                id=record.id,
-                managerSessionId=record.managerSessionId,
-                haasSessionId=record.haasSessionId,
-                haasUserId=record.haasUserId,
-                harnessId=record.harnessId,
-                harnessBase=record.harnessBase,
-                image=record.image,
-                provider=record.provider,
-                mountManifest=mount_manifest,
-                delegationPolicySnapshot=policy,
-                runtime=runtime_after_policy,
-                binding=record.binding,
-                createdAtMs=record.createdAtMs,
+            replace(
+                record,
+                desiredRevision=revision,
+                pendingPolicyUpdate=pending,
+                pendingPolicyTarget={
+                    "image": image,
+                    "profileRef": profile_ref,
+                    "mountManifest": mount_manifest,
+                    "delegationPolicySnapshot": policy,
+                },
             )
         )
-        runtime.logger.event(
-            "haas.delegation.policy_updated",
-            {"delegatedSessionId": updated.id},
+        # An idle or absent runtime can apply synchronously. Busy runtimes keep
+        # executing their current applied snapshot and are reconciled later.
+        updated = reconcile_delegated_policy(runtime.store, updated.id) or updated
+        event = (
+            "haas.delegation.policy_update_applied"
+            if updated.appliedRevision == revision
+            else "haas.delegation.policy_update_pending"
+        )
+        runtime.logger.event(event, {"delegatedSessionId": updated.id})
+        runtime.event_log.append_typed(
+            type_=event,
+            app_name=updated.harnessId,
+            user_id=updated.haasUserId,
+            invocation_id=None,
+            session_id=updated.haasSessionId,
+            turn_id=None,
+            harness_id=updated.harnessId,
+            adapter_id="delegated-policy-reconciler",
+            author="haas",
+            content={"role": "model", "parts": []},
+            actions={},
+            haas={
+                "delegatedSessionId": updated.id,
+                "updateId": update_id,
+                "revision": revision,
+                "fields": sorted(supplied_domains),
+            },
         )
         session = runtime.store.get_session(
             _session_key(updated.harnessId, updated.haasUserId, updated.haasSessionId)
@@ -1230,19 +2034,148 @@ def build_app(
             runtime.store.put_session(
                 replace(session, delegatedSessionRef=_delegated_session_ref(updated))
             )
-        return _delegated_session_envelope(updated)
+        envelope = _delegated_session_envelope(updated)
+        if key_hash:
+            runtime.store.complete(key_hash, envelope)
+        status = 200 if updated.appliedRevision == revision else 202
+        return JSONResponse(status_code=status, content=envelope)
+
+    @app.get("/v1/haas/sessions/{session_id}/profile")
+    async def get_session_profile(session_id: str, request: Request) -> dict[str, Any]:
+        principal = await _authenticate(runtime.identity, request)
+        delegated = runtime.store.get_delegated_session_by_haas_session(session_id)
+        if delegated is not None:
+            try:
+                _ensure_delegated_access(runtime, principal, delegated)
+            except HaasError as exc:
+                if exc.status_code == 404:
+                    raise HaasError(404, "invalid_request_error", "session_not_found") from exc
+                raise
+            raise HaasError(409, "invalid_request_error", "haas_profile_rebind_unsupported")
+        session = _resolve_visible_session(runtime, principal, session_id)
+        snapshot = session.effectiveProfile or {}
+        required = (
+            "profileId",
+            "profileVersion",
+            "profileFingerprint",
+            "harnessId",
+            "base",
+        )
+        if not all(snapshot.get(field) is not None for field in required):
+            raise HaasError(404, "invalid_request_error", "session_not_found")
+        intent = {
+            key: value
+            for key, value in snapshot.items()
+            if key not in {"profileId", "profileVersion", "profileFingerprint", "resolvedAtMs"}
+        }
+        return {
+            "data": {
+                **{field: snapshot[field] for field in required},
+                "executionIntentFingerprint": execution_intent_fingerprint(intent),
+            },
+            "traceId": _trace_id(),
+        }
+
+    @app.post("/v1/haas/sessions/{session_id}/profile-rebind")
+    async def rebind_session_profile(session_id: str, request: Request) -> Response:
+        principal = await _authenticate(runtime.identity, request)
+        delegated = runtime.store.get_delegated_session_by_haas_session(session_id)
+        if delegated is not None:
+            _ensure_delegated_access(runtime, principal, delegated)
+            raise HaasError(409, "invalid_request_error", "haas_profile_rebind_unsupported")
+        session = _resolve_visible_session(runtime, principal, session_id)
+        body = await _json_object(request)
+        expected = body.get("expectedProfileVersion")
+        if (
+            set(body) - {"profileId", "expectedProfileVersion", "reason"}
+            or not isinstance(body.get("profileId"), str)
+            or not body["profileId"]
+            or ("expectedProfileVersion" in body and (type(expected) is not int or expected < 1))
+            or ("reason" in body and not isinstance(body["reason"], str))
+        ):
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+        key = _session_key(session.appName, session.userId, session_id)
+        idempotency_key = request.headers.get("Idempotency-Key")
+        key_hash = (
+            _hash(json.dumps([principal.principalId, key, "profile-rebind", idempotency_key]))
+            if idempotency_key
+            else None
+        )
+        reserved = False
+        holder = f"rebind_{uuid.uuid4().hex}"
+        while True:
+            try:
+                lease = runtime.store.acquire_lease(key, holder, ttl_ms=30_000)
+                break
+            except LeaseConflictError:
+                await asyncio.sleep(0.05)
+        try:
+            if key_hash:
+                try:
+                    reservation = runtime.store.reserve(
+                        key_hash, _hash(json.dumps(body, sort_keys=True))
+                    )
+                except IdempotencyConflictError as exc:
+                    raise HaasError(
+                        409, "invalid_request_error", "haas_idempotency_conflict"
+                    ) from exc
+                if reservation.replay:
+                    if reservation.result is None:
+                        raise HaasError(
+                            409, "invalid_request_error", "session_busy", retryable=True
+                        )
+                    return JSONResponse(content=reservation.result)
+                reserved = True
+            session = runtime.sessions.get_session(*key)
+            try:
+                profile = runtime.profiles.get(principal, body["profileId"])
+                if profile.harnessId != session.appName:
+                    raise ProfileNotFoundError(profile.id)
+                snapshot = runtime.profiles.execution_snapshot(profile)
+            except ProfileNotFoundError as exc:
+                raise HaasError(404, "invalid_request_error", "haas_profile_not_found") from exc
+            except ProfileConflictError as exc:
+                raise HaasError(409, "invalid_request_error", "haas_profile_conflict") from exc
+            _validate_local_materialization(runtime, snapshot)
+            previous = session.effectiveProfile or {}
+            if previous.get("profileId") != profile.id:
+                if (
+                    expected is not None and expected != previous.get("profileVersion")
+                ) or previous.get("profileVersion", 0) >= profile.version:
+                    raise HaasError(409, "invalid_request_error", "haas_profile_conflict")
+                runtime.store.put_session(replace(session, effectiveProfile=snapshot))
+            else:
+                snapshot = previous
+            envelope = {
+                "data": {
+                    field: snapshot[field]
+                    for field in (
+                        "profileId",
+                        "profileVersion",
+                        "profileFingerprint",
+                        "harnessId",
+                        "base",
+                        "resolvedAtMs",
+                    )
+                },
+                "traceId": _trace_id(),
+            }
+            if key_hash:
+                runtime.store.complete(key_hash, envelope)
+                reserved = False
+            return JSONResponse(content=envelope)
+        finally:
+            if key_hash and reserved:
+                runtime.store.release(key_hash)
+            runtime.store.release_lease(key, holder, lease.token)
 
     @app.get("/v1/haas/harnesses/{harness_id}/skills/{skill_id}/files")
-    async def list_skill_files(
-        harness_id: str, skill_id: str, request: Request
-    ) -> dict[str, Any]:
+    async def list_skill_files(harness_id: str, skill_id: str, request: Request) -> dict[str, Any]:
         principal = await _authenticate(runtime.identity, request)
         try:
             record = runtime.registry.get_scoped(principal, harness_id)
         except HarnessNotFoundError as exc:
-            raise HaasError(
-                404, "invalid_request_error", "haas_harness_not_found"
-            ) from exc
+            raise HaasError(404, "invalid_request_error", "haas_harness_not_found") from exc
         for bundle in record.skills:
             if str(bundle.get("id", "")) == skill_id:
                 return {
@@ -1276,9 +2209,7 @@ def build_app(
             }
         records = [
             r
-            for r in runtime.store.list_sessions(
-                app_name=app, user_ids=principal.userIds
-            )
+            for r in runtime.store.list_sessions(app_name=app, user_ids=principal.userIds)
             if r.appName in visible_apps
         ]
 
@@ -1332,10 +2263,7 @@ def _resolve_visible_session(
     the same bare id.
     """
     visible_apps = {
-        h.id
-        for h in runtime.store.list_harnesses(
-            (principal.tenantId, principal.workspaceId)
-        )
+        h.id for h in runtime.store.list_harnesses((principal.tenantId, principal.workspaceId))
     }
     records = [
         r
@@ -1355,16 +2283,75 @@ def _resolve_visible_invocation(
         raise HaasError(404, "invalid_request_error", "haas_invocation_not_found")
     _ensure_owns(runtime.identity, principal, invocation.userId)
     visible_apps = {
-        h.id
-        for h in runtime.store.list_harnesses(
-            (principal.tenantId, principal.workspaceId)
-        )
+        h.id for h in runtime.store.list_harnesses((principal.tenantId, principal.workspaceId))
     }
     if invocation.appName not in visible_apps:
         raise HaasError(404, "invalid_request_error", "haas_invocation_not_found")
     if runtime.store.get_session((invocation.appName, invocation.userId, session_id)) is None:
         raise HaasError(404, "invalid_request_error", "haas_invocation_not_found")
     return invocation
+
+
+def _local_effective_profile(
+    runtime: _Runtime,
+    principal: Principal,
+    app: HarnessRecord,
+    user_id: str,
+    session_id: str | None,
+    body: dict[str, Any],
+) -> dict[str, Any] | None:
+    selection = body.get("haas") or {}
+    if not isinstance(selection, dict):
+        raise HaasError(400, "invalid_request_error", "invalid_input")
+    session = runtime.store.get_session((app.id, user_id, session_id)) if session_id else None
+    effective = session.effectiveProfile if session else None
+    if (
+        effective
+        and selection.get("profileId")
+        and (
+            selection["profileId"] != effective["profileId"]
+            or selection.get("profileVersion") != effective["profileVersion"]
+        )
+    ):
+        raise HaasError(409, "invalid_request_error", "haas_profile_rebind_required")
+    if effective is None:
+        try:
+            if selection.get("profileId"):
+                profile = runtime.profiles.get(principal, str(selection["profileId"]))
+                if profile.harnessId != app.id or profile.version != selection.get(
+                    "profileVersion"
+                ):
+                    raise ProfileNotFoundError(profile.id)
+                effective = runtime.profiles.execution_snapshot(profile)
+            else:
+                active = runtime.profiles.list(principal, harness_id=app.id, status="active")
+                if active:
+                    effective = runtime.profiles.execution_snapshot(active[0])
+        except ProfileNotFoundError as exc:
+            raise HaasError(404, "invalid_request_error", "haas_profile_not_found") from exc
+        except ProfileConflictError as exc:
+            raise HaasError(409, "invalid_request_error", "haas_profile_conflict") from exc
+    if runtime.adapter.base == "codex":
+        proxy = runtime.sessions.model_proxy
+        if not effective or proxy is None or not proxy.base_url or not proxy.resolver.available:
+            raise HaasError(
+                503, "service_unavailable", "haas_provider_error", "model_proxy_unavailable"
+            )
+        _validate_local_materialization(runtime, effective)
+    return effective
+
+
+def _validate_local_materialization(runtime: _Runtime, effective: dict[str, Any]) -> None:
+    if runtime.adapter.base == "codex" and any(
+        effective.get(field)
+        for field in ("mcpServers", "skills", "agentsMd", "policy", "workspace", "budget")
+    ):
+        raise HaasError(
+            409,
+            "invalid_request_error",
+            "haas_profile_conflict",
+            "profile_materialization_unsupported",
+        )
 
 
 async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
@@ -1376,6 +2363,8 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
     user_id = body.get("userId")
     session_id = body.get("sessionId")
     new_message = body.get("newMessage", {})
+    sandbox = body.get("sandbox", {})
+    policy = body.get("policy", {})
     if (
         not isinstance(app_name, str)
         or not isinstance(user_id, str)
@@ -1383,6 +2372,8 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
         or not user_id
         or (session_id is not None and not isinstance(session_id, str))
         or not isinstance(new_message, dict)
+        or not isinstance(sandbox, dict)
+        or not isinstance(policy, dict)
     ):
         raise HaasError(400, "invalid_request_error", "invalid_input")
 
@@ -1393,18 +2384,41 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
     except AppNotFoundError as exc:
         raise HaasError(404, "invalid_request_error", "app_not_found") from exc
 
+    last_event_id = request.headers.get("Last-Event-ID")
+    if last_event_id is not None:
+        if not streaming or not isinstance(session_id, str):
+            raise HaasError(400, "invalid_request_error", "invalid_input")
+        try:
+            remaining = runtime.event_log.read_session(app.id, user_id, session_id, last_event_id)
+        except CursorNotFoundError as exc:
+            raise HaasError(410, "invalid_request_error", "haas_offset_expired") from exc
+        all_events = runtime.event_log.read_session(app.id, user_id, session_id)
+        cursor = next(event for event in all_events if event.eventId == last_event_id)
+        invocation_id = cursor.invocationId
+        replay = [event for event in remaining if event.invocationId == invocation_id]
+
+        async def replay_frames() -> Any:
+            for event in replay:
+                yield runtime.event_log.sse_frame(event)
+            yield HEARTBEAT_FRAME
+
+        return StreamingResponse(replay_frames(), media_type="text/event-stream")
+
     # Idempotency-Key reservation happens before admission (spec: haas-protocol §7).
     idempotency_key = request.headers.get("Idempotency-Key")
     key_hash: str | None = None
     if idempotency_key:
-        key_hash = _hash(idempotency_key)
-        request_hash = _hash(json.dumps(body, sort_keys=True, default=str))
+        key_hash = _hash(f"{principal.principalId}:{idempotency_key}")
+        request_hash = _hash(
+            f"{request.method}:{request.url.path}:"
+            + json.dumps(body, sort_keys=True, default=str)
+        )
         try:
             reservation = runtime.store.reserve(key_hash, request_hash)
+        except IdempotencyExpiredError as exc:
+            raise HaasError(410, "invalid_request_error", "haas_idempotency_expired") from exc
         except IdempotencyConflictError as exc:
-            raise HaasError(
-                409, "invalid_request_error", "haas_idempotency_conflict"
-            ) from exc
+            raise HaasError(409, "invalid_request_error", "haas_idempotency_conflict") from exc
         attempts = 0
         while reservation.replay:
             result = reservation.result
@@ -1418,14 +2432,18 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
                 raise HaasError(409, "invalid_request_error", "session_busy", retryable=True)
             try:
                 reservation = runtime.store.reserve(key_hash, request_hash)
+            except IdempotencyExpiredError as exc:
+                raise HaasError(410, "invalid_request_error", "haas_idempotency_expired") from exc
             except IdempotencyConflictError as exc:
-                raise HaasError(
-                    409, "invalid_request_error", "haas_idempotency_conflict"
-                ) from exc
+                raise HaasError(409, "invalid_request_error", "haas_idempotency_conflict") from exc
 
     admission = runtime.admission.admit_run(
-        AdmissionInput(principalHash=principal.principalId, appName=app.id,
-                       tenantId=principal.tenantId, workspaceId=principal.workspaceId)
+        AdmissionInput(
+            principalHash=principal.principalId,
+            appName=app.id,
+            tenantId=principal.tenantId,
+            workspaceId=principal.workspaceId,
+        )
     )
     if not admission.allowed:
         if key_hash:
@@ -1434,7 +2452,10 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
         retryable = code in {"haas_rate_limited", "haas_quota_exceeded", "haas_queue_full"}
         raise HaasError(
             429 if code != "haas_queue_full" else 503,
-            "invalid_request_error", code, admission.safeReason, retryable,
+            "invalid_request_error",
+            code,
+            admission.safeReason,
+            retryable,
         )
 
     lease_id = admission.leaseId
@@ -1448,6 +2469,14 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             if delegated_record.harnessId != app.id or delegated_record.haasUserId != user_id:
                 raise HaasError(404, "invalid_request_error", "session_not_found")
             _ensure_delegated_access(runtime, principal, delegated_record)
+            if delegated_record.appliedRevision < delegated_record.desiredRevision:
+                raise HaasError(
+                    409,
+                    "invalid_request_error",
+                    "session_busy",
+                    safe_reason="configuration_update_pending",
+                    retryable=True,
+                )
         except HaasError:
             if key_hash:
                 runtime.store.release(key_hash)
@@ -1460,13 +2489,37 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             user_id=user_id,
             session_id=delegated_record.haasSessionId,
             message=new_message,
+            policy={
+                **policy,
+                "network": dict(
+                    delegated_record.delegationPolicySnapshot.get("network")
+                    or {"defaultAction": "deny", "allow": []}
+                ),
+            },
             delegated=delegated_record,
             streaming=streaming,
             key_hash=key_hash,
             lease_id=lease_id,
         )
+    try:
+        effective_profile = _local_effective_profile(
+            runtime, principal, app, user_id, session_id, body
+        )
+    except HaasError:
+        if key_hash:
+            runtime.store.release(key_hash)
+        if lease_id:
+            runtime.admission.release_run(lease_id)
+        raise
     req = RunRequest(
-        app=app, user_id=user_id, session_id=session_id, message=new_message
+        app=app,
+        user_id=user_id,
+        session_id=session_id,
+        message=new_message,
+        sandbox=sandbox,
+        policy=policy,
+        effective_profile=effective_profile,
+        principal_id=principal.principalId,
     )
     if streaming:
         stream = runtime.sessions.run_stream(req)
@@ -1478,8 +2531,25 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
                 runtime.store.release(key_hash)
             if lease_id:
                 runtime.admission.release_run(lease_id)
+            safe_reason = (
+                "configuration_update_pending"
+                if str(exc) == "configuration_update_pending"
+                else "session_busy"
+            )
             raise HaasError(
-                409, "invalid_request_error", "session_busy", retryable=True
+                409,
+                "invalid_request_error",
+                "session_busy",
+                safe_reason=safe_reason,
+                retryable=True,
+            ) from exc
+        except ResumeRequiredError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            if lease_id:
+                runtime.admission.release_run(lease_id)
+            raise HaasError(
+                409, "invalid_request_error", "haas_resume_required"
             ) from exc
         except StopAsyncIteration:
             if key_hash:
@@ -1511,6 +2581,14 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             ) from exc
 
         first_adk = runtime.event_log.project_adk(first)
+        if first.invocationId is None:
+            raise HaasError(503, "service_unavailable", "haas_store_unavailable", retryable=True)
+        expires_at_ms = _accept_idempotency(runtime, key_hash, first.invocationId)
+        accepted_headers = _accepted_headers(
+            invocation_id=first.invocationId,
+            session_id=first.sessionId,
+            expires_at_ms=expires_at_ms,
+        )
         adk_events.append(first_adk)
         queue: asyncio.Queue[str | None] = asyncio.Queue()
         disconnected = False
@@ -1532,7 +2610,15 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
                     # cannot change HTTP status after headers are sent.
                     pass
                 if key_hash:
-                    runtime.store.complete(key_hash, {"events": adk_events})
+                    runtime.store.complete(
+                        key_hash,
+                        {
+                            "events": adk_events,
+                            "idempotency_expires_at_ms": expires_at_ms,
+                            "invocation_id": first.invocationId,
+                            "session_id": first.sessionId,
+                        },
+                    )
             finally:
                 if lease_id:
                     runtime.admission.release_run(lease_id)
@@ -1547,7 +2633,12 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             try:
                 yield f"data: {json.dumps(first_adk, separators=(',', ':'))}\n\n"
                 while True:
-                    frame = await queue.get()
+                    try:
+                        async with asyncio.timeout(SSE_HEARTBEAT_SECONDS):
+                            frame = await queue.get()
+                    except TimeoutError:
+                        yield HEARTBEAT_FRAME
+                        continue
                     if frame is None:
                         break
                     yield frame
@@ -1556,7 +2647,11 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
                 if producer.done():
                     producer.result()
 
-        return StreamingResponse(frames(), media_type="text/event-stream")
+        return StreamingResponse(
+            frames(),
+            media_type="text/event-stream",
+            headers=accepted_headers,
+        )
 
     try:
         try:
@@ -1564,8 +2659,23 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
         except SessionBusyError as exc:
             if key_hash:
                 runtime.store.release(key_hash)
+            safe_reason = (
+                "configuration_update_pending"
+                if str(exc) == "configuration_update_pending"
+                else "session_busy"
+            )
             raise HaasError(
-                409, "invalid_request_error", "session_busy", retryable=True
+                409,
+                "invalid_request_error",
+                "session_busy",
+                safe_reason=safe_reason,
+                retryable=True,
+            ) from exc
+        except ResumeRequiredError as exc:
+            if key_hash:
+                runtime.store.release(key_hash)
+            raise HaasError(
+                409, "invalid_request_error", "haas_resume_required"
             ) from exc
         except AdapterTurnError as exc:
             if key_hash:
@@ -1589,7 +2699,15 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
                 body = _haas_error_content(error)
                 runtime.store.complete(
                     key_hash,
-                    {"status_code": error.status_code, "body": body, "events": events},
+                    {
+                        "status_code": error.status_code,
+                        "body": body,
+                        "events": events,
+                        "invocation_id": exc.invocation_id,
+                        "session_id": (
+                            invocation.sessionId if invocation is not None else session_id
+                        ),
+                    },
                 )
                 return JSONResponse(status_code=error.status_code, content=body)
             raise HaasError(
@@ -1597,10 +2715,25 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             ) from exc
 
         adk_events = [runtime.event_log.project_adk(e) for e in result.events]
+        expires_at_ms = _accept_idempotency(runtime, key_hash, result.invocation.id)
+        accepted_headers = _accepted_headers(
+            invocation_id=result.invocation.id,
+            session_id=result.invocation.sessionId,
+            expires_at_ms=expires_at_ms,
+        )
         if key_hash:
-            runtime.store.complete(key_hash, {"status_code": 200, "events": adk_events})
+            runtime.store.complete(
+                key_hash,
+                {
+                    "status_code": 200,
+                    "events": adk_events,
+                    "idempotency_expires_at_ms": expires_at_ms,
+                    "invocation_id": result.invocation.id,
+                    "session_id": result.invocation.sessionId,
+                },
+            )
 
-        return adk_events
+        return JSONResponse(content=adk_events, headers=accepted_headers)
     finally:
         if lease_id:
             runtime.admission.release_run(lease_id)
@@ -1613,6 +2746,7 @@ async def _run_delegated(
     user_id: str,
     session_id: str,
     message: dict[str, Any],
+    policy: dict[str, Any],
     delegated: DelegatedSessionRecord,
     streaming: bool,
     key_hash: str | None,
@@ -1657,6 +2791,12 @@ async def _run_delegated(
     )
     runtime.store.put_invocation(invocation)
     runtime.store.put_turn(turn)
+    expires_at_ms = _accept_idempotency(runtime, key_hash, invocation.id)
+    accepted_headers = _accepted_headers(
+        invocation_id=invocation.id,
+        session_id=session_id,
+        expires_at_ms=expires_at_ms,
+    )
 
     async def events() -> AsyncIterator[CanonicalEventRecord]:
         nonlocal delegated, session, invocation, turn
@@ -1685,11 +2825,14 @@ async def _run_delegated(
                 replace(session, delegatedSessionRef=_delegated_session_ref(delegated))
             )
             body = {
+                "executionId": invocation.id,
+                "containerGeneration": delegated.runtime.containerGeneration,
                 "appName": app.id,
                 "userId": user_id,
                 "sessionId": session_id,
                 "newMessage": message,
                 "streaming": True,
+                "policy": dict(policy),
             }
             async for event in runtime.delegated_containers.run_stream(delegated, body):
                 content = event.get("content") if isinstance(event, dict) else {}
@@ -1742,10 +2885,19 @@ async def _run_delegated(
                 status_code = 403
                 retryable = False
             else:
-                code = "haas_delegation_backend_unavailable"
-                safe_reason = "delegation_backend_unavailable"
-                status_code = 503
-                retryable = True
+                unsupported = str(exc) == "haas_policy_unsupported"
+                code = (
+                    "haas_policy_unsupported"
+                    if unsupported
+                    else "haas_delegation_backend_unavailable"
+                )
+                safe_reason = (
+                    "network_policy_unsupported"
+                    if unsupported
+                    else "delegation_backend_unavailable"
+                )
+                status_code = 422 if unsupported else 503
+                retryable = not unsupported
             terminal = runtime.event_log.append(
                 app_name=app.id,
                 user_id=user_id,
@@ -1779,6 +2931,52 @@ async def _run_delegated(
             runtime.store.put_invocation(invocation)
             runtime.store.put_turn(turn)
             runtime.store.put_session(session)
+            current_delegated = runtime.store.get_delegated_session(delegated.id)
+            if current_delegated is not None and current_delegated.runtime.status == "running":
+                current_delegated = runtime.store.update_delegated_runtime(
+                    current_delegated.id,
+                    replace(
+                        current_delegated.runtime,
+                        status="idle",
+                        lastActiveAtMs=int(time.time() * 1000),
+                    ),
+                )
+                pending = current_delegated.pendingPolicyUpdate
+                reconciled = reconcile_delegated_policy(runtime.store, current_delegated.id)
+                if pending is not None and reconciled is not None:
+                    result = reconciled.lastPolicyUpdateResult or {}
+                    event_type = (
+                        "haas.delegation.policy_update_applied"
+                        if result.get("status") == "applied"
+                        else "haas.delegation.policy_update_failed"
+                    )
+                    metadata = {
+                        "delegatedSessionId": reconciled.id,
+                        "updateId": pending["updateId"],
+                        "revision": pending["revision"],
+                        "fields": pending["fields"],
+                    }
+                    if event_type.endswith("failed"):
+                        metadata.update(
+                            {
+                                "code": result.get("code", "haas_internal_error"),
+                                "safeReason": result.get("safeReason", "policy_apply_failed"),
+                            }
+                        )
+                    runtime.event_log.append_typed(
+                        type_=event_type,
+                        app_name=app.id,
+                        user_id=user_id,
+                        invocation_id=None,
+                        session_id=session_id,
+                        turn_id=None,
+                        harness_id=app.id,
+                        adapter_id="delegated-policy-reconciler",
+                        author="haas",
+                        content={"role": "model", "parts": []},
+                        actions={},
+                        haas=metadata,
+                    )
             runtime.store.release_lease(key, holder, token)
 
     if streaming:
@@ -1805,7 +3003,15 @@ async def _run_delegated(
                     pass
                 finally:
                     if key_hash:
-                        runtime.store.complete(key_hash, {"events": adk_events})
+                        runtime.store.complete(
+                            key_hash,
+                            {
+                                "events": adk_events,
+                                "idempotency_expires_at_ms": expires_at_ms,
+                                "invocation_id": invocation.id,
+                                "session_id": session_id,
+                            },
+                        )
             finally:
                 if lease_id:
                     runtime.admission.release_run(lease_id)
@@ -1819,7 +3025,12 @@ async def _run_delegated(
             nonlocal disconnected
             try:
                 while True:
-                    frame = await queue.get()
+                    try:
+                        async with asyncio.timeout(SSE_HEARTBEAT_SECONDS):
+                            frame = await queue.get()
+                    except TimeoutError:
+                        yield HEARTBEAT_FRAME
+                        continue
                     if frame is None:
                         break
                     yield frame
@@ -1828,7 +3039,9 @@ async def _run_delegated(
                 if producer.done():
                     producer.result()
 
-        return StreamingResponse(frames(), media_type="text/event-stream")
+        return StreamingResponse(
+            frames(), media_type="text/event-stream", headers=accepted_headers
+        )
 
     delegated_adk_events: list[dict[str, Any]] = []
     try:
@@ -1836,10 +3049,18 @@ async def _run_delegated(
             delegated_adk_events.append(runtime.event_log.project_adk(event))
     finally:
         if key_hash:
-            runtime.store.complete(key_hash, {"events": delegated_adk_events})
+            runtime.store.complete(
+                key_hash,
+                {
+                    "events": delegated_adk_events,
+                    "idempotency_expires_at_ms": expires_at_ms,
+                    "invocation_id": invocation.id,
+                    "session_id": session_id,
+                },
+            )
         if lease_id:
             runtime.admission.release_run(lease_id)
-    return delegated_adk_events
+    return JSONResponse(content=delegated_adk_events, headers=accepted_headers)
 
 
 async def _wait_for_idempotency(
@@ -1859,26 +3080,105 @@ async def _wait_for_idempotency(
     return store.replay(key_hash)
 
 
+async def _reserve_mutation(
+    store: MemoryStore,
+    request: Request,
+    body: dict[str, Any],
+    principal: Principal,
+) -> tuple[str | None, dict[str, Any] | None]:
+    idempotency_key = request.headers.get("Idempotency-Key")
+    if not idempotency_key:
+        return None, None
+    # Idempotency keys are caller-controlled and commonly reused by different
+    # tenants. Namespace reservations by authenticated principal so a guessed key
+    # can never replay another caller's mutation response before resource checks.
+    key_hash = _hash(f"{principal.principalId}:{idempotency_key}")
+    request_hash = _hash(
+        f"{request.method}:{request.url.path}:" + json.dumps(body, sort_keys=True, default=str)
+    )
+    try:
+        reservation = store.reserve(key_hash, request_hash)
+    except IdempotencyExpiredError as exc:
+        raise HaasError(410, "invalid_request_error", "haas_idempotency_expired") from exc
+    except IdempotencyConflictError as exc:
+        raise HaasError(409, "invalid_request_error", "haas_idempotency_conflict") from exc
+    if not reservation.replay:
+        return key_hash, None
+    result = reservation.result
+    if result is None:
+        result = await _wait_for_idempotency(store, key_hash)
+    return key_hash, dict(result) if isinstance(result, dict) else None
+
+
+def _accept_idempotency(runtime: _Runtime, key_hash: str | None, invocation_id: str) -> int | None:
+    if key_hash is None:
+        return None
+    record = runtime.store.accept(key_hash, invocation_id)
+    invocation = runtime.store.get_invocation(invocation_id)
+    if invocation is not None:
+        invocation.acceptedAtMs = record.acceptedAtMs
+        invocation.idempotencyKeyHash = key_hash
+        invocation.idempotencyExpiresAtMs = record.expiresAtMs
+        runtime.store.put_invocation(invocation)
+    return record.expiresAtMs
+
+
+def _idempotency_headers(expires_at_ms: int | None) -> dict[str, str] | None:
+    if expires_at_ms is None:
+        return None
+    return {"Idempotency-Expires-At": str(expires_at_ms)}
+
+
+def _accepted_headers(
+    *,
+    invocation_id: str | None,
+    session_id: str | None,
+    expires_at_ms: int | None,
+) -> dict[str, str]:
+    headers = _idempotency_headers(expires_at_ms) or {}
+    if invocation_id:
+        headers["X-HaaS-Invocation-ID"] = invocation_id
+    if session_id:
+        headers["X-HaaS-Session-ID"] = session_id
+    return headers
+
+
 def _render_cached(cached: Any, *, streaming: bool) -> Any:
+    expires_at_ms: int | None = None
     if not isinstance(cached, dict):
         events: list[Any] = []
         status_code = 200
         body: Any = None
+        invocation_id: Any = None
+        session_id: Any = None
     else:
         events = cached.get("events", [])
         status_code = int(cached.get("status_code", 200))
         body = cached.get("body")
+        expires_at_ms = cached.get("idempotency_expires_at_ms")
+        invocation_id = cached.get("invocation_id")
+        session_id = cached.get("session_id")
+    headers = _accepted_headers(
+        invocation_id=invocation_id if isinstance(invocation_id, str) else None,
+        session_id=session_id if isinstance(session_id, str) else None,
+        expires_at_ms=expires_at_ms,
+    )
     if status_code >= 400:
         return JSONResponse(
             status_code=status_code,
             content=body if isinstance(body, dict) else {"detail": "request_failed"},
+            headers=headers,
         )
     if not streaming:
-        return events
+        return JSONResponse(content=events, headers=headers)
 
     async def frames() -> Any:
         for event in events:
             yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
         yield ": keep-alive\n\n"
 
-    return StreamingResponse(frames(), media_type="text/event-stream")
+    return StreamingResponse(
+        frames(),
+        media_type="text/event-stream",
+        headers=headers,
+    )

@@ -50,6 +50,7 @@ def _usage_from(meta: Any) -> Optional[TokenUsage]:
         cache_read=cached,
     )
 
+
 # Gemini finishReason → the engine's OpenAI-shaped finish_reason vocabulary. STOP maps to
 # "tool_calls" instead when the turn contains function calls (Gemini has no distinct reason).
 _FINISH_REASON_MAP = {
@@ -92,13 +93,9 @@ _SCHEMA_KEYS = {
     "title",
 }
 
-_DATA_URL_RE = re.compile(
-    r"^data:(image/[a-z0-9.+-]+);base64,(.+)$", re.IGNORECASE | re.DOTALL
-)
+_DATA_URL_RE = re.compile(r"^data:(image/[a-z0-9.+-]+);base64,(.+)$", re.IGNORECASE | re.DOTALL)
 
-_PDF_DATA_URL_RE = re.compile(
-    r"^data:application/pdf;base64,(.+)$", re.IGNORECASE | re.DOTALL
-)
+_PDF_DATA_URL_RE = re.compile(r"^data:application/pdf;base64,(.+)$", re.IGNORECASE | re.DOTALL)
 
 
 def resolve_api_key(secrets: Any = None) -> Optional[str]:
@@ -120,9 +117,7 @@ def _image_part(url: str) -> Optional[dict[str, Any]]:
     URLs (attachments.py). Plain http(s) URLs are not fetchable by the API → None."""
     match = _DATA_URL_RE.match(url or "")
     if match:
-        return {
-            "inline_data": {"mime_type": match.group(1).lower(), "data": match.group(2)}
-        }
+        return {"inline_data": {"mime_type": match.group(1).lower(), "data": match.group(2)}}
     return None
 
 
@@ -330,9 +325,7 @@ def _sig_str(part: Any) -> Optional[str]:
     return str(sig)
 
 
-def _signature_extras(
-    text_sig: Optional[str], call_sigs: list[Optional[str]]
-) -> dict[str, Any]:
+def _signature_extras(text_sig: Optional[str], call_sigs: list[Optional[str]]) -> dict[str, Any]:
     """Captured signatures → the `_gemini` assistant-message sidecar (empty when none)."""
     if not text_sig and not any(call_sigs):
         return {}
@@ -443,9 +436,7 @@ class GeminiProvider(ProviderClient):
         if "stop" in settings and "stop_sequences" not in settings:
             stop = settings["stop"]
             settings["stop_sequences"] = [stop] if isinstance(stop, str) else list(stop)
-        config: dict[str, Any] = {
-            k: v for k, v in settings.items() if k in _SETTINGS_WHITELIST
-        }
+        config: dict[str, Any] = {k: v for k, v in settings.items() if k in _SETTINGS_WHITELIST}
         # Thinking models (2.5+/3.x — all our curated ids) think by default; ask for the
         # thought SUMMARIES too so the GUI can show them. Parse-side keeps them out of
         # answer text (`thought` parts → reasoning).

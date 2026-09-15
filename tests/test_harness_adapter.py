@@ -1,4 +1,5 @@
 """Harness adapter interface and fake adapter tests (specs/harness-adapter/)."""
+
 from haas.harnesses.base import (
     CancelTurnRequest,
     PrepareSessionRequest,
@@ -23,7 +24,10 @@ async def test_fake_adapter_stream_and_finalize() -> None:
     adapter = FakeAdapter()
     handle = await adapter.start_turn(
         StartTurnRequest(
-            invocationId="inv_1", sessionId="hsess_1", turnId="turn_1", appName="chrn_1",
+            invocationId="inv_1",
+            sessionId="hsess_1",
+            turnId="turn_1",
+            appName="chrn_1",
             input=[{"text": "hi"}],
         )
     )
@@ -50,4 +54,4 @@ async def test_fake_adapter_sandbox_declaration() -> None:
     adapter = FakeAdapter()
     decl = adapter.sandbox_declaration()
     assert decl.cwd == "/workspace"
-    assert decl.approvalMode == "never"
+    assert decl.approvalMode == "on-request"

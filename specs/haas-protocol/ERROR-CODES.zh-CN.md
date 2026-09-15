@@ -3,10 +3,10 @@
 [English](ERROR-CODES.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-12
 
 本文件是 HaaS 全部稳定错误码的唯一目录。`POST /run`、`/run_sse`、session
-路径、`/v1/haas/*` 与 legacy shim 的错误都必须映射到本表；OpenAPI 的
+路径与 `/v1/haas/*` 的错误都必须映射到本表；OpenAPI 的
 `haasError.code` 与本表保持一一对应。`ADK` 语义码不加前缀，HaaS 扩展加
 `haas_` 前缀。不加前缀的 ADK 语义码仅限：`missing_credential`、
 `invalid_credential`、`invalid_input`、`app_not_found`、`session_not_found`、
@@ -23,6 +23,7 @@ Last reviewed: 2026-08-26
 | `haas_harness_not_found` | 404 | no | harness_not_found | harness-registry（`/v1/haas/harnesses/{id}`） |
 | `session_not_found` | 404 | no | session_not_found | session-runtime |
 | `haas_invocation_not_found` | 404 | no | invocation_not_found | session-runtime |
+| `haas_execution_evidence_not_found` | 404 | no | execution_evidence_not_found | security-boundary / session-runtime |
 | `haas_delegated_session_not_found` | 404 | no | delegated_session_not_found | manager-delegation |
 | `haas_file_not_found` | 404 | no | file_not_found | artifact-store |
 
@@ -31,9 +32,12 @@ Last reviewed: 2026-08-26
 | code | HTTP | retryable | safeReason | 来源组件 |
 |------|------|-----------|------------|----------|
 | `invalid_input` | 400 | no | invalid_input | haas-protocol（schema 校验） |
-| `haas_legacy_request_invalid` | 400 | no | legacy_request_invalid | haas-protocol（shim 不可映射） |
 | `haas_unsupported_base` | 422 | no | unsupported_base | harness-registry |
 | `haas_tool_schema_unsupported` | 422 | no | tool_schema_unsupported | model-proxy |
+| `haas_profile_not_found` | 404 | no | profile_not_found | harness-profile |
+| `haas_profile_conflict` | 409 | no | profile_conflict | harness-profile |
+| `haas_profile_rebind_required` | 409 | no | profile_rebind_required | harness-profile / session-runtime |
+| `haas_agents_md_invalid` | 422 | no | agents_md_invalid | harness-profile / mcp-tool-skill-runtime |
 
 ## 3. Session / Invocation
 
@@ -41,11 +45,20 @@ Last reviewed: 2026-08-26
 |------|------|-----------|------------|----------|
 | `session_busy` | 409 | yes | session_busy | session-runtime（同 session 并发 run） |
 | `session_expired` | 410 | no | session_expired | session-runtime |
+| `haas_session_read_too_large` | 413 | no | session_read_too_large | session-runtime / event-log-sse |
 | `haas_offset_expired` | 410 | no | offset_expired | event-log-sse（HaaS native replay cursor 过期） |
+| `haas_execution_evidence_expired` | 410 | no | execution_evidence_expired | security-boundary / session-runtime |
 | `haas_cancel_unsupported` | 422 | no | cancel_unsupported | harness-adapter |
+| `haas_invocation_not_running` | 409 | no | invocation_not_running | session-runtime（Pause 与自然终态竞态失败或目标已非 running） |
+| `haas_resume_required` | 409 | no | resume_required | session-runtime（session 存在可恢复 interrupted 源时调用普通 run） |
+| `haas_invocation_not_resumable` | 409 | no | invocation_not_resumable | session-runtime / harness-adapter（源已过期、非 interrupted、已继续/取消或 native state 不可用） |
+| `haas_profile_rebind_unsupported` | 409 | no | profile_rebind_unsupported | harness-profile / manager-delegation（delegated session 改用 delegated policy 更新路径） |
 | `haas_delegated_session_conflict` | 409 | no | delegated_session_binding_conflict | manager-delegation |
 | `haas_approval_not_found` | 404 | no | approval_not_found | manager-delegation / session-runtime |
 | `haas_approval_state_conflict` | 409 | no | approval_state_conflict | manager-delegation / session-runtime |
+| `haas_input_request_not_found` | 404 | no | input_request_not_found | session-runtime / harness-adapter |
+| `haas_input_request_state_conflict` | 409 | no | input_request_state_conflict | session-runtime / harness-adapter |
+| `haas_interaction_unsupported` | 422 | no | interaction_unsupported | harness-adapter / manager backend |
 
 ## 4. Policy 与安全
 
@@ -54,6 +67,7 @@ Last reviewed: 2026-08-26
 | `haas_policy_denied` | 403 | no | policy_denied | policy-controller |
 | `haas_policy_invalid` | 400 | no | policy_invalid | policy-controller |
 | `haas_policy_unsupported` | 422 | no | policy_unsupported | policy-controller |
+| `haas_policy_revision_conflict` | 409 | no | policy_revision_conflict | session-runtime / policy-controller |
 | `haas_url_not_allowed` | 403 | no | network_host_not_allowed | security-boundary（SSRF/egress） |
 | `haas_secret_input_invalid` | 400 | no | secret_input_invalid | security-boundary |
 | `haas_provider_source_invalid` | 422 | no | provider_source_invalid | harness-registry / security-boundary |
@@ -67,7 +81,7 @@ Last reviewed: 2026-08-26
 | `haas_adapter_unavailable` | 503 | yes | adapter_unavailable | harness-adapter |
 | `haas_adapter_incompatible` | 503 | no | adapter_incompatible | harness-adapter（schema drift） |
 | `haas_adapter_overloaded` | 429 | yes | adapter_overloaded | harness-adapter |
-| `haas_adapter_error` | 502 | yes | adapter_error | harness-adapter（原生错误泛型） |
+| `haas_adapter_error` | 502 | yes | adapter_error | harness-adapter（仅 pre-acceptance probe/preflight failure；accepted invocation failure 使用 terminal event） |
 
 ## 6. Model / MCP / Provider
 
@@ -76,6 +90,8 @@ Last reviewed: 2026-08-26
 | `haas_model_unavailable` | 422 | no | model_unavailable | harness-registry |
 | `haas_provider_error` | 502 | yes | provider_error | model-proxy |
 | `haas_provider_timeout` | 504 | yes | provider_timeout | model-proxy（stream idle 耗尽） |
+| `haas_model_proxy_token_invalid` | acceptance 前 502；accepted 后 HTTP 200 terminal | yes | model_proxy_token_invalid | model-proxy（active invocation capability 被拒且刷新失败） |
+| `haas_model_proxy_token_expired` | acceptance 前 502；accepted 后 HTTP 200 terminal | yes | model_proxy_token_expired | model-proxy（active invocation capability 过期且刷新失败） |
 | `haas_mcp_unavailable` | 503 | yes | mcp_unavailable | mcp-tool-skill-runtime（required MCP 不可用） |
 
 ## 7. Sandbox / Runtime
@@ -105,6 +121,8 @@ Last reviewed: 2026-08-26
 | `haas_idempotency_conflict` | 409 | no | idempotency_conflict | session-runtime / stores（同 key 不同 request hash） |
 | `haas_identity_unavailable` | 503 | yes | identity_unavailable | identity |
 
+| `haas_idempotency_expired` | 410 | no | idempotency_expired | session-runtime / stores（确认执行 replay 过期；Manager 下次使用自动新 attempt，不由后台 timer 触发） |
+
 ## 9. Artifact
 
 | code | HTTP | retryable | safeReason | 来源组件 |
@@ -119,3 +137,4 @@ Last reviewed: 2026-08-26
    对 429/409 可选提供。
 2. 新增错误码必须先更新本目录，再实现；不得在组件内私自新增稳定码。
 3. 所有 `safeReason`/`detail` 不得含 secret、内部 host、绝对路径、stack trace。
+4. 正常 accepted execution failure 不是 HTTP error-code response，而是 HTTP 200 ADK terminal event 与 typed native terminal event。`haasError.accepted=true` 只用于无法持久化 required terminal evidence 等 post-acceptance integrity failure，并且必须携带安全 `invocationId`。 对 accepted integrity error，`retryable=true` 只允许 readback 或使用同一 idempotency key replay，绝不允许用新 key 自动提交。

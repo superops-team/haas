@@ -48,9 +48,7 @@ class MemorySettingsStore:
         rules = self._load().get("user_rules", "")
         return rules if isinstance(rules, str) else ""
 
-    def set(
-        self, *, enabled: Optional[bool] = None, user_rules: Optional[str] = None
-    ) -> dict:
+    def set(self, *, enabled: Optional[bool] = None, user_rules: Optional[str] = None) -> dict:
         with self._lock:
             data = self._load()
             if enabled is not None:

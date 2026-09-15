@@ -3,6 +3,7 @@
 Offline unit tests cover sandbox projection. Loopback integration tests drive
 the full turn lifecycle against an in-process fake app-server (no real Codex).
 """
+
 from __future__ import annotations
 
 import json
@@ -10,12 +11,18 @@ from typing import Any
 
 import pytest
 
+from haas.execution_evidence import ExecutionEvidenceStore
 from haas.harnesses.base import (
     CancelTurnRequest,
     PrepareSessionRequest,
     StartTurnRequest,
+    TurnHandle,
 )
-from haas.harnesses.codex_app_server.adapter import CodexAdapter
+from haas.harnesses.codex_app_server.adapter import (
+    CodexAdapter,
+    _terminal_failure_details,
+    _TurnContext,
+)
 from haas.harnesses.codex_app_server.sandbox import (
     SandboxPolicyError,
     to_thread_sandbox_mode,
@@ -32,6 +39,239 @@ def test_thread_sandbox_mode_mapping() -> None:
     assert to_thread_sandbox_mode("workspace_write") == "workspace-write"
     assert to_thread_sandbox_mode("read-only") == "read-only"
     assert to_thread_sandbox_mode("danger-full-access") == "danger-full-access"
+
+
+def test_terminal_failure_details_are_stable_redacted_and_recoverable() -> None:
+    secret_error = "provider rejected api_key=abcdefghijklmnop"  # haas-secret-ignore
+    notification = {
+        "method": "turn/completed",
+        "params": {
+            "turn": {
+                "status": "failed",
+                "error": {
+                    "message": secret_error,
+                    "codexErrorInfo": "rateLimitExceeded",
+                },
+            }
+        },
+    }
+
+    code, reason, retryable = _terminal_failure_details(notification)
+
+    assert code == "haas_rate_limited"
+    assert reason == "provider rejected api_key=[REDACTED]"
+    assert retryable is True
+
+
+def test_command_output_delta_accumulates_in_ephemeral_evidence() -> None:
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    store = ExecutionEvidenceStore(clock_ms=lambda: 1_789_263_000_000)
+    adapter.bind_execution_evidence_store(store)
+    ctx = _TurnContext(
+        turn_id="turn_1", session_id="hsess_1", invocation_id="inv_1",
+        thread_id="thread_1", codex_turn_id="codex_turn_1", timeout_seconds=30,
+        principal_id="p_1", user_id="u_1", app_name="chrn_1",
+    )
+    adapter._to_harness_event(
+        {
+            "method": "item/started",
+            "params": {"item": {
+                "id": "call_1", "type": "commandExecution",
+                "command": "printf hello", "cwd": "/workspace/project",
+            }},
+        },
+        ctx,
+    )
+    adapter._to_harness_event(
+        {
+            "method": "item/commandExecution/outputDelta",
+            "params": {"itemId": "call_1", "delta": "API_KEY="},
+        },
+        ctx,
+    )
+    adapter._to_harness_event(
+        {
+            "method": "item/commandExecution/outputDelta",
+            "params": {"itemId": "call_1", "delta": "top-secret\nhello"},
+        },
+        ctx,
+    )
+
+    evidence_ref = adapter._command_evidence_refs[("turn_1", "call_1")]
+    assert store.get(evidence_ref).output == "API_KEY=[REDACTED]\nhello"
+
+
+def test_command_output_delta_keeps_100001_byte_evidence_complete() -> None:
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    store = ExecutionEvidenceStore(clock_ms=lambda: 1_789_263_000_000)
+    adapter.bind_execution_evidence_store(store)
+    ctx = _TurnContext(
+        turn_id="turn_1", session_id="hsess_1", invocation_id="inv_1",
+        thread_id="thread_1", codex_turn_id="codex_turn_1", timeout_seconds=30,
+        principal_id="p_1", user_id="u_1", app_name="chrn_1",
+    )
+    adapter._to_harness_event(
+        {
+            "method": "item/started",
+            "params": {"item": {
+                "id": "call_1", "type": "commandExecution",
+                "command": "python3 -c 'print(\"x\" * 100000)'",
+                "cwd": "/workspace/project",
+            }},
+        },
+        ctx,
+    )
+    output = "x" * 100_000 + "\n"
+    adapter._to_harness_event(
+        {
+            "method": "item/commandExecution/outputDelta",
+            "params": {"itemId": "call_1", "delta": output},
+        },
+        ctx,
+    )
+
+    evidence_ref = adapter._command_evidence_refs[("turn_1", "call_1")]
+    assert store.get(evidence_ref).output == output
+    assert len(store.get(evidence_ref).output.encode("utf-8")) == 100_001
+
+
+def test_command_completion_does_not_replace_more_complete_delta_evidence() -> None:
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    store = ExecutionEvidenceStore(clock_ms=lambda: 1_789_263_000_000)
+    adapter.bind_execution_evidence_store(store)
+    ctx = _TurnContext(
+        turn_id="turn_1", session_id="hsess_1", invocation_id="inv_1",
+        thread_id="thread_1", codex_turn_id="codex_turn_1", timeout_seconds=30,
+        principal_id="p_1", user_id="u_1", app_name="chrn_1",
+    )
+    adapter._to_harness_event(
+        {"method": "item/started", "params": {"item": {
+            "id": "call_1", "type": "commandExecution",
+            "command": "produce-output", "cwd": "/workspace/project",
+        }}},
+        ctx,
+    )
+    complete_output = "first\nsecond\nthird\n"
+    adapter._to_harness_event(
+        {"method": "item/commandExecution/outputDelta",
+         "params": {"itemId": "call_1", "delta": complete_output}},
+        ctx,
+    )
+    evidence_ref = adapter._command_evidence_refs[("turn_1", "call_1")]
+
+    adapter._to_harness_event(
+        {"method": "item/completed", "params": {"item": {
+            "id": "call_1", "type": "commandExecution",
+            "command": "produce-output", "cwd": "/workspace/project",
+            "status": "completed", "exitCode": 0,
+            "aggregatedOutput": "third\n",
+        }}},
+        ctx,
+    )
+
+    assert store.get(evidence_ref).output == complete_output
+
+
+@pytest.mark.asyncio
+async def test_finalize_turn_clears_private_command_accumulators() -> None:
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    store = ExecutionEvidenceStore(clock_ms=lambda: 1_789_263_000_000)
+    adapter.bind_execution_evidence_store(store)
+    ctx = _TurnContext(
+        turn_id="turn_1", session_id="hsess_1", invocation_id="inv_1",
+        thread_id="thread_1", codex_turn_id="codex_turn_1", timeout_seconds=30,
+        principal_id="p_1", user_id="u_1", app_name="chrn_1",
+    )
+    adapter._turn_contexts[ctx.turn_id] = ctx
+    adapter._to_harness_event(
+        {"method": "item/started", "params": {"item": {
+            "id": "call_1", "type": "commandExecution",
+            "command": "printf secret", "cwd": "/workspace/project",
+        }}},
+        ctx,
+    )
+    adapter._to_harness_event(
+        {"method": "item/commandExecution/outputDelta",
+         "params": {"itemId": "call_1", "delta": "temporary raw output"}},
+        ctx,
+    )
+
+    await adapter.finalize_turn(
+        TurnHandle(turnId="turn_1", sessionId="hsess_1", invocationId="inv_1")
+    )
+
+    assert not adapter._command_evidence_output
+    assert not adapter._command_evidence_refs
+    assert not adapter._command_evidence_truncated
+
+
+def test_model_call_correlation_is_stable_across_items_tools_and_usage() -> None:
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    ctx = _TurnContext(
+        turn_id="turn_1", session_id="hsess_1", invocation_id="inv_1",
+        thread_id="thread_1", codex_turn_id="codex_turn_1", timeout_seconds=30,
+    )
+
+    reasoning = adapter._to_harness_event(
+        {"method": "item/reasoning/summaryTextDelta",
+         "params": {"itemId": "reason_1", "summaryIndex": 0, "delta": "Inspect"}},
+        ctx,
+    )
+    message = adapter._to_harness_event(
+        {"method": "item/agentMessage/delta",
+         "params": {"itemId": "msg_1", "delta": "I will inspect."}},
+        ctx,
+    )
+    tool = adapter._to_harness_event(
+        {"method": "item/started",
+         "params": {"item": {"id": "call_1", "type": "commandExecution",
+                                "command": "pwd", "status": "inProgress"}}},
+        ctx,
+    )
+    usage = adapter._to_harness_event(
+        {"method": "thread/tokenUsage/updated",
+         "params": {"tokenUsage": {
+             "last": {"inputTokens": 10, "cachedInputTokens": 0,
+                      "cacheWriteInputTokens": 0, "outputTokens": 5,
+                      "reasoningOutputTokens": 2, "totalTokens": 15},
+             "total": {"inputTokens": 10, "cachedInputTokens": 0,
+                       "cacheWriteInputTokens": 0, "outputTokens": 5,
+                       "reasoningOutputTokens": 2, "totalTokens": 15},
+         }}},
+        ctx,
+    )
+    tool_done = adapter._to_harness_event(
+        {"method": "item/completed",
+         "params": {"item": {"id": "call_1", "type": "commandExecution",
+                                "command": "pwd", "status": "completed", "exitCode": 0}}},
+        ctx,
+    )
+    result = adapter._to_harness_event(
+        {"method": "item/agentMessage/delta",
+         "params": {"itemId": "msg_2", "delta": "Done."}},
+        ctx,
+    )
+    result_done = adapter._to_harness_event(
+        {"method": "item/completed",
+         "params": {"item": {"id": "msg_2", "type": "agentMessage",
+                                "text": "Done.", "phase": "final_answer"}}},
+        ctx,
+    )
+
+    assert reasoning and message and tool and usage and tool_done and result and result_done
+    first_call_ids = {
+        reasoning.actions["haas"]["modelCallId"],
+        message.actions["haas"]["modelCallId"],
+        tool.actions["artifactDelta"]["modelCallId"],
+        usage.actions["haas"]["modelCallId"],
+        tool_done.actions["artifactDelta"]["modelCallId"],
+    }
+    assert first_call_ids == {"mcall_0001"}
+    assert result.actions["haas"]["modelCallId"] == "mcall_0002"
+    assert result_done.actions["haas"] == {
+        "itemId": "msg_2", "modelCallId": "mcall_0002",
+        "messagePhase": "final_answer",
+    }
 
 
 def test_thread_sandbox_mode_rejects_unknown() -> None:
@@ -217,7 +457,7 @@ async def test_codex_adapter_cancel() -> None:
         result = await adapter.cancel_turn(
             CancelTurnRequest(turnId="turn_1", sessionId="hsess_1", invocationId="inv_1")
         )
-        assert result.status == "cancelled"
+        assert result.status == "accepted"
         assert interrupt_sent == [{"threadId": "thr_1", "turnId": "codex_turn_1"}]
 
 
@@ -271,5 +511,11 @@ async def test_codex_adapter_timeout_fails_turn() -> None:
         )
         events = [event async for event in adapter.stream_events(handle)]
         assert events, "expected a terminal event"
+        assert events[-1].actions["stateDelta"] == {
+            "status": "failed",
+            "code": "haas_request_timeout",
+            "reason": "Codex turn timed out",
+            "retryable": False,
+        }
         result = await adapter.finalize_turn(handle)
         assert result.status == "failed"

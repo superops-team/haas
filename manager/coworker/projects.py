@@ -23,7 +23,9 @@ def _git_common_dir(workspace: Path) -> Optional[Path]:
     try:
         out = subprocess.run(
             ["git", "-C", str(workspace), "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -71,7 +73,7 @@ def project_label(key: str, *, home: Optional[str] = None) -> dict[str, Any]:
     if shown == h:
         shown = "~"
     elif shown.startswith(h + "/"):
-        shown = "~" + shown[len(h):]
+        shown = "~" + shown[len(h) :]
     return {
         "kind": "git" if is_git else "folder",
         "label": p.name if is_git else shown,
@@ -170,9 +172,11 @@ def resolve_memory_key(
     if not workspace:
         return None
     derived = project_key(workspace)
-    path_key = str(Path(workspace).expanduser().resolve()) if Path(
-        workspace
-    ).expanduser().exists() else str(Path(workspace).expanduser())
+    path_key = (
+        str(Path(workspace).expanduser().resolve())
+        if Path(workspace).expanduser().exists()
+        else str(Path(workspace).expanduser())
+    )
     if memory_store is not None and derived != path_key:
         try:
             memory_store.rekey_workspace(path_key, derived)
@@ -199,9 +203,11 @@ def resolve_board_space(
     if not workspace:
         return None
     derived = project_key(workspace)
-    path_key = str(Path(workspace).expanduser().resolve()) if Path(
-        workspace
-    ).expanduser().exists() else str(Path(workspace).expanduser())
+    path_key = (
+        str(Path(workspace).expanduser().resolve())
+        if Path(workspace).expanduser().exists()
+        else str(Path(workspace).expanduser())
+    )
     if team_store is not None and derived != path_key:
         try:
             team_store.rekey_space(path_key, derived)

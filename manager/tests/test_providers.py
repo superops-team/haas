@@ -421,9 +421,14 @@ def test_ark_curated_models_are_strict_allowlists():
         "dola-seed-2-1-turbo-260628",
     ]
     assert models_for_provider("volcengine-ark") == [
-        "doubao-seed-2.1-turbo",
-        "doubao-seed-1.6-250615",
+        "doubao-seed-2-1-turbo-260628",
+        "doubao-seed-1-6-250615",
     ]
+    from coworker.providers.registry import get_descriptor
+    from coworker.server.manager import SessionManager
+
+    assert get_descriptor("volcengine-ark").recommended_model == "doubao-seed-2-1-turbo-260628"
+    assert SessionManager.COMPAT_MODELS["volcengine-ark"] == models_for_provider("volcengine-ark")
     assert models_for_provider("ark-agent-plan-cn") == [
         "doubao-seed-evolving",
         "doubao-seed-2.1-turbo",
@@ -436,8 +441,8 @@ def test_ark_models_route_and_get_verified_agent_capabilities():
     models = (
         "ark:dola-seed-evolving-latest-version",
         "ark:dola-seed-2-1-turbo-260628",
-        "volcengine-ark:doubao-seed-2.1-turbo",
-        "volcengine-ark:doubao-seed-1.6-250615",
+        "volcengine-ark:doubao-seed-2-1-turbo-260628",
+        "volcengine-ark:doubao-seed-1-6-250615",
         "ark-agent-plan-cn:doubao-seed-evolving",
         "ark-agent-plan-cn:doubao-seed-2.1-turbo",
     )

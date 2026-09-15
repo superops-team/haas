@@ -57,7 +57,6 @@ def buttons_for(item) -> list[Button]:
         # One button per option; the resolution IS the chosen option's label (what the agent
         # gets). Rich {label, description, …} options button as their label.
         return [
-            Button(option_label(opt), encode(item.id, option_label(opt)))
-            for opt in item.options
+            Button(option_label(opt), encode(item.id, option_label(opt))) for opt in item.options
         ]
     return []

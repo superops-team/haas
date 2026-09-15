@@ -99,13 +99,15 @@ def board_tools(
         """List work items on the board, optionally filtered by state
         (open/in_progress/blocked/review/done/canceled) or assignee."""
         try:
-            return {"items": store.list_items(space, actor, state=state or None, assignee=assignee or None)}
+            return {
+                "items": store.list_items(
+                    space, actor, state=state or None, assignee=assignee or None
+                )
+            }
         except (BoardError, ValueError) as error:
             return {"error": str(error)}
 
-    def transition(
-        item: int, to: str, comment: str = "", refs: Optional[list] = None
-    ) -> dict:
+    def transition(item: int, to: str, comment: str = "", refs: Optional[list] = None) -> dict:
         """Move a work item to a new state. Workers move their own item to
         in_progress, blocked, or review (attach the blocker or a hand-off summary
         as `comment`, and artifact pointers — branch, report, session — as

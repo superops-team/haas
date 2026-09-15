@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-10
 Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -56,13 +56,13 @@ Artifact Store 管理 HaaS 输入文件、session container 文件索引、agent
 
 | Method | Path | 说明 |
 |--------|------|------|
-| POST | `/v1/haas/files` | 上传一个 input file，返回 `file` 对象 |
+| POST | `/v1/haas/files` | 使用可选 `Idempotency-Key` 上传一个 input file，返回 `file` 对象 |
 | GET | `/v1/haas/sessions/{session_id}/artifacts` | 列出 session 所有 artifacts |
 | GET | `/v1/haas/sessions/{session_id}/artifacts/archive` | 下载 artifacts zip |
 | GET | `/v1/haas/files/{file_id}/content` | 下载 artifact bytes |
 | GET | `/v1/haas/files/{file_id}/pdf` | 可选 PDF preview（未实现返回 `501 haas_preview_unavailable`） |
 
-inline 文件通过 ADK `newMessage.parts[].inlineData` 传入，不走上传端点。`fileId` 引用已上传文件是 HaaS 扩展。
+inline 文件通过 ADK `newMessage.parts[].inlineData` 传入，不走上传端点。`fileId` 引用已上传文件是 HaaS 扩展。multipart 上传的幂等 request hash 包含规范化 metadata 与上传字节摘要；同一 key + 同一 hash 返回第一次创建的 `File`，同一 key 搭配不同字节或 metadata 返回 `409 haas_idempotency_conflict`。
 
 ### 5.2 Internal API
 
@@ -202,6 +202,7 @@ Metrics:
 
 - Unit：path canonicalization、symlink rejection、size/count limits、MIME inference。
 - Integration：upload -> task input materialization -> artifact list -> download。
+- Idempotency：同一 key 与字节/metadata hash 的重复上传返回第一次创建的 `File`；同一 key 搭配不同字节或 metadata 返回 `409 haas_idempotency_conflict`，且不创建第二个文件。
 - Security：encoded `../` traversal and cross-principal file access return not found/rejected。
 - Compatibility：ADK inline file（`inlineData`）round-trip、download 与 archive 行为。
 - E2E：Codex writes a file under allowed output root and response annotation can download it。

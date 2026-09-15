@@ -56,9 +56,7 @@ class RiskOverrideStore:
         # Trust entries: {"pattern": "..."} dicts (the written form) or bare strings.
         seen: set[str] = set()
         for entry in data.get("trust", []) or []:
-            pattern = (
-                str(entry.get("pattern", "")) if isinstance(entry, dict) else str(entry)
-            )
+            pattern = str(entry.get("pattern", "")) if isinstance(entry, dict) else str(entry)
             if pattern and pattern not in seen:
                 seen.add(pattern)
                 self._trust.append(pattern)
@@ -95,10 +93,7 @@ class RiskOverrideStore:
         self.path.write_text(
             json.dumps(
                 {
-                    "rules": [
-                        {"pattern": r.pattern, "risk": r.risk.value}
-                        for r in self._rules
-                    ],
+                    "rules": [{"pattern": r.pattern, "risk": r.risk.value} for r in self._rules],
                     "trust": [{"pattern": p} for p in self._trust],
                 },
                 indent=2,

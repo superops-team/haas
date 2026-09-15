@@ -21,7 +21,9 @@ hides the window while keeping stdio intact.
 """
 
 import os
+import subprocess
 import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
@@ -29,6 +31,10 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_sub
 # (<repo>/packaging). Derive everything else from it — no hardcoded paths.
 PACKAGING = SPECPATH
 ROOT = os.path.dirname(PACKAGING)
+REPO_ROOT = os.path.dirname(ROOT)
+for path in (ROOT, REPO_ROOT):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -41,7 +47,29 @@ hiddenimports = []
 datas = []
 binaries = []
 
-for pkg in ("coworker", "aisuite", "mcp", "ddgs", "croniter", "docstring_parser"):
+codex_input = os.environ.get("COWORKER_CODEX_BIN")
+if not codex_input:
+    raise SystemExit("COWORKER_CODEX_BIN must point to the native Codex 0.152.1 executable")
+codex_bin = Path(codex_input).expanduser().resolve()
+if not codex_bin.is_file() or not os.access(codex_bin, os.X_OK):
+    raise SystemExit("COWORKER_CODEX_BIN is not executable")
+with codex_bin.open("rb") as source:
+    if source.read(2) == b"#!":
+        raise SystemExit("COWORKER_CODEX_BIN must be a native executable, not a wrapper script")
+version = subprocess.check_output([str(codex_bin), "--version"], text=True, timeout=10).strip()
+if version != "codex-cli 0.152.1":
+    raise SystemExit("COWORKER_CODEX_BIN must report codex-cli 0.152.1")
+expected_name = "codex.exe" if IS_WINDOWS else "codex"
+if codex_bin.name != expected_name:
+    raise SystemExit(f"COWORKER_CODEX_BIN must be named {expected_name}")
+binaries.append((str(codex_bin), "codex"))
+code_mode_host = codex_bin.with_name(
+    "codex-code-mode-host.exe" if IS_WINDOWS else "codex-code-mode-host"
+)
+if code_mode_host.is_file():
+    binaries.append((str(code_mode_host), "codex"))
+
+for pkg in ("coworker", "haas", "aisuite", "mcp", "ddgs", "croniter", "docstring_parser"):
     hiddenimports += collect_submodules(pkg)
 
 # Builtin personas ship as DATA, not code: personas/builtin/<id>/manifest.md plus their
@@ -51,6 +79,20 @@ for pkg in ("coworker", "aisuite", "mcp", "ddgs", "croniter", "docstring_parser"
 # PyInstaller needs its own instruction.) Keep this even if the persona set changes — it
 # collects whatever non-.py files the package carries.
 datas += collect_data_files("coworker")
+datas += collect_data_files("haas")
+datas += [
+    (
+        os.path.join(
+            REPO_ROOT,
+            "tests",
+            "fixtures",
+            "codex",
+            "schema",
+            "codex-cli-0.152.1.json",
+        ),
+        os.path.join("tests", "fixtures", "codex", "schema"),
+    )
+]
 
 if not INCLUDE_EXPERIMENTAL:
     hiddenimports = [
@@ -97,7 +139,7 @@ for pkg in ("slack_bolt", "telegram"):  # [messaging] extra — optional
 
 a = Analysis(
     [os.path.join(PACKAGING, "server_entry.py")],
-    pathex=[ROOT],
+    pathex=[ROOT, REPO_ROOT],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

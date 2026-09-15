@@ -40,9 +40,7 @@ _SCHEMA = {
 }
 
 
-def provider_name(
-    secrets: Optional[SecretStore] = None, *, default: str = "duckduckgo"
-) -> str:
+def provider_name(secrets: Optional[SecretStore] = None, *, default: str = "duckduckgo") -> str:
     """The configured provider's NAME, without building (or validating) the provider.
     Same resolution order as `resolve_provider`. Used by the web_search approval card,
     which names the live destination (§1.9: "currently: ‹name›", never "default:")."""

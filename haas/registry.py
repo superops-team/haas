@@ -3,6 +3,7 @@
 Implements specs/harness-registry §4 (resolution + scope), §5.1.1 (immutable
 fields), §5.1.2 (base availability) and §5.1.3 (scope binding).
 """
+
 from __future__ import annotations
 
 import uuid
@@ -129,11 +130,7 @@ class HarnessRegistry:
         return record
 
     def list_active(self, principal: Principal) -> list[HarnessRecord]:
-        return [
-            h
-            for h in self.store.list_harnesses(account_of(principal))
-            if h.status == "active"
-        ]
+        return [h for h in self.store.list_harnesses(account_of(principal)) if h.status == "active"]
 
     def list_apps(self, principal: Principal) -> list[str]:
         return [h.id for h in self.list_active(principal)]
@@ -145,11 +142,7 @@ class HarnessRegistry:
         when its id is guessed correctly.
         """
         by_id = self.store.get_harness(app_name)
-        if (
-            by_id is not None
-            and by_id.status == "active"
-            and self._visible(by_id, principal)
-        ):
+        if by_id is not None and by_id.status == "active" and self._visible(by_id, principal):
             return by_id
 
         matches = [h for h in self.list_active(principal) if h.name == app_name]
@@ -182,9 +175,7 @@ class HarnessRegistry:
         )
         return self.store.save_harness(record)
 
-    def update(
-        self, principal: Principal, harness_id: str, body: dict[str, Any]
-    ) -> HarnessRecord:
+    def update(self, principal: Principal, harness_id: str, body: dict[str, Any]) -> HarnessRecord:
         current = self.get_scoped(principal, harness_id)
         self._reject_immutable_conflicts(current, body)
         base = body.get("base")
@@ -208,9 +199,7 @@ class HarnessRegistry:
         if base not in self.known_bases:
             raise UnsupportedBaseError(base)
 
-    def _reject_immutable_conflicts(
-        self, current: HarnessRecord, body: dict[str, Any]
-    ) -> None:
+    def _reject_immutable_conflicts(self, current: HarnessRecord, body: dict[str, Any]) -> None:
         """Matching values are accepted so read-modify-write stays idempotent."""
         for name in IMMUTABLE_FIELDS:
             if name not in body:
@@ -242,9 +231,7 @@ def _mutable_fields(body: dict[str, Any]) -> dict[str, Any]:
             fields[name] = validate_skills(items) if name == "skills" else items
     if "disabledTools" in body:
         value = body["disabledTools"]
-        fields["disabledTools"] = (
-            [str(v) for v in value] if isinstance(value, list) else []
-        )
+        fields["disabledTools"] = [str(v) for v in value] if isinstance(value, list) else []
     for name in ("maxStep", "timeoutSeconds"):
         if name in body:
             value = body[name]
@@ -257,16 +244,35 @@ def _mutable_fields(body: dict[str, Any]) -> dict[str, Any]:
 def _provider_from(value: Any) -> ProviderConfig | None:
     if not isinstance(value, dict):
         return None
-    return ProviderConfig(
+    provider = ProviderConfig(
+        providerId=str(value.get("providerId") or ""),
         name=str(value.get("name") or "openai-compatible"),
         baseUrl=str(value.get("baseUrl") or ""),
         wireApi=str(value.get("wireApi") or "responses"),
+        apiType=str(value.get("apiType") or ""),
         # Only the reference is stored; raw secrets never enter the registry
         # (specs/harness-registry §8).
         credentialRef=str(value.get("credentialRef") or ""),
         credentialFingerprint=str(value.get("credentialFingerprint") or ""),
         allowlistRuleId=str(value.get("allowlistRuleId") or ""),
     )
+    validate_provider_config(provider)
+    return provider
+
+
+def validate_provider_config(provider: ProviderConfig) -> None:
+    """Validate the ProviderRoute discriminated contract without guessing."""
+    if not provider.providerId:
+        raise ValueError("providerId is required")
+    if not provider.name:
+        raise ValueError("provider name is required")
+    if provider.wireApi not in {"openai-compatible", "responses", "agent-plan"}:
+        raise ValueError("unsupported wireApi")
+    if provider.wireApi == "responses":
+        if provider.apiType != "responses":
+            raise ValueError("responses wireApi requires apiType=responses")
+    elif provider.apiType not in {"responses", "chat_completions"}:
+        raise ValueError(f"{provider.wireApi} wireApi requires apiType")
 
 
 def harness_to_dict(harness: HarnessRecord) -> dict[str, Any]:
@@ -274,9 +280,11 @@ def harness_to_dict(harness: HarnessRecord) -> dict[str, Any]:
     provider: dict[str, Any] | None = None
     if harness.provider is not None:
         provider = {
+            "providerId": harness.provider.providerId,
             "name": harness.provider.name,
             "baseUrl": harness.provider.baseUrl,
             "wireApi": harness.provider.wireApi,
+            "apiType": harness.provider.apiType,
             "credentialRef": harness.provider.credentialRef,
             "credentialFingerprint": harness.provider.credentialFingerprint,
             "allowlistRuleId": harness.provider.allowlistRuleId,
@@ -326,9 +334,7 @@ def seed_codex(
 
     seeded: list[HarnessRecord] = []
     for index, (tenant_id, workspace_id) in enumerate(targets):
-        harness_id = (
-            "chrn_codex_default" if index == 0 else f"chrn_codex_default_{index}"
-        )
+        harness_id = "chrn_codex_default" if index == 0 else f"chrn_codex_default_{index}"
         seeded.append(
             registry.save(
                 HarnessRecord(

@@ -1,4 +1,5 @@
 """Artifact Store tests: path safety + register/list/get."""
+
 from __future__ import annotations
 
 import pytest

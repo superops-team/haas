@@ -4,6 +4,7 @@ Complements test_security_paths.py: that file pins the *rejection* side of
 narrowing; this one pins the authorization decisions and the widening branches
 that only run once a layer granted delegation.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -27,9 +28,7 @@ def _layer(**kw) -> PolicyLayer:
 
 
 def _compile(*layers: PolicyLayer):
-    return PolicyController().compile(
-        PolicyCompileInput(scope=PolicyScope(), layers=list(layers))
-    )
+    return PolicyController().compile(PolicyCompileInput(scope=PolicyScope(), layers=list(layers)))
 
 
 # --- post-delegation widening ----------------------------------------------
@@ -42,8 +41,7 @@ def test_network_allow_and_default_action_widen_after_delegation() -> None:
             network=NetworkPolicy(defaultAction="deny", allow=["a.com"]),
             delegation=True,
         ),
-        _layer(network=NetworkPolicy(defaultAction="allow",
-                                     allow=["a.com", "b.com"])),
+        _layer(network=NetworkPolicy(defaultAction="allow", allow=["a.com", "b.com"])),
     )
     assert result.network.defaultAction == "allow"
     assert "b.com" in result.network.allow
@@ -83,8 +81,7 @@ def net_policy():
     return _compile(
         _layer(
             workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
-            network=NetworkPolicy(defaultAction="deny",
-                                  allow=["https://api.example.com"]),
+            network=NetworkPolicy(defaultAction="deny", allow=["https://api.example.com"]),
         )
     )
 
@@ -111,17 +108,12 @@ def test_authorize_network_rejects_missing_host(net_policy) -> None:
 
 
 def test_authorize_network_rejects_unlisted_host(net_policy) -> None:
-    assert (
-        PolicyController().authorize_network(net_policy, "https://evil.com/x").allowed
-        is False
-    )
+    assert PolicyController().authorize_network(net_policy, "https://evil.com/x").allowed is False
 
 
 def test_authorize_network_rejects_scheme_mismatch(net_policy) -> None:
     # Host matches the allowlist entry but the scheme does not.
-    decision = PolicyController().authorize_network(
-        net_policy, "http://api.example.com/x"
-    )
+    decision = PolicyController().authorize_network(net_policy, "http://api.example.com/x")
     assert decision.allowed is False
 
 
@@ -130,16 +122,11 @@ def test_authorize_network_port_must_match_when_pinned() -> None:
     ported = _compile(
         _layer(
             workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
-            network=NetworkPolicy(defaultAction="deny",
-                                  allow=["https://api.example.com:443"]),
+            network=NetworkPolicy(defaultAction="deny", allow=["https://api.example.com:443"]),
         )
     )
-    assert controller.authorize_network(
-        ported, "https://api.example.com:8443/x"
-    ).allowed is False
-    assert controller.authorize_network(
-        ported, "https://api.example.com:443/x"
-    ).allowed is True
+    assert controller.authorize_network(ported, "https://api.example.com:8443/x").allowed is False
+    assert controller.authorize_network(ported, "https://api.example.com:443/x").allowed is True
 
 
 def test_authorize_network_pinned_port_rejects_default_port_omission() -> None:
@@ -147,19 +134,12 @@ def test_authorize_network_pinned_port_rejects_default_port_omission() -> None:
     ported = _compile(
         _layer(
             workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
-            network=NetworkPolicy(defaultAction="deny",
-                                  allow=["http://api.example.com:8080"]),
+            network=NetworkPolicy(defaultAction="deny", allow=["http://api.example.com:8080"]),
         )
     )
-    assert controller.authorize_network(
-        ported, "http://api.example.com/x"
-    ).allowed is False
-    assert controller.authorize_network(
-        ported, "http://api.example.com:80/x"
-    ).allowed is False
-    assert controller.authorize_network(
-        ported, "http://api.example.com:8080/x"
-    ).allowed is True
+    assert controller.authorize_network(ported, "http://api.example.com/x").allowed is False
+    assert controller.authorize_network(ported, "http://api.example.com:80/x").allowed is False
+    assert controller.authorize_network(ported, "http://api.example.com:8080/x").allowed is True
 
 
 def test_authorize_network_http_entry_without_port_rejects_non_default_port() -> None:
@@ -167,19 +147,20 @@ def test_authorize_network_http_entry_without_port_rejects_non_default_port() ->
     default_port_only = _compile(
         _layer(
             workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
-            network=NetworkPolicy(defaultAction="deny",
-                                  allow=["http://api.example.com"]),
+            network=NetworkPolicy(defaultAction="deny", allow=["http://api.example.com"]),
         )
     )
-    assert controller.authorize_network(
-        default_port_only, "http://api.example.com/x"
-    ).allowed is True
-    assert controller.authorize_network(
-        default_port_only, "http://api.example.com:80/x"
-    ).allowed is True
-    assert controller.authorize_network(
-        default_port_only, "http://api.example.com:8080/x"
-    ).allowed is False
+    assert (
+        controller.authorize_network(default_port_only, "http://api.example.com/x").allowed is True
+    )
+    assert (
+        controller.authorize_network(default_port_only, "http://api.example.com:80/x").allowed
+        is True
+    )
+    assert (
+        controller.authorize_network(default_port_only, "http://api.example.com:8080/x").allowed
+        is False
+    )
 
 
 def test_authorize_network_https_entry_without_port_rejects_non_default_port() -> None:
@@ -187,19 +168,20 @@ def test_authorize_network_https_entry_without_port_rejects_non_default_port() -
     default_port_only = _compile(
         _layer(
             workspace=WorkspacePolicy(mode="read-only", writableRoots=["/w"]),
-            network=NetworkPolicy(defaultAction="deny",
-                                  allow=["https://api.example.com"]),
+            network=NetworkPolicy(defaultAction="deny", allow=["https://api.example.com"]),
         )
     )
-    assert controller.authorize_network(
-        default_port_only, "https://api.example.com/x"
-    ).allowed is True
-    assert controller.authorize_network(
-        default_port_only, "https://api.example.com:443/x"
-    ).allowed is True
-    assert controller.authorize_network(
-        default_port_only, "https://api.example.com:8443/x"
-    ).allowed is False
+    assert (
+        controller.authorize_network(default_port_only, "https://api.example.com/x").allowed is True
+    )
+    assert (
+        controller.authorize_network(default_port_only, "https://api.example.com:443/x").allowed
+        is True
+    )
+    assert (
+        controller.authorize_network(default_port_only, "https://api.example.com:8443/x").allowed
+        is False
+    )
 
 
 def test_authorize_network_allow_all_when_default_action_allow() -> None:
@@ -221,27 +203,28 @@ def test_authorize_network_allow_all_when_default_action_allow() -> None:
 @pytest.fixture
 def ws_policy():
     return _compile(
-        _layer(workspace=WorkspacePolicy(mode="workspace-write",
-                                         writableRoots=["/w/project"]))
+        _layer(workspace=WorkspacePolicy(mode="workspace-write", writableRoots=["/w/project"]))
     )
 
 
 def test_authorize_write_inside_writable_root(ws_policy) -> None:
-    assert PolicyController().authorize_workspace_path(
-        ws_policy, "/w/project/src/main.py", "write"
-    ).allowed is True
+    assert (
+        PolicyController()
+        .authorize_workspace_path(ws_policy, "/w/project/src/main.py", "write")
+        .allowed
+        is True
+    )
 
 
 def test_authorize_write_outside_writable_root_is_denied(ws_policy) -> None:
-    assert PolicyController().authorize_workspace_path(
-        ws_policy, "/etc/passwd", "write"
-    ).allowed is False
+    assert (
+        PolicyController().authorize_workspace_path(ws_policy, "/etc/passwd", "write").allowed
+        is False
+    )
 
 
 def test_authorize_rejects_unknown_access_mode(ws_policy) -> None:
-    decision = PolicyController().authorize_workspace_path(
-        ws_policy, "/w/project/x", "execute"
-    )
+    decision = PolicyController().authorize_workspace_path(ws_policy, "/w/project/x", "execute")
     assert decision.allowed is False
     assert decision.code == "haas_policy_denied"
     assert decision.safeReason == "invalid_access"
@@ -249,9 +232,12 @@ def test_authorize_rejects_unknown_access_mode(ws_policy) -> None:
 
 def test_authorize_path_traversal_is_denied(ws_policy) -> None:
     """`..` must be canonicalized before the containment check."""
-    assert PolicyController().authorize_workspace_path(
-        ws_policy, "/w/project/../../etc/shadow", "write"
-    ).allowed is False
+    assert (
+        PolicyController()
+        .authorize_workspace_path(ws_policy, "/w/project/../../etc/shadow", "write")
+        .allowed
+        is False
+    )
 
 
 def test_authorize_read_includes_workspace_root(ws_policy) -> None:

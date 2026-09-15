@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-10
 Related specs: [Security Boundary](../security-boundary/README.zh-CN.md), [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -51,6 +51,8 @@ class Principal(TypedDict):
     principalId: str
     tenantId: str | None
     workspaceId: str | None
+    defaultUserId: str
+    allowedUserIds: list[str]
     roles: list[str]
 
 class IdentityProvider(Protocol):
@@ -76,11 +78,24 @@ class IdentityProvider(Protocol):
   "principalId": "p_abc",
   "tenantId": "tenant_1",
   "workspaceId": "workspace_1",
+  "defaultUserId": "u_123",
+  "allowedUserIds": ["u_123"],
   "roles": ["user"]
 }
 ```
 
-`userId` 不是 principal 的固定字段，而是 principal scope 下的 sub-scope：`owns(principal, user_id=...)` 判定。默认 `userId` 可由 principal 派生（`defaultUserId`），也可由 caller 显式声明并在 `owns` 中校验。
+ADK `userId` 是受控业务子身份，不是 authentication override。认证后必须得到
+`defaultUserId`；`allowedUserIds` 是普通 principal 可访问的精确集合，并且必须包含
+`defaultUserId`。Request 省略 `userId` 时由 Protocol Mapper 使用 `defaultUserId`；显式
+提供时，只有命中 `allowedUserIds`，或独立授予的 `delegate_user`/admin scope 明确允许
+目标时，`owns()` 才能通过。显式值绝不能替换 `principalId`、tenant、workspace、role
+或 token identity。
+
+`StaticTokenIdentityProvider` 必须把每个 token 映射到固定 `defaultUserId` 与显式
+allowlist。`ExternalJwtIdentityProvider` 只映射已配置并验证的 claim，不得从任意 request
+header 推导 allowlist。非法或未授权 user sub-scope 返回 404，不暴露存在性。
+
+Managed launch 的 `HAAS_STATIC_PRINCIPAL_JSON` 仅从可信进程配置解析（base64 JSON），要求上述 Principal 字段且 allowedUserIds 包含 defaultUserId，只映射配置的 token file。Bootstrap 默认 user `manager`，不是 admin。映射缺失/非法启动失败，request/project 字段不能授予 role。Token 创建/轮换由 supervisor 在认证前管理，不进入 worker container。
 
 ## 7. 运行模型与状态机
 
@@ -120,6 +135,6 @@ Metrics：`haas_identity_auth_total{outcome}`，label 低基数，不含明文�
 
 ## 11. 测试计划与验收
 
-- Unit：`authenticate` 三类输出、`owns` 判定、`is_admin`。
+- Unit：`authenticate` 三类输出、defaultUserId 派生、allowedUserIds 精确判断、独立 scope user delegation、拒绝显式 identity override、`is_admin`。
 - Integration：两 principal 互相访问 harness/session/invocation/file 全 404。
 - Security：token 明文、完整 principal 不进入日志/metrics。

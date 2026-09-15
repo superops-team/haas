@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-08-30
+Last reviewed: 2026-09-10
 
 ## 1. 组件定位
 
@@ -20,6 +20,7 @@ HaaS Sidecar API (FastAPI)
   |
   +-- Protocol Mapper (ADK <-> internal)
   +-- Harness Registry
+  +-- Harness Profile
   +-- Session Runtime
   +-- Admission Control
   +-- Event Log & SSE Replay
@@ -41,7 +42,7 @@ Harness Adapter Interface
   +-- AMP adapter               (future)
   |
   v
-Sandbox Runtime (OpenSandbox sandbox/execd/credential vault projection)
+Sandbox Runtime（共同 policy 合同：Lite Docker 或 OpenSandbox AIO）
   |
   v
 OpenSandbox AIO container runtime
@@ -52,7 +53,7 @@ OpenSandbox AIO container runtime
 1. 上游只依赖 ADK 2.0 **REST API 协议层**，不依赖任何 harness 原生协议；也不依赖 ADK 执行引擎（`BaseAgent`/WorkflowGraph）、图工作流或 ADK Web UI。
 2. `harness adapter` 是完整 agent runtime，不是 LLM provider。
 3. `configured harness` 是执行能力单位，`appName` 即 configured harness `id`。
-4. `Sandbox Runtime` 把各 harness 的执行 sandbox 统一投影到 OpenSandbox AIO 的 sandbox/execd/credential vault——这是多 harness 标准化的运行时承载体，不是只把 AIO 当 base image。
+4. `Sandbox Runtime` 提供统一 policy/isolation 合同，由 Lite Docker（默认）与可选 OpenSandbox AIO 实现。下文 AIO 专属节点仅适用于 AIO；Lite 使用 Container Runtime 定义的 private worker/broker network 和 persistent session volume。宿主控制 sidecar 拥有公共执行事实。
 5. `Admission Control` 负责服务化的配额、限流、并发与队列准入。
 6. `Manager Delegation` 定义上游 manager 如何把 session、policy、mount manifest、审批与容器恢复绑定到 HaaS 这个完整执行后端。
 7. `Stores` 是唯一持久事实源；`Identity` 是鉴权边界；`Config` 是装配契约（三者见各自 spec）。
@@ -78,11 +79,12 @@ Logo、README 顶部、指标定义与徽章发布合同见
 | 上游 | Client / Manager / SDK / CLI | 只依赖 ADK 2.0 HTTP/SSE |
 | 下游 | HaaS Protocol | 定义 public contract |
 | 下游 | Harness Registry | 管理 configured harness（ADK app） |
+| 下游 | Harness Profile | 管理 provider/MCP/skills/AGENTS.md/workspace profile 的版本化 revision |
 | 下游 | Session Runtime | 管理 session/invocation/turn |
 | 下游 | Admission Control | 配额、限流、并发、队列准入 |
 | 下游 | Manager Delegation | 面向 manager 的 delegated session binding、恢复、approval relay 和 workspace single-writer 合同 |
 | 下游 | Harness Adapter | 隔离具体 harness |
-| 下游 | Sandbox Runtime | 统一投影执行 sandbox 到 OpenSandbox |
+| 下游 | Sandbox Runtime | 把同一 policy 合同投影到 Lite Docker 或 OpenSandbox AIO |
 | 下游 | Container Runtime | 承接 OpenSandbox AIO 镜像与进程拓扑 |
 | 下游 | Security Boundary | 约束所有跨边界数据 |
 
@@ -91,7 +93,7 @@ Logo、README 顶部、指标定义与徽章发布合同见
 负责：
 
 - 定义系统级组件边界和依赖方向。
-- 定义 ADK 主协议与 HaaS native extension 的关系。（legacy shim 不在本项目范围，见 [specs/README §3.1.1](../README.zh-CN.md#311-范围决策不实现-mpa-codex-worker-迁移-shim)。）
+- 定义 ADK 主协议与 HaaS native extension 的关系。
 - 定义 P0/P1/P2 首期落地顺序。
 - 明确每个事实的 authority owner。
 - 明确负路径、恢复策略和验证门禁。
@@ -110,7 +112,6 @@ Logo、README 顶部、指标定义与徽章发布合同见
 |---------|------|-------|
 | ADK-compatible API | `/list-apps`、`/run`、`/run_sse`、`/apps/{app}/users/{user}/sessions/{sid}` | HaaS Protocol |
 | HaaS native API | `/v1/haas/*` | HaaS Protocol |
-| ~~Legacy sidecar shim~~ | ~~`/v1/codex-worker/*`~~ | **不实现**（specs/README §3.1.1） |
 | Adapter interface | internal Python async interface | Harness Adapter |
 | Sandbox projection | internal SandboxRuntime API | Sandbox Runtime |
 | Container entrypoint | `/opt/haas/run.sh` | Container Runtime |
@@ -122,10 +123,11 @@ Logo、README 顶部、指标定义与徽章发布合同见
 | Object | Public? | Authority | Notes |
 |--------|---------|-----------|-------|
 | Harness | yes | Harness Registry | configured harness，`id`=ADK `appName`，`base` 开放字符串 |
+| HarnessProfile | yes on HaaS native API | Harness Profile / Harness Registry | 版本化执行配置，作为 `EffectiveHarnessProfile` 冻结进 session |
 | Run/Invocation | yes | Session Runtime | ADK 一次 `/run`/`/run_sse`，`invocationId` |
 | Session | yes | Session Runtime | `(appName, userId, sessionId)` 三元组唯一 |
 | Turn | internal | Session Runtime | adapter 执行单元，首期与 invocation 一一对应 |
-| Event | yes | Event Log & SSE | ADK `Event` 投影，invocation-scoped |
+| Event | yes | Event Log & SSE | 内部稳定 `CanonicalEventRecord`；ADK surface 使用 ADK projection；session/invocation native stream 使用 typed `CanonicalHaasEvent` projection |
 | DelegatedSession | yes on HaaS native API | Manager Delegation / Session Runtime | manager 到 HaaS 的 binding、policy snapshot、mount manifest 与 runtime restore 合同 |
 | File | yes | Artifact Store | input files and produced artifacts |
 | Policy | internal/public summary | Policy Controller | effective runtime constraints |
@@ -143,7 +145,7 @@ request received
   -> policy compilation
   -> sandbox projection (workspace/network/tool -> OpenSandbox)
   -> adapter execution
-  -> event append + ADK projection
+  -> 稳定 canonical event append + ADK/native projection
   -> invocation finalization
   -> artifact publication
 ```
@@ -165,7 +167,7 @@ optional MCP/skill/browser warmup -> capability ready
 
 - Public API is authenticated except discovery/health/readiness probes.
 - Object scope is enforced on every read, write, cancel, delete and artifact access；`userId`/`sessionId` 均按 principal scope 隔离。
-- Secretless applies before adapter execution；provider key 进 OpenSandbox credential vault，harness 只拿短 token。
+- Adapter execution 前完成 secretless；AIO 使用自身 vault，Lite 使用可信外部 broker memory；harness process 只拿短期 scoped token。
 - Adapter native protocol data is never public by default.
 - Sandbox isolation 是运行时硬边界；adapter 自带的 harness sandbox 只能在其内运行，不替代 HaaS 边界。
 
@@ -197,6 +199,6 @@ System status must be able to answer:
 - Architecture review confirms every component has one owner and no reverse dependency.
 - Protocol tests cover ADK-compatible API before HaaS native expansion.
 - Adapter contract tests run against fake adapter and Codex app-server adapter.
-- Sandbox tests verify OpenSandbox sandbox/execd/credential vault projection for each harness.
+- Sandbox test 验证 Lite/AIO 的共同隔离；AIO 额外验证 sandbox/execd/vault 投影。
 - Admission tests verify quota/rate/queue boundaries.
 - Security tests cover every public surface and adapter env/config/log output.

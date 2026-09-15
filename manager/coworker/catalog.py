@@ -60,13 +60,9 @@ def _code_files(context: AgentContext) -> list:
     """
     ws = str(context.workspace)
     replaced = {"search_files", "read_file", "read_file_lines"}
-    file_kwargs = (
-        {"roots": context.roots} if context.roots else {"root": ws, "allow_write": True}
-    )
+    file_kwargs = {"roots": context.roots} if context.roots else {"root": ws, "allow_write": True}
     files = [
-        t
-        for t in ai.toolkits.files(**file_kwargs)
-        if getattr(t, "__name__", "") not in replaced
+        t for t in ai.toolkits.files(**file_kwargs) if getattr(t, "__name__", "") not in replaced
     ]
     return [*files, *file_tools(ws, roots=context.roots)]
 
@@ -78,14 +74,10 @@ def _files(context: AgentContext) -> list:
     replaces the slow `search_files` — same set Code uses.
     """
     ws = str(context.workspace)
-    file_kwargs = (
-        {"roots": context.roots} if context.roots else {"root": ws, "allow_write": True}
-    )
+    file_kwargs = {"roots": context.roots} if context.roots else {"root": ws, "allow_write": True}
     replaced = {"search_files", "read_file", "read_file_lines"}
     files = [
-        t
-        for t in ai.toolkits.files(**file_kwargs)
-        if getattr(t, "__name__", "") not in replaced
+        t for t in ai.toolkits.files(**file_kwargs) if getattr(t, "__name__", "") not in replaced
     ]
     return [*files, *file_tools(ws, roots=context.roots)]
 

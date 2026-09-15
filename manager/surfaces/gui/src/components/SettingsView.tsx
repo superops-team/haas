@@ -458,6 +458,9 @@ function HaasDelegationCard() {
     trigger_keywords: "",
     local_autostart: false,
     allow_unpinned_local_image: false,
+    network_access: true,
+    workspace_mode: "workspace-write" as HaasDelegationSettings["workspace_mode"],
+    approval_mode: "on-request" as HaasDelegationSettings["approval_mode"],
   });
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -475,6 +478,9 @@ function HaasDelegationCard() {
           trigger_keywords: old.trigger_keywords || listText(next.trigger_keywords),
           local_autostart: next.local_autostart,
           allow_unpinned_local_image: next.allow_unpinned_local_image,
+          network_access: next.network_access,
+          workspace_mode: next.workspace_mode,
+          approval_mode: next.approval_mode,
         }));
       })
       .catch(() => setSettings(null));
@@ -536,6 +542,39 @@ function HaasDelegationCard() {
           <span className={FIELD_HELP}>{t("settings.haas_local_autostart_help")}</span>
         </span>
       </label>
+      <label className="flex items-start gap-2 text-[13px] text-ink mt-3">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={draft.network_access}
+          data-testid="haas-network-access"
+          onChange={(e) => setDraft((d) => ({ ...d, network_access: e.target.checked }))}
+        />
+        <span>
+          <span className="block font-medium">{t("settings.haas_network_access")}</span>
+          <span className={FIELD_HELP}>{t("settings.haas_network_access_help")}</span>
+        </span>
+      </label>
+      <div className="mt-3">
+        <label>
+          <span className={FIELD_LABEL}>{t("settings.haas_workspace_mode")}</span>
+          <select
+            className={INPUT + " mt-1.5 w-full"}
+            value={draft.workspace_mode}
+            data-testid="haas-workspace-mode"
+            onChange={(e) =>
+              setDraft((d) => ({
+                ...d,
+                workspace_mode: e.target.value as HaasDelegationSettings["workspace_mode"],
+              }))
+            }
+          >
+            <option value="read-only">{t("settings.haas_workspace_read_only")}</option>
+            <option value="workspace-write">{t("settings.haas_workspace_write")}</option>
+            <option value="danger-full-access">{t("settings.haas_workspace_full")}</option>
+          </select>
+        </label>
+      </div>
       <label className="flex items-start gap-2 text-[13px] text-ink mt-3">
         <input
           type="checkbox"
@@ -635,6 +674,9 @@ function HaasDelegationCard() {
               image_digest: draft.image_digest,
               local_autostart: draft.local_autostart,
               allow_unpinned_local_image: draft.allow_unpinned_local_image,
+              network_access: draft.network_access,
+              workspace_mode: draft.workspace_mode,
+              approval_mode: draft.approval_mode,
               trigger_keywords: parseList(draft.trigger_keywords),
             })
           }

@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+# Minimal HaaS runtime. The default base is a multi-platform digest pin.
+ARG HAAS_LITE_BASE=python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+ARG HAAS_LITE_NODE_BASE=node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+ARG CODEX_NPM_VERSION=0.152.1
+FROM ${HAAS_LITE_NODE_BASE} AS codex
+ARG CODEX_NPM_VERSION
+RUN --mount=type=cache,target=/root/.npm \
+    npm install -g "@openai/codex@${CODEX_NPM_VERSION}" \
+    && codex --version
+
+FROM ${HAAS_LITE_BASE}
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git tini \
+    && groupadd --system --gid 10001 haas \
+    && useradd --system --uid 10001 --gid haas --home-dir /home/haas --create-home haas
+COPY --from=codex /usr/local/bin/node /usr/local/bin/node
+COPY --from=codex /usr/local/lib/node_modules/@openai/codex /opt/codex
+RUN ln -s /opt/codex/bin/codex.js /usr/local/bin/codex \
+    && codex --version
+
+WORKDIR /app/haas
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    pip install --no-cache-dir uv \
+    && uv venv --python python3.12 \
+    && uv sync --frozen --no-dev --no-install-project
+COPY haas ./haas
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
+
+ENV HAAS_SIDECAR_PORT=8092 \
+    HAAS_RUNTIME_ROOT=/tmp/haas \
+    HAAS_DATA_ROOT=/data/haas \
+    HAAS_CONFIG=/etc/haas/config.yaml \
+    CODEX_HOME=/data/haas/harnesses/codex/home
+RUN mkdir -p /etc/haas \
+    && printf '%s\n' \
+      'server:' '  host: 0.0.0.0' '  port: 8092' \
+      'store:' '  backend: sqlite' '  dsn: /data/haas/state/haas.db' \
+      'adapters:' '  default_base: codex' '  codex:' '    transport: unix_websocket' '    socket_path: /tmp/haas/codex.sock' \
+      > /etc/haas/config.yaml
+COPY docker/run-lite.sh /opt/haas/run.sh
+RUN printf '%s\n' '#!/bin/sh' 'exec /app/haas/.venv/bin/python -m haas.runtime.worker' \
+      > /opt/haas/private-worker \
+    && chmod +x /opt/haas/run.sh /opt/haas/private-worker \
+    && mkdir -p /opt/haas/bin \
+    && ln -s /opt/haas/private-worker /opt/haas/bin/private-worker \
+    && mkdir -p /data/haas /tmp/haas \
+    && chown -R haas:haas /data/haas /tmp/haas /app/haas /home/haas
+
+EXPOSE 8092
+USER haas
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/haas/run.sh"]

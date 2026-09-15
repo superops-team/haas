@@ -1,4 +1,5 @@
 """Tests for CodexAdapter probe / resume / cleanup edge paths."""
+
 from __future__ import annotations
 
 import json

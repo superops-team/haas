@@ -67,9 +67,29 @@ _IMPLICIT_TARGETS: dict[str, tuple[str, ...]] = {
 
 # Extensions that make a bare token (no path separator) worth resolving as a file.
 _SCRIPT_SUFFIXES = {
-    ".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl",
-    ".php", ".ps1", ".bat", ".cmd", ".jar", ".exe", ".json", ".yml", ".yaml",
-    ".ini", ".toml", ".cfg", ".mk",
+    ".py",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".rb",
+    ".pl",
+    ".php",
+    ".ps1",
+    ".bat",
+    ".cmd",
+    ".jar",
+    ".exe",
+    ".json",
+    ".yml",
+    ".yaml",
+    ".ini",
+    ".toml",
+    ".cfg",
+    ".mk",
 }
 
 
@@ -193,9 +213,7 @@ def _shell_download_paths(command: str) -> list[str]:
     return out
 
 
-def created_paths(
-    tool_name: str, arguments: dict[str, Any], result: Any
-) -> tuple[list[str], str]:
+def created_paths(tool_name: str, arguments: dict[str, Any], result: Any) -> tuple[list[str], str]:
     """(paths, origin) for a call that just SUCCEEDED, or ([], "") when it created nothing."""
     from .permissions import write_paths
     from .risk import WRITE_TOOLS
@@ -228,9 +246,7 @@ class SessionFiles:
         self.root = Path(workspace_root)
         self._files: dict[str, Origin] = {}
 
-    def record(
-        self, tool_name: str, arguments: dict[str, Any], result: Any, *, step: int
-    ) -> None:
+    def record(self, tool_name: str, arguments: dict[str, Any], result: Any, *, step: int) -> None:
         """Note what a SUCCESSFUL call created. Callers must not record failed calls: a
         write that raised left nothing on disk to run."""
         paths, origin = created_paths(tool_name, arguments, result)
@@ -239,9 +255,7 @@ class SessionFiles:
             # ones that would execute.
             self._files[resolve(path, self.root)] = Origin(step=step, kind=origin)
 
-    def match(
-        self, tool_name: str, arguments: dict[str, Any], *, step: int
-    ) -> Optional[Match]:
+    def match(self, tool_name: str, arguments: dict[str, Any], *, step: int) -> Optional[Match]:
         """The most recently created path this call names, or None. Newest wins: it is the
         one whose contents the agent most recently controlled."""
         best: Optional[Match] = None
@@ -249,9 +263,7 @@ class SessionFiles:
             origin = self._files.get(resolve(path, self.root))
             if origin is None:
                 continue
-            candidate = Match(
-                path=path, origin=origin, steps_ago=max(step - origin.step, 0)
-            )
+            candidate = Match(path=path, origin=origin, steps_ago=max(step - origin.step, 0))
             if best is None or candidate.origin.step > best.origin.step:
                 best = candidate
         return best

@@ -64,9 +64,7 @@ def load_credentials(service_account_json: Optional[str]) -> Any:
 
     if raw.startswith("{"):
         info = json.loads(raw)
-        return service_account.Credentials.from_service_account_info(
-            info, scopes=_SCOPES
-        )
+        return service_account.Credentials.from_service_account_info(info, scopes=_SCOPES)
     return service_account.Credentials.from_service_account_file(raw, scopes=_SCOPES)
 
 

@@ -60,6 +60,7 @@ def _usage_from(usage: Any) -> Optional[TokenUsage]:
         cache_write=int(usage.get("cacheWriteInputTokens") or 0),
     )
 
+
 # Converse has no required max token param but per-model defaults vary wildly (Meta's is
 # 512 — an agent turn gets truncated mid-tool-call); 4096 fits every family's ceiling.
 DEFAULT_MAX_TOKENS = 4096
@@ -74,12 +75,8 @@ _STOP_REASON_MAP = {
     "content_filtered": "stop",
 }
 
-_DATA_URL_RE = re.compile(
-    r"^data:image/([a-z0-9.+-]+);base64,(.+)$", re.IGNORECASE | re.DOTALL
-)
-_PDF_DATA_URL_RE = re.compile(
-    r"^data:application/pdf;base64,(.+)$", re.IGNORECASE | re.DOTALL
-)
+_DATA_URL_RE = re.compile(r"^data:image/([a-z0-9.+-]+);base64,(.+)$", re.IGNORECASE | re.DOTALL)
+_PDF_DATA_URL_RE = re.compile(r"^data:application/pdf;base64,(.+)$", re.IGNORECASE | re.DOTALL)
 
 # Bedrock document names: alphanumeric, whitespace, hyphens, parens, brackets only.
 _DOC_NAME_RE = re.compile(r"[^A-Za-z0-9\s\-\(\)\[\]]+")
@@ -218,9 +215,7 @@ def convert_messages(
                         {
                             "toolResult": {
                                 "toolUseId": message.get("tool_call_id") or "",
-                                "content": [
-                                    {"text": str(message.get("content") or "")}
-                                ],
+                                "content": [{"text": str(message.get("content") or "")}],
                             }
                         }
                     ],
@@ -264,9 +259,7 @@ def convert_tools(tools: Optional[list[dict[str, Any]]]) -> Optional[dict[str, A
 
 def _inference_config(settings: dict[str, Any]) -> dict[str, Any]:
     """Whitelisted engine settings → Converse `inferenceConfig` (camelCase)."""
-    config: dict[str, Any] = {
-        "maxTokens": int(settings.get("max_tokens") or DEFAULT_MAX_TOKENS)
-    }
+    config: dict[str, Any] = {"maxTokens": int(settings.get("max_tokens") or DEFAULT_MAX_TOKENS)}
     if settings.get("temperature") is not None:
         config["temperature"] = settings["temperature"]
     if settings.get("top_p") is not None:
@@ -366,9 +359,7 @@ class _BedrockConverseClient(ProviderClient):
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls: list[ToolCall] = []
-        content = ((response.get("output") or {}).get("message") or {}).get(
-            "content"
-        ) or []
+        content = ((response.get("output") or {}).get("message") or {}).get("content") or []
         for block in content:
             if "text" in block:
                 text_parts.append(block["text"] or "")
@@ -382,9 +373,7 @@ class _BedrockConverseClient(ProviderClient):
                     )
                 )
             elif "reasoningContent" in block:
-                text = (block["reasoningContent"].get("reasoningText") or {}).get(
-                    "text"
-                ) or ""
+                text = (block["reasoningContent"].get("reasoningText") or {}).get("text") or ""
                 if text:
                     reasoning_parts.append(text)
         stop_reason = response.get("stopReason")
@@ -522,9 +511,7 @@ class BedrockProvider(ProviderClient):
 
                 # A Bedrock API key (field or ambient env) takes the bearer path and
                 # EXCLUDES the SigV4 params — AnthropicBedrock raises on a mix.
-                bearer = self._bedrock_api_key or os.environ.get(
-                    "AWS_BEARER_TOKEN_BEDROCK"
-                )
+                bearer = self._bedrock_api_key or os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
                 if bearer:
                     sdk = AnthropicBedrock(api_key=bearer, aws_region=self._region)
                 else:

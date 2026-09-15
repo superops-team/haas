@@ -78,18 +78,15 @@ class ProviderDescriptor:
     needs_key: bool
     fields: list[ProviderField]
     build: Callable[[dict[str, Any], Any], ProviderClient] = field(repr=False)
-    recommended_model: Optional[str] = (
-        None  # pre-filled in the UI; auto-added on configure
-    )
-    env_key: Optional[str] = (
-        None  # env var that can supply the API key (e.g. ANTHROPIC_API_KEY)
-    )
+    recommended_model: Optional[str] = None  # pre-filled in the UI; auto-added on configure
+    env_key: Optional[str] = None  # env var that can supply the API key (e.g. ANTHROPIC_API_KEY)
     # One-line note under the provider title (e.g. "Connects through X's OpenAI-compatible API").
     blurb: str = ""
     # "oauth" → no key form at all: the provider is configured by a browser sign-in
     # (tokens in its `provider:<name>` profile) and the GUI renders connect/sign-out
     # instead of fields. None → the usual key/field form.
     auth: Optional[str] = None
+    haas_api_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -149,9 +146,7 @@ def _build_anthropic(profile: dict[str, Any], secrets: Any) -> ProviderClient:
         thinking_budget = int(str((profile or {}).get("thinking_budget") or "").strip())
     except ValueError:
         thinking_budget = DEFAULT_THINKING_BUDGET
-    return AnthropicProvider(
-        api_key=api_key, secrets=secrets, thinking_budget=thinking_budget
-    )
+    return AnthropicProvider(api_key=api_key, secrets=secrets, thinking_budget=thinking_budget)
 
 
 def _build_gemini(profile: dict[str, Any], secrets: Any) -> ProviderClient:
@@ -215,9 +210,7 @@ def _openai_compat(vendor: str, default_base_url: str, env_key: Optional[str] = 
             os.environ.get(env_key, "").strip() if env_key else ""
         )
         if not api_key:
-            raise RuntimeError(
-                f"No {vendor} API key configured — add it in Settings ▸ Models."
-            )
+            raise RuntimeError(f"No {vendor} API key configured — add it in Settings ▸ Models.")
         return OpenAIProvider(api_key=api_key, base_url=base_url)
 
     return build
@@ -242,9 +235,7 @@ def _openai_responses_compat(
             os.environ.get(env_key, "").strip() if env_key else ""
         )
         if not api_key:
-            raise RuntimeError(
-                f"No {vendor} API key configured — add it in Settings ▸ Models."
-            )
+            raise RuntimeError(f"No {vendor} API key configured — add it in Settings ▸ Models.")
         return OpenAIResponsesProvider(
             api_key=api_key,
             base_url=base_url,
@@ -262,6 +253,7 @@ def _compat(
     recommended_model: str,
     env_key: str,
     endpoint_help: str = "",
+    haas_api_type: str | None = None,
 ) -> ProviderDescriptor:
     """Descriptor for an OpenAI-compatible vendor: key + a prefilled, editable endpoint."""
     vendor = title.split(" (")[0]
@@ -285,6 +277,7 @@ def _compat(
                 or f"Prefilled with {vendor}'s official endpoint; edit only for a regional or proxy variant.",
             ),
         ],
+        haas_api_type=haas_api_type,
         build=_openai_compat(vendor, base_url, env_key),
         recommended_model=recommended_model,
         env_key=env_key,
@@ -319,10 +312,10 @@ def _responses_compat(
                 required=False,
                 default=base_url,
                 placeholder=base_url,
-                help=endpoint_help
-                or f"Prefilled with {title}'s official Responses endpoint.",
+                help=endpoint_help or f"Prefilled with {title}'s official Responses endpoint.",
             ),
         ],
+        haas_api_type="responses",
         build=_openai_responses_compat(
             title,
             base_url,
@@ -339,6 +332,7 @@ DESCRIPTORS: list[ProviderDescriptor] = [
     ProviderDescriptor(
         name="openai",
         title="OpenAI",
+        haas_api_type="responses",
         needs_key=True,
         fields=[
             ProviderField(
@@ -588,8 +582,9 @@ DESCRIPTORS: list[ProviderDescriptor] = [
         "volcengine-ark",
         "Volcengine Ark",
         base_url="https://ark.cn-beijing.volces.com/api/v3",
-        recommended_model="doubao-seed-2.1-turbo",
+        recommended_model="doubao-seed-2-1-turbo-260628",
         env_key="VOLCENGINE_ARK_API_KEY",
+        haas_api_type="responses",
         endpoint_help=(
             "Volcengine Ark's standard China (Beijing) data-plane endpoint. "
             "This provider is separate from Ark Agent Plan."
@@ -716,9 +711,7 @@ def get_descriptor(name: str) -> Optional[ProviderDescriptor]:
     return _BY_NAME.get(name)
 
 
-def build_provider_client(
-    name: str, profile: dict[str, Any], secrets: Any
-) -> ProviderClient:
+def build_provider_client(name: str, profile: dict[str, Any], secrets: Any) -> ProviderClient:
     """Build a `ProviderClient` for `name` from its stored profile. Unknown → OpenAI default."""
     descriptor = _BY_NAME.get(name) or _BY_NAME["openai"]
     return descriptor.build(profile or {}, secrets)
@@ -736,9 +729,7 @@ def descriptor_configured(d: ProviderDescriptor, profile: dict[str, Any]) -> boo
         return True  # keyless (Ollama) — usable out of the box
     profile = profile or {}
     if any(f.key == "api_key" for f in d.fields):
-        return bool(profile.get("api_key")) or bool(
-            d.env_key and os.environ.get(d.env_key)
-        )
+        return bool(profile.get("api_key")) or bool(d.env_key and os.environ.get(d.env_key))
     return all(profile.get(f.key) for f in d.fields if f.required)
 
 
@@ -783,9 +774,7 @@ def _verify_bedrock(fields: dict[str, Any], timeout: float) -> dict[str, Any]:
         get("bedrock_api_key") or os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
     ):
         return {"ok": False, "error": "Enter a Bedrock API key to test."}
-    if method == "iam" and not (
-        get("aws_access_key_id") and get("aws_secret_access_key")
-    ):
+    if method == "iam" and not (get("aws_access_key_id") and get("aws_secret_access_key")):
         return {"ok": False, "error": "Enter an access key ID and secret access key."}
     try:
         if method == "api_key":

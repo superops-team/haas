@@ -1,4 +1,6 @@
 """S2 ADK API integration tests (functional verification cases C1-C10)."""
+
+import asyncio
 import json
 
 import pytest
@@ -6,7 +8,9 @@ from fastapi.testclient import TestClient
 
 from haas.api import build_app
 from haas.harnesses import FakeAdapter
+from haas.harnesses.base import StartTurnRequest
 from haas.identity import Principal
+from haas.stores import InvocationRecord, SessionRecord
 
 # ADK 2.0 northbound protocol surface: also run under `make adk-compat`.
 pytestmark = pytest.mark.adk
@@ -18,7 +22,8 @@ HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 def make_client(**kwargs: object) -> TestClient:
     tokens = {TOKEN: Principal(principalId="p_1", tenantId="t1", userIds=frozenset({"u_1"}))}
     app = build_app(
-        adapter=FakeAdapter(), identity_tokens=tokens,
+        adapter=kwargs.get("adapter", FakeAdapter()),
+        identity_tokens=tokens,
         run_quota=int(kwargs.get("run_quota", 20)),
         rate_limit=int(kwargs.get("rate_limit", 100)),
     )
@@ -33,6 +38,28 @@ def test_c1_health_ready() -> None:
     assert client.get("/v1/haas/ready?scope=execution").json()["data"]["status"] == "ready"
 
 
+def test_v1_public_routes_use_only_the_haas_namespace() -> None:
+    client = make_client()
+    v1_paths = {route.path for route in client.app.routes if route.path.startswith("/v1/")}
+
+    assert v1_paths
+    assert all(path.startswith("/v1/haas/") for path in v1_paths)
+
+
+def test_capabilities_advertise_interaction_as_an_atomic_pair() -> None:
+    response = make_client().get("/v1/haas/capabilities", headers=HEADERS)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["object"] == "haas_capabilities"
+    harness = data["harnesses"][0]
+    approval = harness["capabilities"]["approval"]
+    input_handling = harness["capabilities"]["input"]
+    assert (approval["mode"], input_handling["mode"]) in {
+        ("human_bridge", "human_bridge"),
+        ("none", "none"),
+    }
+
+
 def test_c2_list_apps_requires_auth() -> None:
     client = make_client()
     assert client.get("/list-apps").status_code == 401
@@ -45,8 +72,11 @@ def test_c3_run_non_streaming() -> None:
     client = make_client()
     resp = client.post(
         "/run",
-        json={"appName": "chrn_codex_default", "userId": "u_1",
-              "newMessage": {"role": "user", "parts": [{"text": "hi"}]}},
+        json={
+            "appName": "chrn_codex_default",
+            "userId": "u_1",
+            "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+        },
         headers=HEADERS,
     )
     assert resp.status_code == 200
@@ -56,15 +86,183 @@ def test_c3_run_non_streaming() -> None:
     assert events[-1]["content"]["role"] == "model"
 
 
+def test_execution_idempotency_expiry_header_and_invocation_readback() -> None:
+    client = make_client()
+    body = {
+        "appName": "chrn_codex_default",
+        "userId": "u_1",
+        "sessionId": "hsess_expiry",
+        "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+    }
+    headers = {**HEADERS, "Idempotency-Key": "expiry-key"}
+    first = client.post("/run", json=body, headers=headers)
+    replay = client.post("/run", json=body, headers=headers)
+    assert first.headers["Idempotency-Expires-At"] == replay.headers["Idempotency-Expires-At"]
+    invocation_id = first.json()[0]["invocationId"]
+    readback = client.get(
+        f"/v1/haas/sessions/hsess_expiry/invocations/{invocation_id}", headers=HEADERS
+    )
+    assert readback.status_code == 200
+    assert readback.json()["data"]["idempotencyExpiresAtMs"] == int(
+        first.headers["Idempotency-Expires-At"]
+    )
+
+
+def test_execution_evidence_is_scoped_no_store_and_expirable() -> None:
+    client = make_client()
+    runtime = client.app.state.runtime
+    runtime.store.put_session(
+        SessionRecord(id="hsess_evidence", appName="chrn_codex_default", userId="u_1")
+    )
+    runtime.store.put_invocation(
+        InvocationRecord(
+            id="inv_evidence", sessionId="hsess_evidence",
+            appName="chrn_codex_default", userId="u_1", turnId="turn_evidence",
+        )
+    )
+    record = runtime.execution_evidence.put(
+        principal_id="p_1", app_name="chrn_codex_default", user_id="u_1",
+        session_id="hsess_evidence", invocation_id="inv_evidence",
+        tool_call_id="call_1", command="pwd", working_directory="/workspace",
+        output="/workspace",
+    )
+    path = "/v1/haas/sessions/hsess_evidence/invocations/inv_evidence/tools/call_1/evidence"
+
+    response = client.get(path, params={"evidence_ref": record.evidenceRef}, headers=HEADERS)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.json()["data"]["command"] == "pwd"
+
+    wrong_tool = client.get(
+        path.replace("call_1", "call_2"),
+        params={"evidence_ref": record.evidenceRef}, headers=HEADERS,
+    )
+    assert wrong_tool.status_code == 404
+    assert wrong_tool.json()["haasError"]["code"] == "haas_execution_evidence_not_found"
+    assert wrong_tool.headers["cache-control"] == "no-store"
+    assert wrong_tool.headers["referrer-policy"] == "no-referrer"
+
+    runtime.execution_evidence._clock_ms = lambda: record.expiresAtMs + 1
+    expired = client.get(path, params={"evidence_ref": record.evidenceRef}, headers=HEADERS)
+    assert expired.status_code == 410
+    assert expired.json()["haasError"]["code"] == "haas_execution_evidence_expired"
+    assert expired.headers["cache-control"] == "no-store"
+    assert expired.headers["referrer-policy"] == "no-referrer"
+
+
+def test_run_sse_returns_accepted_headers_and_replays_them() -> None:
+    client = make_client()
+    body = {
+        "appName": "chrn_codex_default",
+        "userId": "u_1",
+        "sessionId": "hsess_sse_headers",
+        "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+    }
+    headers = {**HEADERS, "Idempotency-Key": "sse-header-key"}
+
+    with client.stream("POST", "/run_sse", json=body, headers=headers) as resp:
+        assert resp.status_code == 200
+        invocation_id = resp.headers["X-HaaS-Invocation-ID"]
+        assert invocation_id.startswith("inv_")
+        assert resp.headers["X-HaaS-Session-ID"] == "hsess_sse_headers"
+        assert int(resp.headers["Idempotency-Expires-At"]) > 0
+        list(resp.iter_lines())
+
+    with client.stream("POST", "/run_sse", json=body, headers=headers) as replay:
+        assert replay.status_code == 200
+        assert replay.headers["X-HaaS-Invocation-ID"] == invocation_id
+        assert replay.headers["X-HaaS-Session-ID"] == "hsess_sse_headers"
+
+
+def test_run_sse_emits_periodic_heartbeat_during_silent_turn(monkeypatch) -> None:
+    from collections.abc import AsyncIterator
+
+    from haas.harnesses import FakeAdapter
+    from haas.harnesses.base import HarnessEvent, TurnHandle
+
+    class SilentAdapter(FakeAdapter):
+        async def stream_events(self, handle: TurnHandle) -> AsyncIterator[HarnessEvent]:
+            yield HarnessEvent(
+                type="harness.turn.started",
+                invocationId=handle.invocationId,
+                sessionId=handle.sessionId,
+                turnId=handle.turnId,
+                author=self.base,
+                content={"role": "model", "parts": []},
+                actions={"stateDelta": {"status": "running"}},
+            )
+            await asyncio.sleep(0.05)
+            async for event in super().stream_events(handle):
+                yield event
+
+    monkeypatch.setattr("haas.api.SSE_HEARTBEAT_SECONDS", 0.01)
+    client = make_client(adapter=SilentAdapter())
+    with client.stream(
+        "POST",
+        "/run_sse",
+        json={
+            "appName": "chrn_codex_default",
+            "userId": "u_1",
+            "sessionId": "hsess_heartbeat",
+            "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+        },
+        headers=HEADERS,
+    ) as response:
+        lines = list(response.iter_lines())
+
+    assert lines.count(": keep-alive") >= 2
+
+
+def test_run_sse_passes_sandbox_to_adapter() -> None:
+    class SandboxRecordingAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            self.requests: list[StartTurnRequest] = []
+
+        async def start_turn(self, request: StartTurnRequest):
+            self.requests.append(request)
+            return await super().start_turn(request)
+
+    adapter = SandboxRecordingAdapter()
+    tokens = {TOKEN: Principal(principalId="p_1", tenantId="t1", userIds=frozenset({"u_1"}))}
+    client = TestClient(build_app(adapter=adapter, identity_tokens=tokens))
+    body = {
+        "appName": "chrn_codex_default",
+        "userId": "u_1",
+        "sessionId": "hsess_sandbox",
+        "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+        "sandbox": {
+            "mode": "workspace-write",
+            "workspaceRoot": "/tmp/project",
+            "writableRoots": ["/tmp/project"],
+        },
+    }
+
+    with client.stream(
+        "POST",
+        "/run_sse",
+        json=body,
+        headers={**HEADERS, "Idempotency-Key": "sandbox-key"},
+    ) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    assert adapter.requests[0].sandbox["workspaceRoot"] == "/tmp/project"
+    assert adapter.requests[0].sandbox["mode"] == "workspace-write"
+
+
 def test_c4_run_sse_and_parity() -> None:
     client = make_client()
-    body = {"appName": "chrn_codex_default", "userId": "u_1",
-            "newMessage": {"role": "user", "parts": [{"text": "hi"}]}}
+    body = {
+        "appName": "chrn_codex_default",
+        "userId": "u_1",
+        "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+    }
     with client.stream("POST", "/run_sse", json=body, headers=HEADERS) as resp:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
         lines = [line for line in resp.iter_lines() if line.startswith("data: ")]
-    sse_events = [json.loads(line[len("data: "):]) for line in lines]
+    sse_events = [json.loads(line[len("data: ") :]) for line in lines]
 
     run_events = client.post("/run", json=body, headers=HEADERS).json()
     assert [e["content"] for e in sse_events] == [e["content"] for e in run_events]
@@ -73,8 +271,13 @@ def test_c4_run_sse_and_parity() -> None:
 def test_c5_session_get_read_back() -> None:
     client = make_client()
     resp = client.post(
-        "/run", json={"appName": "chrn_codex_default", "userId": "u_1",
-                      "sessionId": "hsess_1", "newMessage": {"role": "user", "parts": []}},
+        "/run",
+        json={
+            "appName": "chrn_codex_default",
+            "userId": "u_1",
+            "sessionId": "hsess_1",
+            "newMessage": {"role": "user", "parts": []},
+        },
         headers=HEADERS,
     )
     assert resp.status_code == 200
@@ -89,17 +292,24 @@ def test_c5_session_get_read_back() -> None:
 def test_c6_patch_state_delta_deep_merge() -> None:
     client = make_client()
     client.post(
-        "/run", json={"appName": "chrn_codex_default", "userId": "u_1",
-                      "sessionId": "hsess_1", "newMessage": {"role": "user", "parts": []}},
+        "/run",
+        json={
+            "appName": "chrn_codex_default",
+            "userId": "u_1",
+            "sessionId": "hsess_1",
+            "newMessage": {"role": "user", "parts": []},
+        },
         headers=HEADERS,
     )
     client.patch(
         "/apps/chrn_codex_default/users/u_1/sessions/hsess_1",
-        json={"stateDelta": {"a": {"b": 1}}}, headers=HEADERS,
+        json={"stateDelta": {"a": {"b": 1}}},
+        headers=HEADERS,
     )
     client.patch(
         "/apps/chrn_codex_default/users/u_1/sessions/hsess_1",
-        json={"stateDelta": {"a": {"c": 2}}}, headers=HEADERS,
+        json={"stateDelta": {"a": {"c": 2}}},
+        headers=HEADERS,
     )
     session = client.get(
         "/apps/chrn_codex_default/users/u_1/sessions/hsess_1", headers=HEADERS
@@ -110,16 +320,27 @@ def test_c6_patch_state_delta_deep_merge() -> None:
 def test_c7_delete_session() -> None:
     client = make_client()
     client.post(
-        "/run", json={"appName": "chrn_codex_default", "userId": "u_1",
-                      "sessionId": "hsess_1", "newMessage": {"role": "user", "parts": []}},
+        "/run",
+        json={
+            "appName": "chrn_codex_default",
+            "userId": "u_1",
+            "sessionId": "hsess_1",
+            "newMessage": {"role": "user", "parts": []},
+        },
         headers=HEADERS,
     )
-    assert client.delete(
-        "/apps/chrn_codex_default/users/u_1/sessions/hsess_1", headers=HEADERS
-    ).status_code == 204
-    assert client.get(
-        "/apps/chrn_codex_default/users/u_1/sessions/hsess_1", headers=HEADERS
-    ).status_code == 404
+    assert (
+        client.delete(
+            "/apps/chrn_codex_default/users/u_1/sessions/hsess_1", headers=HEADERS
+        ).status_code
+        == 204
+    )
+    assert (
+        client.get(
+            "/apps/chrn_codex_default/users/u_1/sessions/hsess_1", headers=HEADERS
+        ).status_code
+        == 404
+    )
 
 
 def test_c8_error_envelope() -> None:
@@ -128,17 +349,23 @@ def test_c8_error_envelope() -> None:
     assert client.get("/list-apps").status_code == 401
     # 404 app_not_found
     resp = client.post(
-        "/run", json={"appName": "nope", "userId": "u_1",
-                      "newMessage": {"role": "user", "parts": []}}, headers=HEADERS
+        "/run",
+        json={"appName": "nope", "userId": "u_1", "newMessage": {"role": "user", "parts": []}},
+        headers=HEADERS,
     )
     assert resp.status_code == 404
     assert resp.json()["haasError"]["code"] == "app_not_found"
     # 409 idempotency conflict
-    body = {"appName": "chrn_codex_default", "userId": "u_1", "sessionId": "hsess_x",
-            "newMessage": {"role": "user", "parts": [{"text": "a"}]}}
+    body = {
+        "appName": "chrn_codex_default",
+        "userId": "u_1",
+        "sessionId": "hsess_x",
+        "newMessage": {"role": "user", "parts": [{"text": "a"}]},
+    }
     client.post("/run", json=body, headers={**HEADERS, "Idempotency-Key": "k1"})
     conflict = client.post(
-        "/run", json={**body, "newMessage": {"role": "user", "parts": [{"text": "b"}]}},
+        "/run",
+        json={**body, "newMessage": {"role": "user", "parts": [{"text": "b"}]}},
         headers={**HEADERS, "Idempotency-Key": "k1"},
     )
     assert conflict.status_code == 409
@@ -147,12 +374,13 @@ def test_c8_error_envelope() -> None:
 
 def test_c9_run_quota_released_after_completion() -> None:
     client = make_client(run_quota=1)
-    body = {"appName": "chrn_codex_default", "userId": "u_1",
-            "newMessage": {"role": "user", "parts": []}}
+    body = {
+        "appName": "chrn_codex_default",
+        "userId": "u_1",
+        "newMessage": {"role": "user", "parts": []},
+    }
     for index in range(3):
-        resp = client.post(
-            "/run", json={**body, "sessionId": f"hsess_q{index}"}, headers=HEADERS
-        )
+        resp = client.post("/run", json={**body, "sessionId": f"hsess_q{index}"}, headers=HEADERS)
         assert resp.status_code == 200, f"run {index} should not leak admission quota"
 
 
@@ -174,9 +402,7 @@ def _texts(events: list[dict[str, object]]) -> list[str]:
 def _sse_payloads(resp: object) -> list[dict[str, object]]:
     # TestClient response/stream objects both expose iter_lines().
     return [
-        json.loads(line[len("data: "):])
-        for line in resp.iter_lines()
-        if line.startswith("data: ")
+        json.loads(line[len("data: ") :]) for line in resp.iter_lines() if line.startswith("data: ")
     ]
 
 
@@ -188,26 +414,32 @@ def test_events_are_isolated_when_different_users_share_session_id() -> None:
     client = TestClient(build_app(adapter=FakeAdapter(), identity_tokens=tokens))
     shared_session = "hsess_shared_user"
 
-    assert client.post(
-        "/run",
-        json={
-            "appName": "chrn_codex_default",
-            "userId": "u_a",
-            "sessionId": shared_session,
-            "newMessage": {"role": "user", "parts": [{"text": "a"}]},
-        },
-        headers={"Authorization": "Bearer tok-a"},
-    ).status_code == 200
-    assert client.post(
-        "/run",
-        json={
-            "appName": "chrn_codex_default",
-            "userId": "u_b",
-            "sessionId": shared_session,
-            "newMessage": {"role": "user", "parts": [{"text": "b"}]},
-        },
-        headers={"Authorization": "Bearer tok-b"},
-    ).status_code == 200
+    assert (
+        client.post(
+            "/run",
+            json={
+                "appName": "chrn_codex_default",
+                "userId": "u_a",
+                "sessionId": shared_session,
+                "newMessage": {"role": "user", "parts": [{"text": "a"}]},
+            },
+            headers={"Authorization": "Bearer tok-a"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/run",
+            json={
+                "appName": "chrn_codex_default",
+                "userId": "u_b",
+                "sessionId": shared_session,
+                "newMessage": {"role": "user", "parts": [{"text": "b"}]},
+            },
+            headers={"Authorization": "Bearer tok-b"},
+        ).status_code
+        == 200
+    )
 
     session_a = client.get(
         f"/apps/chrn_codex_default/users/u_a/sessions/{shared_session}",
@@ -236,26 +468,32 @@ def test_events_are_isolated_when_different_apps_share_session_id() -> None:
     app_2 = created.json()["data"]["id"]
     shared_session = "hsess_shared_app"
 
-    assert client.post(
-        "/run",
-        json={
-            "appName": "chrn_codex_default",
-            "userId": "u_1",
-            "sessionId": shared_session,
-            "newMessage": {"role": "user", "parts": []},
-        },
-        headers=HEADERS,
-    ).status_code == 200
-    assert client.post(
-        "/run",
-        json={
-            "appName": app_2,
-            "userId": "u_1",
-            "sessionId": shared_session,
-            "newMessage": {"role": "user", "parts": []},
-        },
-        headers=HEADERS,
-    ).status_code == 200
+    assert (
+        client.post(
+            "/run",
+            json={
+                "appName": "chrn_codex_default",
+                "userId": "u_1",
+                "sessionId": shared_session,
+                "newMessage": {"role": "user", "parts": []},
+            },
+            headers=HEADERS,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/run",
+            json={
+                "appName": app_2,
+                "userId": "u_1",
+                "sessionId": shared_session,
+                "newMessage": {"role": "user", "parts": []},
+            },
+            headers=HEADERS,
+        ).status_code
+        == 200
+    )
 
     session_1 = client.get(
         f"/apps/chrn_codex_default/users/u_1/sessions/{shared_session}",
@@ -302,16 +540,19 @@ def test_session_events_endpoint_rejects_cross_user_access() -> None:
     }
     client = TestClient(build_app(adapter=FakeAdapter(), identity_tokens=tokens))
     session_id = "hsess_private"
-    assert client.post(
-        "/run",
-        json={
-            "appName": "chrn_codex_default",
-            "userId": "u_a",
-            "sessionId": session_id,
-            "newMessage": {"role": "user", "parts": []},
-        },
-        headers={"Authorization": "Bearer tok-a"},
-    ).status_code == 200
+    assert (
+        client.post(
+            "/run",
+            json={
+                "appName": "chrn_codex_default",
+                "userId": "u_a",
+                "sessionId": session_id,
+                "newMessage": {"role": "user", "parts": []},
+            },
+            headers={"Authorization": "Bearer tok-a"},
+        ).status_code
+        == 200
+    )
 
     denied = client.get(
         f"/v1/haas/sessions/{session_id}/events",

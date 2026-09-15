@@ -4,15 +4,18 @@ Implements the :class:`HarnessAdapter` protocol over the Codex app-server
 JSON-RPC transport. Native Codex thread/turn/notification semantics stay
 inside this module (adapter isolation, AGENTS.md 铁律 #5).
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from haas.execution_evidence import MAX_EVIDENCE_BYTES, ExecutionEvidenceStore
 from haas.harnesses.base import (
     AdapterProbe,
     AdapterTurnResult,
@@ -32,10 +35,16 @@ from haas.harnesses.base import (
     StartTurnRequest,
     TurnHandle,
 )
-from haas.harnesses.codex_app_server.normalizer import normalize_notification
+from haas.harnesses.codex_app_server.normalizer import (
+    command_text,
+    normalize_notification,
+    notification_method,
+    notification_params,
+)
 from haas.harnesses.codex_app_server.rpc import (
     CodexConnectionError,
     CodexJsonRpc,
+    CodexSubscriberOverloaded,
 )
 from haas.harnesses.codex_app_server.sandbox import (
     to_thread_sandbox_mode,
@@ -48,11 +57,13 @@ from haas.harnesses.codex_app_server.schema import (
     schema_drift,
 )
 from haas.harnesses.codex_app_server.transport import CodexEndpoint
+from haas.security.redact import safe_upstream_body
+from haas.stores import ApprovalRecord, InputRequestRecord, MemoryStore
 
 JsonObject = dict[str, Any]
 
 DEFAULT_CWD = "/workspace"
-DEFAULT_APPROVAL_POLICY = "never"
+DEFAULT_APPROVAL_POLICY = "on-request"
 DEFAULT_TIMEOUT_SECONDS = 900.0
 
 # Codex notification methods that terminate a turn, mapped to canonical status.
@@ -61,6 +72,18 @@ _TERMINAL_METHODS: dict[str, str] = {
     "turn/failed": "failed",
     "turn/interrupted": "interrupted",
     "turn/cancelled": "cancelled",
+}
+_APPROVAL_METHODS = {
+    "item/commandExecution/requestApproval": "command",
+    "item/fileChange/requestApproval": "file",
+}
+_TOOL_ITEM_TYPES = {
+    "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch"
+}
+_TOOL_OUTPUT_NOTIFICATION_METHODS = {
+    "item/commandExecution/outputDelta",
+    "item/fileChange/outputDelta",
+    "item/mcpToolCall/progress",
 }
 
 
@@ -75,6 +98,18 @@ class _TurnContext:
     started_at: float = field(default_factory=time.monotonic)
     terminal_status: str | None = None
     terminal_event: HarnessEvent | None = None
+    principal_id: str = ""
+    user_id: str = ""
+    app_name: str = ""
+    model_call_ordinal: int = 0
+    current_model_call_id: str | None = None
+    notification_cursor: int = 0
+    server_request_cursor: int = 0
+    current_model_call_metered: bool = False
+    completed_tool_in_model_call: bool = False
+    active_tool_ids: set[str] = field(default_factory=set)
+    item_model_calls: dict[str, str] = field(default_factory=dict)
+    tool_model_calls: dict[str, str] = field(default_factory=dict)
 
 
 def _notification_thread_id(notification: JsonObject) -> str:
@@ -144,6 +179,37 @@ def _terminal_status(notification: JsonObject) -> str | None:
     return _TERMINAL_METHODS.get(event_type)
 
 
+def _terminal_failure_details(notification: JsonObject) -> tuple[str, str, bool]:
+    params = notification.get("params")
+    turn = params.get("turn") if isinstance(params, dict) else None
+    error = turn.get("error") if isinstance(turn, dict) else None
+    error = error if isinstance(error, dict) else {}
+    info = error.get("codexErrorInfo")
+    info_key = (
+        info
+        if isinstance(info, str)
+        else next(iter(info), "other")
+        if isinstance(info, dict)
+        else "other"
+    )
+    code_map = {
+        "rateLimitExceeded": ("haas_rate_limited", True),
+        "usageLimitExceeded": ("haas_rate_limited", True),
+        "serverOverloaded": ("haas_provider_error", True),
+        "internalServerError": ("haas_provider_error", True),
+        "httpConnectionFailed": ("haas_provider_error", True),
+        "responseStreamConnectionFailed": ("haas_provider_error", True),
+        "responseStreamDisconnected": ("haas_provider_error", True),
+        "responseTooManyFailedAttempts": ("haas_provider_error", True),
+        "unauthorized": ("haas_model_proxy_token_invalid", True),
+        "contextWindowExceeded": ("haas_model_unavailable", False),
+        "sessionBudgetExceeded": ("haas_model_unavailable", False),
+    }
+    code, retryable = code_map.get(str(info_key), ("haas_provider_error", False))
+    message = str(error.get("message") or "Codex turn failed")
+    return code, safe_upstream_body(message), retryable
+
+
 def _to_codex_input(items: list[Any]) -> list[JsonObject]:
     """Convert HaaS/ADK input items to Codex app-server ``turn/start`` input.
 
@@ -203,11 +269,32 @@ class CodexAdapter:
         self._endpoint = endpoint
         self._codex_bin = codex_bin
         self._rpc = CodexJsonRpc(endpoint, codex_bin=codex_bin, request_timeout=request_timeout)
+        self._connect_lock = asyncio.Lock()
         self._session_threads: dict[str, str] = {}
         self._turn_contexts: dict[str, _TurnContext] = {}
         self._turn_index: dict[str, str] = {}  # codexTurnId -> turnId
         self._generation = 0
         self._non_resumable: set[str] = set()
+        self._interaction_store: MemoryStore | None = None
+        self._pending_interactions: set[str] = set()
+        self._execution_evidence: ExecutionEvidenceStore | None = None
+        self._command_evidence_refs: dict[tuple[str, str], str] = {}
+        self._command_evidence_output: dict[tuple[str, str], str] = {}
+        self._command_evidence_truncated: set[tuple[str, str]] = set()
+
+    def bind_interaction_store(self, store: MemoryStore) -> None:
+        self._interaction_store = store
+
+    def bind_execution_evidence_store(self, store: ExecutionEvidenceStore) -> None:
+        self._execution_evidence = store
+
+    async def close(self) -> None:
+        await self._rpc.close()
+        self._turn_contexts.clear()
+        self._turn_index.clear()
+        self._command_evidence_output.clear()
+        self._command_evidence_truncated.clear()
+        self._command_evidence_refs.clear()
 
     # --- probe / declaration ------------------------------------------------
 
@@ -308,7 +395,7 @@ class CodexAdapter:
         if transport not in {"unix_websocket", "unix"}:
             return None
         listen_url = self._endpoint.listen_url or ""
-        path = listen_url[len("unix://"):] if listen_url.startswith("unix://") else ""
+        path = listen_url[len("unix://") :] if listen_url.startswith("unix://") else ""
         if not path:
             return "codex_socket_not_configured"
         import os
@@ -319,7 +406,10 @@ class CodexAdapter:
         return {
             "streaming": True,
             "sessionContinuation": "native",
+            "pausing": "native",
             "cancellation": "best_effort",
+            "approval": "human_bridge",
+            "input": "human_bridge",
             "toolRestriction": "advisory",
             "mcp": "unsupported",
             "skills": "unsupported",
@@ -405,7 +495,7 @@ class CodexAdapter:
         thread_id = self._session_threads.get(request.sessionId, "")
         if thread_id:
             thread_id = await self._resume_or_drop_thread(
-                thread_id, request.sessionId, cwd
+                thread_id, request.sessionId, cwd, request
             )
         if not thread_id:
             thread_id = await self._start_thread(request.sessionId, cwd, mode, request)
@@ -419,6 +509,8 @@ class CodexAdapter:
         }
         if request.model:
             turn_params["model"] = request.model
+        notification_cursor = self._rpc.notification_cursor
+        server_request_cursor = self._rpc.server_request_cursor
         turn_result = await self._rpc.request("turn/start", turn_params)
         turn = turn_result.get("turn", {})
         codex_turn_id = (
@@ -434,6 +526,11 @@ class CodexAdapter:
             thread_id=thread_id,
             codex_turn_id=codex_turn_id,
             timeout_seconds=request.timeoutSeconds,
+            principal_id=request.principalId,
+            user_id=request.userId,
+            app_name=request.appName,
+            notification_cursor=notification_cursor,
+            server_request_cursor=server_request_cursor,
         )
         self._turn_contexts[request.turnId] = ctx
         self._turn_index[codex_turn_id] = request.turnId
@@ -450,58 +547,244 @@ class CodexAdapter:
             raise CodexConnectionError(f"unknown turn handle: {handle.turnId}")
 
         timeout_at = ctx.started_at + ctx.timeout_seconds
-        notifications = self._rpc.notifications()
-        while True:
-            remaining = timeout_at - time.monotonic()
-            if remaining <= 0:
-                # Best-effort interrupt before failing the turn.
-                with contextlib.suppress(CodexConnectionError):
-                    await self._rpc.request(
-                        "turn/interrupt",
-                        {"threadId": ctx.thread_id, "turnId": ctx.codex_turn_id},
+        notifications = self._rpc.notifications(after=ctx.notification_cursor)
+        server_requests = self._rpc.server_requests(after=ctx.server_request_cursor)
+        notification_task: asyncio.Future[JsonObject] = asyncio.ensure_future(anext(notifications))
+        request_task: asyncio.Future[JsonObject] = asyncio.ensure_future(anext(server_requests))
+        try:
+            while True:
+                remaining = timeout_at - time.monotonic()
+                if remaining <= 0:
+                    # Best-effort interrupt before failing the turn.
+                    with contextlib.suppress(CodexConnectionError):
+                        await self._rpc.request(
+                            "turn/interrupt",
+                            {"threadId": ctx.thread_id, "turnId": ctx.codex_turn_id},
+                        )
+                    terminal = self._terminal_harness_event(
+                        ctx,
+                        "failed",
+                        code="haas_request_timeout",
+                        safe_reason="Codex turn timed out",
+                        retryable=False,
                     )
-                terminal = self._terminal_harness_event(ctx, "failed")
-                ctx.terminal_status = "failed"
-                ctx.terminal_event = terminal
-                yield terminal
-                return
+                    ctx.terminal_status = "failed"
+                    ctx.terminal_event = terminal
+                    yield terminal
+                    return
 
-            if not self._rpc.connected:
-                break
+                if not self._rpc.connected:
+                    break
 
-            try:
-                async with asyncio.timeout(min(remaining, 5.0)):
-                    notification = await anext(notifications)
-            except TimeoutError:
-                continue
-            except StopAsyncIteration:
-                break
+                done, _pending = await asyncio.wait(
+                    {notification_task, request_task},
+                    timeout=min(remaining, 5.0),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    continue
+                if request_task in done:
+                    try:
+                        request = request_task.result()
+                    except CodexSubscriberOverloaded:
+                        terminal = self._terminal_harness_event(
+                            ctx, "failed", code="haas_adapter_overloaded",
+                            safe_reason="Codex event consumer could not keep up",
+                            retryable=True,
+                        )
+                        ctx.terminal_status = "failed"
+                        ctx.terminal_event = terminal
+                        yield terminal
+                        return
+                    request_task = asyncio.ensure_future(anext(server_requests))
+                    event = self._persist_server_request(request, ctx)
+                    if event is not None:
+                        yield event
+                    continue
 
-            if not self._belongs_to_turn(notification, ctx):
-                continue
+                try:
+                    notification = notification_task.result()
+                except CodexSubscriberOverloaded:
+                    terminal = self._terminal_harness_event(
+                        ctx, "failed", code="haas_adapter_overloaded",
+                        safe_reason="Codex event consumer could not keep up",
+                        retryable=True,
+                    )
+                    ctx.terminal_status = "failed"
+                    ctx.terminal_event = terminal
+                    yield terminal
+                    return
+                notification_task = asyncio.ensure_future(anext(notifications))
+                if not self._belongs_to_turn(notification, ctx):
+                    continue
 
-            status = _terminal_status(notification)
-            if status is not None:
-                if status == "interrupted":
-                    status = "cancelled"
-                terminal = self._terminal_harness_event(ctx, status)
-                ctx.terminal_status = status
-                ctx.terminal_event = terminal
-                yield terminal
-                return
+                status = _terminal_status(notification)
+                if status is not None:
+                    details: tuple[str | None, str | None, bool | None] = (None, None, None)
+                    if status == "failed":
+                        details = _terminal_failure_details(notification)
+                    terminal = self._terminal_harness_event(
+                        ctx,
+                        status,
+                        code=details[0],
+                        safe_reason=details[1],
+                        retryable=details[2],
+                    )
+                    ctx.terminal_status = status
+                    ctx.terminal_event = terminal
+                    yield terminal
+                    return
 
-            event = self._to_harness_event(notification, ctx)
-            if event is not None:
-                yield event
+                event = self._to_harness_event(notification, ctx)
+                if event is not None:
+                    yield event
+        finally:
+            for task in (notification_task, request_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(notification_task, request_task, return_exceptions=True)
+            await notifications.aclose()
+            await server_requests.aclose()
 
         # Connection dropped or stream ended without a terminal notification.
-        terminal = self._terminal_harness_event(ctx, "incomplete")
+        terminal = self._terminal_harness_event(
+            ctx,
+            "incomplete",
+            code="haas_adapter_unavailable",
+            safe_reason=(
+                self._rpc.connection_failure_reason
+                or "Codex app-server connection ended before the turn completed"
+            ),
+            retryable=True,
+        )
         ctx.terminal_status = "incomplete"
         ctx.terminal_event = terminal
         yield terminal
 
+    def _persist_server_request(
+        self, request: JsonObject, ctx: _TurnContext
+    ) -> HarnessEvent | None:
+        if self._interaction_store is None or not self._belongs_to_turn(request, ctx):
+            return None
+        method = str(request.get("method") or "")
+        native_id = request.get("id")
+        if native_id is None:
+            return None
+        params = request.get("params")
+        params = params if isinstance(params, dict) else {}
+        digest = hashlib.sha256(
+            f"{self._generation}:{ctx.invocation_id}:{native_id}:{method}".encode()
+        ).hexdigest()[:20]
+        remaining_seconds = max(0.0, ctx.started_at + ctx.timeout_seconds - time.monotonic())
+        expires_at_ms = int(time.time() * 1000 + remaining_seconds * 1000)
+        if method in _APPROVAL_METHODS:
+            record = self._interaction_store.put_approval(
+                ApprovalRecord(
+                    id=f"appr_{digest}",
+                    sessionId=ctx.session_id,
+                    invocationId=ctx.invocation_id,
+                    turnId=ctx.turn_id,
+                    request={
+                        "kind": _APPROVAL_METHODS[method],
+                        "safeSummary": (
+                            "Run command" if method.startswith("item/command") else "Change files"
+                        ),
+                        "availableDecisions": ["approved", "denied", "cancelled"],
+                        "policyReason": "harness_requested",
+                        "expiresAtMs": expires_at_ms,
+                    },
+                    nativeRequestId=native_id,
+                    adapterGeneration=self._generation,
+                    expiresAtMs=expires_at_ms,
+                )
+            )
+            self._pending_interactions.add(record.id)
+            return HarnessEvent(
+                type="haas.approval.required",
+                invocationId=ctx.invocation_id,
+                sessionId=ctx.session_id,
+                turnId=ctx.turn_id,
+                author=self.base,
+                content={"role": "model", "parts": []},
+                actions={"haas": {"approvalId": record.id, **record.request}},
+            )
+        if method == "item/tool/requestUserInput":
+            questions = params.get("questions")
+            safe_questions = []
+            if isinstance(questions, list):
+                for question in questions:
+                    if not isinstance(question, dict):
+                        continue
+                    safe_questions.append(
+                        {
+                            key: question[key]
+                            for key in (
+                                "id",
+                                "header",
+                                "question",
+                                "options",
+                                "isSecret",
+                            )
+                            if key in question
+                        }
+                    )
+            input_record = self._interaction_store.put_input_request(
+                InputRequestRecord(
+                    id=f"inreq_{digest}",
+                    sessionId=ctx.session_id,
+                    invocationId=ctx.invocation_id,
+                    turnId=ctx.turn_id,
+                    questions=safe_questions,
+                    blocking=bool(params.get("isBlocking", True)),
+                    expiresAtMs=expires_at_ms,
+                    nativeRequestId=native_id,
+                    adapterGeneration=self._generation,
+                )
+            )
+            self._pending_interactions.add(input_record.id)
+            return HarnessEvent(
+                type="haas.input.required",
+                invocationId=ctx.invocation_id,
+                sessionId=ctx.session_id,
+                turnId=ctx.turn_id,
+                author=self.base,
+                content={"role": "model", "parts": []},
+                actions={
+                    "haas": {
+                        "inputRequestId": input_record.id,
+                        "questions": safe_questions,
+                        "blocking": input_record.blocking,
+                        "expiresAtMs": expires_at_ms,
+                    }
+                },
+            )
+        return None
+
+    async def respond_interaction(
+        self, record: ApprovalRecord | InputRequestRecord, payload: dict[str, Any]
+    ) -> None:
+        if record.adapterGeneration != self._generation:
+            raise CodexConnectionError("interaction adapter generation is stale")
+        if record.id not in self._pending_interactions:
+            raise CodexConnectionError("interaction is not pending on this connection")
+        if isinstance(record, ApprovalRecord):
+            mapping = {"approved": "accept", "denied": "decline", "cancelled": "cancel"}
+            result: JsonObject = {"decision": mapping[str(payload["decision"])]}
+        else:
+            supplied = payload.get("answers") or {}
+            result = {
+                "answers": {
+                    key: {"answers": value.get("values", [])}
+                    for key, value in supplied.items()
+                    if isinstance(value, dict)
+                }
+            }
+        await self._rpc.respond(record.nativeRequestId, result)
+        self._pending_interactions.discard(record.id)
+
     async def finalize_turn(self, handle: TurnHandle) -> AdapterTurnResult:
         ctx = self._turn_contexts.pop(handle.turnId, None)
+        self._clear_command_evidence_state(handle.turnId)
         if ctx is not None:
             self._turn_index.pop(ctx.codex_turn_id, None)
             if ctx.terminal_status is not None:
@@ -510,12 +793,21 @@ class CodexAdapter:
                 )
         return AdapterTurnResult(status="incomplete")
 
+    def _clear_command_evidence_state(self, turn_id: str) -> None:
+        for key in [key for key in self._command_evidence_output if key[0] == turn_id]:
+            self._command_evidence_output.pop(key, None)
+            self._command_evidence_truncated.discard(key)
+            self._command_evidence_refs.pop(key, None)
+
     async def _ensure_connected(self) -> None:
         """Connect (or reconnect) and re-initialize; bump generation on reconnect."""
         if self._rpc.connected and self._rpc.initialized:
             return
-        self._generation += 1
-        await self._rpc.connect()
+        async with self._connect_lock:
+            if self._rpc.connected and self._rpc.initialized:
+                return
+            self._generation += 1
+            await self._rpc.connect()
 
     async def _start_thread(
         self,
@@ -531,6 +823,7 @@ class CodexAdapter:
         }
         if request.model:
             thread_params["model"] = request.model
+        thread_params.update(self._model_overrides(request))
         thread_result = await self._rpc.request("thread/start", thread_params)
         thread = thread_result.get("thread", {})
         thread_id = str(thread.get("id", "")) if isinstance(thread, dict) else ""
@@ -545,18 +838,59 @@ class CodexAdapter:
         thread_id: str,
         session_id: str,
         cwd: str,
+        request: StartTurnRequest | None = None,
     ) -> str:
         """Validate an existing thread via thread/resume; drop it if it is gone."""
         try:
-            return await self._resume_thread(thread_id, session_id, cwd)
+            return await self._resume_thread(thread_id, session_id, cwd, request)
         except CodexConnectionError as exc:
             if not _is_thread_not_found(exc):
                 raise
         self._session_threads.pop(session_id, None)
         return ""
 
-    async def _resume_thread(self, thread_id: str, session_id: str, cwd: str = DEFAULT_CWD) -> str:
-        resume_params: JsonObject = {"threadId": thread_id, "cwd": cwd}
+    @staticmethod
+    def _model_overrides(request: StartTurnRequest) -> JsonObject:
+        if not request.credentials:
+            return {}
+        base_url = request.credentials["baseUrl"]
+        token = request.credentials["token"]
+        return {
+            "model": request.model,
+            "modelProvider": "haas",
+            "config": {
+                "features.multi_agent": False,
+                "features.default_mode_request_user_input": (
+                    request.policy.get("approvalPolicy") == "on-request"
+                ),
+                "web_search": "disabled",
+                "model_reasoning_summary": "auto",
+                "model_providers.haas": {
+                    "name": "HaaS",
+                    "base_url": base_url,
+                    "wire_api": "responses",
+                    "requires_openai_auth": False,
+                    "http_headers": {"Authorization": f"Bearer {token}"},
+                },
+            },
+        }
+
+    async def _resume_thread(
+        self,
+        thread_id: str,
+        session_id: str,
+        cwd: str = DEFAULT_CWD,
+        request: StartTurnRequest | None = None,
+    ) -> str:
+        resume_params: JsonObject = {
+            "threadId": thread_id,
+            "cwd": cwd,
+            "excludeTurns": True,
+        }
+        if request is not None:
+            if request.credentials:
+                await self._rpc.request("thread/unsubscribe", {"threadId": thread_id})
+            resume_params.update(self._model_overrides(request))
         resume_result = await self._rpc.request("thread/resume", resume_params)
         thread = resume_result.get("thread", {})
         resumed = str(thread.get("id", "")) if isinstance(thread, dict) else ""
@@ -573,7 +907,7 @@ class CodexAdapter:
                 "turn/interrupt",
                 {"threadId": ctx.thread_id, "turnId": ctx.codex_turn_id},
             )
-            return CancelResult(status="cancelled")
+            return CancelResult(status="accepted")
         except CodexConnectionError:
             return CancelResult(status="accepted")
 
@@ -591,7 +925,22 @@ class CodexAdapter:
             return False
         return not (turn_id and turn_id != ctx.codex_turn_id)
 
-    def _terminal_harness_event(self, ctx: _TurnContext, status: str) -> HarnessEvent:
+    def _terminal_harness_event(
+        self,
+        ctx: _TurnContext,
+        status: str,
+        *,
+        code: str | None = None,
+        safe_reason: str | None = None,
+        retryable: bool | None = None,
+    ) -> HarnessEvent:
+        state: JsonObject = {"status": status}
+        if code is not None:
+            state["code"] = code
+        if safe_reason is not None:
+            state["reason"] = safe_reason
+        if retryable is not None:
+            state["retryable"] = retryable
         return HarnessEvent(
             type=f"harness.turn.{status}",
             invocationId=ctx.invocation_id,
@@ -599,14 +948,159 @@ class CodexAdapter:
             turnId=ctx.turn_id,
             author=self.base,
             content={"role": "model", "parts": []},
-            actions={"stateDelta": {"status": status}},
+            actions={"stateDelta": state},
         )
 
     def _to_harness_event(self, notification: JsonObject, ctx: _TurnContext) -> HarnessEvent | None:
-        return normalize_notification(
+        model_call_id = self._model_call_id(notification, ctx)
+        params = notification.get("params")
+        item = params.get("item") if isinstance(params, dict) else None
+        if isinstance(item, dict) and item.get("type") == "commandExecution":
+            tool_call_id = str(item.get("id") or "")
+            command = command_text(item.get("command"))
+            if self._execution_evidence is not None and tool_call_id and command:
+                key = (ctx.turn_id, tool_call_id)
+                method = notification_method(notification)
+                if method == "item/started":
+                    self._command_evidence_output[key] = ""
+                    self._command_evidence_truncated.discard(key)
+                accumulated = self._command_evidence_output.get(key, "")
+                aggregated = item.get("aggregatedOutput")
+                aggregated = aggregated if isinstance(aggregated, str) else ""
+                # Codex normally supplies the complete aggregate, but a terminal
+                # frame may contain only a tail/summary. Never replace more complete
+                # delta evidence with a shorter terminal representation.
+                output = max(
+                    (accumulated, aggregated), key=lambda value: len(value.encode("utf-8"))
+                )
+                record = self._execution_evidence.put(
+                    principal_id=ctx.principal_id,
+                    app_name=ctx.app_name,
+                    user_id=ctx.user_id,
+                    session_id=ctx.session_id,
+                    invocation_id=ctx.invocation_id,
+                    tool_call_id=tool_call_id,
+                    command=command,
+                    working_directory=str(item.get("cwd") or DEFAULT_CWD),
+                    output=output,
+                    evidence_ref=self._command_evidence_refs.get(key),
+                )
+                self._command_evidence_refs[key] = record.evidenceRef
+                if method == "item/completed":
+                    self._command_evidence_output.pop(key, None)
+                    self._command_evidence_truncated.discard(key)
+                    self._command_evidence_refs.pop(key, None)
+                normalized = normalize_notification(
+                    notification,
+                    invocation_id=ctx.invocation_id,
+                    session_id=ctx.session_id,
+                    turn_id=ctx.turn_id,
+                    author=self.base,
+                    model_call_id=model_call_id,
+                    evidence_ref=record.evidenceRef,
+                    evidence_expires_at_ms=record.expiresAtMs,
+                )
+                return normalized
+        if (
+            self._execution_evidence is not None
+            and notification_method(notification) == "item/commandExecution/outputDelta"
+        ):
+            delta_params = notification_params(notification)
+            tool_call_id = str(delta_params.get("itemId") or "")
+            evidence_ref = self._command_evidence_refs.get((ctx.turn_id, tool_call_id))
+            delta = delta_params.get("delta")
+            if evidence_ref and isinstance(delta, str) and delta:
+                key = (ctx.turn_id, tool_call_id)
+                if key in self._command_evidence_truncated:
+                    return normalize_notification(
+                        notification, invocation_id=ctx.invocation_id,
+                        session_id=ctx.session_id, turn_id=ctx.turn_id, author=self.base,
+                        model_call_id=model_call_id,
+                    )
+                raw_output = self._command_evidence_output.get(key, "") + delta
+                encoded = raw_output.encode("utf-8")
+                if len(encoded) > MAX_EVIDENCE_BYTES:
+                    raw_output = (
+                        encoded[: MAX_EVIDENCE_BYTES - 18].decode("utf-8", errors="ignore")
+                        + "\n...<truncated>\n"
+                    )
+                    self._command_evidence_truncated.add(key)
+                self._command_evidence_output[key] = raw_output
+                self._execution_evidence.update_output(evidence_ref, raw_output)
+        normalized = normalize_notification(
             notification,
             invocation_id=ctx.invocation_id,
             session_id=ctx.session_id,
             turn_id=ctx.turn_id,
             author=self.base,
+            model_call_id=model_call_id,
         )
+        if notification_method(notification) in _TERMINAL_METHODS:
+            self._clear_command_evidence_state(ctx.turn_id)
+        return normalized
+
+    def _model_call_id(self, notification: JsonObject, ctx: _TurnContext) -> str | None:
+        """Correlate public process facts to a measured native model round trip."""
+        method = notification_method(notification)
+        params = notification_params(notification)
+        item = params.get("item")
+        item = item if isinstance(item, dict) else {}
+        item_type = str(item.get("type") or "")
+        item_id = str(params.get("itemId") or item.get("id") or "")
+
+        if method in {"item/agentMessage/delta", "item/reasoning/summaryTextDelta"}:
+            known = ctx.item_model_calls.get(item_id) if item_id else None
+            if known is not None:
+                return known
+            if (
+                ctx.current_model_call_metered
+                and ctx.completed_tool_in_model_call
+                and not ctx.active_tool_ids
+            ):
+                self._open_model_call(ctx)
+            model_call_id = self._ensure_model_call(ctx)
+            if item_id:
+                ctx.item_model_calls[item_id] = model_call_id
+            return model_call_id
+
+        if method == "thread/tokenUsage/updated":
+            model_call_id = self._ensure_model_call(ctx)
+            ctx.current_model_call_metered = True
+            return model_call_id
+
+        if method == "item/started" and item_type in _TOOL_ITEM_TYPES:
+            model_call_id = self._ensure_model_call(ctx)
+            if item_id:
+                ctx.tool_model_calls[item_id] = model_call_id
+                ctx.active_tool_ids.add(item_id)
+            return model_call_id
+
+        if method == "item/completed" and item_type in _TOOL_ITEM_TYPES:
+            model_call_id = ctx.tool_model_calls.get(item_id) or self._ensure_model_call(ctx)
+            if item_id:
+                ctx.tool_model_calls[item_id] = model_call_id
+                ctx.active_tool_ids.discard(item_id)
+            ctx.completed_tool_in_model_call = True
+            return model_call_id
+
+        if method in _TOOL_OUTPUT_NOTIFICATION_METHODS:
+            model_call_id = ctx.tool_model_calls.get(item_id) or self._ensure_model_call(ctx)
+            if item_id:
+                ctx.tool_model_calls[item_id] = model_call_id
+            return model_call_id
+
+        if method == "item/completed" and item_type == "agentMessage":
+            return ctx.item_model_calls.get(item_id) or self._ensure_model_call(ctx)
+        return None
+
+    @staticmethod
+    def _open_model_call(ctx: _TurnContext) -> str:
+        ctx.model_call_ordinal += 1
+        ctx.current_model_call_id = f"mcall_{ctx.model_call_ordinal:04d}"
+        ctx.current_model_call_metered = False
+        ctx.completed_tool_in_model_call = False
+        ctx.active_tool_ids.clear()
+        return ctx.current_model_call_id
+
+    def _ensure_model_call(self, ctx: _TurnContext) -> str:
+        return ctx.current_model_call_id or self._open_model_call(ctx)

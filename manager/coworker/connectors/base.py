@@ -30,9 +30,7 @@ def parse_target(target: str) -> tuple[str, str, Optional[str]]:
     """`'platform:chat_id[:thread]'` -> (platform, chat_id, thread_id)."""
     parts = (target or "").split(":")
     if len(parts) < 2 or not parts[0] or not parts[1]:
-        raise ValueError(
-            f"invalid target {target!r} (expected 'platform:chat_id[:thread]')"
-        )
+        raise ValueError(f"invalid target {target!r} (expected 'platform:chat_id[:thread]')")
     thread = ":".join(parts[2:]) if len(parts) > 2 else None
     return parts[0], parts[1], (thread or None)
 
@@ -174,9 +172,7 @@ class BasePlatformAdapter(ABC):
         """Stop the listener and close connections."""
 
     @abstractmethod
-    async def send(
-        self, chat_id: str, text: str, *, thread_id: Optional[str] = None
-    ) -> SendResult:
+    async def send(self, chat_id: str, text: str, *, thread_id: Optional[str] = None) -> SendResult:
         """Send an outbound message."""
 
     async def handle_message(self, event: MessageEvent) -> None:

@@ -197,6 +197,37 @@ export async function getSessionMessages(sessionId: string): Promise<Conversatio
   return (await res.json()).messages ?? [];
 }
 
+export interface ExecutionEvidenceLink {
+  url: string;
+  kind: "ordinary" | "authorization";
+  expiresAtMs: number | null;
+}
+
+export interface ExecutionEvidence {
+  evidenceRef: string;
+  sessionId: string;
+  invocationId: string;
+  toolCallId: string;
+  command: string;
+  workingDirectory: string;
+  output: string;
+  outputStream: "combined" | "stdout" | "stderr";
+  links: ExecutionEvidenceLink[];
+  expiresAtMs: number;
+}
+
+export async function getExecutionEvidence(
+  sessionId: string, invocationId: string, toolCallId: string, evidenceRef: string,
+): Promise<ExecutionEvidence> {
+  const params = new URLSearchParams({
+    invocation_id: invocationId, tool_call_id: toolCallId, evidence_ref: evidenceRef,
+  });
+  const res = await fetch(`${httpBase()}/v1/sessions/${encodeURIComponent(sessionId)}/execution-evidence?${params}`);
+  const body = await res.json();
+  if (!res.ok) throw Object.assign(new Error(body.error || "Execution evidence unavailable"), { status: res.status, code: body.code });
+  return body.data;
+}
+
 export async function renameSession(sessionId: string, title: string): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch(`${httpBase()}/v1/sessions/${encodeURIComponent(sessionId)}`, {
     method: "PATCH",
@@ -956,6 +987,10 @@ export interface HaasDelegationSettings {
   request_timeout_seconds: number;
   local_autostart: boolean;
   allow_unpinned_local_image: boolean;
+  network_access: boolean;
+  workspace_mode: "read-only" | "workspace-write" | "danger-full-access";
+  approval_mode: "never" | "on-request" | "always";
+  policy_defaults_revision: number;
   local_status?: {
     enabled: boolean;
     status: string;
@@ -2473,8 +2508,12 @@ export class Session {
     });
   }
 
-  approve(decision: string) {
-    this.send({ type: "approval", decision });
+  approve(decision: string, haasApprovalId?: string) {
+    this.send({
+      type: "approval",
+      decision,
+      ...(haasApprovalId ? { haas_approval_id: haasApprovalId } : {}),
+    });
   }
 
   /** §8.4 "Allow anyway": register a ONE-SHOT exact-action approval for a reviewer-denied
@@ -2521,12 +2560,28 @@ export class Session {
   }
 
   // Answer a live `ask_user` prompt (attended sessions; unattended ones answer via the Inbox).
-  respondQuestion(answer: string) {
-    this.send({ type: "question_response", answer });
+  respondQuestion(answer: string, haasInputRequestId?: string, answers?: Record<string, { values: string[] }>) {
+    this.send({
+      type: "question_response",
+      answer,
+      ...(haasInputRequestId ? { haas_input_request_id: haasInputRequestId } : {}),
+      ...(answers ? { answers } : {}),
+    });
   }
 
   interrupt() {
     this.send({ type: "interrupt" });
+  }
+
+  pause() {
+    this.send({ type: "pause" });
+  }
+
+  continue(additionalInstruction?: string) {
+    this.send({
+      type: "continue",
+      ...(additionalInstruction ? { text: additionalInstruction } : {}),
+    });
   }
 
   // Re-run a turn that ended in a provider error — no new user message; the server

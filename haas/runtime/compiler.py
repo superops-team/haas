@@ -4,6 +4,7 @@ Compiles a frozen :class:`EffectivePolicy` plus a harness
 :class:`HarnessSandboxDecl` into an OpenSandbox-bound :class:`SandboxSpec`
 with narrow-only enforcement, and projects network policy to egress.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

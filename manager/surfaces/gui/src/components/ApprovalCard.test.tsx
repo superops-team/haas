@@ -805,3 +805,19 @@ describe("ApprovalCard — MCP trust ladder (OPE-136 §4)", () => {
     expect(screen.queryByTestId("approval-always-trust")).toBeNull();
   });
 });
+
+describe("ApprovalCard — HaaS human bridge", () => {
+  it("offers only the native request decisions", () => {
+    render(
+      <ApprovalCard
+        item={sendApproval({ haasApprovalId: "appr_1" })}
+        onApprove={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Allow once")).toBeTruthy();
+    expect(screen.getByText("Deny")).toBeTruthy();
+    expect(screen.queryByText("Allow for this run")).toBeNull();
+    expect(screen.queryByText("Allow for this session")).toBeNull();
+    expect(screen.queryByText("Allow every time")).toBeNull();
+  });
+});

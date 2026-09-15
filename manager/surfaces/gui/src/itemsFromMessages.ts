@@ -50,12 +50,44 @@ export function itemsFromMessages(messages: ConversationMessage[]): Item[] {
       if (typeof m.ts === "number") user.ts = m.ts;
       if (user.text || user.attachments?.length) items.push(user);
     } else if (m.role === "assistant") {
-      if (m.content || m.reasoning)
+      const restoredActivities = Array.isArray(m._haas_activity) ? m._haas_activity : [];
+      for (const activity of restoredActivities) {
+        if (!activity || typeof activity !== "object" || !activity.id) continue;
+        items.push({
+          kind: "tool",
+          id: String(activity.id),
+          name: "haas_activity",
+          args: {},
+          status: String(activity.status || "failed"),
+          source: "haas",
+          activityKind: activity.kind,
+          safeSummary: String(activity.summary || ""),
+          outputPreview: String(activity.preview || ""),
+          omittedLineCount: Number(activity.omittedLineCount || 0),
+          ...(typeof activity.durationMs === "number" ? { durationMs: activity.durationMs } : {}),
+          ...(typeof activity.exitCode === "number" ? { exitCode: activity.exitCode } : {}),
+          ...(activity.safeReason ? { safeReason: String(activity.safeReason) } : {}),
+          ...(activity.recoveryGroupId ? { recoveryGroupId: String(activity.recoveryGroupId) } : {}),
+          ...(activity.invocationId ? { invocationId: String(activity.invocationId) } : {}),
+          ...(activity.commandPreview ? { commandPreview: String(activity.commandPreview) } : {}),
+          ...(activity.workingDirectory ? { workingDirectory: String(activity.workingDirectory) } : {}),
+          ...(activity.evidenceRef ? { evidenceRef: String(activity.evidenceRef) } : {}),
+          ...(typeof activity.evidenceExpiresAtMs === "number"
+            ? { evidenceExpiresAtMs: activity.evidenceExpiresAtMs }
+            : {}),
+          ...(m._haas_task_outcome?.phase ? { taskOutcome: m._haas_task_outcome } : {}),
+        });
+      }
+      if (m.content || m.reasoning || (Array.isArray(m._haas_model_stages) && m._haas_model_stages.length > 0))
         items.push({
           kind: "assistant",
           text: m.content || "",
           ...(typeof m.ts === "number" ? { ts: m.ts } : {}),
           ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+          ...(Array.isArray(m._haas_model_stages)
+            ? { modelStages: m._haas_model_stages }
+            : {}),
+          ...(m._delegated?.backend === "haas" ? { source: "haas" as const } : {}),
         });
       for (const tc of m.tool_calls || []) {
         let args: any = {};

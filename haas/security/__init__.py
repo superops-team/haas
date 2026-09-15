@@ -1,4 +1,5 @@
 """HaaS Security Boundary primitives (specs/security-boundary/README.md)."""
+
 from haas.security.redact import (
     ArtifactPathTraversalError,
     RedactionContext,

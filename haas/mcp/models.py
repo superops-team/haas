@@ -1,4 +1,5 @@
 """MCP / Tool / Skill Runtime data models (specs/mcp-tool-skill-runtime §6)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

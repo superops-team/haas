@@ -25,9 +25,7 @@ from .email_tools import make_email_tools
 from .tool_defs import approval_for_tool, connector_for_tool
 
 
-def _meta(
-    name: str, *, approval: bool = False, capabilities: Optional[list[str]] = None
-):
+def _meta(name: str, *, approval: bool = False, capabilities: Optional[list[str]] = None):
     return ai.ToolMetadata(
         name=name,
         category="connector",
@@ -145,11 +143,7 @@ def _gmail_profile(
 
     email, key, profile = gmail_accounts.resolve(secrets, account)
     if profile is None:
-        hint = (
-            f"no gmail account matching {account!r}"
-            if account
-            else "gmail is not connected"
-        )
+        hint = f"no gmail account matching {account!r}" if account else "gmail is not connected"
         return "", None, {"error": hint}
     if profile.get("managed"):
         from ..cloud import ensure_fresh_connector_token
@@ -182,9 +176,7 @@ def _gcal_profile(
         from ..cloud import ensure_fresh_connector_token
         from ..config import load_config
 
-        ensure_fresh_connector_token(
-            secrets, load_config(), "google_calendar", profile_key=key
-        )
+        ensure_fresh_connector_token(secrets, load_config(), "google_calendar", profile_key=key)
         profile = secrets.get(key) or profile
     if not profile.get("access_token"):
         return (
@@ -214,11 +206,7 @@ def _hubspot_profile(
 
     hub_id, key, profile = hubspot_portals.resolve(secrets, portal)
     if profile is None:
-        hint = (
-            f"no hubspot portal matching {portal!r}"
-            if portal
-            else "hubspot is not connected"
-        )
+        hint = f"no hubspot portal matching {portal!r}" if portal else "hubspot is not connected"
         return "", "", {"error": hint}
     if profile.get("managed"):
         from ..cloud import ensure_fresh_connector_token
@@ -290,17 +278,12 @@ def _gmail_is_hidden(
 ) -> bool:
     from .gmail_accounts import sender_matches
 
-    if filters["senders"] and sender_matches(
-        _gmail_from_address(message), filters["senders"]
-    ):
+    if filters["senders"] and sender_matches(_gmail_from_address(message), filters["senders"]):
         return True
     if filters["labels"]:
         wanted = {name.lower() for name in filters["labels"]}
         for lid in message.get("labelIds") or []:
-            if (
-                label_map.get(str(lid), "").lower() in wanted
-                or str(lid).lower() in wanted
-            ):
+            if label_map.get(str(lid), "").lower() in wanted or str(lid).lower() in wanted:
                 return True
     return False
 
@@ -325,9 +308,7 @@ def _request(
     try:
         import httpx
 
-        with httpx.Client(
-            timeout=30.0, follow_redirects=not check_addresses
-        ) as client:
+        with httpx.Client(timeout=30.0, follow_redirects=not check_addresses) as client:
             if check_addresses:
                 if method.upper() != "GET":
                     return {"error": "address-checked requests must be GET"}
@@ -415,9 +396,7 @@ def _github_auth(
             installation_id, _prof = github_installs.resolve(secrets, "")
         if not installation_id:
             return None, {"error": "github is not connected; no App installation"}
-        token = github_installation_token(
-            secrets, load_config(), installation_id, force=force
-        )
+        token = github_installation_token(secrets, load_config(), installation_id, force=force)
         if not token:
             return None, {
                 "error": "github installation token unavailable "
@@ -447,9 +426,7 @@ def _github_git_auth_args(secrets: SecretStore, owner: str) -> list[str]:
     ]
 
 
-def _run_git(
-    args: list[str], *, cwd: Any = None, timeout: int = 600
-) -> tuple[str, str]:
+def _run_git(args: list[str], *, cwd: Any = None, timeout: int = 600) -> tuple[str, str]:
     """(stdout, error). Never raises; the error string is capped and carries no
     auth material (git never echoes header values)."""
     import subprocess
@@ -616,9 +593,7 @@ def make_integration_tools(
         )
     )
 
-    def github_create_issue(
-        owner: str, repo: str, title: str, body: str = ""
-    ) -> dict[str, Any]:
+    def github_create_issue(owner: str, repo: str, title: str, body: str = "") -> dict[str, Any]:
         return _github_call(
             secrets,
             "POST",
@@ -779,9 +754,7 @@ def make_integration_tools(
         )
     )
 
-    def _writable_target(
-        raw: str, *, default_name: str = ""
-    ) -> tuple[Any, dict[str, Any] | None]:
+    def _writable_target(raw: str, *, default_name: str = "") -> tuple[Any, dict[str, Any] | None]:
         """Resolve a directory inside a WRITABLE granted root — clones and pulls
         never touch anything the user hasn't shared with the session."""
         from pathlib import Path as _Path
@@ -795,9 +768,7 @@ def make_integration_tools(
             else (writable[0] / default_name).resolve()
         )
         if not any(path.is_relative_to(root) for root in writable):
-            return None, {
-                "error": f"{path} is outside the session's writable directories"
-            }
+            return None, {"error": f"{path} is outside the session's writable directories"}
         return path, None
 
     def github_clone(owner: str, repo: str, directory: str = "") -> dict[str, Any]:
@@ -805,9 +776,7 @@ def make_integration_tools(
         if err:
             return err
         if target.exists() and any(target.iterdir()):
-            return {
-                "error": f"{target} already exists and is not empty (use github_pull?)"
-            }
+            return {"error": f"{target} already exists and is not empty (use github_pull?)"}
         url = f"{_github_git_base()}/{owner}/{repo}.git"
         _out, git_err = _run_git(
             [*_github_git_auth_args(secrets, owner), "clone", url, str(target)]
@@ -926,18 +895,14 @@ def make_integration_tools(
                 detail = meta.get("data") if meta.get("ok") else None
                 # Fail-open on a metadata miss: ids alone reveal nothing, and
                 # gmail_get_message re-enforces before any content flows.
-                if isinstance(detail, dict) and _gmail_is_hidden(
-                    detail, filters, label_map
-                ):
+                if isinstance(detail, dict) and _gmail_is_hidden(detail, filters, label_map):
                     hidden += 1
                 else:
                     kept.append(m)
             if hidden:
                 data["messages"] = kept
                 if isinstance(data.get("resultSizeEstimate"), int):
-                    data["resultSizeEstimate"] = max(
-                        0, data["resultSizeEstimate"] - hidden
-                    )
+                    data["resultSizeEstimate"] = max(0, data["resultSizeEstimate"] - hidden)
                 result = {
                     "ok": True,
                     "data": data,
@@ -1121,11 +1086,7 @@ def make_integration_tools(
         email, profile, err = _gcal_profile(secrets, account)
         if err:
             return err
-        items = [
-            {"id": c.strip()}
-            for c in str(calendars or "primary").split(",")
-            if c.strip()
-        ]
+        items = [{"id": c.strip()} for c in str(calendars or "primary").split(",") if c.strip()]
         return _gcal_result(
             email,
             _request(
@@ -1237,9 +1198,7 @@ def make_integration_tools(
         if end:
             payload["end"] = {"dateTime": end, "timeZone": timezone}
         if not payload:
-            return {
-                "error": "nothing to update — pass summary, description, start, or end"
-            }
+            return {"error": "nothing to update — pass summary, description, start, or end"}
         return _gcal_result(
             email,
             _request(
@@ -1311,9 +1270,7 @@ def make_integration_tools(
     def outlook_search_messages(
         query: str = "", max_results: int = 10, account: str = ""
     ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "outlook", account, "access_token"
-        )
+        aid, profile, err = _account_profile(secrets, "outlook", account, "access_token")
         if err:
             return err
         params = {"$top": max(1, min(int(max_results or 10), 20))}
@@ -1347,12 +1304,8 @@ def make_integration_tools(
         )
     )
 
-    def outlook_send_mail(
-        to: str, subject: str, body: str, account: str = ""
-    ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "outlook", account, "access_token"
-        )
+    def outlook_send_mail(to: str, subject: str, body: str, account: str = "") -> dict[str, Any]:
+        aid, profile, err = _account_profile(secrets, "outlook", account, "access_token")
         if err:
             return err
         payload = {
@@ -1395,9 +1348,7 @@ def make_integration_tools(
     def outlook_list_events(
         start: str = "", end: str = "", max_results: int = 10, account: str = ""
     ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "outlook", account, "access_token"
-        )
+        aid, profile, err = _account_profile(secrets, "outlook", account, "access_token")
         if err:
             return err
         # calendarView expands recurrences and takes a window; /me/events does
@@ -1452,9 +1403,7 @@ def make_integration_tools(
         teams_meeting: bool = False,
         account: str = "",
     ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "outlook", account, "access_token"
-        )
+        aid, profile, err = _account_profile(secrets, "outlook", account, "access_token")
         if err:
             return err
         payload: dict[str, Any] = {
@@ -1521,9 +1470,7 @@ def make_integration_tools(
         location: str = "",
         account: str = "",
     ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "outlook", account, "access_token"
-        )
+        aid, profile, err = _account_profile(secrets, "outlook", account, "access_token")
         if err:
             return err
         # PATCH semantics: only the provided fields change.
@@ -1574,9 +1521,7 @@ def make_integration_tools(
     )
 
     def outlook_delete_event(event_id: str, account: str = "") -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "outlook", account, "access_token"
-        )
+        aid, profile, err = _account_profile(secrets, "outlook", account, "access_token")
         if err:
             return err
         return _acct_result(
@@ -1606,9 +1551,7 @@ def make_integration_tools(
     def outlook_respond_event(
         event_id: str, response: str, comment: str = "", account: str = ""
     ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "outlook", account, "access_token"
-        )
+        aid, profile, err = _account_profile(secrets, "outlook", account, "access_token")
         if err:
             return err
         actions = {
@@ -1716,9 +1659,7 @@ def make_integration_tools(
                     "content": [
                         {
                             "type": "paragraph",
-                            "content": [
-                                {"type": "text", "text": description or summary}
-                            ],
+                            "content": [{"type": "text", "text": description or summary}],
                         }
                     ],
                 },
@@ -1894,9 +1835,7 @@ def make_integration_tools(
         )
     )
 
-    def zendesk_create_ticket(
-        subject: str, body: str, requester_email: str = ""
-    ) -> dict[str, Any]:
+    def zendesk_create_ticket(subject: str, body: str, requester_email: str = "") -> dict[str, Any]:
         profile, err = _profile(secrets, "zendesk", "subdomain", "email", "api_token")
         if err:
             return err
@@ -1938,9 +1877,7 @@ def make_integration_tools(
             " searchIssues(term: $term, first: $first) {"
             " nodes { identifier title url state { name } assignee { name } } } }"
         )
-        return _linear_gql(
-            profile["api_key"], gql, {"term": query, "first": _clamp(max_results)}
-        )
+        return _linear_gql(profile["api_key"], gql, {"term": query, "first": _clamp(max_results)})
 
     linear_search_issues.__name__ = "linear_search_issues"
     tools.append(
@@ -1985,9 +1922,7 @@ def make_integration_tools(
         profile, err = _profile(secrets, "linear", "api_key")
         if err:
             return err
-        return _linear_gql(
-            profile["api_key"], "{ teams { nodes { id key name } } }", {}
-        )
+        return _linear_gql(profile["api_key"], "{ teams { nodes { id key name } } }", {})
 
     linear_list_teams.__name__ = "linear_list_teams"
     tools.append(
@@ -2003,9 +1938,7 @@ def make_integration_tools(
         )
     )
 
-    def linear_create_issue(
-        team_id: str, title: str, description: str = ""
-    ) -> dict[str, Any]:
+    def linear_create_issue(team_id: str, title: str, description: str = "") -> dict[str, Any]:
         profile, err = _profile(secrets, "linear", "api_key")
         if err:
             return err
@@ -2038,9 +1971,7 @@ def make_integration_tools(
         )
     )
 
-    def gitlab_search(
-        query: str, scope: str = "issues", max_results: int = 10
-    ) -> dict[str, Any]:
+    def gitlab_search(query: str, scope: str = "issues", max_results: int = 10) -> dict[str, Any]:
         profile, err = _profile(secrets, "gitlab", "token")
         if err:
             return err
@@ -2118,9 +2049,7 @@ def make_integration_tools(
         )
     )
 
-    def gitlab_create_issue(
-        project: str, title: str, description: str = ""
-    ) -> dict[str, Any]:
+    def gitlab_create_issue(project: str, title: str, description: str = "") -> dict[str, Any]:
         profile, err = _profile(secrets, "gitlab", "token")
         if err:
             return err
@@ -2250,9 +2179,7 @@ def make_integration_tools(
         )
     )
 
-    def stripe_list_charges(
-        customer_id: str = "", max_results: int = 10
-    ) -> dict[str, Any]:
+    def stripe_list_charges(customer_id: str = "", max_results: int = 10) -> dict[str, Any]:
         profile, err = _profile(secrets, "stripe", "api_key")
         if err:
             return err
@@ -2280,9 +2207,7 @@ def make_integration_tools(
         )
     )
 
-    def stripe_list_invoices(
-        customer_id: str = "", max_results: int = 10
-    ) -> dict[str, Any]:
+    def stripe_list_invoices(customer_id: str = "", max_results: int = 10) -> dict[str, Any]:
         profile, err = _profile(secrets, "stripe", "api_key")
         if err:
             return err
@@ -2334,9 +2259,7 @@ def make_integration_tools(
         )
     )
 
-    def asana_search_tasks(
-        workspace_gid: str, query: str, max_results: int = 10
-    ) -> dict[str, Any]:
+    def asana_search_tasks(workspace_gid: str, query: str, max_results: int = 10) -> dict[str, Any]:
         profile, err = _profile(secrets, "asana", "token")
         if err:
             return err
@@ -2393,9 +2316,7 @@ def make_integration_tools(
         )
     )
 
-    def asana_create_task(
-        project_gid: str, name: str, notes: str = ""
-    ) -> dict[str, Any]:
+    def asana_create_task(project_gid: str, name: str, notes: str = "") -> dict[str, Any]:
         profile, err = _profile(secrets, "asana", "token")
         if err:
             return err
@@ -2457,8 +2378,7 @@ def make_integration_tools(
             except ValueError:
                 return {"error": "filters must be a JSON array of filter objects"}
             if not isinstance(parsed, list) or not all(
-                isinstance(f, dict) and f.get("property") and f.get("operator")
-                for f in parsed
+                isinstance(f, dict) and f.get("property") and f.get("operator") for f in parsed
             ):
                 return {"error": "each filter needs at least 'property' and 'operator'"}
             body["filterGroups"] = [{"filters": parsed}]
@@ -2932,9 +2852,7 @@ def make_integration_tools(
             "GET",
             f"{_qbo_base(profile)}/query",
             headers=_bearer_headers(profile["access_token"]),
-            params={
-                "query": f"SELECT * FROM Customer MAXRESULTS {_clamp(max_results)}"
-            },
+            params={"query": f"SELECT * FROM Customer MAXRESULTS {_clamp(max_results)}"},
         )
 
     quickbooks_list_customers.__name__ = "quickbooks_list_customers"
@@ -3104,16 +3022,12 @@ def make_integration_tools(
         for b in blocks:
             content = b.get(b.get("type", ""), {})
             texts = content.get("rich_text") or content.get("title") or []
-            line = "".join(
-                t.get("plain_text", "") for t in texts if isinstance(t, dict)
-            )
+            line = "".join(t.get("plain_text", "") for t in texts if isinstance(t, dict))
             if line:
                 lines.append(line)
         return "\n".join(lines)
 
-    def notion_search(
-        query: str, max_results: int = 10, account: str = ""
-    ) -> dict[str, Any]:
+    def notion_search(query: str, max_results: int = 10, account: str = "") -> dict[str, Any]:
         aid, profile, err = _account_profile(secrets, "notion", account, "access_token")
         if err:
             return err
@@ -3348,9 +3262,7 @@ def make_integration_tools(
         )
     )
 
-    def attio_get_record(
-        object_type: str, record_id: str, account: str = ""
-    ) -> dict[str, Any]:
+    def attio_get_record(object_type: str, record_id: str, account: str = "") -> dict[str, Any]:
         aid, profile, err = _account_profile(secrets, "attio", account, "access_token")
         if err:
             return err
@@ -3432,9 +3344,7 @@ def make_integration_tools(
         return str(profile.get("base_url") or "https://us.posthog.com").rstrip("/")
 
     def posthog_query(hogql: str, account: str = "") -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "posthog", account, "api_key", "project_id"
-        )
+        aid, profile, err = _account_profile(secrets, "posthog", account, "api_key", "project_id")
         if err:
             return err
         result = _request(
@@ -3464,9 +3374,7 @@ def make_integration_tools(
     def posthog_list_insights(
         query: str = "", max_results: int = 10, account: str = ""
     ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "posthog", account, "api_key", "project_id"
-        )
+        aid, profile, err = _account_profile(secrets, "posthog", account, "api_key", "project_id")
         if err:
             return err
         params: dict[str, Any] = {"limit": _clamp(max_results)}
@@ -3516,9 +3424,7 @@ def make_integration_tools(
             "event": event,
             "from_date": from_date,
             "to_date": to_date,
-            "unit": (
-                unit if unit in ("minute", "hour", "day", "week", "month") else "day"
-            ),
+            "unit": (unit if unit in ("minute", "hour", "day", "week", "month") else "day"),
         }
         if where:
             params["where"] = where
@@ -3587,9 +3493,7 @@ def make_integration_tools(
     def amplitude_active_users(
         start: str, end: str, metric: str = "active", account: str = ""
     ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "amplitude", account, "api_key", "secret_key"
-        )
+        aid, profile, err = _account_profile(secrets, "amplitude", account, "api_key", "secret_key")
         if err:
             return err
         result = _request(
@@ -3611,8 +3515,7 @@ def make_integration_tools(
             amplitude_active_users,
             _schema(
                 "amplitude_active_users",
-                "Amplitude daily active or new users between two dates (YYYYMMDD "
-                "or YYYY-MM-DD).",
+                "Amplitude daily active or new users between two dates (YYYYMMDD or YYYY-MM-DD).",
                 {
                     "start": {"type": "string"},
                     "end": {"type": "string"},
@@ -3628,9 +3531,7 @@ def make_integration_tools(
     def amplitude_event_totals(
         event_type: str, start: str, end: str, account: str = ""
     ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "amplitude", account, "api_key", "secret_key"
-        )
+        aid, profile, err = _account_profile(secrets, "amplitude", account, "api_key", "secret_key")
         if err:
             return err
         result = _request(
@@ -3731,8 +3632,7 @@ def make_integration_tools(
             apollo_enrich_company,
             _schema(
                 "apollo_enrich_company",
-                "Enrich a company from Apollo by domain: size, industry, funding, "
-                "tech stack.",
+                "Enrich a company from Apollo by domain: size, industry, funding, tech stack.",
                 {"domain": {"type": "string"}, "account": _GEN_ACCOUNT_PROP},
                 ["domain"],
             ),
@@ -3773,9 +3673,7 @@ def make_integration_tools(
         )
     )
 
-    def _hunter_get(
-        profile: dict[str, Any], path: str, params: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _hunter_get(profile: dict[str, Any], path: str, params: dict[str, Any]) -> dict[str, Any]:
         return _request(
             "GET",
             f"https://api.hunter.io/v2/{path}",
@@ -3848,9 +3746,7 @@ def make_integration_tools(
         aid, profile, err = _account_profile(secrets, "hunter", account, "api_key")
         if err:
             return err
-        return _acct_result(
-            aid, _hunter_get(profile, "email-verifier", {"email": email})
-        )
+        return _acct_result(aid, _hunter_get(profile, "email-verifier", {"email": email}))
 
     hunter_verify_email.__name__ = "hunter_verify_email"
     tools.append(
@@ -3874,9 +3770,7 @@ def make_integration_tools(
         profile, err = _profile(secrets, "clickup", "api_token")
         if err:
             return err
-        return _request(
-            "GET", f"{_CLICKUP}/team", headers={"Authorization": profile["api_token"]}
-        )
+        return _request("GET", f"{_CLICKUP}/team", headers={"Authorization": profile["api_token"]})
 
     clickup_list_teams.__name__ = "clickup_list_teams"
     tools.append(
@@ -3999,9 +3893,7 @@ def make_integration_tools(
         )
     )
 
-    def clickup_create_task(
-        list_id: str, name: str, description: str = ""
-    ) -> dict[str, Any]:
+    def clickup_create_task(list_id: str, name: str, description: str = "") -> dict[str, Any]:
         profile, err = _profile(secrets, "clickup", "api_token")
         if err:
             return err
@@ -4136,9 +4028,7 @@ def make_integration_tools(
         profile, err = _profile(secrets, "close", "api_key")
         if err:
             return err
-        return _request(
-            "GET", f"{_CLOSE}/lead/{quote(lead_id)}/", auth=_close_auth(profile)
-        )
+        return _request("GET", f"{_CLOSE}/lead/{quote(lead_id)}/", auth=_close_auth(profile))
 
     close_get_lead.__name__ = "close_get_lead"
     tools.append(
@@ -4154,18 +4044,14 @@ def make_integration_tools(
         )
     )
 
-    def close_list_opportunities(
-        lead_id: str = "", max_results: int = 10
-    ) -> dict[str, Any]:
+    def close_list_opportunities(lead_id: str = "", max_results: int = 10) -> dict[str, Any]:
         profile, err = _profile(secrets, "close", "api_key")
         if err:
             return err
         params: dict[str, Any] = {"_limit": _clamp(max_results)}
         if lead_id:
             params["lead_id"] = lead_id
-        return _request(
-            "GET", f"{_CLOSE}/opportunity/", auth=_close_auth(profile), params=params
-        )
+        return _request("GET", f"{_CLOSE}/opportunity/", auth=_close_auth(profile), params=params)
 
     close_list_opportunities.__name__ = "close_list_opportunities"
     tools.append(
@@ -4359,9 +4245,7 @@ def make_integration_tools(
         )
     )
 
-    def figma_post_comment(
-        file_key: str, message: str, reply_to: str = ""
-    ) -> dict[str, Any]:
+    def figma_post_comment(file_key: str, message: str, reply_to: str = "") -> dict[str, Any]:
         profile, err = _profile(secrets, "figma", "access_token")
         if err:
             return err
@@ -4440,12 +4324,8 @@ def make_integration_tools(
     def _drive_quote(term: str) -> str:
         return term.replace("\\", "\\\\").replace("'", "\\'")
 
-    def drive_search_files(
-        query: str, max_results: int = 10, account: str = ""
-    ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "google_drive", account, "access_token"
-        )
+    def drive_search_files(query: str, max_results: int = 10, account: str = "") -> dict[str, Any]:
+        aid, profile, err = _account_profile(secrets, "google_drive", account, "access_token")
         if err:
             return err
         q = _drive_quote(query)
@@ -4484,9 +4364,7 @@ def make_integration_tools(
     def drive_list_folder(
         folder_id: str = "root", max_results: int = 20, account: str = ""
     ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "google_drive", account, "access_token"
-        )
+        aid, profile, err = _account_profile(secrets, "google_drive", account, "access_token")
         if err:
             return err
         return _acct_result(
@@ -4521,12 +4399,8 @@ def make_integration_tools(
         )
     )
 
-    def drive_read_file(
-        file_id: str, max_chars: int = 20000, account: str = ""
-    ) -> dict[str, Any]:
-        aid, profile, err = _account_profile(
-            secrets, "google_drive", account, "access_token"
-        )
+    def drive_read_file(file_id: str, max_chars: int = 20000, account: str = "") -> dict[str, Any]:
+        aid, profile, err = _account_profile(secrets, "google_drive", account, "access_token")
         if err:
             return err
         headers = _google_headers(profile["access_token"])
@@ -4549,9 +4423,7 @@ def make_integration_tools(
                 params={"mimeType": export_mime},
             )
         elif mime.startswith("application/vnd.google-apps"):
-            return _acct_result(
-                aid, {"error": f"cannot read {mime} as text", "file": info}
-            )
+            return _acct_result(aid, {"error": f"cannot read {mime} as text", "file": info})
         else:
             body = _request(
                 "GET",
@@ -4631,9 +4503,7 @@ def make_integration_tools(
             "base": f"{str(base_uri).rstrip('/')}/restapi/v2.1/accounts/{account_id}",
         }, None
 
-    def docusign_list_envelopes(
-        status: str = "", since_days: int = 30
-    ) -> dict[str, Any]:
+    def docusign_list_envelopes(status: str = "", since_days: int = 30) -> dict[str, Any]:
         profile, err = _profile(secrets, "docusign", "access_token")
         if err:
             return err
@@ -4886,9 +4756,7 @@ def make_integration_tools(
     )
 
     if enabled_connectors is not None:
-        tools = [
-            t for t in tools if connector_for_tool(t.__name__) in enabled_connectors
-        ]
+        tools = [t for t in tools if connector_for_tool(t.__name__) in enabled_connectors]
     if enabled_tools is not None:
         tools = [t for t in tools if t.__name__ in enabled_tools]
     return tools

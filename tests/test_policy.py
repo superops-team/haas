@@ -1,4 +1,5 @@
 """Policy Controller tests: precedence merge, widening rejection, network + path authz."""
+
 from __future__ import annotations
 
 import pytest
@@ -19,6 +20,39 @@ def _compile(*layers: PolicyLayer) -> object:
     return PolicyController().compile(
         PolicyCompileInput(scope=PolicyScope(tenantId="t1", workspaceId="w1"), layers=list(layers))
     )
+
+
+def test_fresh_policy_defaults_match_openharness_contract() -> None:
+    policy = _compile()
+    assert policy.workspace.mode == "workspace-write"
+    assert policy.network.defaultAction == "allow"
+    assert policy.tools.approvalMode == "on-request"
+
+
+@pytest.mark.parametrize("target", ["always", "never"])
+def test_approval_mode_can_narrow_from_on_request_without_delegation(target: str) -> None:
+    policy = _compile(PolicyLayer("session", tools=ToolsPolicy(approvalMode=target)))
+    assert policy.tools.approvalMode == target
+
+
+@pytest.mark.parametrize(
+    "source,target",
+    [("always", "on-request"), ("never", "on-request"), ("never", "always")],
+)
+def test_approval_mode_expansion_requires_delegation(source: str, target: str) -> None:
+    with pytest.raises(PolicyWideningRejected):
+        _compile(
+            PolicyLayer("tenant", tools=ToolsPolicy(approvalMode=source)),
+            PolicyLayer("session", tools=ToolsPolicy(approvalMode=target)),
+        )
+
+
+def test_approval_mode_expansion_with_delegation_is_allowed() -> None:
+    policy = _compile(
+        PolicyLayer("tenant", tools=ToolsPolicy(approvalMode="never"), delegation=True),
+        PolicyLayer("session", tools=ToolsPolicy(approvalMode="on-request")),
+    )
+    assert policy.tools.approvalMode == "on-request"
 
 
 # --- precedence merge -------------------------------------------------------
@@ -143,7 +177,9 @@ def test_compile_rejects_widening_network_allow() -> None:
     with pytest.raises(PolicyWideningRejected):
         _compile(
             PolicyLayer("tenant", network=NetworkPolicy(allow=["https://a.com"])),
-            PolicyLayer("workspace", network=NetworkPolicy(allow=["https://a.com", "https://evil.com"])),
+            PolicyLayer(
+                "workspace", network=NetworkPolicy(allow=["https://a.com", "https://evil.com"])
+            ),
         )
 
 
@@ -165,13 +201,22 @@ def test_compile_allows_widening_with_delegation() -> None:
 
 
 def test_authorize_network_allows_listed_url() -> None:
-    policy = _compile(PolicyLayer("tenant", network=NetworkPolicy(allow=["https://api.openai.com"])))
+    policy = _compile(
+        PolicyLayer("tenant", network=NetworkPolicy(allow=["https://api.openai.com"]))
+    )
     decision = PolicyController().authorize_network(policy, "https://api.openai.com/v1/chat")
     assert decision.allowed is True
 
 
 def test_authorize_network_denies_unlisted_url() -> None:
-    policy = _compile(PolicyLayer("tenant", network=NetworkPolicy(allow=["https://api.openai.com"])))
+    policy = _compile(
+        PolicyLayer(
+            "tenant",
+            network=NetworkPolicy(
+                defaultAction="deny", allow=["https://api.openai.com"]
+            ),
+        )
+    )
     decision = PolicyController().authorize_network(policy, "https://evil.com")
     assert decision.allowed is False
     assert decision.code == "haas_policy_denied"
@@ -185,18 +230,24 @@ def test_authorize_network_rejects_non_http_scheme() -> None:
 
 def test_authorize_network_blocks_private_ip() -> None:
     policy = _compile(PolicyLayer("tenant", network=NetworkPolicy(allow=["https://10.0.0.5"])))
-    decision = PolicyController().authorize_network(policy, "http://169.254.169.254/latest/meta-data")
+    decision = PolicyController().authorize_network(
+        policy, "http://169.254.169.254/latest/meta-data"
+    )
     assert decision.allowed is False
 
 
 def test_authorize_network_blocks_localhost_without_allowlist() -> None:
-    policy = _compile(PolicyLayer("tenant", network=NetworkPolicy(allow=["https://api.openai.com"])))
+    policy = _compile(
+        PolicyLayer("tenant", network=NetworkPolicy(allow=["https://api.openai.com"]))
+    )
     decision = PolicyController().authorize_network(policy, "http://127.0.0.1:9000/")
     assert decision.allowed is False
 
 
 def test_authorize_network_allows_loopback_when_listed() -> None:
-    policy = _compile(PolicyLayer("tenant", network=NetworkPolicy(allow=["http://127.0.0.1:18080"])))
+    policy = _compile(
+        PolicyLayer("tenant", network=NetworkPolicy(allow=["http://127.0.0.1:18080"]))
+    )
     decision = PolicyController().authorize_network(policy, "http://127.0.0.1:18080/v1")
     assert decision.allowed is True
 
@@ -208,9 +259,7 @@ def test_authorize_workspace_write_within_root() -> None:
     policy = _compile(
         PolicyLayer("tenant", workspace=WorkspacePolicy(mode="workspace-write", root="/workspace"))
     )
-    decision = PolicyController().authorize_workspace_path(
-        policy, "/workspace/out.txt", "write"
-    )
+    decision = PolicyController().authorize_workspace_path(policy, "/workspace/out.txt", "write")
     assert decision.allowed
 
 

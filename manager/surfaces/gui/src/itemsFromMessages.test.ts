@@ -33,6 +33,30 @@ describe("itemsFromMessages _display sidecar", () => {
   });
 });
 
+describe("itemsFromMessages HaaS activity evidence locator", () => {
+  it("restores safe command facts and the scoped ephemeral locator, never an evidence body", () => {
+    const items = itemsFromMessages([{
+      role: "assistant",
+      content: "done",
+      _delegated: { backend: "haas" },
+      _haas_activity: [{
+        id: "call_1", kind: "command", status: "completed",
+        summary: "Run tests", preview: "1 passed", omittedLineCount: 0,
+        invocationId: "inv_1", commandPreview: "pytest -q",
+        workingDirectory: "/workspace", evidenceRef: "evd_1",
+        evidenceExpiresAtMs: 1_900_000_000_000,
+      }],
+    }] as any);
+
+    expect(items[0]).toMatchObject({
+      kind: "tool", id: "call_1", invocationId: "inv_1",
+      commandPreview: "pytest -q", workingDirectory: "/workspace",
+      evidenceRef: "evd_1", evidenceExpiresAtMs: 1_900_000_000_000,
+    });
+    expect(JSON.stringify(items)).not.toContain("evidenceBody");
+  });
+});
+
 describe("itemsFromMessages timestamps", () => {
   it("carries the server ts through to user/assistant items; pre-stamp history gets none", () => {
     const items = itemsFromMessages([
@@ -106,6 +130,56 @@ describe("itemsFromMessages reasoning", () => {
     ] as any);
     expect(items[1]).toEqual({ kind: "assistant", text: "answer", reasoning: "let me think" });
     expect(items[2]).toEqual({ kind: "assistant", text: "", reasoning: "stopped mid-thought" });
+  });
+
+  it("restores a stage-only HaaS assistant item", () => {
+    const stages = [{
+      modelCallId: "mcall_0001", status: "completed",
+      steps: [{ stepId: "reason_1:0", kind: "reasoning_summary", text: "Safe summary" }],
+    }];
+    const items = itemsFromMessages([{
+      role: "assistant", content: "", _delegated: { backend: "haas" },
+      _haas_model_stages: stages,
+    }] as any);
+
+    expect(items).toEqual([{
+      kind: "assistant", text: "", source: "haas", modelStages: stages,
+    }]);
+  });
+
+  it("restores each HaaS turn's safe activity snapshot before its final answer", () => {
+    const items = itemsFromMessages([
+      { role: "user", content: "check" },
+      {
+        role: "assistant",
+        content: "failed result",
+        reasoning: "Checking tests",
+        _delegated: { backend: "haas" },
+        _haas_activity: [
+          {
+            id: "call_1",
+            kind: "command",
+            status: "failed",
+            title: "",
+            summary: "Run tests",
+            preview: "1 failed",
+            omittedLineCount: 0,
+            exitCode: 1,
+          },
+        ],
+        _haas_task_outcome: {
+          phase: "failed",
+          code: "haas_provider_error",
+          safeReason: "Provider unavailable",
+          retryable: true,
+        },
+      },
+    ] as any);
+
+    expect(items.map((item) => item.kind)).toEqual(["user", "tool", "assistant"]);
+    expect((items[1] as any).taskOutcome.phase).toBe("failed");
+    expect((items[1] as any).safeSummary).toBe("Run tests");
+    expect((items[2] as any).source).toBe("haas");
   });
 });
 

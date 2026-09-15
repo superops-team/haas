@@ -67,9 +67,7 @@ def default_account(secrets: SecretStore) -> str:
     return next(iter(accounts), "")
 
 
-def resolve(
-    secrets: SecretStore, account: str = ""
-) -> tuple[str, str, Optional[dict[str, Any]]]:
+def resolve(secrets: SecretStore, account: str = "") -> tuple[str, str, Optional[dict[str, Any]]]:
     """(email, profile_key, profile) for the requested — or default — account.
     Profile is None when nothing matches (not connected / unknown account)."""
     email = _norm(account) or default_account(secrets)
@@ -79,9 +77,7 @@ def resolve(
     return email, key, secrets.get(key)
 
 
-def managed_connect_account(
-    secrets: SecretStore, profile: dict[str, Any]
-) -> dict[str, Any]:
+def managed_connect_account(secrets: SecretStore, profile: dict[str, Any]) -> dict[str, Any]:
     """Store one managed-OAuth account; the first connected account becomes the
     default. Reconnecting an email replaces its tokens in place."""
     migrate_legacy_default(secrets)

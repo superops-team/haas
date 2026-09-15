@@ -32,9 +32,7 @@ def _is_data_pdf(url: Any) -> bool:
     return isinstance(url, str) and url.startswith("data:application/pdf;base64,")
 
 
-def build_user_content(
-    text: Optional[str], attachments: Optional[list[dict]] = None
-) -> Any:
+def build_user_content(text: Optional[str], attachments: Optional[list[dict]] = None) -> Any:
     """Return `str` (no attachments) or a list of OpenAI content-parts (with attachments).
 
     Each attachment is `{"kind": "image"|"pdf"|"text", "name"?, "data_url"? (image/pdf),
@@ -64,17 +62,13 @@ def build_user_content(
             url = a.get("data_url") or ""
             if _is_data_pdf(url) and len(url) <= MAX_PDF_CHARS:
                 name = str(a.get("name") or "attachment.pdf")
-                parts.append(
-                    {"type": "file", "file": {"filename": name, "file_data": url}}
-                )
+                parts.append({"type": "file", "file": {"filename": name, "file_data": url}})
                 added += 1
         elif kind == "text":
             body = str(a.get("text") or "")[:MAX_TEXT_CHARS]
             name = str(a.get("name") or "attachment")
             if body:
-                parts.append(
-                    {"type": "text", "text": f"{ATTACHED_TEXT_PREFIX}{name}]\n{body}"}
-                )
+                parts.append({"type": "text", "text": f"{ATTACHED_TEXT_PREFIX}{name}]\n{body}"})
                 added += 1
 
     if added == 0:

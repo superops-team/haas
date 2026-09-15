@@ -1,4 +1,5 @@
 """Harness adapter interface and concrete adapters (specs/harness-adapter/)."""
+
 from haas.harnesses.base import (
     AdapterProbe,
     AdapterTurnResult,

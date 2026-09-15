@@ -214,15 +214,11 @@ async def _refuse_browser(url: str) -> None:
     the GUI's "reopen sign-in page" affordance still works after the refusal."""
     global last_authorize_url
     last_authorize_url = url
-    raise InteractiveAuthRequired(
-        "sign-in required — reconnect this server from its page"
-    )
+    raise InteractiveAuthRequired("sign-in required — reconnect this server from its page")
 
 
 async def _refuse_callback() -> tuple[str, Optional[str]]:
-    raise InteractiveAuthRequired(
-        "sign-in required — reconnect this server from its page"
-    )
+    raise InteractiveAuthRequired("sign-in required — reconnect this server from its page")
 
 
 async def _wait_for_callback() -> tuple[str, Optional[str]]:
@@ -264,9 +260,7 @@ class _MetadataSeededProvider(OAuthClientProvider):
                 self.context.oauth_metadata = OAuthMetadata.model_validate(raw)
             except Exception:
                 pass  # stale/incompatible cache: discovery will refill it
-        if self.context.oauth_metadata is None and self._ocw_storage._data().get(
-            "tokens"
-        ):
+        if self.context.oauth_metadata is None and self._ocw_storage._data().get("tokens"):
             # No cache yet (tokens predate this fix): one best-effort fetch from the
             # standard well-known location, so the refresh grant can target the real
             # token endpoint on the very next request. Cached on success; any failure

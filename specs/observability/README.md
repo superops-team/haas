@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-10
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
@@ -46,6 +46,7 @@ Non-responsibilities:
 - Does not directly read secret values.
 - Does not directly execute adapter or provider requests.
 - Is not a source of truth for business state; business facts come from the Registry, Session Runtime, Event Log, or Artifact Store.
+- Does not own stable feature discovery. `GET /v1/haas/capabilities` is owned by HaaS Protocol and composed from registry, adapter, and runtime facts; clients MUST NOT infer support from `/status`.
 
 ## 5. Core Interfaces
 
@@ -57,7 +58,7 @@ Non-responsibilities:
 | GET | `/v1/haas/ready?scope=control` | Can accept control-plane requests |
 | GET | `/v1/haas/ready?scope=execution` | Can start a harness turn |
 | GET | `/v1/haas/ready?scope=capability` | Optional capability (MCP/skill/browser) warmup is complete |
-| GET | `/v1/haas/status` | Runtime status summary |
+| GET | `/v1/haas/status` | Runtime status summary; not a stable capability-discovery contract |
 | GET | `/v1/haas/diagnostics` | Redacted diagnostics summary |
 
 ### 5.2 Internal API
@@ -106,7 +107,7 @@ def write_verification_report(change_id: str, report_type: str, report: dict) ->
   "version": "dev",
   "uptimeSeconds": 120,
   "protocol": {
-    "haasVersion": "2026-08-26",
+    "haasVersion": "2026-09-10",
     "adkProtocol": "2.0",
     "capability": "run/run_sse/sessions"
   },
@@ -144,6 +145,7 @@ Health/ready states:
 - Diagnostics require admin/debug scope when they include per-session details.
 - Verification reports MUST redact commands or outputs that include credentials.
 - Public status MAY include fingerprints and safe reasons, but not raw values.
+- `protocol.haasVersion` MUST report the runtime-implemented version. It may report `2026-09-10` only after the roadmap conformance gate passes; spec publication alone does not advance runtime status.
 
 ## 9. Observability
 
@@ -158,12 +160,15 @@ Baseline metrics:
 - `haas_mcp_probe_total{transport,status}`
 - `haas_event_log_lag_ms`
 - `haas_container_startup_duration_ms{phase,status}`
+- `haas_lifecycle_control_total{action,stage,status}`
+- `haas_lifecycle_control_duration_ms{action,status}`
 
 Baseline logs:
 
 - JSON structured logs go to stdout/stderr by default.
 - Every request-scoped log line SHOULD carry `traceId`.
 - Access logs MUST use route templates, not raw paths with query strings.
+- Lifecycle logs carry safe session/invocation/operation ids, action and stage only; they never include continuation instructions or native thread ids.
 
 ## 10. Failure and Recovery
 

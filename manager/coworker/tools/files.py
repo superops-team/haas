@@ -60,11 +60,7 @@ def file_tools(workspace: str, roots: Optional[list] = None) -> list:
         max_lines: int = _DEFAULT_MAX_LINES,
     ) -> dict[str, Any]:
         start = start_line if isinstance(start_line, int) and start_line > 0 else 1
-        n = (
-            max_lines
-            if isinstance(max_lines, int) and max_lines > 0
-            else _DEFAULT_MAX_LINES
-        )
+        n = max_lines if isinstance(max_lines, int) and max_lines > 0 else _DEFAULT_MAX_LINES
         n = min(n, _DEFAULT_MAX_LINES)
         target = (root / path).resolve()
         home = root

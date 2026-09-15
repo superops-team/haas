@@ -16,7 +16,6 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-#[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -151,7 +150,11 @@ fn sidecar_env() -> std::collections::HashMap<String, String> {
         .cloned()
         .or_else(|| std::env::var("PATH").ok())
         .unwrap_or_default();
-    let mut parts: Vec<String> = base.split(':').filter(|s| !s.is_empty()).map(String::from).collect();
+    let mut parts: Vec<String> = base
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
     for dir in KNOWN_TOOL_DIRS {
         if !parts.iter().any(|p| p == dir) && std::path::Path::new(dir).is_dir() {
             parts.push((*dir).to_string());
@@ -169,16 +172,26 @@ fn sidecar_env() -> std::collections::HashMap<String, String> {
 
 /// Path to the server entrypoint. Resolution order:
 ///   1. `COWORKER_SERVER_BIN` env override.
-///   2. The bundled onedir sidecar shipped via Tauri `resources` (production): the
+///   2. Debug builds use the repository Manager venv so staged release artifacts cannot
+///      shadow newer source code.
+///   3. The bundled onedir sidecar shipped via Tauri `resources` (production): the
 ///      `sidecar/` folder lands in Contents/Resources on macOS and in the install dir
 ///      (next to the app exe) on Windows.
-///   3. Legacy onefile slot: `openworker-server[.exe]` next to the app binary (pre-onedir
+///   4. Legacy onefile slot: `openworker-server[.exe]` next to the app binary (pre-onedir
 ///      builds used Tauri externalBin).
-///   4. Dev fallback: the repo venv, relative to this crate (`src-tauri` → repo-root `.venv`;
-///      `bin/` on POSIX, `Scripts\` on Windows).
+///   5. The executable name on PATH is the production fallback for non-standard layouts.
 fn server_bin() -> PathBuf {
     if let Ok(p) = std::env::var("COWORKER_SERVER_BIN") {
         return PathBuf::from(p);
+    }
+    if cfg!(debug_assertions) {
+        let mut dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        if cfg!(windows) {
+            dev.push("../../../.venv/Scripts/openworker-server.exe");
+        } else {
+            dev.push("../../../.venv/bin/openworker-server");
+        }
+        return dev;
     }
     let exe_name = if cfg!(windows) {
         "openworker-server.exe"
@@ -201,13 +214,7 @@ fn server_bin() -> PathBuf {
             }
         }
     }
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if cfg!(windows) {
-        p.push("../../../.venv/Scripts/openworker-server.exe");
-    } else {
-        p.push("../../../.venv/bin/openworker-server");
-    }
-    p
+    PathBuf::from(exe_name)
 }
 
 /// Mirror of `coworker.secrets.state_dir()` so the shell and server agree on `desktop.json`.
@@ -645,7 +652,11 @@ async fn download_update(
     // (Guard scope stays sync: a std MutexGuard must not live across an await.)
     {
         let slot = pending.0.lock().unwrap();
-        if slot.as_ref().map(|(v, _)| v == &update.version).unwrap_or(false) {
+        if slot
+            .as_ref()
+            .map(|(v, _)| v == &update.version)
+            .unwrap_or(false)
+        {
             return Ok(());
         }
     }
@@ -761,6 +772,13 @@ pub fn run() {
                 .env("COWORKER_EXIT_WITH_PARENT", "1")
                 .env("COWORKER_PARENT_PID", std::process::id().to_string())
                 .env("COWORKER_API_TOKEN", &api_token)
+                // Packaged desktop builds ship and supervise the non-containerized
+                // local HaaS sidecar. User profile env is inherited first, but these
+                // product defaults keep the app on the HaaS local API path.
+                .env("COWORKER_HAAS_BACKEND_PREFERENCE", "haas")
+                .env("COWORKER_HAAS_EXECUTION_MODE", "local_api")
+                .env("COWORKER_HAAS_DELEGATION_ENABLED", "true")
+                .env("COWORKER_HAAS_LOCAL_AUTOSTART", "true")
                 // This GUI app has no console, so a console-subsystem child would inherit
                 // invalid std handles and crash a few seconds in when uvicorn writes its logs
                 // (the "Starting coworker…" freeze on Windows). Hand it real handles: the
@@ -812,11 +830,27 @@ pub fn run() {
 
             // 2. Build the window, injecting the sidecar endpoints before the SPA loads.
             //    Overlay title bar (macOS): traffic lights float over the edge-to-edge UI.
-            let mut builder =
+            let initial_window_pending = Arc::new(AtomicBool::new(true));
+            let builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .on_page_load(move |window, payload| {
+                        if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+                            && initial_window_pending
+                                .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                                .is_ok()
+                        {
+                            // A dynamically-created WKWebView can miss its first visible frame
+                            // when the native window is shown before the initial navigation
+                            // commits. Keep startup hidden until the page is ready, then surface
+                            // it exactly as tray/single-instance reopen does.
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    })
                     .title("OpenHarness")
                     .inner_size(1360.0, 900.0)
                     .min_inner_size(980.0, 640.0)
+                    .visible(false)
                     // Let the WEBVIEW receive OS file drags: Tauri's own drag-drop handler
                     // otherwise intercepts them, so the composer's HTML5 onDrop (attach by
                     // dragging a file in) never fired in the desktop shell — browser dev
@@ -825,15 +859,13 @@ pub fn run() {
                     .disable_drag_drop_handler()
                     .initialization_script(&inject);
             #[cfg(target_os = "macos")]
-            {
-                builder = builder
-                    .title_bar_style(tauri::TitleBarStyle::Overlay)
-                    .hidden_title(true)
-                    // Nudge the traffic lights down + in so they sit vertically centered in a
-                    // roomier top strip, aligned with the sidebar toggle and title rather than
-                    // jammed against the top edge.
-                    .traffic_light_position(tauri::LogicalPosition::new(19.0, 24.0));
-            }
+            let builder = builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true)
+                // Nudge the traffic lights down + in so they sit vertically centered in a
+                // roomier top strip, aligned with the sidebar toggle and title rather than
+                // jammed against the top edge.
+                .traffic_light_position(tauri::LogicalPosition::new(19.0, 24.0));
             let win = builder.build()?;
 
             // Close-to-tray: hide instead of quitting so the sidecar keeps running.
@@ -853,7 +885,8 @@ pub fn run() {
 
             // A monochrome template icon (black + alpha, raw RGBA 32x32) so the menu bar tints
             // it for light/dark automatically — not the full-color app icon.
-            let tray_icon = tauri::image::Image::new(include_bytes!("../icons/tray32.rgba"), 32, 32);
+            let tray_icon =
+                tauri::image::Image::new(include_bytes!("../icons/tray32.rgba"), 32, 32);
             TrayIconBuilder::new()
                 .tooltip("OpenHarness")
                 .icon(tray_icon)
@@ -879,6 +912,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building the OpenHarness desktop app")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = event
+            {
+                show_main(app);
+                return;
+            }
+
             // Also on Exit: belt-and-suspenders in case a quit path reaches teardown without
             // a preceding ExitRequested (observed with macOS Cmd+Q under the tray setup).
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {

@@ -5,6 +5,7 @@ classification. Loopback integration tests exercise the full JSON-RPC
 handshake against an in-process fake app-server (no real Codex, no external
 network).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -23,8 +24,10 @@ from haas.harnesses.codex_app_server.rpc import (
     message_id,
 )
 from haas.harnesses.codex_app_server.transport import (
+    CODEX_STDIO_FRAME_LIMIT,
     CodexEndpoint,
     CodexTransportError,
+    StdioTransport,
     unix_socket_path,
 )
 
@@ -90,6 +93,31 @@ def test_classify_notification() -> None:
 def test_classify_invalid() -> None:
     assert classify_message({"id": 2, "result": {}}, {1}) == "invalid"
     assert classify_message({}, set()) == "invalid"
+
+
+@pytest.mark.integration
+async def test_stdio_transport_accepts_large_ndjson_frame(tmp_path: Path) -> None:
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {"item": {"aggregatedOutput": "x" * 100_000}},
+    }
+    fake_codex = tmp_path / "fake-codex"
+    fake_codex.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps(" + repr(payload) + "))\n",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+
+    assert CODEX_STDIO_FRAME_LIMIT == 64 << 20
+    transport = await StdioTransport.start(str(fake_codex))
+    try:
+        raw = await asyncio.wait_for(transport.recv(), timeout=5)
+        assert json.loads(raw)["params"]["item"]["aggregatedOutput"] == "x" * 100_000
+    finally:
+        await transport.close()
 
 
 # --- loopback integration --------------------------------------------------
@@ -168,7 +196,9 @@ async def test_codex_json_rpc_notification_and_server_request() -> None:
 
     async with serve(handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        endpoint = CodexEndpoint(transport="loopback_websocket", listen_url=f"ws://127.0.0.1:{port}")
+        endpoint = CodexEndpoint(
+            transport="loopback_websocket", listen_url=f"ws://127.0.0.1:{port}"
+        )
         rpc = CodexJsonRpc(endpoint)
         await rpc.connect()
         try:
@@ -177,6 +207,7 @@ async def test_codex_json_rpc_notification_and_server_request() -> None:
             server_request = await asyncio.wait_for(anext(rpc.server_requests()), timeout=5)
             assert server_request["method"] == "item/commandExecution/requestApproval"
             assert server_request["id"] == 100
+            await rpc.respond(100, {"decision": "accept"})
         finally:
             await rpc.close()
 
@@ -203,7 +234,9 @@ async def test_codex_json_rpc_unknown_method_error() -> None:
 
     async with serve(handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        endpoint = CodexEndpoint(transport="loopback_websocket", listen_url=f"ws://127.0.0.1:{port}")
+        endpoint = CodexEndpoint(
+            transport="loopback_websocket", listen_url=f"ws://127.0.0.1:{port}"
+        )
         rpc = CodexJsonRpc(endpoint)
         await rpc.connect()
         try:

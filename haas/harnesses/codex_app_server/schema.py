@@ -5,6 +5,7 @@ contract): pin a Codex CLI version, snapshot the `codex app-server
 generate-json-schema` output as a single JSON fixture, and re-run the
 generator at probe time to detect wire-protocol drift.
 """
+
 from __future__ import annotations
 
 import json

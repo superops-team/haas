@@ -119,9 +119,7 @@ class SkillStore:
         return folder
 
     # -- queries ------------------------------------------------------------------
-    def find(
-        self, name: str, workspace: Optional[str | Path] = None
-    ) -> tuple[Path, str]:
+    def find(self, name: str, workspace: Optional[str | Path] = None) -> tuple[Path, str]:
         """Locate a skill by name, most-local first (project before global) — mirrors the
         loader's collision precedence so management operates on the copy the model sees."""
         name = validate_name(name)
@@ -217,12 +215,8 @@ class SkillStore:
         _write_skill_md(
             folder,
             name=current.name,
-            description=(
-                description if description is not None else current.description
-            ),
-            instructions=(
-                instructions if instructions is not None else current.instructions
-            ),
+            description=(description if description is not None else current.description),
+            instructions=(instructions if instructions is not None else current.instructions),
             source=_frontmatter_source(folder / "SKILL.md"),
         )
         return {"name": current.name, "scope": scope}
@@ -247,9 +241,7 @@ class SkillStore:
         target_base = self._base(to_scope, workspace)
         target = self._folder_of(target_base, name)
         if (target / "SKILL.md").is_file():
-            raise ValueError(
-                f"A skill named '{name}' already exists in the target scope."
-            )
+            raise ValueError(f"A skill named '{name}' already exists in the target scope.")
         target_base.mkdir(parents=True, exist_ok=True)
         shutil.move(str(folder), str(target))
         return {"name": name, "scope": to_scope}
@@ -353,9 +345,7 @@ class SkillStore:
         skill = _parse_skill(staged / "SKILL.md")
         if skill.name == token:  # no frontmatter name → parser fell back to the folder
             shutil.rmtree(staged, ignore_errors=True)
-            raise ValueError(
-                "The .md file needs YAML frontmatter with at least a skill name."
-            )
+            raise ValueError("The .md file needs YAML frontmatter with at least a skill name.")
         try:
             validate_name(skill.name)
         except ValueError:
@@ -428,9 +418,7 @@ class SessionSkillStore:
         if not self.path:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps({"sessions": self._rows}, indent=2), encoding="utf-8"
-        )
+        self.path.write_text(json.dumps({"sessions": self._rows}, indent=2), encoding="utf-8")
 
     def get(self, session_id: str) -> dict[str, bool]:
         return dict(self._rows.get(session_id, {}))
@@ -550,7 +538,9 @@ def save_skill_tool(
         except ValueError as exc:
             return {"error": str(exc)}
         if not (description or "").strip():
-            return {"error": "A one-line description is required — it becomes the skill's menu entry."}
+            return {
+                "error": "A one-line description is required — it becomes the skill's menu entry."
+            }
         if not (instructions or "").strip():
             return {"error": "Skill instructions are required."}
 

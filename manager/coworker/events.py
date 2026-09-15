@@ -15,6 +15,7 @@ class EventType(str, Enum):
     TURN_START = "turn_start"
     ASSISTANT_DELTA = "assistant_delta"
     REASONING_DELTA = "reasoning_delta"  # model thinking text (display-only, never replayed)
+    MODEL_STAGE_UPDATED = "model_stage_updated"
     ASSISTANT_MESSAGE = "assistant_message"
     TOOL_PROPOSED = "tool_proposed"
     PERMISSION_REQUIRED = "permission_required"
@@ -23,18 +24,16 @@ class EventType(str, Enum):
     QUESTION_REQUESTED = (
         "question_requested"  # agent asks the user a free-text/multiple-choice question
     )
-    PLAN_PROPOSED = (
-        "plan_proposed"  # agent presents a plan for approval (plan mode exit)
-    )
-    TEAM_PROPOSED = (
-        "team_proposed"  # a lead proposes a worker roster (the staffing gate)
-    )
+    PLAN_PROPOSED = "plan_proposed"  # agent presents a plan for approval (plan mode exit)
+    TEAM_PROPOSED = "team_proposed"  # a lead proposes a worker roster (the staffing gate)
     ITEMS_PROPOSED = (
         "items_proposed"  # a lead proposes work items (the decomposition gate);
         # unlike propose_plan this is mode-independent — approval creates the items
     )
     TOOL_STARTED = "tool_started"
+    TOOL_OUTPUT_DELTA = "tool_output_delta"
     TOOL_FINISHED = "tool_finished"
+    TASK_STATE = "task_state"
     ITERATION_END = "iteration_end"
     TURN_END = "turn_end"
     ERROR = "error"

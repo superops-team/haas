@@ -47,9 +47,7 @@ def build(dialect, *, space: str):
     def board_list(state: str = "", assignee: str = "") -> Any:
         """List work items on the board, optionally filtered by state
         (open/in_progress/blocked/review/done/canceled) or assignee."""
-        return _safe(
-            dialect.list_items, space, state=state or None, assignee=assignee or None
-        )
+        return _safe(dialect.list_items, space, state=state or None, assignee=assignee or None)
 
     @mcp.tool()
     def board_show(item: int) -> Any:
@@ -89,9 +87,7 @@ def build(dialect, *, space: str):
         """Move a work item: in_progress when you start, blocked with the blocker
         as `comment`, review with a hand-off comment and artifact refs (branch,
         PR, file:line) when finished."""
-        return _safe(
-            dialect.transition, space, item, to, comment=comment, refs=list(refs or [])
-        )
+        return _safe(dialect.transition, space, item, to, comment=comment, refs=list(refs or []))
 
     @mcp.tool()
     def board_comment(item: int, body: str, refs: list[str] = []) -> Any:

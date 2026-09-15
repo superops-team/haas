@@ -295,6 +295,7 @@ function Buttons({
   // trust rule below.
   const isMcp = item.name.startsWith("mcp__") && !connector;
   const noSessionGrant =
+    !!item.haasApprovalId ||
     autoApprove ||
     offerStanding ||
     connector ||
@@ -314,7 +315,7 @@ function Buttons({
       <button className="btn approval-primary" onClick={() => onApprove("once")}>
         {primaryLabel}
       </button>
-      {!autoApprove && !offerStanding && externalFamily && (
+      {!item.haasApprovalId && !autoApprove && !offerStanding && externalFamily && (
         <button
           className="btn"
           title={t("approval.btn.this_run_title", { name: item.name })}
@@ -359,7 +360,7 @@ function Buttons({
           writes a per-tool rule to the user-local store; survives sessions; revocable
           on the server's detail page. Never in Auto-approve (§1.5: a card the
           reviewer escalated must not mint a permanent skip). */}
-      {!autoApprove && !offerStanding && isMcp && (
+      {!item.haasApprovalId && !autoApprove && !offerStanding && isMcp && (
         <button
           className="btn"
           title={t("approval.btn.always_trust_title", { name: item.name })}
@@ -369,7 +370,7 @@ function Buttons({
           {t("approval.btn.always_trust")}
         </button>
       )}
-      {!autoApprove && !offerStanding && item.name === "web_fetch" && fetchHost && (
+      {!item.haasApprovalId && !autoApprove && !offerStanding && item.name === "web_fetch" && fetchHost && (
         <button
           className="btn"
           title={t("approval.btn.always_domain_title", { host: fetchHost })}

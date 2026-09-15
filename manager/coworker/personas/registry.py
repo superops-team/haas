@@ -57,9 +57,7 @@ class PersonaEntry:
     subagents: bool = False
     scheduling: bool = True
     tools: list[str] = field(default_factory=list)
-    default_surfaced: bool = (
-        True  # whether it shows in the picker before any user choice
-    )
+    default_surfaced: bool = True  # whether it shows in the picker before any user choice
     # Whether it ships enabled before any user choice. Builtins default on (UX-029: the
     # composer picker is their front door) — except Code (owner call 2026-08-21: ships
     # disabled). Installed third-party personas always start disabled pending consent.
@@ -178,18 +176,14 @@ class PersonaRegistry:
         if not d.is_dir():
             return
         for md in sorted(d.glob("*.md")):
-            self._register_manifest(
-                load_manifest_file(md, builtin=builtin), builtin=builtin
-            )
+            self._register_manifest(load_manifest_file(md, builtin=builtin), builtin=builtin)
         # Bundle subdirs (OPE-58): <dir>/<id>/manifest.md with an optional sibling
         # skills/ folder — the same self-contained shape an install snapshot uses, so a
         # persona's skills live with it instead of leaking into a shared flat dir.
         for sub in sorted(p for p in d.iterdir() if p.is_dir()):
             md = sub / "manifest.md"
             if md.is_file():
-                self._register_manifest(
-                    load_manifest_file(md, builtin=builtin), builtin=builtin
-                )
+                self._register_manifest(load_manifest_file(md, builtin=builtin), builtin=builtin)
 
     def _register_manifest(self, m, *, builtin: bool) -> None:
         self._entries[m.id] = PersonaEntry(
@@ -510,9 +504,7 @@ class PersonaRegistry:
             for d in candidates:
                 if list(d.glob("*.md")) or (d / "manifest.md").is_file():
                     return self.install_from_dir(d)
-            raise FileNotFoundError(
-                f"no persona manifest found in {filename or 'the archive'}"
-            )
+            raise FileNotFoundError(f"no persona manifest found in {filename or 'the archive'}")
 
     def _snapshot(self, md: Path, persona_id: str) -> Optional[Path]:
         """Copy a manifest into the managed install area; return the snapshot path (or None if no
@@ -539,10 +531,7 @@ class PersonaRegistry:
         base = (
             Path(cache_base)
             if cache_base
-            else (
-                (self.state_path.parent if self.state_path else Path.cwd())
-                / "persona-cache"
-            )
+            else ((self.state_path.parent if self.state_path else Path.cwd()) / "persona-cache")
         )
         dest = clone_persona_repo(url, base, clone=clone or git_clone)
         return self.install_from_dir(dest)
