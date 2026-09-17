@@ -2330,6 +2330,7 @@ def create_app(manager: SessionManager) -> FastAPI:
             # The receive loop atomically claims this session before scheduling the task.
             # Keeping the claim outside prevents two back-to-back frames from both starting.
             haas_turn_started = False
+            turn_token = manager.active_turn_token(session_id)
             try:
                 events = manager.run_turn_events(
                     session_id,
@@ -2364,8 +2365,21 @@ def create_app(manager: SessionManager) -> FastAPI:
                         # Title on the user's words the moment they land — never behind
                         # a long agentic turn (owner catch 2026-08-24).
                         manager._maybe_autotitle(session_id)
+            except (HaasClientError, HaasDelegationError) as exc:
+                message_text = str(exc) or exc.__class__.__name__
+                engine._append_notice("error", message_text)
+                await manager.broadcast_session(
+                    session_id,
+                    {
+                        "type": "error",
+                        "data": {
+                            "error": message_text,
+                            "error_type": exc.__class__.__name__,
+                        },
+                    },
+                )
             finally:
-                manager.mark_idle(session_id)
+                manager.mark_idle(session_id, token=turn_token)
                 manager.save(session_id, engine)
                 terminal_control = manager.haas_control_state(session_id)
                 # Pause already publishes its authoritative `paused` readback in
@@ -2379,6 +2393,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                 await manager.broadcast_session(session_id, {"type": "turn_done", "data": {}})
 
         async def continue_turn(additional_instruction: str | None = None) -> None:
+            turn_token = manager.active_turn_token(session_id)
             try:
                 events = manager.continue_haas_turn_events(
                     session_id,
@@ -2402,7 +2417,7 @@ def create_app(manager: SessionManager) -> FastAPI:
             except (HaasClientError, HaasDelegationError) as exc:
                 await reject_input(f"Could not continue HaaS execution: {exc}")
             finally:
-                manager.mark_idle(session_id)
+                manager.mark_idle(session_id, token=turn_token)
                 manager.save(session_id, engine)
                 await manager.broadcast_session(
                     session_id,
@@ -2615,7 +2630,7 @@ def create_app(manager: SessionManager) -> FastAPI:
                     spawn_control(pause_execution())
                 elif kind == "continue":
                     paused_control = manager.haas_control_state(session_id)
-                    if not manager.try_mark_running(session_id):
+                    if not manager.try_mark_resuming_from_paused(session_id):
                         await reject_input(
                             "This session is already running a turn. Wait for it to finish."
                         )
@@ -2636,7 +2651,9 @@ def create_app(manager: SessionManager) -> FastAPI:
                         )
                         asyncio.create_task(
                             continue_turn(
-                                instruction if isinstance(instruction, str) and instruction else None
+                                instruction
+                                if isinstance(instruction, str) and instruction
+                                else None
                             )
                         )
                 elif kind == "retry":

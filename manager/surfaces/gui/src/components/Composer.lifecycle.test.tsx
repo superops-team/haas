@@ -32,6 +32,28 @@ describe("Composer HaaS lifecycle controls", () => {
     expect(p.onInterrupt).toHaveBeenCalledOnce();
   });
 
+  it("does not submit with Enter while disconnected", () => {
+    const p = props({ connected: false });
+    render(<Composer {...p} />);
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "queued by mistake" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(p.onSend).not.toHaveBeenCalled();
+  });
+
+  it("shows Stop immediately for a locally submitted turn before HaaS confirms pause support", () => {
+    const p = props({ running: true, executionState: "running", pauseSupported: false });
+    render(<Composer {...p} />);
+
+    expect(screen.queryByLabelText("Send")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+
+    expect(p.onInterrupt).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+  });
+
   it("shows Continue and Stop for a paused execution", () => {
     const p = props({ executionState: "paused" });
     render(<Composer {...p} />);

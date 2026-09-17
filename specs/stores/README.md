@@ -3,7 +3,8 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-10
+Last reviewed: 2026-09-15
+Change ID: long-task-model-proxy-stability
 Related specs: [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Harness Registry](../harness-registry/README.md), [Harness Profile](../harness-profile/README.md), [Admission Control](../admission-control/README.md), [Manager Delegation](../manager-delegation/README.md)
 
 ## 1. Component Role
@@ -187,6 +188,18 @@ served. The migration is idempotent, preserves existing ids/order/content/action
 and maps ambiguous historical records to `haas.adapter.event_unparsed` rather than
 inventing semantics.
 
+Persistent record decoding MUST be forward compatible for additive fields. A
+newer writer may store optional fields that an older in-process dataclass does
+not yet know; SQLite/Postgres loaders MUST ignore unknown keys after recording a
+safe migration diagnostic, normalize accepted aliases, and apply dataclass
+defaults for missing optional fields. Known aliases are part of the migration
+contract: `control_state` and `controlState` normalize to the same session
+control field before constructing `SessionRecord`. Type mismatches for known
+fields, unknown schema versions, invalid terminal states, or secret-shaped values
+still fail closed. A single unreadable historical record MUST NOT prevent the
+sidecar from serving health/control APIs; execution readiness may degrade until
+the affected record is quarantined or migrated.
+
 Invocation/delegation migration for the unpublished 2026-08-26 baseline is also
 forward-only:
 
@@ -196,7 +209,10 @@ forward-only:
   the same HaaS session as `acceptedInvocationId` and its acceptance timestamp;
 - if no invocation exists, migrate the contract to `prepared`, not `haas_bound`;
 - ambiguous/inconsistent records fail migration rather than fabricating accepted work.
-- lifecycle fields are additive: sessions default missing `controlState` to `idle` unless an active invocation requires reconciliation; invocations and turns default missing continuation links to null. `interrupted` records retain the same retention and immutability guarantees as other terminal records.
+- lifecycle fields are additive: sessions default missing `controlState` to
+  `idle` unless an active invocation requires reconciliation; invocations and
+  turns default missing continuation links to null. `interrupted` records retain
+  the same retention and immutability guarantees as other terminal records.
 
 Event-log records MUST be indexed by the complete `SessionKey`
 `(appName, userId, sessionId)` for session reads and by
@@ -287,6 +303,9 @@ Logs:
 | Store unavailable | New requests fail closed; reads for frozen sessions MAY degrade to unavailable |
 | Event append fails | The invocation MUST NOT claim `completed`; Session Runtime persists `failed` in its authoritative state store, completes idempotency with a safe error envelope, and records fallback diagnostics outside Event Log |
 | Migration fails | Startup fails closed; the service MUST NOT run against an old schema |
+| Additive record field unknown to the current binary | Ignore the unknown key after a safe diagnostic and keep control APIs available; do not crash startup |
+| Known field alias appears in persisted data | Normalize the alias before dataclass construction and preserve the canonical field on next write |
+| Known field has an invalid type/value | Quarantine or fail closed for execution readiness; do not invent a replacement value |
 | Lease expires | Takeover is allowed only with a newer fencing token; stale holders cannot append events or overwrite records and the new holder must inspect/explain previous state before proceeding |
 | Delegated runtime record is missing | Restore fails closed; do not infer configuration from a live container |
 | Workspace lock holder is ambiguous | Do not grant a second `rw` lock; return `haas_workspace_lock_busy` or timeout |
@@ -306,5 +325,9 @@ Logs:
 - Recovery: after idle TTL cleanup and process restart, recover the delegated-session contract, policy snapshot, approval waits, and workspace-lock state.
 - Concurrency: store-backed workspace lock prevents two active `rw` delegated sessions for the same canonical workspace.
 - Schema: old data remains readable after a forward migration; rollback is explicitly unsupported. Event schema v1 fixtures migrate deterministically to v2, including the safe unparsed fallback.
-- Lifecycle schema: migrate missing `controlState` and continuation links additively; retain interrupted source records and linked successor records across restart/retention; operation receipts make duplicate pause/continue keys replay without a second native action.
+- Lifecycle schema: migrate missing `controlState`, snake_case/camelCase aliases
+  and continuation links additively; ignore unknown optional fields without
+  crashing startup; retain interrupted source records and linked successor
+  records across restart/retention; operation receipts make duplicate
+  pause/continue keys replay without a second native action.
 - Security: a full store audit contains no plaintext secrets, verified with negative assertions after constructed inputs.

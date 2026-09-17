@@ -181,6 +181,25 @@ describe("itemsFromMessages reasoning", () => {
     expect((items[1] as any).safeSummary).toBe("Run tests");
     expect((items[2] as any).source).toBe("haas");
   });
+
+  it("restores terminal task outcome on a HaaS answer without tool activity", () => {
+    const items = itemsFromMessages([
+      { role: "user", content: "answer directly" },
+      {
+        role: "assistant",
+        content: "done",
+        _delegated: { backend: "haas" },
+        _haas_task_outcome: { phase: "completed" },
+      },
+    ] as any);
+
+    expect(items[1]).toEqual({
+      kind: "assistant",
+      text: "done",
+      source: "haas",
+      taskOutcome: { phase: "completed" },
+    });
+  });
 });
 
 describe("itemsFromMessages mcp failure", () => {

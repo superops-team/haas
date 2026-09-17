@@ -88,6 +88,59 @@ export function insertReplayedHaasTool(items: Item[], tool: ToolItem): Item[] {
   return [...items.slice(0, insertion), tool, ...items.slice(insertion)];
 }
 
+const TERMINAL_PHASES = new Set([
+  "completed",
+  "failed",
+  "incomplete",
+  "interrupted",
+  "cancelled",
+  "canceled",
+]);
+
+export function isTerminalTaskOutcome(
+  outcome: TaskOutcome | undefined,
+): outcome is TaskOutcome {
+  return !!outcome?.phase && TERMINAL_PHASES.has(outcome.phase);
+}
+
+export function latestHaasTaskOutcome(items: Item[]): TaskOutcome | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if ((item.kind === "assistant" || item.kind === "tool") && item.taskOutcome) {
+      return item.taskOutcome;
+    }
+  }
+  return undefined;
+}
+
+export function latestUserIntentKey(items: Item[]): string | undefined {
+  let intentOrdinal = 0;
+  let latest: string | undefined;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item.kind === "user") {
+      intentOrdinal += 1;
+      latest = `user:${intentOrdinal}:${item.text}`;
+    }
+    if (item.kind === "connector") {
+      intentOrdinal += 1;
+      const source = item.source;
+      latest = `connector:${intentOrdinal}:${source.connector}:${source.kind}:${source.ts}:${source.text}`;
+    }
+  }
+  return latest;
+}
+
+export function canReconcileReadback(
+  localItems: Item[],
+  replayedItems: Item[],
+): boolean {
+  if (!isTerminalTaskOutcome(latestHaasTaskOutcome(replayedItems))) return false;
+  const localIntent = latestUserIntentKey(localItems);
+  const replayedIntent = latestUserIntentKey(replayedItems);
+  return !localIntent || replayedIntent === localIntent;
+}
+
 export function finalizeCurrentHaasTurn(
   items: Item[],
   outcome: TaskOutcome,

@@ -3,7 +3,8 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-12
+Last reviewed: 2026-09-15
+Change ID: long-task-model-proxy-stability
 Related specs: [Security Boundary](../security-boundary/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Observability](../observability/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -12,9 +13,23 @@ Model Proxy 是 HaaS 的模型访问边界。它让 harness 使用 OpenAI-compat
 
 ### 1.1 内置本地运行时
 
-HaaS lifespan 管理仅 loopback 的 proxy listener，退出时关闭上游连接。每个 invocation 冻结已应用 provider route，签发仅限其 harness、session、invocation 和精确 model 的短期 model_proxy token；所有终态/取消/失败路径均撤销 token 并删除 route。未知 invocation route 不回退可变 registry 配置。凭证解析还检查 Manager grant 的精确 model/URL，禁止重定向和继承环境代理。
+HaaS lifespan 管理仅 loopback 的 proxy listener，退出时关闭上游连接。Model Proxy
+capability 按 session scope 和 generation 管理：Codex 只能看到一个 `model_proxy`
+bearer，该 bearer 只标识已授权的 HaaS session、harness、provider 协议族、base URL
+和 credential scope。它不得绑定到单个 invocation id、profile version、model id 或
+model-call sequence。每个 invocation 仍冻结实际使用的 provider route，并记录所用
+generation；但 terminal/cancel/fail 不得在逻辑 session 仍可继续时撤销 session
+capability。未知 session route 不回退到可变 registry 配置。凭证解析还检查 Manager
+grant 的精确 provider scope 与 URL，禁止重定向和继承环境代理。
 
-Responses 支持 JSON 和增量 SSE，有界上游读取超时且取消时清理连接。错误不透传原始 provider body、credential 或原始异常文本。上游拒绝请求时，proxy 仅可从结构化 `error.code`、`error.type`、`error.param`、`error.message` 字段组装经过脱敏、限长的诊断摘要；未知字段与非 JSON 正文必须丢弃。JSON 请求和 SSE 建连失败使用同一规则；规范化 SSE error frame，但不丢合法 text/tool frame。此 Codex 路径明确不支持 Chat Completions，不能静默替换。Control ready 独立；execution ready 除 Codex 外要求已配置 profile 和可用 resolver/proxy。每次提交校验实际选择的 profile，不能仅信全局 ready。
+Responses 支持 JSON 和增量 SSE，并对上游 connect、response-header 与 read 使用有界
+timeout，取消时清理连接。错误不透传原始 provider body、credential 或原始异常文本。
+上游拒绝请求时，proxy 仅可从结构化 `error.code`、`error.type`、`error.param`、
+`error.message` 字段组装经过脱敏、限长的诊断摘要；未知字段与非 JSON 正文必须丢弃。
+JSON 请求和 SSE 建连失败使用同一规则；规范化 SSE error frame，但不丢合法 text/tool
+frame。此 Codex 路径明确不支持 Chat Completions，不能静默替换。Control ready 独立；
+execution ready 除 Codex 外要求已配置 profile 和可用 resolver/proxy。每次提交校验实际
+选择的 profile，不能仅信全局 ready。
 
 仅对显式选择的 `volcengine-ark` provider，出站 Responses 历史输入中的 reasoning 项和 assistant message 在缺失 `status` 时补 `completed`，满足方舟标准接口要求。出站顶层 `reasoning.summary` 选项会被移除，因为方舟拒绝这个 OpenAI 专有字段；其他 reasoning 选项保持不变。Codex namespace tool（`{"type":"namespace","name":"mcp__...","tools":[...]}`）在上游调用前展平成普通 Responses `function` tool，名称使用 `<namespace>__<tool>`，同一 bridge 中的历史 input/output `function_call` 再恢复为 namespace/name 形态。这样保留 Codex MCP 语义，同时避免 provider 侧 `unknown tool type: namespace` 失败。已有状态、内容、ID 和非 namespace tool payload 不变，且不修改调用方原始输入。其他 provider ID 不变，不按 URL 或展示名称启用该兼容规则。JSON 与 SSE 请求共用转换；离线反向断言与真实多轮 provider smoke 验证此规则。
 
@@ -22,7 +37,7 @@ Responses 支持 JSON 和增量 SSE，有界上游读取超时且取消时清理
 
 | 来源 | 采用内容 |
 |------|----------|
-| `mpa-codex-worker` model proxy / secretless runtime | provider key 不进 harness、短期 proxy token、stream idle timeout、usage normalization |
+| `mpa-codex-worker` model proxy / secretless runtime | provider key 不进 harness、session-scoped proxy token、动态 credential generation 与 grace fallback、stream idle timeout、retry budget、usage normalization |
 | Effective Harness Profile | 已应用 frozen provider route 是 per-invocation ModelRoute 来源 |
 | Security Boundary / Sandbox Runtime | provider credential 走 credential vault，不放入 agent sandbox；caller URL allowlist |
 | 本组件总览 | Secretless runtime |
@@ -43,7 +58,7 @@ Responses 支持 JSON 和增量 SSE，有界上游读取超时且取消时清理
 负责：
 
 - 接收 harness 发往模型 provider 的请求。
-- 验证短期 runtime token 的 session、audience、expiry 和 revocation。
+- 验证 session-scoped runtime token 的 session、audience、generation、expiry 和 revocation。
 - 根据 configured harness 和 request model 解析 provider endpoint。
 - 对 manager-delegated session，只解析 delegated-session contract 中存在且被
   frozen policy snapshot 允许的 manager-supplied `credentialRef`。
@@ -81,6 +96,8 @@ Responses 支持 JSON 和增量 SSE，有界上游读取超时且取消时清理
 ```python
 async def resolve_model_proxy_token(scope: ModelProxyScope) -> RuntimeToken: ...  # 委托 Security Boundary issue_runtime_token(audience="model_proxy")
 async def resolve_model_route(session_id: str, model: str) -> ModelRoute: ...
+async def register_model_proxy_route(session_id: str, route: ModelRoute, credential_ref: str) -> ModelProxyCapability: ...
+async def refresh_model_proxy_capability(session_id: str, token_generation: int, reason: str) -> ModelProxyCapability: ...
 async def proxy_openai_responses(request: ProxyRequest) -> ProxyResponse: ...
 async def proxy_chat_completions(request: ProxyRequest) -> ProxyResponse: ...
 async def normalize_usage(provider: str, body: object) -> Usage: ...
@@ -114,14 +131,53 @@ async def transform_tools(provider: str, request: object) -> ProviderRequestTran
 {
   "audience": "model_proxy",
   "sessionId": "s_123",
-  "invocationId": "inv_abc",
   "harnessId": "chrn_codex_default",
-  "allowedModels": ["gpt-5.6-terra"],
+  "providerScopeKey": "sha256:provider-base-wire-token-field",
   "expiresAtMs": 1786400000000
 }
 ```
 
-### 6.3 Usage
+`RuntimeTokenScope` 刻意按 session 定界。Token 还可以携带非 secret 的
+`generation` 和 `issuedAtMs`，但不得携带 provider credential、profile version、
+作为硬鉴权边界的 model id、invocation id、host path 或带 query 的原始 URL。模型授权
+在请求时通过当前 session capability 与 route registry 执行。
+
+### 6.3 ModelProxyCapability
+
+```json
+{
+  "sessionId": "s_123",
+  "harnessId": "chrn_codex_default",
+  "providerScopeKey": "sha256:provider-base-wire-token-field",
+  "activeGeneration": 3,
+  "activeTokenFingerprint": "sha256:token",
+  "route": {
+    "providerId": "volcengine-ark",
+    "baseUrl": "https://provider.example.com/v1",
+    "wireApi": "responses",
+    "apiType": "responses"
+  },
+  "allowedModels": ["gpt-5.6-terra", "gpt-5.6-sol"],
+  "credentialGeneration": 7,
+  "status": "active",
+  "graceGenerations": [
+    {
+      "generation": 2,
+      "tokenFingerprint": "sha256:previous-token",
+      "expiresAtMs": 1786400300000,
+      "reason": "supervisor_restart"
+    }
+  ],
+  "lastUsedAtMs": 1786400000000,
+  "expiresAtMs": 1786486400000
+}
+```
+
+Capability 默认保存在进程内存中，也可以由 Manager credential channel 与 session
+frozen profile 重建。持久 store 只保存 fingerprint、generation counter 与 route
+摘要；不得持久化原始 model proxy bearer token 或 provider credential。
+
+### 6.4 Usage
 
 ```json
 {
@@ -138,18 +194,36 @@ If usage is unknown, return `null`; never fabricate zero.
 ## 7. 运行模型与状态机
 
 ```text
-runtime token issued
+session capability registered or refreshed
   -> harness sends model request to loopback proxy
-  -> token validated
-  -> route resolved
+  -> token validated to session/generation/provider scope
+  -> route resolved from session capability and frozen profile
   -> request transformed if required
-  -> upstream called
+  -> upstream called with bounded retry policy
   -> streaming bytes relayed or JSON returned
   -> response transformed if required
   -> usage emitted
 ```
 
-Capability 生命周期必须覆盖完整 accepted invocation，包括 tool 之后的模型调用和有界的人工响应等待。初始 expiry 必须晚于 invocation deadline 加有界 cleanup margin，或 runtime 必须在到期前刷新。Blocking interaction 带显式 `expiresAtMs`，且不得晚于 invocation deadline；过期生成 typed terminal，不能无限等待。刷新保持相同 audience、harness、session、invocation、精确 model 与精确 URL，不扩大 scope，也不暴露上游 credential。Active capability 被拒绝时最多刷新一次。旧 token 在 replacement 应用到 native thread 前保持有效，应用后再撤销。权威 terminal、取消或 runtime shutdown 时撤销全部对应 token 和 route。
+Capability 生命周期覆盖整个可继续接收工作的逻辑 session。它必须长于任意 accepted
+invocation deadline，包括 24 小时长任务默认值，并且必须跨 tool call、model call、
+GUI 重连、以及保持同一 owned credential channel 的 Manager/HaaS 热重启继续有效。
+Blocking interaction 带显式 `expiresAtMs`，且不得晚于 invocation deadline；capability
+刷新必须让 pending turn 在该 deadline 或权威 terminal 前保持可恢复。
+
+刷新保持相同 audience、harness、session、provider scope 与 base URL，不扩大 scope，也不
+暴露上游 credential。只有 session applied profile 或显式 profile rebind 授权时，refresh
+才可增删 allowed model。Previous generation 在 replacement 应用到 native thread 前、
+短 grace TTL 到期前、且未跨安全边界时保持有效。上游认证失败若尚未输出任何 byte，可使用
+最近 grace credential 重试一次；已输出 byte 后的失败是 terminal stream failure，不做隐藏重试。
+
+Codex app-server 在 HaaS/Manager 重连后可能继续在 native thread 中持有旧 loopback base URL
+和 bearer token。Model Proxy 在向 harness 报告 `model_proxy_token_invalid` 前，必须先尝试
+一次 same-session 恢复：解析或查找 token 的 session/generation fingerprint，确认当前
+Manager-owned credential channel 有效，确认请求 model 被当前 session capability 允许，并把
+route 重新绑定到当前 loopback listener。全部检查通过后，用刷新后的 capability 重试该请求一次；
+失败时返回稳定 token error 并保留 partial progress。该恢复不得允许跨 session 复用、未经
+profile 授权的 provider URL 变化，或访问 grace window 外的已退休 credential。
 
 Provider compatibility:
 
@@ -163,12 +237,12 @@ Provider compatibility:
 ## 8. 安全与权限
 
 - Real provider key is read only by Model Proxy or secret resolver.
-- Harness sees only loopback base URL and short TTL token.
+- Harness 只能看到 loopback base URL 和 session-scoped bearer token。
 - Delegated HaaS container 不得在 env、config、startup command、mount、event、log
   或 artifact metadata 中看到真实 provider key。
 - Caller-provided provider base URL is accepted only through registry allowlist.
 - Request/response logging redacts Authorization, API keys, cookies, raw messages and tool args.
-- Proxy token must be session scoped, audience restricted and revocable.
+- Proxy token 必须是 session-scoped、audience-restricted、带 generation 且可撤销。
 - Proxy must not expose arbitrary URL forwarding.
 
 ## 9. 可观测性
@@ -179,6 +253,8 @@ Metrics:
 - `haas_model_proxy_request_duration_ms{provider,wireApi,status}`
 - `haas_model_proxy_stream_idle_timeout_total{provider,wireApi}`
 - `haas_model_proxy_token_refresh_total{status}`
+- `haas_model_proxy_capability_rebind_total{status,reason}`
+- `haas_model_proxy_retry_total{provider,wireApi,status,safeReason}`
 - `haas_model_proxy_usage_tokens{kind,provider,model}`
 
 Logs:
@@ -187,6 +263,8 @@ Logs:
 - `haas.model_proxy.request_completed`
 - `haas.model_proxy.request_failed`
 - `haas.model_proxy.token_refreshed`
+- `haas.model_proxy.capability_rebound`
+- `haas.model_proxy.retry_attempted`
 - `haas.model_proxy.transform_applied`
 
 Log fields must use safe route ids, fingerprints and status codes, never prompt bodies or credentials.
@@ -195,11 +273,13 @@ Log fields must use safe route ids, fingerprints and status codes, never prompt 
 
 | 场景 | 行为 |
 |------|------|
-| Active invocation 中 runtime token missing/invalid | 仅在相同 frozen scope 仍 active 时刷新一次；否则以 `model_proxy_token_invalid` 失败并保留阶段性进展 |
-| Active invocation 中 runtime token expired | 重试模型请求前刷新一次；刷新失败发出 `model_proxy_token_expired`，不得退化为泛化 `incomplete` |
+| active 或可恢复 session 中 runtime token missing/invalid | 仅在同一 session、harness、provider scope 与 active credential channel 均被证明时 rebind/refresh 一次；否则以 `model_proxy_token_invalid` 失败并保留阶段性进展 |
+| active 或可恢复 session 中 runtime token expired | 重试模型请求前 refresh；刷新失败发出 `model_proxy_token_expired`，不得退化为泛化 `incomplete` |
 | delegated session credentialRef 缺失或未授权 | fail closed，返回 `invalid_credential` 或 `haas_provider_source_invalid`；不得要求 harness 提供 key |
 | provider unreachable | invocation 接受前返回 `502 haas_provider_error`；接受后持久化 `haas.turn.failed` 且 `haas.code=haas_provider_error`，保留 partial events，并保持 `/run`/`/run_sse` HTTP 200 |
-| stream idle timeout | 按 provider policy retry；接受后耗尽时持久化带稳定 timeout code/reason 的 `haas.turn.failed` 或 `haas.turn.incomplete`，HTTP 保持 200 |
+| upstream 429/502/503/504 或 connect/read timeout，且尚未输出 byte | 在 invocation deadline 允许范围内执行带 jitter 的有界指数退避重试；默认最多 2 次，总 sleep 有上限 |
+| stream idle timeout | 输出前按 provider policy retry；接受后或已输出 byte 后耗尽时，持久化带稳定 timeout code/reason 的 `haas.turn.failed` 或 `haas.turn.incomplete`，HTTP 保持 200 |
+| Manager/HaaS 重启后 loopback listener 端口变化 | 通过 owned credential channel 重建 session capability，并在下一次模型请求前 rebind native profile；不得附着到不归当前 Manager 拥有的 listener |
 | unsupported tool schema | fail with safe `haas_tool_schema_unsupported`, do not drop tool silently |
 | usage missing | return usage `null` and log safe diagnostic |
 | transform fails | fail closed before upstream call if semantics are uncertain |
@@ -212,5 +292,6 @@ Log fields must use safe route ids, fingerprints and status codes, never prompt 
 - Streaming：SSE/chunked upstream relay is progressive and handles idle timeout。
 - Security：provider key never appears in harness env/config/log/event/artifact/report。
 - Negative：unsupported provider, missing key, expired token, disallowed URL and malformed upstream response；测试区分 pre-acceptance HTTP error 与 accepted HTTP-200 terminal failure，并保留 partial output。
-- Lifecycle：真实或受控时钟任务跨过配置的 stream-idle 区间并完成至少一轮 tool round-trip，token 仍有效；refresh 保持精确 scope；stale、跨 session 和 terminal 后 token 均失败。
-- Observability：token issue/refresh/revoke 只记录安全 token fingerprint、invocation id、age 与 reason；不得出现原始 token 或 provider key。
+- Lifecycle：真实或受控时钟任务跨过配置的 stream-idle 区间、过去的 900 秒边界，并完成至少一轮 tool round-trip，token 仍有效；refresh/rebind 保持精确 session/provider scope；stale、跨 session 和 session 撤销/删除后的 token 均失败。
+- Concurrency：两个 session 并发使用同一 provider 时，各自保持独立 capability generation 与 route；一个 session 的 model/key/profile 变化不得使另一个 session 的 loopback token 失效或被接管。
+- Observability：token issue/refresh/revoke 只记录安全 token fingerprint、session id、generation、age 与 reason；不得出现原始 token 或 provider key。

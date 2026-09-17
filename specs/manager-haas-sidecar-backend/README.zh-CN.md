@@ -3,8 +3,8 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-14
-Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy
+Last reviewed: 2026-09-15
+Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability
 Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Config](../config/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -78,7 +78,7 @@ token_ref = "secret://manager/haas/default"
 connect_timeout_seconds = 5
 response_header_timeout_seconds = 30
 stream_idle_timeout_seconds = 90
-turn_timeout_seconds = 900
+turn_timeout_seconds = 86400
 reconnect_max_attempts = 8
 reconnect_backoff_initial_ms = 250
 reconnect_backoff_max_ms = 10000
@@ -125,6 +125,13 @@ Launch 字段由 Config §5.2 拥有，不能成为 supervisor 私有约定。�
 - capability 可用时的 file upload/list/download/archive。
 
 除无副作用 validate 外所有 mutation 使用已持久化的 operation-scoped Idempotency-Key。`profile-rebind` 仅供非 delegated client；Manager 不对 delegated chat 发送该请求。成功 header 带合法 `X-HaaS-Invocation-ID` 与 `X-HaaS-Session-ID` 后才构造 `RunSseStream`，GUI 输出前持久化 acceptance。Header 前结构化 integrity error 的 `accepted=true` 同样表示已接受工作，触发 readback，不替换执行。Pause、Continue 与 Stop 是不同的 Manager intent。Pause 必须等源 invocation 的 `haas.turn.interrupted` terminal 后 GUI 才进入 paused。Continue 创建关联源记录的新 HaaS invocation，重新接入双流 bridge，并在渲染输出前持久化新的 acceptance header。Stop 使用 cancel，之后不再暴露 Continue。
+
+Manager transport budget 不是执行预算。`response_header_timeout_seconds` 只约束
+acceptance 前的 connect/header 等待，`stream_idle_timeout_seconds` 只约束单次 delivery
+空闲间隔后的 replay/readback recovery，`turn_timeout_seconds` 才映射 HaaS accepted
+invocation deadline。Local-managed 默认 deadline 为 24 小时，桌面 turn 不得被静默缩短。
+单个 shell/tool command 的 timeout 是 tool failure；它可以作为恢复依据，但除非 task
+deadline 到达或用户显式 Stop，不得取消整个用户任务。
 
 ### 5.3 Discovery 与路由
 
@@ -427,8 +434,15 @@ terminal barrier 对账；只有服务端明确确认幂等过期，才允许进
 
 桌面执行状态为 `idle|running|pausing|paused|resuming|stopping`。Running 时 Composer
 分别展示 Pause 与 Stop；paused 时展示 Continue 与 Stop；过渡态禁用重复操作。重连时状态
-来自 HaaS 持久 readback，不依赖乐观 boolean。Reviewer pause 必须使用不同文案，且不改变
-execution lifecycle。
+来自 HaaS 持久 readback。前台发送已交给 session WebSocket 后，GUI 可以立即投影为
+`running`，确保 acceptance 前窗口仍可 Stop；首个 `turn_start`、`execution_control`、
+`input_rejected`、`error`、`turn_done` 或 socket close 必须清理该本地 pending 投影，并恢复
+服务端权威状态。Reviewer pause 必须使用不同文案，且不改变 execution lifecycle。
+session list 的 `liveness=working` 也是当前打开 session 的执行态兜底信号。若 session
+WebSocket 重连时带着陈旧的 `ready.running=false`，或过程事件尚未及时 replay，GUI
+仍必须基于 liveness 让 Transcript 与 Composer 保持 running，直到明确的 terminal event、
+terminal readback 或刷新的 session list 清除该状态。同一个 effective running 值必须同时
+驱动 Transcript、Composer、waiting row、jump-to-latest 与右侧面板控制。
 Manager session WebSocket 承载 `pause`、`continue`、`interrupt` 三种 intent。
 `ready.data.execution_control` 快照与后续 `execution_control` 事件统一使用
 `controlState`、`supportsResume`、`resumableInvocationId`；收到 `pause` 后立即发布
@@ -438,6 +452,10 @@ Stop 必须对 `resumableInvocationId` 调用 HaaS cancel，撤销 resumability�
 的 source invocation。成功的 cancel acknowledgement 如携带权威 `sessionControl`，Manager
 必须立即持久化并发布，即使 interrupted source stream 尚未退出 Manager 的 `finally`；内存中的
 active-turn 记录不得在 acknowledgement 后继续让桌面停留于 `stopping`。
+Continue 遵循同一权威 readback 规则：一旦 `paused` 和合法
+`resumableInvocationId` 已持久化，用户点击 Continue 可以声明一个新的 linked invocation，
+即使 interrupted source stream 还没有进入本地 `finally`/`turn_done`。旧 source stream
+不得覆盖已经 accepted 的 linked invocation，其延迟 cleanup 也不得清理新的 active-turn 状态。
 WebSocket 收包循环不得内联等待耗时 Pause 请求：Pause 要等待权威 terminal readback，
 其后的 Stop 仍必须被并发接收并下发，使更强的 cancel intent 赢得竞态。控制任务属于
 session 生命周期；查看窗口的 socket 断开不等于取消控制请求。
@@ -458,9 +476,28 @@ Manager 在向桌面发送前归一化 HaaS 持久终态控制状态：`cancelle
 
 安全 manager event 包括 backend_selected、local_sidecar_starting/ready/degraded、remote_probe_failed、binding_created/reused、materialization_requested 和关联 attempt 创建。`X-HaaS-Trace-ID` 为可选有界 correlation header，不作授权。Desired/applied revision 与安全更新失败独立于 invocation 结果展示。
 
+local-managed 启动与恢复诊断是协议合同的一部分，不是仅用于调试的文本。
+`local_status` 暴露稳定 `status`、`reason`、`url`、`pid`、`managerLogPath`
+与 `logPath`，但不得返回 token 或 credential material。常见启动失败使用稳定 reason：
+`local_autostart_requires_loopback`、`local_sidecar_not_owned`、
+`local_sidecar_port_occupied`、`local_haas_config_write_failed`、
+`bundled_codex_unavailable`、`local_haas_start_failed`、`local_haas_exited`
+与 `local_haas_starting`。配置的 loopback 端口上存在未知 listener 时，
+Manager 不得采纳、杀死或将其当作 fallback HaaS endpoint。Manager 只执行
+有界 drain 等待；若端口仍被占用，则 fail closed 为
+`local_sidecar_port_occupied`，保持主 sidecar 与 WebSocket 可用，发送结构化
+task error 加 `turn_done`，并在诊断中指向本地 HaaS 日志路径。
+
 ## 10. 失败与恢复
 
 Acceptance 前展示未启动错误；之后保留 binding/partial output 并核对终态。配置失败阻止未来 turn，不影响当前已运行 invocation。Docker/image/secret 故障不能开启 local fallback。Remote P0 workspace 限制明确，session expiry 与 idempotency expiry 使用不同恢复路径。Active invocation 收到 `invalid_token` 或 `token_expired` 属于 model-proxy lifecycle failure，必须使用稳定安全 code，不能退化为泛化的成功 stream close。Manager 保留同一 binding，只提供 replay-safe recovery。
+
+重试或继续 accepted non-terminal attempt 时，Manager 必须先读取已有 invocation 和
+native cursor。不得只因为本地 credential ref、model proxy 端口或 profile version 变化，
+就重建新的 `/run_sse` 请求和新 profile。若 HaaS session 仍是同一 provider scope，
+Manager 刷新 session-scoped model proxy capability，并在下一次模型请求前 rebind native
+Codex profile。若刷新失败，task 保持 failed/incomplete，并展示准确
+`haas_model_proxy_token_invalid|expired` 原因和 partial transcript；不得显示为已完成回答。
 
 ## 11. 测试计划与验收
 
@@ -477,11 +514,28 @@ Acceptance 前展示未启动错误；之后保留 binding/partial output 并核
 5. HaaS-backed chat 只有在 approval/input bridge 实现后才能展示“Ask for approval”。
 6. 增加 task-level completion/verification/continuation 状态，防止中间模型消息结束未完成任务。
 
+### 11.1.1 真实本机故障样本（2026-09-15）
+
+最新本机 session `fead0639-f8c`，workspace 为
+`/Users/bytedance/workspace/bytedance/slide/why-mpa`，暴露了两个新增 release blocker。
+“安装 Quarto 环境”的 invocation `inv_cafe86d3d0624411` 在 22:30:04 启动，22:45:04
+失败，正好命中过去的 900 秒 deadline。任务当时仍在处理较慢的 Quarto release 下载；
+多个 tool call 被自身 timeout 限制，partial 文件从几十 MiB 增长到数百 MiB，一次损坏的
+续传在 `tar xzf` 时失败，错误为 `gzip decompression failed`。随后 HaaS 输出
+`haas.turn.failed`，`code=timeout`，导致用户任务在环境安装完成前终止。
+
+22:45:27 与 23:02:29 的后续追问失败属于另一个问题：Codex 恢复同一 native thread 后，
+仍通过旧的 loopback model proxy bearer 访问 `127.0.0.1:65060`，HaaS 返回
+`haas_provider_error`，内部原因为 `haas_model_proxy_token_invalid`。这证明
+invocation-scoped token 撤销和对端口敏感的 native profile 状态不足以支撑长时间
+local-managed session。修复必须改为 session-scoped capability 注册、exact-scope
+refresh/rebind，以及新提交前先 readback/replay。
+
 ### 11.2 实施切片
 
 | 顺序 | 切片 | 必须先写的失败测试 | 退出条件 |
 |------|------|--------------------|----------|
-| 1 | Terminal 与 token 完整性 | 跨 stream-idle 长任务、注入 invalid/expired token、adapter terminal 加 finalize | 精确安全失败或成功 refresh；唯一 terminal；保留 partial output |
+| 1 | 长任务 deadline 与 token 完整性 | 24 小时受控时钟 turn、真实长下载跨过旧 900 秒边界、注入 invalid/expired token、adapter terminal 加 finalize | 不再出现 900 秒失败；只有到达 24 小时 deadline 或成功 session-scope refresh 后才给出精确安全失败；唯一 terminal；保留 partial output |
 | 2 | Canonical 过程事件 | 真实 0.152.1 reasoning/item start/output/completed fixture | 稳定、脱敏 reasoning/tool type；受支持事件不再 unparsed |
 | 3 | Manager 并发双流桥接 | ADK/native 到达排列、实时 native event、断线 replay | GUI 在执行中收到有序过程事件，cursor 独立且无重复 |
 | 4 | 交互桥接 | Command/file approval 与 blocking input request，覆盖断线重连 | 一条持久请求、一次显式响应、同 invocation 续接；全部通过后 capability 才升级为 `human_bridge` |
@@ -489,7 +543,7 @@ Acceptance 前展示未启动错误；之后保留 binding/partial output 并核
 | 6 | 语义 Activity projector | Tool lifecycle replay、缺失/未知 activity kind、command exit 与 recovery 关联 | 每个 tool call 一个稳定 activity；显式规范状态；不出现机器字段文案或启发式 kind 推断 |
 | 7 | Transcript 与 Inspector UI | Running/completed/非成功状态、键盘导航与响应式宽度矩阵 | Codex 风格运行流、完成摘要、右侧 Inspector/底部抽屉与 secretless 详情符合 §5.8 |
 | 8 | 短期 command evidence | Adapter capture、scoped memory store、鉴权读取、过期和 GUI no-store 渲染 | 有效期内提供完整有效证据；credential 被遮蔽；授权 URL 可用但不进入任何持久 surface |
-| 9 | 打包验收 | 3–5 分钟真实 provider 任务，包含 tool、interaction、reconnect、verification | App 展示完整生命周期，实际完成任务，并通过 secret/terminal/event-volume/UI 检查 |
+| 9 | 打包验收 | 15+ 分钟真实 provider 任务，包含慢速 tool IO、tool、interaction、reconnect、verification | App 在过去的 900 秒截断点之后仍保持运行；依赖可用时实际完成任务；并通过 secret/terminal/event-volume/UI 检查 |
 | 10 | Terminal reconciliation recovery | 超过一页 session event、ADK stream 缺失 terminal projection、稍后到达的 canonical failure，以及带 stale running binding 的重连 | 未过滤 page checkpoint 持续推进，authoritative terminal readback 关闭 bridge，只产生一次 failure/`turn_end`，重连在 `ready` 前呈现 `failed`/`idle` 而不是恢复 `running` |
 
 - 空 registry、缺 Docker/provider、token/port 竞态、陈旧 ready file、双 Manager；control API 可用且 owned file 不被覆盖。
@@ -499,7 +553,7 @@ Acceptance 前展示未启动错误；之后保留 binding/partial output 并核
 - 服务端确认 replay 过期后使用时仅一个关联新 attempt；无 timer 重跑，404 不触发；旧 policy/approval retry 不撤销新状态。
 - Mac Docker Lite arm64、Lite amd64、AIO amd64 的真实首 turn/追问/TTL/cancel/readback；unsupported remote workspace/human approval 不可选。
 - GUI/binding/log/public event 不含 provider/MCP secret、raw tool argument、host path 或 native id；spec/schema 检查不代表 runtime 完成。
-- 真实打包 turn 运行超过 90 秒 stream-idle 区间后仍保持 active，至少展示一个 reasoning/progress 更新及每个 tool start/terminal 对，并最终只产生一个权威 terminal event。注入 `invalid_token`/`token_expired` 必须可见且不能渲染为成功。
+- 真实打包 turn 运行超过 90 秒 stream-idle 区间和过去的 900 秒 runtime 截断点后仍保持 active，至少展示一个 reasoning/progress 更新及每个 tool start/terminal 对，并最终只产生一个权威 terminal event。注入 `invalid_token`/`token_expired` 时，安全情况下通过 session-scoped capability 恢复；否则保持可见且不能渲染为成功。
 - 交互式 local HaaS 验收覆盖 command approval、file-change approval、blocking `request_user_input`、等待期间断线重连、approve/deny/cancel 以及同 invocation 续接；在用例通过前 capability 与 mode selector 保持禁用。
 - Fresh-session 默认值端到端可见且真实生效：授权 root 内 workspace write 成功、公网 egress
   成功、需要 escalation 的命令产生一张 action-scoped 人工 approval card；private/metadata/
@@ -534,3 +588,14 @@ global memory、workspace memory，以及近期脱敏 session transcript facts�
 超过已保留可见 transcript 范围的 raw prompt。该 MCP source 是 optional；不可用时
 turn 可以继续，但 Manager 必须通过 HaaS profile 和普通 task outcome 路径记录降级。
 Local Codex 路径在完整 MCP runtime contract 实现前仍不支持任意外部 MCP materialization。
+
+Retry 与恢复场景的 recall 必须在过滤前合并已持久化 transcript 与最新 HaaS
+`stream_bridge` checkpoint。这覆盖一种窗口：失败或中断的 HaaS turn 已持久化可见
+user message、终态 notice 和 bridge state，但由于 Manager 进程、浏览器连接或 stream
+loop 提前结束，assistant 投影尚未提交进 transcript。合成的 recall 行仍是 transcript
+fact，不是新的 user prompt：它可以包含 assistant text、task outcome、reasoning
+summary、model-stage summary，以及来自 `_haas_activity` 的有界 activity facts，但只能
+使用已经脱敏的投影字段，例如 status、safeSummary/summary、commandPreview、
+outputPreview/preview、exitCode、safeReason 和 durationMs。Query filtering 必须同时
+搜索这些安全字段和 assistant text，确保 agent retry 能 recall 已经尝试过的步骤，
+避免盲目重复 side effect。

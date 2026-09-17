@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -147,6 +148,172 @@ def test_sqlite_store_forward_migrates_empty_version_zero_database(tmp_path) -> 
     connection = sqlite3.connect(path)
     assert connection.execute("PRAGMA user_version").fetchone() == (SQLiteStore.SCHEMA_VERSION,)
     connection.close()
+
+
+def test_sqlite_store_ignores_unknown_session_fields_and_keeps_control_state(tmp_path) -> None:
+    path = tmp_path / "forward-compatible.db"
+    with SQLiteStore(path) as first:
+        first.put_session(
+            SessionRecord(
+                id="hsess_forward",
+                appName="chrn_1",
+                userId="u_1",
+                controlState="running",
+                supportsResume=True,
+                resumableInvocationId="inv_resume",
+            )
+        )
+    connection = sqlite3.connect(path)
+    payload = json.loads(
+        connection.execute(
+            "SELECT payload FROM records WHERE namespace='session' AND record_key=?",
+            ("chrn_1|u_1|hsess_forward",),
+        ).fetchone()[0]
+    )
+    payload["unknownFutureField"] = {"safe": True}
+    connection.execute(
+        "UPDATE records SET payload=? WHERE namespace='session' AND record_key=?",
+        (json.dumps(payload), "chrn_1|u_1|hsess_forward"),
+    )
+    connection.commit()
+    connection.close()
+
+    with SQLiteStore(path) as reopened:
+        restored = reopened.get_session(("chrn_1", "u_1", "hsess_forward"))
+
+    assert restored is not None
+    assert restored.controlState == "running"
+    assert restored.supportsResume is True
+    assert restored.resumableInvocationId == "inv_resume"
+
+
+def test_sqlite_store_ignores_unknown_invocation_and_turn_fields(tmp_path) -> None:
+    path = tmp_path / "forward-compatible-invocation.db"
+    with SQLiteStore(path):
+        pass
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT INTO records(namespace, record_key, payload) VALUES(?, ?, ?)",
+        (
+            "invocation",
+            "inv_forward",
+            json.dumps(
+                {
+                    "id": "inv_forward",
+                    "sessionId": "hsess_forward",
+                    "appName": "chrn_1",
+                    "turnId": "turn_forward",
+                    "userId": "u_1",
+                    "status": "completed",
+                    "deadlineAtMs": 1_900_000_000_000,
+                    "unknownFutureField": "ignored",
+                }
+            ),
+        ),
+    )
+    connection.execute(
+        "INSERT INTO records(namespace, record_key, payload) VALUES(?, ?, ?)",
+        (
+            "turn",
+            "turn_forward",
+            json.dumps(
+                {
+                    "id": "turn_forward",
+                    "invocationId": "inv_forward",
+                    "sessionId": "hsess_forward",
+                    "status": "completed",
+                    "unknownFutureField": "ignored",
+                }
+            ),
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    with SQLiteStore(path) as reopened:
+        invocation = reopened.get_invocation("inv_forward")
+        turn = reopened.get_turn("turn_forward")
+
+    assert invocation is not None
+    assert invocation.deadlineAtMs == 1_900_000_000_000
+    assert invocation.status == "completed"
+    assert turn is not None
+    assert turn.status == "completed"
+
+
+def test_sqlite_store_normalizes_legacy_control_state_alias(tmp_path) -> None:
+    path = tmp_path / "control-state-alias.db"
+    with SQLiteStore(path):
+        pass
+    payload = {
+        "id": "hsess_alias",
+        "appName": "chrn_1",
+        "userId": "u_1",
+        "state": {},
+        "control_state": "paused",
+        "supportsResume": True,
+        "resumableInvocationId": "inv_resume",
+        "unknownFutureField": "ignored",
+    }
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT INTO records(namespace, record_key, payload) VALUES(?, ?, ?)",
+        ("session", "chrn_1|u_1|hsess_alias", json.dumps(payload)),
+    )
+    connection.commit()
+    connection.close()
+
+    with SQLiteStore(path) as reopened:
+        restored = reopened.get_session(("chrn_1", "u_1", "hsess_alias"))
+
+    assert restored is not None
+    assert restored.controlState == "paused"
+    assert restored.supportsResume is True
+    assert restored.resumableInvocationId == "inv_resume"
+
+
+def test_sqlite_store_quarantines_invalid_session_control_state(tmp_path) -> None:
+    path = tmp_path / "invalid-control-state.db"
+    with SQLiteStore(path):
+        pass
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT INTO records(namespace, record_key, payload) VALUES(?, ?, ?)",
+        (
+            "session",
+            "chrn_1|u_1|hsess_bad",
+            json.dumps(
+                {
+                    "id": "hsess_bad",
+                    "appName": "chrn_1",
+                    "userId": "u_1",
+                    "controlState": "impossible",
+                    "supportsResume": False,
+                }
+            ),
+        ),
+    )
+    connection.execute(
+        "INSERT INTO records(namespace, record_key, payload) VALUES(?, ?, ?)",
+        (
+            "session",
+            "chrn_1|u_1|hsess_ok",
+            json.dumps(
+                {
+                    "id": "hsess_ok",
+                    "appName": "chrn_1",
+                    "userId": "u_1",
+                    "controlState": "idle",
+                }
+            ),
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    with SQLiteStore(path) as reopened:
+        assert reopened.get_session(("chrn_1", "u_1", "hsess_bad")) is None
+        assert reopened.get_session(("chrn_1", "u_1", "hsess_ok")) is not None
 
 
 def test_sqlite_store_persists_control_plane_records_and_fencing(tmp_path) -> None:

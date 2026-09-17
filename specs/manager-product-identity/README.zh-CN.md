@@ -95,6 +95,14 @@ Manager Product Identity 定义 HaaS 配套 manager 应用的对外产品身份�
 - 现有 HaaS delegation settings 流程在品牌变更后仍可用。
 - 全新 no-login 安装会启动 managed local HaaS sidecar；符合条件的新 chat 无需
   trigger keyword 即通过 HaaS 执行，同时保留可见的 session 级显式 local opt-out。
+  Release smoke 必须使用打包后的 app/server 二进制和隔离 state dir，并预置包含前向兼容
+  HaaS SQLite 记录的 fixture；随后提交一条 WebSocket task，断言失败会作为结构化
+  transcript error 投递，而不是后台 task exception 或静默不执行。
+- 打包 release smoke 还必须执行端口占用变体：配置的本地 HaaS 端口已被非 HaaS
+  loopback listener 占用时，主 sidecar 仍保持健康，任务路径必须返回结构化
+  `local_sidecar_port_occupied` error 加 `turn_done`，settings 诊断必须包含
+  `local_status.reason`、`local_status.managerLogPath` 与 `local_status.logPath`，
+  且不得暴露 token material。
 - 离线合同测试覆盖 platform/architecture 拒绝、不可变 release 资产选择、先校验后
   mount、限定范围的 `xattr`、清理和回滚。release smoke 必须通过公开命令安装已上传
   DMG，并确认 `/Applications/OpenHarness.app` 存在且不带 quarantine 属性。

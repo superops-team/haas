@@ -64,7 +64,7 @@ JsonObject = dict[str, Any]
 
 DEFAULT_CWD = "/workspace"
 DEFAULT_APPROVAL_POLICY = "on-request"
-DEFAULT_TIMEOUT_SECONDS = 900.0
+DEFAULT_TIMEOUT_SECONDS = 86_400.0
 BUILTIN_COWORK_RECALL_MCP_NAME = "manager-cowork-recall"
 
 # Codex notification methods that terminate a turn, mapped to canonical status.
@@ -571,8 +571,8 @@ class CodexAdapter:
                         ctx,
                         "failed",
                         code="haas_request_timeout",
-                        safe_reason="Codex turn timed out",
-                        retryable=False,
+                        safe_reason="long_task_deadline_exceeded",
+                        retryable=True,
                     )
                     ctx.terminal_status = "failed"
                     ctx.terminal_event = terminal

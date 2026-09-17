@@ -14,7 +14,15 @@ The Codex App-Server Adapter is the only P0 concrete harness adapter in the init
 
 Codex app-server is an internal implementation detail. Upstream systems MUST NOT connect directly to Codex WebSocket, Unix socket, or stdio transports, and MUST NOT depend on Codex `threadId`, `turnId`, notification methods, or rollout file paths.
 
-Embedded local execution supplies the applied bare model and an invocation-scoped loopback provider through `thread/start` or `thread/resume` configuration overrides, using the pinned 0.152.1 schema. Resuming applies the new proxy route/token without replacing native thread identity; `turn/start` receives the selected model. Only the short-lived proxy capability may reach the harness, never the upstream key or credential-resolver descriptor. Personal Codex authentication is not used. Proxy capabilities expire and are revoked at turn completion even if native private checkpoints retain configuration.
+Embedded local execution supplies the applied bare model and a session-scoped,
+generationed loopback provider capability through `thread/start` or
+`thread/resume` configuration overrides, using the pinned 0.152.1 schema.
+Resuming or rebinding applies the current proxy route/token without replacing
+native thread identity; `turn/start` receives the selected model. Only the
+session-scoped proxy capability may reach the harness, never the upstream key or
+credential-resolver descriptor. Personal Codex authentication is not used. Proxy
+capabilities outlive individual invocation terminals and are revoked on session
+delete/revoke or runtime shutdown.
 
 The local proxy integration uses a conservative Responses tool surface: native multi-agent namespaces and provider-hosted web search are disabled, while `model_reasoning_summary=auto` requests only the provider-authored safe reasoning summary needed by the process timeline. Raw reasoning remains private and is never projected. Responses support alone does not imply support for other extensions. Ordinary function tools remain available under the existing sandbox/policy; the proxy must not silently drop tools or rewrite native tool calls. The adapter applies this configuration on both start and resume. Real Codex wire tests reject namespace/web-search declarations, verify the safe-summary request and ordinary function tools, and real-provider smoke must complete through this path.
 
@@ -233,7 +241,12 @@ Process-event rules:
 ## 8. Security and Authorization
 
 - `CODEX_HOME` MUST be scoped to a session/workspace or be an explicitly isolated runtime home.
-- The Codex model provider MUST NOT store real API keys. Local API supplies an invocation-scoped, short-lived loopback proxy capability through app-server overrides; it is revoked on terminal/cancel. Codex 0.152.1 requires `thread/unsubscribe` before `thread/resume` to replace a loaded thread's provider override while preserving the native thread id. Runtime shutdown closes the owned app-server transport.
+- The Codex model provider MUST NOT store real API keys. Local API supplies a
+  session-scoped, generationed loopback proxy capability through app-server
+  overrides; it is revoked on session delete/revoke or runtime shutdown. Codex
+  0.152.1 requires `thread/unsubscribe` before `thread/resume` to replace a
+  loaded thread's provider override while preserving the native thread id.
+  Runtime shutdown closes the owned app-server transport.
 - Any Codex app-server child process started by the adapter MUST receive an explicit allowlisted environment. The default inherited allowlist is limited to process basics required to execute Codex (`PATH`), resolve an isolated home (`HOME`), create temporary files (`TMPDIR`/`TMP`/`TEMP`), and keep Unicode/locale behavior stable (`LANG`/`LC_ALL`/`LC_CTYPE`/`LC_MESSAGES`). Provider keys, cloud credentials, tokens, passwords, cookies, and other credential-like variables MUST NOT be inherited by construction; adding any new environment variable requires a spec delta documenting why it is required and why it is not a secret channel.
 - `approvalPolicy=on-request` is the fresh interactive-session default. HaaS uses it only when
   command approval, file-change approval, and blocking input response paths are all live and
@@ -316,11 +329,11 @@ MUST NOT silently start a context-free replacement thread.
 | Stdio frame exceeds the explicit limit or is malformed | End the accepted invocation exactly once with `haas_adapter_unavailable` and a bounded safe transport reason; never misclassify it as a tool failure or generic clean EOF |
 | Codex process exits after acceptance | Increment generation and attempt restart/reconnect; active turn terminates with failed/incomplete terminal events and HTTP 200 |
 | Notification lacks a terminal event | After timeout, Session Runtime marks the invocation `failed` or `incomplete` |
-| Model-proxy token becomes invalid during an active turn | Refresh the invocation-scoped capability once when identity/route/turn scope still match; otherwise emit `failed` with stable `model_proxy_token_invalid`, retaining partial progress |
+| Model-proxy token becomes invalid during an active or resumable session | Refresh/rebind the session-scoped capability once when session/harness/provider scope and the owned credential channel still match; otherwise emit `failed` with stable `model_proxy_token_invalid`, retaining partial progress |
 | Blocking server request is unsupported or cannot be restored | Fail closed with a stable interaction-unsupported/recovery code; never fabricate an answer or continue with a guessed choice |
 | Cancellation requested | Invoke `turn/interrupt`; even if native cancellation is slow, the HaaS cancellation API MUST quickly return accepted/current state |
 | `turn/interrupt` returns `{}` | Treat as acknowledgement only; keep draining native notifications and do not synthesize a terminal |
-| `turn/completed(status=interrupted)` | Emit one normalized `harness.turn.interrupted`; Session Runtime maps recorded Pause intent to canonical `haas.turn.interrupted` and Stop intent to `haas.turn.cancelled`, then revokes invocation-scoped capabilities |
+| `turn/completed(status=interrupted)` | Emit one normalized `harness.turn.interrupted`; Session Runtime maps recorded Pause intent to canonical `haas.turn.interrupted` and Stop intent to `haas.turn.cancelled`; session-scoped model proxy capabilities remain usable until session revoke/delete or runtime shutdown |
 | Schema drift | Probe fails and blocks release; runtime returns `haas_adapter_incompatible` |
 
 ## 11. Test Plan and Acceptance Criteria

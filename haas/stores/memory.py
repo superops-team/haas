@@ -141,6 +141,8 @@ class InvocationRecord:
     schemaVersion: int = 1
     startedAtMs: int = field(default_factory=_now_ms)
     completedAtMs: int | None = None
+    timeoutSeconds: float | None = None
+    deadlineAtMs: int | None = None
     continuedFromInvocationId: str | None = None
     continuedFromTurnId: str | None = None
     executionContext: dict[str, Any] = field(default_factory=dict)

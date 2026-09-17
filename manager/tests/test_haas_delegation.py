@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -714,6 +715,8 @@ class PausedReadbackBeforeTurnDoneClient(PauseAwareDirectHaasClient):
         self.terminal_yielded = asyncio.Event()
         self.finish_stream = asyncio.Event()
         self.cancel_calls: list[tuple[str, str]] = []
+        self.continue_calls: list[tuple[str, str, str | None]] = []
+        self.continued = False
 
     def run_sse(self, body: dict[str, Any], *, idempotency_key: str, last_event_id=None):
         del last_event_id
@@ -759,11 +762,35 @@ class PausedReadbackBeforeTurnDoneClient(PauseAwareDirectHaasClient):
             trace_id="tr_pause_stop_cancel",
         )
 
+    def continue_invocation(
+        self,
+        session_id: str,
+        invocation_id: str,
+        *,
+        additional_instruction: str | None = None,
+    ) -> ContinuedDirectRunStream:
+        self.continue_calls.append(
+            (session_id, invocation_id, additional_instruction)
+        )
+        self.continued = True
+        self.finish_stream.set()
+        return ContinuedDirectRunStream()
+
     async def events_page(
         self, session_id: str, *, after_event_id: str | None = None, limit: int = 100
     ) -> HaasEnvelope[list[dict[str, Any]]]:
         del session_id, after_event_id, limit
         events = []
+        if self.continued:
+            events.append(
+                {
+                    "eventId": "evt_continue_terminal",
+                    "invocationId": "inv_continue_2",
+                    "type": "haas.turn.completed",
+                    "haas": {"status": "completed"},
+                }
+            )
+            return HaasEnvelope(events, trace_id="tr_continue_events")
         if self.paused.is_set():
             events.append(
                 {
@@ -1250,6 +1277,8 @@ class FakeLocalHaasSupervisor:
             "pid": 123 if config.local_autostart and config.enabled else None,
             "url": config.base_url,
             "reason": None,
+            "logPath": "/tmp/openharness/logs/haas-sidecar.log",
+            "managerLogPath": "/tmp/openharness/logs/openworker-server.log",
         }
 
     def status(self, config: HaasDelegationConfig) -> dict[str, Any]:
@@ -1261,6 +1290,8 @@ class FakeLocalHaasSupervisor:
             "pid": 123 if config.local_autostart and config.enabled else None,
             "url": config.base_url,
             "reason": None,
+            "logPath": "/tmp/openharness/logs/haas-sidecar.log",
+            "managerLogPath": "/tmp/openharness/logs/openworker-server.log",
         }
 
     def stop(self) -> None:
@@ -1278,6 +1309,8 @@ class UnownedLocalHaasSupervisor(FakeLocalHaasSupervisor):
             "pid": None,
             "url": config.base_url,
             "reason": "local_sidecar_not_owned",
+            "logPath": "/tmp/openharness/logs/haas-sidecar.log",
+            "managerLogPath": "/tmp/openharness/logs/openworker-server.log",
         }
 
 
@@ -1661,6 +1694,42 @@ def test_ws_default_uses_local_haas_api_without_delegated_agent_gate(
     messages = client.get("/v1/sessions/s1/messages").json()["messages"]
     assert messages[-1]["role"] == "assistant"
     assert messages[-1]["content"] == "local haas done"
+
+
+def test_ws_reports_local_haas_startup_error_without_background_task_crash(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    monkeypatch.setattr(SessionManager, "_maybe_autotitle", lambda self, session_id: None)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+
+    def fail_local_haas(config):
+        del config
+        raise HaasDelegationError("local HaaS sidecar unavailable: local_haas_exited")
+
+    manager._ensure_local_haas = fail_local_haas
+    client = TestClient(create_app(manager))
+
+    with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "user_message", "text": "hello from packaged app"})
+        events = []
+        while True:
+            event = ws.receive_json()
+            events.append(event)
+            if event["type"] == "turn_done":
+                break
+
+    assert [event["type"] for event in events] == ["error", "turn_done"]
+    assert events[0]["data"] == {
+        "error": "local HaaS sidecar unavailable: local_haas_exited",
+        "error_type": "HaasDelegationError",
+    }
+    messages = client.get("/v1/sessions/s1/messages").json()["messages"]
+    assert messages[-1]["role"] == "notice"
+    assert messages[-1]["kind"] == "error"
+    assert messages[-1]["text"] == "local HaaS sidecar unavailable: local_haas_exited"
 
 
 @pytest.mark.asyncio
@@ -2100,11 +2169,19 @@ def test_ws_continue_resumes_same_haas_session_with_a_new_invocation(
 
         ws.send_json({"type": "continue"})
         continued_events = []
-        while True:
+        saw_continue_turn_end = False
+        for _ in range(12):
             event = ws.receive_json()
             continued_events.append(event)
-            if event["type"] == "turn_done":
+            if (
+                event["type"] == "turn_end"
+                and event["data"].get("status") == "completed"
+            ):
+                saw_continue_turn_end = True
+            if saw_continue_turn_end and event["type"] == "turn_done":
                 break
+        else:
+            raise AssertionError(f"continue did not reach turn_done: {continued_events!r}")
 
     assert direct.continue_calls == [("hsess_s1", "inv_pause_1", None)]
     assert next(
@@ -2121,6 +2198,61 @@ def test_ws_continue_resumes_same_haas_session_with_a_new_invocation(
     assert binding["control_state"] == "idle"
     assert binding["supports_resume"] is False
     assert binding["resumable_invocation_id"] is None
+
+
+def test_ws_continue_works_after_paused_readback_before_source_turn_done(
+    tmp_path, monkeypatch
+):
+    """Continue must follow authoritative paused state, not the old run task's finally."""
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    monkeypatch.setattr(SessionManager, "_maybe_autotitle", lambda self, session_id: None)
+    direct = PausedReadbackBeforeTurnDoneClient(cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager._haas_supervisor = FakeLocalHaasSupervisor()
+    manager._haas_direct_client_factory = lambda _config: direct
+
+    with TestClient(create_app(manager)).websocket_connect(
+        "/ws/session/s1?agent=cowork"
+    ) as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "user_message", "text": "run until paused"})
+        assert ws.receive_json()["type"] == "turn_start"
+        assert ws.receive_json()["data"]["controlState"] == "running"
+        ws.send_json({"type": "pause"})
+        assert ws.receive_json()["data"]["controlState"] == "pausing"
+        assert ws.receive_json()["data"]["controlState"] == "paused"
+        assert manager.is_running("s1") is True
+
+        ws.send_json({"type": "continue"})
+        continued_events = []
+        saw_continue_turn_end = False
+        while True:
+            event = ws.receive_json()
+            continued_events.append(event)
+            if (
+                event["type"] == "turn_end"
+                and event["data"].get("status") == "completed"
+            ):
+                saw_continue_turn_end = True
+            if saw_continue_turn_end and event["type"] == "turn_done":
+                break
+
+    assert not [
+        event for event in continued_events if event["type"] == "input_rejected"
+    ]
+    assert direct.continue_calls == [("hsess_s1", "inv_pause_stop_1", None)]
+    assert next(
+        event for event in continued_events if event["type"] == "execution_control"
+    )["data"]["controlState"] == "resuming"
+    turn_start = next(event for event in continued_events if event["type"] == "turn_start")
+    assert turn_start["data"]["delegated"]["invocation"] == "inv_continue_2"
+    assert turn_start["data"]["continuedFromInvocationId"] == "inv_pause_stop_1"
+    turn_end = next(event for event in continued_events if event["type"] == "turn_end")
+    assert turn_end["data"]["status"] == "completed"
+    binding = manager.session_store.load("s1").bindings["haas_delegation"]
+    assert binding["control_state"] == "idle"
+    assert binding["supports_resume"] is False
 
 
 def test_ws_rejected_continue_restores_paused_control_state(tmp_path, monkeypatch):
@@ -3340,6 +3472,23 @@ def test_settings_exposes_haas_delegation_without_token(tmp_path, monkeypatch):
     assert "secret-token" not in str(settings)
 
 
+def test_haas_delegation_settings_exposes_safe_local_diagnostics(tmp_path, monkeypatch):
+    cfg = _haas_config()
+    cfg.api_token = "secret-token"
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager._haas_supervisor._last_error = "local_sidecar_port_occupied"
+    client = TestClient(create_app(manager))
+
+    settings = client.get("/v1/settings/haas-delegation").json()
+
+    assert settings["local_status"]["reason"] == "local_sidecar_port_occupied"
+    assert settings["local_status"]["logPath"].endswith("logs/haas-sidecar.log")
+    assert settings["local_status"]["managerLogPath"].endswith("logs/openworker-server.log")
+    assert "api_token" not in settings
+    assert "secret-token" not in str(settings)
+
+
 def test_haas_delegation_settings_rest_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("COWORKER_STATE_DIR", str(tmp_path / "state"))
     data_dir = tmp_path / "data"
@@ -3681,6 +3830,88 @@ def test_cowork_recall_mcp_returns_scoped_memory_and_session_history(tmp_path, m
     assert denied["transcript"] == []
 
 
+def test_cowork_recall_includes_recovered_haas_execution_history_for_retry(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager.memory_store.add(
+        "Use the Quarto revealjs template",
+        scope=Scope.WORKSPACE,
+        workspace=str(tmp_path),
+    )
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    engine.messages.extend(
+        [
+            {"role": "user", "content": "初始化 Quarto revealjs slide 项目"},
+            {
+                "role": "notice",
+                "kind": "error",
+                "text": "HaaS local API unavailable: transport closed",
+            },
+        ]
+    )
+    manager.save("s1", engine)
+    bridge = StreamBridgeState(
+        endpoint_id=cfg.base_url,
+        session=SessionKey(cfg.harness_id, cfg.user_id, "hsess_s1"),
+        invocation_id="inv_failed",
+        terminal_status="failed",
+        terminal_code="haas_provider_error",
+        terminal_safe_reason="provider unavailable",
+        terminal_retryable=True,
+        completed=True,
+    )
+    bridge.activities["call_quarto"] = {
+        "id": "call_quarto",
+        "kind": "command",
+        "status": "failed",
+        "summary": "Run command",
+        "commandPreview": "which quarto && quarto --version",
+        "preview": "quarto not found",
+        "exitCode": 127,
+        "safeReason": "command_not_found",
+        "invocationId": "inv_failed",
+    }
+    binding = manager._direct_haas_binding(session_id="s1", config=cfg, workspace=str(tmp_path))
+    binding.update(
+        {
+            "recall_token": "fixture_recall_token",
+            "stream_bridge": bridge.to_dict(),
+        }
+    )
+    manager._persist_haas_binding("s1", engine, binding)
+
+    result = manager.cowork_recall(
+        haas_session_id="hsess_s1",
+        token="fixture_recall_token",
+        query="quarto",
+        limit=5,
+    )
+
+    assert result["memories"][0]["content"] == "Use the Quarto revealjs template"
+    assistant = next(item for item in result["transcript"] if item["role"] == "assistant")
+    assert assistant["taskOutcome"] == {
+        "status": "failed",
+        "phase": "failed",
+        "code": "haas_provider_error",
+        "safeReason": "provider unavailable",
+    }
+    assert assistant["activities"] == [
+        {
+            "kind": "command",
+            "status": "failed",
+            "summary": "Run command",
+            "commandPreview": "which quarto && quarto --version",
+            "outputPreview": "quarto not found",
+            "exitCode": 127,
+            "safeReason": "command_not_found",
+        }
+    ]
+
+
 def test_local_haas_supervisor_rejects_non_loopback_url(tmp_path):
     cfg = _haas_config()
     cfg.base_url = "https://haas.example.com"
@@ -3747,6 +3978,51 @@ def test_local_haas_supervisor_does_not_adopt_healthy_unowned_listener(
                 "baseUrl": "https://api.openai.com/v1",
             },
         )
+
+
+def test_local_haas_supervisor_fails_fast_on_non_haas_port_occupant(
+    tmp_path, monkeypatch
+):
+    cfg = _haas_config()
+    supervisor = LocalHaasSupervisor(tmp_path, resolve_credential=lambda _provider: "secret")
+    sleeps = []
+    monkeypatch.setattr(supervisor, "_healthy", lambda _url: False)
+    monkeypatch.setattr(supervisor, "_port_is_listening", lambda _host, _port: True)
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: pytest.fail("must not spawn"))
+    monkeypatch.setattr("coworker.delegation.time.sleep", sleeps.append)
+
+    status = supervisor.ensure(cfg)
+
+    assert status["status"] == "stopped"
+    assert status["running"] is False
+    assert status["managed"] is False
+    assert status["reason"] == "local_sidecar_port_occupied"
+    assert status["logPath"].endswith("logs/haas-sidecar.log")
+    assert status["managerLogPath"].endswith("logs/openworker-server.log")
+    assert sleeps == [0.1] * 20
+
+
+def test_local_haas_supervisor_reports_config_path_failure_without_crashing(
+    tmp_path, monkeypatch
+):
+    cfg = _haas_config()
+    cfg.api_token = ""
+    supervisor = LocalHaasSupervisor(tmp_path, resolve_credential=lambda _provider: "secret")
+    target = tmp_path / "target"
+    target.write_text("not-a-token")
+    (tmp_path / "haas-token").symlink_to(target)
+    monkeypatch.setattr(supervisor, "_healthy", lambda _url: False)
+    monkeypatch.setattr(supervisor, "_port_is_listening", lambda _host, _port: False)
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: pytest.fail("must not spawn"))
+
+    status = supervisor.ensure(cfg)
+
+    assert status["status"] == "stopped"
+    assert status["running"] is False
+    assert status["managed"] is False
+    assert status["reason"] == "local_haas_config_write_failed"
+    assert status["logPath"].endswith("logs/haas-sidecar.log")
+    assert status["managerLogPath"].endswith("logs/openworker-server.log")
 
 
 def test_local_haas_supervisor_waits_for_predecessor_listener_to_drain(

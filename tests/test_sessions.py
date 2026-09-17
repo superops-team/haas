@@ -222,6 +222,25 @@ def test_get_and_delete_session(runtime: SessionRuntime) -> None:
         runtime.get_session("chrn_codex_default", "u_1", "hsess_1")
 
 
+def test_delete_session_revokes_model_proxy_capability(runtime: SessionRuntime) -> None:
+    class FakeModelProxy:
+        def __init__(self) -> None:
+            self.revoked: list[str] = []
+
+        def revoke_session(self, session_id: str) -> None:
+            self.revoked.append(session_id)
+
+    model_proxy = FakeModelProxy()
+    runtime.model_proxy = model_proxy
+    runtime.store.put_session(
+        SessionRecord(id="hsess_proxy_revoke", appName="chrn_codex_default", userId="u_1")
+    )
+
+    runtime.delete_session("chrn_codex_default", "u_1", "hsess_proxy_revoke")
+
+    assert model_proxy.revoked == ["hsess_proxy_revoke"]
+
+
 def test_apply_state_delta_deep_merge(runtime: SessionRuntime) -> None:
     runtime.store.put_session(
         SessionRecord(id="hsess_1", appName="chrn_codex_default", userId="u_1")
@@ -938,8 +957,7 @@ async def test_adapter_timeout_terminalizes_without_pending_or_quota_leak() -> N
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         resp = await client.post("/run", json=body, headers=headers)
-        assert resp.status_code == 502
-        assert resp.json()["haasError"]["code"] == "haas_adapter_error"
+        assert resp.status_code == 200
         assert runtime_api.store.quota_count("run:t1") == 0
         key_hash = hashlib.sha256(b"timeout-key").hexdigest()
         assert runtime_api.store.is_pending(key_hash) is False
@@ -951,11 +969,65 @@ async def test_adapter_timeout_terminalizes_without_pending_or_quota_leak() -> N
         ).json()
     assert session["events"][-1]["actions"]["stateDelta"] == {
         "status": "failed",
-        "reason": "timeout",
+        "reason": "long_task_deadline_exceeded",
+        "code": "haas_request_timeout",
+        "retryable": True,
     }
     assert session["state"]["status"] == "failed"
-    assert session["state"]["reason"] == "timeout"
+    assert session["state"]["reason"] == "long_task_deadline_exceeded"
+    assert session["state"]["code"] == "haas_request_timeout"
+    assert session["state"]["retryable"] is True
     assert adapter.stream_cancelled is True
+
+
+async def test_adapter_timeout_without_idempotency_key_returns_terminal_events() -> None:
+    from haas.api import build_app
+
+    token = "timeout-token"
+    app = build_app(
+        adapter=_NeverEndingAdapter(),
+        identity_tokens={
+            token: Principal(principalId="p_1", tenantId="t1", userIds=frozenset({"u_1"}))
+        },
+        session_lease_ttl_ms=50,
+        session_lease_renew_interval_ms=10,
+        session_turn_timeout_s=0.12,
+    )
+    body = {
+        "appName": "chrn_codex_default",
+        "userId": "u_1",
+        "sessionId": "hsess_timeout_no_key",
+        "newMessage": {"role": "user", "parts": []},
+    }
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post("/run", json=body, headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.status_code == 200
+    assert resp.headers["X-HaaS-Session-ID"] == "hsess_timeout_no_key"
+    assert resp.headers["X-HaaS-Invocation-ID"].startswith("inv_")
+    events = resp.json()
+    assert events[-1]["actions"]["stateDelta"]["code"] == "haas_request_timeout"
+    assert events[-1]["actions"]["stateDelta"]["reason"] == "long_task_deadline_exceeded"
+
+
+def test_session_runtime_defaults_to_24h_turn_deadline(runtime: SessionRuntime) -> None:
+    assert runtime.turn_timeout_s == 86_400
+
+
+def test_session_runtime_clamps_direct_timeout_to_24h() -> None:
+    store = MemoryStore()
+    runtime = SessionRuntime(
+        store=store,
+        registry=HarnessRegistry(store=store),
+        adapter=FakeAdapter(),
+        event_log=EventLog(store=store),
+        turn_timeout_s=172_800,
+    )
+
+    assert runtime.turn_timeout_s == 86_400
 
 
 async def test_renew_task_is_cancelled_after_normal_turn() -> None:
@@ -1058,4 +1130,6 @@ async def test_stream_deadline_survives_consumer_task_handoff() -> None:
     assert [event.type for event in events] == ["haas.turn.failed"]
     assert store.get_invocation(first.invocationId).status == "failed"
     assert store.get_approval("appr_deadline").status == "cancelled"
-    assert events[0].haas["safeReason"] == "timeout"
+    assert events[0].haas["safeReason"] == "long_task_deadline_exceeded"
+    assert events[0].haas["code"] == "haas_request_timeout"
+    assert events[0].haas["retryable"] is True

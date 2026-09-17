@@ -3,8 +3,8 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-14
-Change ID: unified-runtime-approval-policy
+Last reviewed: 2026-09-15
+Change ID: unified-runtime-approval-policy, long-task-model-proxy-stability
 
 ## 1. Component Role
 
@@ -241,7 +241,7 @@ Response:
     "metadata": { "haasTraceId": "tr_abc" },
     "maxOutputTokens": 4096,
     "maxStep": 40,
-    "timeoutSeconds": 900
+    "timeoutSeconds": 86400
   }
 }
 ```
@@ -258,6 +258,10 @@ Rules:
   and does not start an invocation. Clients must use native `profile-rebind` or
   create a new session to change future-turn configuration for an existing
   session.
+- `haas.timeoutSeconds` is an optional per-invocation deadline override. The
+  default and maximum supported value are `86400` seconds. It is a long-task
+  safety guard, not an SSE idle timeout or client HTTP timeout. Values less than
+  or equal to zero are invalid; values above 24 hours are clamped to `86400`.
 
 ### 6.1.1 Profile and Dynamic Configuration Contract
 
@@ -468,7 +472,7 @@ Invocation (internal Run) states:
 | `running` | no | Accepted and executing |
 | `completed` | yes | Harness completed normally; stream closes |
 | `failed` | yes | Harness or service failed; error is readable |
-| `incomplete` | yes | Truncated by budget/timeout; partial output is retained |
+| `incomplete` | yes | Truncated by budget/deadline or orphaned by restart when recoverable; partial output is retained |
 | `interrupted` | yes | Paused by caller; source turn is immutable and may be continued as a new invocation |
 | `cancelled` | yes | Cancelled by caller; committed events are retained |
 
@@ -486,6 +490,12 @@ Failures before acceptance return a structured 4xx/5xx response and create neith
 an invocation nor a terminal event. Once accepted, adapter start/stream/finalize,
 provider, MCP, sandbox, timeout, budget, cancellation, and runtime failures converge
 on exactly one persisted canonical terminal event and its ADK projection:
+
+The default accepted invocation deadline is 24 hours. Reaching it uses stable
+`haas_request_timeout` with `safeReason=long_task_deadline_exceeded`; the event
+is retryable only when the native session or operation is proven replay-safe.
+Transport timeouts and stream disconnects are delivery failures and MUST NOT by
+themselves terminate an accepted invocation.
 
 | Surface | Accepted terminal result |
 |---------|--------------------------|

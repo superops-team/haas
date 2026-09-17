@@ -110,6 +110,60 @@ if [ -n "$(find "$GUI/src-tauri/binaries/sidecar" -type d -name "*.framework" | 
 fi
 chmod +x "$GUI/src-tauri/binaries/sidecar/openworker-server"
 
+# Browser automation must be app-owned. Bundle the Playwright-managed Chromium runtime
+# next to the sidecar so installed OpenHarness does not launch the user's system Chrome
+# and does not depend on a mutable home-cache path.
+PY_PLAYWRIGHT_BROWSERS="$(
+  "$PLATFORM/.venv/bin/python" - <<'PY'
+import os
+import sys
+from pathlib import Path
+try:
+    import playwright
+except Exception:
+    raise SystemExit(0)
+
+roots = []
+env_root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+if env_root and env_root != "0":
+    roots.append(Path(env_root).expanduser())
+elif sys.platform == "darwin":
+    roots.append(Path.home() / "Library/Caches/ms-playwright")
+else:
+    roots.append(Path.home() / ".cache/ms-playwright")
+roots.append(Path(playwright.__file__).resolve().parent / "driver" / "package" / ".local-browsers")
+
+for root in roots:
+    if any(root.glob("chromium_headless_shell-*")):
+        print(root)
+        break
+PY
+)"
+if [ -n "$PY_PLAYWRIGHT_BROWSERS" ] && [ -d "$PY_PLAYWRIGHT_BROWSERS" ]; then
+  echo "    staging Playwright browser runtime"
+  rm -rf "$GUI/src-tauri/binaries/sidecar/playwright-browsers"
+  mkdir -p "$GUI/src-tauri/binaries/sidecar/playwright-browsers"
+  find "$PY_PLAYWRIGHT_BROWSERS" -maxdepth 1 -type d -name 'chromium_headless_shell-*' \
+    -exec cp -R {} "$GUI/src-tauri/binaries/sidecar/playwright-browsers/" \;
+  if ! find "$GUI/src-tauri/binaries/sidecar/playwright-browsers" -type f \
+    \( -name 'chrome-headless-shell' -o -name 'chrome-headless-shell.exe' \) \
+    -perm +111 | grep -q .; then
+    echo "ERROR: staged Playwright browser runtime contains no executable headless shell" >&2
+    exit 1
+  fi
+else
+  echo "ERROR: Playwright Chromium runtime not found; run '$PLATFORM/.venv/bin/python -m playwright install chromium'" >&2
+  exit 1
+fi
+if [ -n "$(find "$GUI/src-tauri/binaries/sidecar" -type l | head -1)" ]; then
+  echo "ERROR: symlinks appeared after browser runtime staging — tauri would flatten them into unsigned copies" >&2
+  exit 1
+fi
+if [ -n "$(find "$GUI/src-tauri/binaries/sidecar" -type d -name "*.framework" | head -1)" ]; then
+  echo "ERROR: a .framework appeared after browser runtime staging — it cannot pass notarization in this layout" >&2
+  exit 1
+fi
+
 # Sign the sidecar's Mach-O files BEFORE tauri build: `tauri build` signs the .app (sealing
 # resources into its signature) but does NOT sign nested binaries inside resources — unsigned
 # Mach-Os there fail notarization. Hardened runtime + timestamp on every one, same identity,
@@ -269,6 +323,13 @@ elif [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
   fi
 else
   echo "    (unsigned dev build — set APPLE_SIGNING_IDENTITY for a distributable DMG)"
+fi
+
+if [ "${OPENHARNESS_SKIP_PACKAGED_SMOKE:-}" != "1" ]; then
+  echo "==> packaged smoke: launch sidecar + local HaaS task gate"
+  "$HERE/smoke_packaged_app.sh" "$BUNDLE/macos/$APP.app"
+else
+  echo "==> packaged smoke: skipped by OPENHARNESS_SKIP_PACKAGED_SMOKE=1"
 fi
 
 echo ""

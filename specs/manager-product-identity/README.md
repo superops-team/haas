@@ -120,7 +120,17 @@ Out of scope:
 - The existing HaaS delegation settings flow still works after branding changes.
 - A fresh no-login installation starts the managed local HaaS sidecar and routes an
   eligible new chat through HaaS without requiring trigger keywords; explicit local
-  execution remains a visible per-session opt-out.
+  execution remains a visible per-session opt-out. The release smoke MUST use the
+  packaged app/server binary with an isolated state directory seeded with
+  forward-compatible HaaS SQLite records, then submit one WebSocket task and assert
+  that failures are delivered as structured transcript errors rather than background
+  task exceptions or silent non-execution.
+- The packaged release smoke MUST also run an occupied-port variant where a
+  non-HaaS loopback listener already owns the configured local HaaS port. The
+  main sidecar must remain healthy, the task path must return a structured
+  `local_sidecar_port_occupied` error plus `turn_done`, and settings diagnostics
+  must include `local_status.reason`, `local_status.managerLogPath`, and
+  `local_status.logPath` without exposing token material.
 - Offline contract tests cover platform/architecture rejection, immutable release
   asset selection, checksum-before-mount ordering, scoped `xattr`, cleanup, and
   rollback. A release smoke test installs the uploaded DMG through the public

@@ -3,8 +3,8 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-13
-Change ID: unified-runtime-approval-policy
+Last reviewed: 2026-09-15
+Change ID: unified-runtime-approval-policy, long-task-model-proxy-stability
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Registry](../harness-registry/README.md), [Harness Profile](../harness-profile/README.md), [Harness Adapter](../harness-adapter/README.md), [Event Log & SSE](../event-log-sse/README.md), [Admission Control](../admission-control/README.md), [Manager Delegation](../manager-delegation/README.md)
 
 ## 1. Component Role
@@ -14,6 +14,24 @@ invocations—one ADK `/run`—turns, containers, leases, idempotency, profile
 snapshots, and terminal states, and drives concrete agents through Harness Adapter.
 
 An ADK session is uniquely identified by the `(appName, userId, sessionId)` tuple. An `invocation` is the public unit of execution, while a `turn` is an adapter-internal unit of execution. They have a one-to-one relationship in the initial release, but Session Runtime MUST preserve room to split one invocation into multiple internal turns or replay turns in the future.
+
+### 1.1 Long-Running Background Task Posture
+
+HaaS is designed for offline, background agent work. A normal accepted invocation
+MUST NOT be forced to fail by a short interactive-client timeout. The default
+runtime turn deadline is 24 hours (`86400` seconds), which is also the maximum
+accepted value for `haas.timeoutSeconds` unless a future capability advertises a
+larger durable execution class. Clients MAY request a shorter timeout for a
+specific turn, but Manager local defaults MUST NOT shorten HaaS-backed work below
+the long-task default.
+
+The deadline is a final safety guard, not an activity or stream-idle timeout.
+Disconnecting `/run_sse`, losing a GUI WebSocket, crossing a model stream-idle
+interval, or running many tool calls is not itself a reason to terminate the
+invocation. The runtime keeps renewing the active-turn lease and keeps model/MCP
+capabilities alive or safely refreshed until the invocation reaches an
+authoritative terminal event, is explicitly cancelled, or reaches the 24-hour
+deadline.
 
 ## 2. Sources and Rationale
 
@@ -51,7 +69,8 @@ Responsibilities:
 - For delegated sessions, persist the HaaS session, native session reference,
   delegated-session reference, approval waits, and runtime-generation metadata needed
   for follow-up restoration.
-- Manage cancellation, timeout, step budget, session expiry, and session deletion.
+- Manage cancellation, the long-running invocation deadline, step budget, session
+  expiry, and session deletion.
 - After a sidecar restart, recover recoverable sessions from persistent state or fail closed into a non-recoverable state.
 
 Non-responsibilities:
@@ -176,6 +195,8 @@ adapter-native configuration.
   "completedAtMs": null,
   "model": "gpt-5.6-terra",
   "requestedModel": "gpt-5.6-terra",
+  "timeoutSeconds": 86400,
+  "deadlineAtMs": 1786486400000,
   "idempotencyKeyHash": "idem_sha256",
   "terminalEventId": null,
   "continuedFromInvocationId": null,
@@ -402,6 +423,17 @@ durably persisted and before any native turn/provider/tool/workspace side effect
 Preflight failures before that write return structured HTTP errors and create no
 invocation. All failures after that write converge on terminal state/events.
 
+Each accepted invocation stores the effective timeout budget and computed
+deadline. The default is `86400` seconds. The server MUST clamp requests above
+24 hours to `86400` seconds, reject non-positive values, and expose the effective
+value in readback/diagnostics where timeout information is shown. The deadline is
+measured against wall-clock execution of the accepted invocation, not against an
+individual SSE client connection. If the deadline is reached, HaaS first attempts
+an adapter-native interrupt/cancel, then persists one terminal event with
+`haas.code=haas_request_timeout`, `haas.safeReason=long_task_deadline_exceeded`,
+and `haas.retryable=true` when the native session is still resumable or the
+operation is replay-safe. Partial output and tool evidence remain readable.
+
 Terminal states are immutable. Every normally terminal accepted invocation returns
 HTTP 200: `/run` returns the ordered ADK event array and `/run_sse` emits the terminal
 ADK event before closing. Exactly one matching
@@ -494,7 +526,9 @@ Metrics:
 
 ## 10. Failure and Recovery
 
-Adapter calls (`prepare_session`, `start_turn`, `stream_events`, and `finalize_turn`) execute inside a single invocation timeout budget. The default timeout is 900 seconds and is configurable per `SessionRuntime`; the value MUST be greater than the lease TTL so normal long turns renew at least once before timing out. On timeout, Runtime cancels the in-flight adapter await, persists terminal invocation/turn/session state, writes canonical `type=haas.turn.failed` with `haas={status:"failed", safeReason:"timeout", retryable:false}` and the compatible ADK `actions.stateDelta.status/reason` projection, releases admission quota in the API layer, and completes any idempotency reservation with the failed response envelope so retries no longer observe a pending key or downgrade the HTTP status.
+Adapter calls (`prepare_session`, `start_turn`, `stream_events`, and `finalize_turn`) execute inside a single invocation deadline. The default deadline is 24 hours (`86400` seconds) and is configurable per `SessionRuntime` only within the supported range `1..86400`. The value MUST be greater than the lease TTL so normal long turns renew repeatedly before the deadline. Stream-idle, HTTP response-header and GUI WebSocket timeouts are separate transport budgets and MUST NOT cancel accepted work.
+
+On deadline expiry, Runtime cancels the in-flight adapter await, persists terminal invocation/turn/session state, writes canonical `type=haas.turn.failed` with `haas={status:"failed", code:"haas_request_timeout", safeReason:"long_task_deadline_exceeded"}` and the compatible ADK `actions.stateDelta.status/reason` projection, releases admission quota in the API layer, and completes any idempotency reservation with the failed response envelope so retries no longer observe a pending key or downgrade the HTTP status. If the adapter can prove a resumable native state, the terminal SHOULD be `incomplete` with `retryable=true`; otherwise it remains `failed` with partial progress retained.
 
 | Scenario | Behavior |
 |----------|----------|
@@ -502,7 +536,7 @@ Adapter calls (`prepare_session`, `start_turn`, `stream_events`, and `finalize_t
 | InvocationRecord accepted write succeeds | Retain idempotency reservation with accepted=true/invocationId; all normal terminal outcomes replay as HTTP 200 plus identical ADK events |
 | Sidecar process restarts | On the first authoritative invocation readback, inspect a persisted `running` invocation before returning it. If the adapter can prove ownership and resume/inspect the native turn, restore that exact invocation. Otherwise acquire the session lease with a fresh fencing token and converge the orphaned invocation and turn to non-resumable `incomplete`, append exactly one `haas.turn.incomplete` with `code=safeReason=sidecar_restart_execution_lost` and `retryable=true`, close its pending interactions, return the session control state to `idle`, and complete its accepted idempotency reservation from the canonical event history. A live unexpired lease owned by another process blocks reconciliation; readback MUST NOT overwrite that owner. Never classify this case as resumable `interrupted`, which is reserved for a confirmed native Pause terminal. |
 | Cancel targets a persisted `running` invocation after restart, but the current process has no active adapter handle | First require the invocation to belong to the path session and require its linked session, turn, and harness records to exist. Then acquire the session lease with a new fencing token, persist matching invocation/turn `cancelled` state, merge the session `cancelled` projection only when no newer terminal invocation has superseded it, and append exactly one `haas.turn.cancelled` terminal event before returning. Never return the stale `running` record as if cancellation succeeded. Missing or mismatched records and lease conflict fail closed without mutating state or overwriting the current owner. |
-| Adapter produces no terminal state | Cancel the adapter await and write terminal `failed` after timeout |
+| Adapter produces no terminal state before the 24-hour deadline | Cancel the adapter await and write a single terminal `failed` or resumable `incomplete` with `haas_request_timeout` / `long_task_deadline_exceeded` |
 | Disconnect after cancellation | Persist cancellation intent; the final state MUST remain readable |
 | Session lease renew fails or lease is fenced out | Stop stale writes; current fencing owner persists `haas.turn.failed` when possible. Do not return unaccepted adapter 502 for an accepted invocation; use integrity-failure recovery if terminal persistence is impossible |
 | Required terminal event write fails after acceptance | Persist invocation/turn/session as failed in the authoritative state store, complete idempotency with accepted=true/invocationId and `503 haas_store_unavailable`, and emit fallback diagnostics. Before headers return that integrity error; after SSE headers abort and require readback. Do not fabricate terminal evidence. |
@@ -514,7 +548,7 @@ Adapter calls (`prepare_session`, `start_turn`, `stream_events`, and `finalize_t
 | Policy application fails | Preserve prior applied revision, expose safe failure, and block new invocation start until corrected or superseded |
 | Structured input is waiting | Persist an `InputRequestRecord`; keep the same invocation/turn active and keep its model capability valid; resume only after an exact manager answer |
 | Adapter already emitted a terminal | Commit that event once; `finalize_turn` returns state but does not append another terminal |
-| Active model-proxy capability is rejected | Attempt one exact-scope refresh; otherwise persist a stable failed terminal and partial progress |
+| Active model-proxy capability is rejected | Attempt exact-session refresh/rebind without resubmitting the invocation; otherwise persist a stable failed terminal and partial progress |
 | Explicit profile rebind validation fails | Reject the rebind and keep the previous `effectiveProfileSnapshot` |
 | Active profile changes after session creation | Mark drift only; the existing session continues on its old snapshot until explicit rebind or a new session |
 
@@ -537,10 +571,10 @@ Adapter calls (`prepare_session`, `start_turn`, `stream_events`, and `finalize_t
   semantics; running invocations remain frozen and queued/continued invocations use only an applied
   revision. Concurrent expected-revision conflicts and apply failures never run stale work.
 - Task completion: an invocation terminal cannot erase pending plan/verification work. Manager acceptance covers completed, verifying, resumable incomplete, failed, cancelled, and continuation-budget-exhausted task states.
-- Long turn: a turn longer than the stream-idle timeout and a tool-heavy turn both retain lease, model capability, and exactly one terminal event.
+- Long turn: a 24-hour controlled-clock turn, a turn longer than the stream-idle timeout, and a tool-heavy turn all retain lease, model capability, and exactly one terminal event.
 - Compatibility: align ADK client behavior for bounded session GET/PATCH/DELETE; over-budget session GET returns explicit 413 and native pagination never silently truncates.
 - Security: all cross-principal access returns 404; secret-shaped input does not enter default logs.
 
 ## stream-timeout-approval-recovery
 
-The invocation deadline must apply to the task currently awaiting adapter work. A task-bound timeout context must never span an async-generator yield: the first event and subsequent events may be consumed by different tasks. Preparation, start, each event wait and finalization share one monotonic deadline. Timeout persists one failed terminal, closes waiting interactions and releases resources. Test silent execution and approval waits after the first streamed event.
+The invocation deadline must apply to the task currently awaiting adapter work. A task-bound timeout context must never span an async-generator yield: the first event and subsequent events may be consumed by different tasks. Preparation, start, each event wait and finalization share one monotonic deadline whose default is 24 hours. Timeout persists one terminal, closes waiting interactions and releases resources. Test silent execution, long downloads, tool-heavy loops and approval waits after the first streamed event.

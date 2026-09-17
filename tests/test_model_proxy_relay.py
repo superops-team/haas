@@ -119,3 +119,98 @@ async def test_proxy_rejects_model_outside_scope() -> None:
         await proxy.proxy_responses(
             route, {}, authorization=f"Bearer {token}", policy=_policy(["http://127.0.0.1:18080"])
         )
+
+
+async def test_proxy_retries_transient_provider_errors_before_json_output() -> None:
+    calls: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers.get("authorization"))
+        if len(calls) == 1:
+            return httpx.Response(503, json={"error": {"code": "overloaded"}})
+        return httpx.Response(200, json={"id": "resp_retry_ok"})
+
+    proxy, tokens = _proxy(handler, allow=["http://127.0.0.1:18080"])
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1"))
+    route = ModelRoute(
+        provider="openai-compatible",
+        baseUrl="http://127.0.0.1:18080/v1",
+        model="gpt-x",
+        credentialRef="secret://tenant/provider",
+    )
+
+    data, usage = await proxy.proxy_responses(
+        route,
+        {"input": "hi"},
+        authorization=f"Bearer {token}",
+        policy=_policy(["http://127.0.0.1:18080"]),
+    )
+
+    assert data["id"] == "resp_retry_ok"
+    assert usage is None
+    assert calls == ["Bearer sk-real-key", "Bearer sk-real-key"]
+
+
+async def test_proxy_retries_connect_timeout_before_json_output() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectTimeout("connect timed out", request=request)
+        return httpx.Response(200, json={"id": "resp_after_timeout"})
+
+    proxy, tokens = _proxy(handler, allow=["http://127.0.0.1:18080"])
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1"))
+    route = ModelRoute(
+        provider="openai-compatible",
+        baseUrl="http://127.0.0.1:18080/v1",
+        model="gpt-x",
+        credentialRef="secret://tenant/provider",
+    )
+
+    data, _usage = await proxy.proxy_responses(
+        route,
+        {"input": "hi"},
+        authorization=f"Bearer {token}",
+        policy=_policy(["http://127.0.0.1:18080"]),
+    )
+
+    assert data["id"] == "resp_after_timeout"
+    assert calls == 2
+
+
+async def test_proxy_retries_transient_provider_errors_before_stream_output() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, json={"error": {"code": "overloaded"}})
+        return httpx.Response(
+            200,
+            text='data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    proxy, tokens = _proxy(handler, allow=["http://127.0.0.1:18080"])
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1"))
+    route = ModelRoute(
+        provider="openai-compatible",
+        baseUrl="http://127.0.0.1:18080/v1",
+        model="gpt-x",
+        credentialRef="secret://tenant/provider",
+    )
+
+    response = await proxy.stream_responses(
+        route,
+        {"input": "hi"},
+        authorization=f"Bearer {token}",
+        policy=_policy(["http://127.0.0.1:18080"]),
+    )
+    chunks = [chunk async for chunk in proxy.relay_stream(response)]
+
+    assert calls == 2
+    assert any('"delta":"ok"' in chunk for chunk in chunks)

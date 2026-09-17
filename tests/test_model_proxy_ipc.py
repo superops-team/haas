@@ -12,7 +12,7 @@ async def test_private_resolver_transmits_scope_and_sequence():
     parent, child = socket.socketpair()
     parent.setblocking(False)
     resolver = LocalCredentialResolver(child.detach())
-    scope = RuntimeTokenScope(harnessId="chrn_x", sessionId="hsess_x", invocationId="inv_x")
+    scope = RuntimeTokenScope(harnessId="chrn_x", sessionId="hsess_x")
     route = ModelRoute(
         provider="openai",
         baseUrl="https://provider.example/v1",
@@ -55,7 +55,7 @@ async def test_private_resolver_rejects_invalid_response(reply):
         model="test",
         credentialRef="secret://test",
     )
-    scope = RuntimeTokenScope(harnessId="chrn_x", sessionId="hsess_x", invocationId="inv_x")
+    scope = RuntimeTokenScope(harnessId="chrn_x", sessionId="hsess_x")
     task = asyncio.create_task(resolver.resolve_for(route, scope))
     loop = asyncio.get_running_loop()
     await loop.sock_recv(parent, 16384)
@@ -79,7 +79,7 @@ async def test_private_resolver_cancel_closes_descriptor():
         model="test",
         credentialRef="secret://test",
     )
-    scope = RuntimeTokenScope(harnessId="chrn_x", sessionId="hsess_x", invocationId="inv_x")
+    scope = RuntimeTokenScope(harnessId="chrn_x", sessionId="hsess_x")
     task = asyncio.create_task(resolver.resolve_for(route, scope))
     await asyncio.get_running_loop().sock_recv(parent, 16384)
     task.cancel()
@@ -147,10 +147,12 @@ async def test_runtime_proxy_lifecycle_and_scoped_tokens(monkeypatch, startup):
         async with proxy.lifespan(app):
             if startup == "normal":
                 credentials = await proxy.begin(harness, invocation, profile)
-                assert proxy.tokens.validate(credentials["token"]).allowedModels == ["test"]
-                assert proxy.route("hsess_test", "inv_test")["model"] == "test"
+                assert proxy.tokens.validate(credentials["token"]).allowedModels == []
+                assert proxy.route("hsess_test")["model"] == "test"
                 assert grants == [("test", "hsess_test")]
                 proxy.end(invocation, credentials)
+                assert proxy.routes and proxy.tokens._tokens
+                proxy.revoke_session(invocation.sessionId)
                 assert not proxy.routes and not proxy.tokens._tokens
                 profile["provider"]["apiType"] = "chat_completions"
                 profile["provider"]["wireApi"] = "openai-compatible"

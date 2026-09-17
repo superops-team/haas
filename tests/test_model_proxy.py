@@ -145,6 +145,17 @@ async def test_token_expires() -> None:
         mgr.validate(token)
 
 
+def test_token_exposes_only_parseable_session_route_hint() -> None:
+    mgr = RuntimeTokenManager()
+    token = mgr.issue(RuntimeTokenScope(sessionId="hsess_with/slash", harnessId="chrn_1"))
+
+    assert "hsess_with/slash" not in token
+    assert mgr.token_session_id(token) == "hsess_with/slash"
+    assert mgr.token_session_id("haas_mp_@@@.1.x") is None
+    assert mgr.token_session_id("haas_mp_not-base64.1.x") is None
+    assert mgr.token_session_id("not-a-haas-token") is None
+
+
 # --- usage normalization ----------------------------------------------------
 
 

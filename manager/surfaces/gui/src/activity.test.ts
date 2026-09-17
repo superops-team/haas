@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   appendBoundedActivityText,
+  canReconcileReadback,
   finalizeCurrentHaasTurn,
   insertReplayedHaasTool,
+  isTerminalTaskOutcome,
+  latestHaasTaskOutcome,
+  latestUserIntentKey,
   projectToolActivity,
 } from "./activity";
 import type { Item } from "./types";
@@ -137,6 +141,115 @@ describe("semantic activity projection", () => {
       result.filter((item) => item.kind === "tool" && item.id === "call_1"),
     ).toHaveLength(1);
     expect(result[1]).toEqual(persisted);
+  });
+
+  it("detects a terminal HaaS outcome from a replayed transcript", () => {
+    const items: Item[] = [
+      { kind: "user", text: "do it" },
+      tool({ id: "call_1", taskOutcome: { phase: "completed" } }),
+      {
+        kind: "assistant",
+        text: "Finished",
+        source: "haas",
+        taskOutcome: { phase: "completed" },
+      },
+    ];
+
+    const outcome = latestHaasTaskOutcome(items);
+    expect(outcome).toEqual({ phase: "completed" });
+    expect(isTerminalTaskOutcome(outcome)).toBe(true);
+    expect(isTerminalTaskOutcome({ phase: "running" })).toBe(false);
+  });
+
+  it("allows readback reconciliation only for terminal matching user intent", () => {
+    const local: Item[] = [
+      { kind: "user", text: "current request" },
+      tool({ id: "call_1", status: "running" }),
+    ];
+    const completed: Item[] = [
+      { kind: "user", text: "current request" },
+      {
+        kind: "assistant",
+        text: "Finished",
+        source: "haas",
+        taskOutcome: { phase: "completed" },
+      },
+    ];
+    const stale: Item[] = [
+      { kind: "user", text: "previous request" },
+      {
+        kind: "assistant",
+        text: "Previous finished",
+        source: "haas",
+        taskOutcome: { phase: "completed" },
+      },
+    ];
+
+    expect(canReconcileReadback(local, completed)).toBe(true);
+    expect(canReconcileReadback(local, stale)).toBe(false);
+    expect(
+      canReconcileReadback(local, [
+        { kind: "user", text: "current request" },
+        { kind: "tool", id: "call_1", name: "haas", args: {}, status: "running" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("keys the latest user intent so stale readback cannot clear a newer send", () => {
+    expect(
+      latestUserIntentKey([
+        { kind: "user", text: "old" },
+        {
+          kind: "assistant",
+          text: "done",
+          source: "haas",
+          taskOutcome: { phase: "completed" },
+        },
+        { kind: "user", text: "new" },
+      ]),
+    ).toBe("user:2:new");
+    expect(
+      latestUserIntentKey([
+        {
+          kind: "connector",
+          source: {
+            connector: "slack",
+            kind: "channel",
+            channel_id: "C1",
+            channel_name: "#eng",
+            sender_id: "U1",
+            sender_name: "Ada",
+            ts: 123,
+            text: "ship it",
+          },
+        },
+      ]),
+    ).toBe("connector:1:slack:channel:123:ship it");
+  });
+
+  it("does not reconcile a repeated identical prompt from an earlier turn", () => {
+    const local: Item[] = [
+      { kind: "user", text: "retry this" },
+      {
+        kind: "assistant",
+        text: "Previous result",
+        source: "haas",
+        taskOutcome: { phase: "completed" },
+      },
+      { kind: "user", text: "retry this" },
+      tool({ id: "call_2", status: "running" }),
+    ];
+    const staleReadback: Item[] = [
+      { kind: "user", text: "retry this" },
+      {
+        kind: "assistant",
+        text: "Previous result",
+        source: "haas",
+        taskOutcome: { phase: "completed" },
+      },
+    ];
+
+    expect(canReconcileReadback(local, staleReadback)).toBe(false);
   });
 
   it("assigns the outcome to only the current HaaS turn and terminates dangling tools", () => {

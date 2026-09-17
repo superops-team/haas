@@ -35,6 +35,8 @@ const haasSettings = {
     pid: 123,
     url: "http://127.0.0.1:8092",
     reason: null,
+    logPath: "/tmp/openharness/logs/haas-sidecar.log",
+    managerLogPath: "/tmp/openharness/logs/openworker-server.log",
   },
   has_api_token: true,
 };
@@ -81,8 +83,41 @@ describe("SettingsView HaaS delegation settings", () => {
     expect(screen.getByTestId("haas-image")).toHaveProperty("value", "haas:local");
     expect(screen.getByTestId("haas-api-token")).toHaveProperty("value", "");
     expect(screen.getByTestId("haas-local-status").textContent).toContain("running");
+    expect(screen.getByTestId("haas-local-status").textContent).toContain(
+      "/tmp/openharness/logs/haas-sidecar.log",
+    );
+    expect(screen.getByTestId("haas-local-status").textContent).toContain(
+      "/tmp/openharness/logs/openworker-server.log",
+    );
     expect(screen.getByPlaceholderText("Token saved")).toBeTruthy();
     expect(document.body.textContent).not.toContain("dev-token");
+  });
+
+  it("renders local HaaS diagnostic reason without exposing secrets", async () => {
+    const fn = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        ...haasSettings,
+        local_status: {
+          ...haasSettings.local_status,
+          status: "stopped",
+          running: false,
+          managed: false,
+          pid: null,
+          reason: "local_sidecar_port_occupied",
+          logPath: "/tmp/openharness/logs/haas-sidecar.log",
+          managerLogPath: "/tmp/openharness/logs/openworker-server.log",
+        },
+      }),
+    }) as Response);
+    vi.stubGlobal("fetch", fn);
+    render(<SettingsView initialTab="execution" />);
+
+    const status = await screen.findByTestId("haas-local-status");
+    expect(status.textContent).toContain("local_sidecar_port_occupied");
+    expect(status.textContent).toContain("/tmp/openharness/logs/haas-sidecar.log");
+    expect(status.textContent).toContain("/tmp/openharness/logs/openworker-server.log");
+    expect(document.body.textContent).not.toContain("sk-");
   });
 
   it("saves edited non-secret settings and writes token only when entered", async () => {

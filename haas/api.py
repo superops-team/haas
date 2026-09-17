@@ -12,6 +12,7 @@ import uuid
 import zipfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
+from math import isfinite
 from typing import Annotated, Any, cast
 
 from fastapi import FastAPI, File, Request, UploadFile
@@ -59,6 +60,7 @@ from haas.runtime.delegation import DisabledDelegatedContainerRuntime
 from haas.runtime.reconciler import reconcile_delegated_policy
 from haas.sessions import (
     AdapterTurnError,
+    AdapterTurnTimeoutError,
     InvocationNotFoundError,
     InvocationNotResumableError,
     InvocationNotRunningError,
@@ -162,6 +164,20 @@ def _deep_merge(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
         else:
             out[key] = value
     return out
+
+
+def _timeout_seconds_from_haas(options: dict[str, Any]) -> float | None:
+    if "timeoutSeconds" not in options:
+        return None
+    value = options["timeoutSeconds"]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError("timeoutSeconds must be numeric")
+    seconds = float(value)
+    if not isfinite(seconds):
+        raise ValueError("timeoutSeconds must be finite")
+    if seconds <= 0:
+        raise ValueError("timeoutSeconds must be positive")
+    return min(seconds, 86_400)
 
 
 def _delegation_policy_from_config(config: AppConfig) -> dict[str, Any]:
@@ -448,6 +464,8 @@ def _invocation_envelope(runtime: _Runtime, invocation: InvocationRecord) -> dic
             "acceptedAtMs": invocation.acceptedAtMs,
             "startedAtMs": invocation.startedAtMs,
             "completedAtMs": invocation.completedAtMs,
+            "timeoutSeconds": invocation.timeoutSeconds,
+            "deadlineAtMs": invocation.deadlineAtMs,
             "idempotencyExpiresAtMs": invocation.idempotencyExpiresAtMs,
         },
         "traceId": _trace_id(),
@@ -2396,6 +2414,7 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
     new_message = body.get("newMessage", {})
     sandbox = body.get("sandbox", {})
     policy = body.get("policy", {})
+    haas_options = body.get("haas", {})
     if (
         not isinstance(app_name, str)
         or not isinstance(user_id, str)
@@ -2405,8 +2424,18 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
         or not isinstance(new_message, dict)
         or not isinstance(sandbox, dict)
         or not isinstance(policy, dict)
+        or not isinstance(haas_options, dict)
     ):
         raise HaasError(400, "invalid_request_error", "invalid_input")
+    try:
+        timeout_seconds = _timeout_seconds_from_haas(haas_options)
+    except (TypeError, ValueError) as exc:
+        raise HaasError(
+            400,
+            "invalid_request_error",
+            "invalid_input",
+            safe_reason="invalid_timeout_seconds",
+        ) from exc
 
     _ensure_owns(runtime.identity, principal, user_id)
 
@@ -2531,6 +2560,7 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             streaming=streaming,
             key_hash=key_hash,
             lease_id=lease_id,
+            timeout_seconds=timeout_seconds,
         )
     try:
         effective_profile = _local_effective_profile(
@@ -2551,6 +2581,7 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
         policy=policy,
         effective_profile=effective_profile,
         principal_id=principal.principalId,
+        timeout_seconds=timeout_seconds,
     )
     if streaming:
         stream = runtime.sessions.run_stream(req)
@@ -2708,6 +2739,44 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             raise HaasError(
                 409, "invalid_request_error", "haas_resume_required"
             ) from exc
+        except AdapterTurnTimeoutError as exc:
+            invocation = runtime.store.get_invocation(exc.invocation_id)
+            events = [
+                runtime.event_log.project_adk(e)
+                for e in (
+                    runtime.event_log.read_invocation(
+                        invocation.appName,
+                        invocation.userId,
+                        invocation.sessionId,
+                        exc.invocation_id,
+                    )
+                    if invocation is not None
+                    else []
+                )
+            ]
+            expires_at_ms = (
+                _accept_idempotency(runtime, key_hash, exc.invocation_id)
+                if key_hash
+                else None
+            )
+            headers = _accepted_headers(
+                invocation_id=exc.invocation_id,
+                session_id=invocation.sessionId if invocation is not None else session_id,
+                expires_at_ms=expires_at_ms,
+            )
+            if key_hash:
+                runtime.store.complete(
+                    key_hash,
+                    {
+                        "events": events,
+                        "idempotency_expires_at_ms": expires_at_ms,
+                        "invocation_id": exc.invocation_id,
+                        "session_id": (
+                            invocation.sessionId if invocation is not None else session_id
+                        ),
+                    },
+                )
+            return JSONResponse(status_code=200, content=events, headers=headers)
         except AdapterTurnError as exc:
             if key_hash:
                 invocation = runtime.store.get_invocation(exc.invocation_id)
@@ -2782,6 +2851,7 @@ async def _run_delegated(
     streaming: bool,
     key_hash: str | None,
     lease_id: str | None,
+    timeout_seconds: float | None,
 ) -> Any:
     key = _session_key(app.id, user_id, session_id)
     holder = f"run_{uuid.uuid4().hex[:8]}"
@@ -2863,6 +2933,7 @@ async def _run_delegated(
                 "sessionId": session_id,
                 "newMessage": message,
                 "streaming": True,
+                "timeoutSeconds": timeout_seconds or 86_400,
                 "policy": dict(policy),
             }
             async for event in runtime.delegated_containers.run_stream(delegated, body):

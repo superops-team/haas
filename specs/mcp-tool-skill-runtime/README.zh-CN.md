@@ -141,6 +141,41 @@ session transcript 中的有界结构化结果。它是 HaaS/Codex 中断或重�
 包含 raw tool arguments、host path、credential、完整 command output 或隐藏 prompt。Local Codex 可在通用外部 MCP
 materialization 完成前先 materialize 这一内置 source；其它 caller-provided MCP source
 仍遵循既有验证与支持门禁。
+失败、中断或进程丢失后的 retry/recovery 场景中，返回的 transcript 必须包含尚未作为
+普通 assistant transcript message 提交的最新 HaaS bridge checkpoint。这类恢复行只暴露
+安全投影字段，包括有界 command/output preview、status、exit code、safe reason、
+task outcome 与 model-stage summary。
+
+### 6.1.2 内置 Browser Harness
+
+OpenHarness 包含一个保留的内置浏览器能力。它不是用户传入的 connector、MCP server
+或个人 Chrome 附着。默认 runtime 是 app-owned managed browser harness，要求：
+
+- user data dir 位于 OpenHarness state directory 下的隔离目录；
+- runtime 选择受控 Chromium / Chrome-for-Testing executable；
+- 不导入用户个人 Chrome profile、cookie、密码或扩展；
+- 每次 tool action 前执行有界 CDP/browser 健康检查；
+- browser context、page 或 CDP session 崩溃/关闭后自动重建一次；
+- `/v1/browser/state` 暴露结构化 `status`、`last_action`、`last_result`
+  和安全 `last_error`。
+- 桌面打包产物必须在 sidecar resources 下内置 Playwright driver 与受控 browser
+  runtime。
+
+Manager 默认不得为 agent browser tools 启动 `/Applications/Google Chrome.app`
+或其它用户浏览器 profile。开发者可以显式指定 browser executable，但仍必须使用
+app-owned profile，并在本地诊断中体现。Browser warmup 是 optional，不得阻塞整体
+service readiness。
+
+Manager connector 面的 browser tool 名称保持稳定：`browser_open_url`、
+`browser_read_page`、`browser_click`、`browser_type`、`browser_select`、
+`browser_upload_file`、`browser_wait`、`browser_screenshot` 和 `browser_close`。
+实现内部可路由到 Browser Harness helper/CLI 逻辑，但 raw CDP endpoint、profile path、
+cookie、Authorization header 和完整 screenshot 不得写入 model-visible 日志。
+
+验收必须包含源码环境 smoke 与 packaged app smoke：在隔离 state directory 下调用
+browser screenshot endpoint，并观察 `browser=managed_chromium`、`managed=true`、
+app-owned profile 与 PNG data URL。缺少内置 Chromium、缺少 Playwright driver
+resources 或回退到个人 Chrome 均为 release blocker。
 
 ### 6.2 SkillBundle
 

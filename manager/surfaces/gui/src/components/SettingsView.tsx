@@ -510,11 +510,14 @@ function HaasDelegationCard() {
           <div className={FIELD_LABEL}>{t("settings.haas_title")}</div>
           <div className={FIELD_HELP}>{t("settings.haas_help")}</div>
           {settings.local_status && (
-            <div className="text-[12px] text-muted mt-2" data-testid="haas-local-status">
+            <div className="text-[12px] text-muted mt-2 break-all" data-testid="haas-local-status">
               {t("settings.haas_local_status", {
                 status: settings.local_status.status,
                 url: settings.local_status.url,
               })}
+              {settings.local_status.reason ? ` · ${settings.local_status.reason}` : ""}
+              {settings.local_status.managerLogPath ? ` · ${settings.local_status.managerLogPath}` : ""}
+              {settings.local_status.logPath ? ` · ${settings.local_status.logPath}` : ""}
             </div>
           )}
         </div>

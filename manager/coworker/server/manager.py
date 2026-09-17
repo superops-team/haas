@@ -19,7 +19,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -235,6 +235,7 @@ class _ActiveHaasTurn:
     the acceptance race without treating an SSE disconnect as cancellation.
     """
 
+    token: str = field(default_factory=lambda: f"haas_turn_{uuid.uuid4().hex}")
     client: Any | None = None
     haas_session_id: str | None = None
     invocation_id: str | None = None
@@ -1272,8 +1273,30 @@ class SessionManager:
         incoming_control_state = str(binding.get("control_state") or "")
         if (
             current_invocation
+            and incoming_invocation
+            and current_invocation != incoming_invocation
+            and binding.get("resumable_invocation_id") == incoming_invocation
+        ):
+            # A paused source run can finish after Continue has already accepted
+            # a linked invocation. Do not let the source snapshot roll the session
+            # back to the predecessor invocation.
+            for key, value in current.items():
+                if key in {
+                    "accepted_invocation_id",
+                    "binding_accepted_at_ms",
+                    "idempotency_expires_at_ms",
+                    "attempt_ledger",
+                    "current_attempt_id",
+                    "stream_bridge",
+                    "control_state",
+                    "supports_resume",
+                    "resumable_invocation_id",
+                }:
+                    merged[key] = value
+        if (
+            current_invocation
             and current_invocation == incoming_invocation
-            and current_control_state in {"idle", "cancelled"}
+            and current_control_state in {"idle", "paused", "cancelled"}
             and incoming_control_state
             in {"running", "pausing", "paused", "resuming", "stopping"}
         ):
@@ -1294,6 +1317,17 @@ class SessionManager:
     def _haas_assistant_message_from_bridge(bridge: StreamBridgeState) -> dict[str, Any] | None:
         if not (bridge.assistant_text or bridge.activities or bridge.model_stages):
             return None
+        task_outcome = {
+            **bridge.task.to_dict(),
+            "status": bridge.terminal_status,
+            "retryable": bridge.terminal_retryable,
+        }
+        if bridge.terminal_status in {"failed", "incomplete", "interrupted", "cancelled"}:
+            task_outcome["phase"] = bridge.terminal_status
+        if bridge.terminal_code is not None:
+            task_outcome["code"] = bridge.terminal_code
+        if bridge.terminal_safe_reason is not None:
+            task_outcome["safeReason"] = bridge.terminal_safe_reason
         return {
             "role": "assistant",
             "content": bridge.assistant_text,
@@ -1305,11 +1339,7 @@ class SessionManager:
             },
             "_haas_activity": [dict(activity) for activity in bridge.activities.values()],
             "_haas_model_stages": bridge.public_model_stages(),
-            "_haas_task_outcome": {
-                **bridge.task.to_dict(),
-                "status": bridge.terminal_status,
-                "retryable": bridge.terminal_retryable,
-            },
+            "_haas_task_outcome": task_outcome,
         }
 
     @classmethod
@@ -1346,14 +1376,56 @@ class SessionManager:
     def _recover_haas_messages(
         cls, messages: list[dict[str, Any]] | None, binding: dict[str, Any] | None
     ) -> list[dict[str, Any]] | None:
-        if messages and any(message.get("role") != "system" for message in messages):
-            return messages
         if not binding:
             return messages
         recovered = cls._haas_rehydrated_messages(binding)
         if not recovered:
             return messages
-        return [*(message for message in (messages or []) if message.get("role") == "system"), *recovered]
+        merged = list(messages or [])
+        if not any(message.get("role") != "system" for message in merged):
+            return [
+                *(message for message in merged if message.get("role") == "system"),
+                *recovered,
+            ]
+        for recovered_message in recovered:
+            if not cls._haas_recovered_message_present(merged, recovered_message):
+                merged.append(recovered_message)
+        return merged
+
+    @staticmethod
+    def _haas_recovered_message_present(
+        messages: list[dict[str, Any]], recovered: dict[str, Any]
+    ) -> bool:
+        role = recovered.get("role")
+        if role == "user":
+            return any(
+                message.get("role") == "user"
+                and message.get("content") == recovered.get("content")
+                for message in messages
+            )
+        if role != "assistant":
+            return False
+        recovered_invocations = {
+            str(activity.get("invocationId"))
+            for activity in recovered.get("_haas_activity", [])
+            if isinstance(activity, dict) and activity.get("invocationId")
+        }
+        for message in messages:
+            if message.get("role") != "assistant":
+                continue
+            message_invocations = {
+                str(activity.get("invocationId"))
+                for activity in message.get("_haas_activity", [])
+                if isinstance(activity, dict) and activity.get("invocationId")
+            }
+            if recovered_invocations and recovered_invocations & message_invocations:
+                return True
+            if (
+                message.get("content") == recovered.get("content")
+                and message.get("_haas_task_outcome") == recovered.get("_haas_task_outcome")
+            ):
+                return True
+        return False
 
     async def _wait_for_delegated_policy(
         self, client: HaasDelegationClient, binding: dict[str, Any]
@@ -1798,7 +1870,19 @@ class SessionManager:
         attempt = (
             ledger.attempts.get(current_attempt_id) if isinstance(current_attempt_id, str) else None
         )
-        if attempt is None or attempt.terminal:
+        if continue_from_invocation_id is not None:
+            if attempt is not None and attempt.invocation_id == continue_from_invocation_id:
+                attempt.terminal = True
+            attempt_id = f"attempt_{uuid.uuid4().hex[:16]}"
+            manager_turn_id = f"turn_{uuid.uuid4().hex[:16]}"
+            idempotency_key = f"manager-turn:{session_id}:{manager_turn_id}:{attempt_id}"
+            attempt = ledger.add(
+                manager_turn_id=manager_turn_id,
+                attempt_id=attempt_id,
+                idempotency_key=idempotency_key,
+                predecessor_invocation_id=continue_from_invocation_id,
+            )
+        elif attempt is None or attempt.terminal:
             attempt_id = f"attempt_{uuid.uuid4().hex[:16]}"
             manager_turn_id = f"turn_{uuid.uuid4().hex[:16]}"
             idempotency_key = f"manager-turn:{session_id}:{manager_turn_id}:{attempt_id}"
@@ -2401,7 +2485,19 @@ class SessionManager:
         attempt = (
             ledger.attempts.get(current_attempt_id) if isinstance(current_attempt_id, str) else None
         )
-        if attempt is None or attempt.terminal:
+        if continue_from_invocation_id is not None:
+            if attempt is not None and attempt.invocation_id == continue_from_invocation_id:
+                attempt.terminal = True
+            attempt_id = f"attempt_{uuid.uuid4().hex[:16]}"
+            manager_turn_id = f"turn_{uuid.uuid4().hex[:16]}"
+            idempotency_key = f"manager-turn:{session_id}:{manager_turn_id}:{attempt_id}"
+            attempt = ledger.add(
+                manager_turn_id=manager_turn_id,
+                attempt_id=attempt_id,
+                idempotency_key=idempotency_key,
+                predecessor_invocation_id=continue_from_invocation_id,
+            )
+        elif attempt is None or attempt.terminal:
             attempt_id = f"attempt_{uuid.uuid4().hex[:16]}"
             manager_turn_id = f"turn_{uuid.uuid4().hex[:16]}"
             idempotency_key = f"manager-turn:{session_id}:{manager_turn_id}:{attempt_id}"
@@ -6710,6 +6806,29 @@ class SessionManager:
         self._active_haas_turns[session_id] = _ActiveHaasTurn()
         return True
 
+    def active_turn_token(self, session_id: str) -> str | None:
+        control = self._active_haas_turns.get(session_id)
+        return control.token if control is not None else None
+
+    def try_mark_resuming_from_paused(self, session_id: str) -> bool:
+        """Claim a new Continue turn after authoritative paused readback.
+
+        The source run may still be unwinding locally after HaaS has already
+        persisted `paused`; do not let that stale busy marker block Continue.
+        """
+        record = self.session_store.load(session_id)
+        binding = binding_from_record(record) or {}
+        resumable_invocation_id = str(binding.get("resumable_invocation_id") or "")
+        if (
+            binding.get("control_state") != "paused"
+            or not binding.get("supports_resume")
+            or not resumable_invocation_id.startswith("inv_")
+        ):
+            return self.try_mark_running(session_id)
+        self._running_sessions.add(session_id)
+        self._active_haas_turns[session_id] = _ActiveHaasTurn()
+        return True
+
     async def request_interrupt(
         self, session_id: str, engine: TurnEngine
     ) -> dict[str, Any] | None:
@@ -6849,7 +6968,11 @@ class SessionManager:
         result = response.data if hasattr(response, "data") else response
         return result if isinstance(result, dict) else None
 
-    def mark_idle(self, session_id: str) -> None:
+    def mark_idle(self, session_id: str, *, token: str | None = None) -> None:
+        if token is not None:
+            control = self._active_haas_turns.get(session_id)
+            if control is not None and control.token != token:
+                return
         self._running_sessions.discard(session_id)
         self._active_haas_turns.pop(session_id, None)
         # Every turn path (WS, background delivery, durable resume) marks idle when it
@@ -6894,6 +7017,17 @@ class SessionManager:
             # persisted, that authoritative terminal state wins over the
             # in-memory active marker so the desktop cannot stick at stopping.
             persisted_state = str(binding.get("control_state") or "")
+            if (
+                control.pause_sent
+                and persisted_state == "paused"
+                and binding.get("supports_resume")
+            ):
+                return {
+                    "controlState": "paused",
+                    "supportsResume": True,
+                    "resumableInvocationId": binding.get("resumable_invocation_id"),
+                    "pauseSupported": bool(binding.get("pause_supported", False)),
+                }
             if control.cancel_sent and persisted_state not in {
                 "",
                 "running",
@@ -7939,23 +8073,120 @@ class SessionManager:
             if role not in {"user", "assistant"}:
                 continue
             content = message.get("content")
-            if not isinstance(content, str) or not content.strip():
-                continue
-            if terms and not any(term in content.lower() for term in terms):
-                continue
-            item: dict[str, Any] = {
-                "role": role,
-                "content": content.strip()[:2000],
-            }
+            text = content.strip() if isinstance(content, str) else ""
+            activities = SessionManager._recall_activity_items(
+                message.get("_haas_activity")
+            )
+            model_stages = SessionManager._recall_model_stage_items(
+                message.get("_haas_model_stages")
+            )
             outcome = message.get("_haas_task_outcome")
-            if isinstance(outcome, dict):
-                item["taskOutcome"] = {
+            task_outcome = (
+                {
                     key: outcome.get(key)
                     for key in ("status", "phase", "code", "safeReason")
                     if outcome.get(key)
                 }
+                if isinstance(outcome, dict)
+                else {}
+            )
+            if not text and not activities and not model_stages and not task_outcome:
+                continue
+            haystack = "\n".join(
+                SessionManager._recall_search_parts(text, activities, model_stages, task_outcome)
+            ).lower()
+            if terms and not any(term in haystack for term in terms):
+                continue
+            item: dict[str, Any] = {
+                "role": role,
+                "content": text[:2000],
+            }
+            if task_outcome:
+                item["taskOutcome"] = task_outcome
+            if activities:
+                item["activities"] = activities
+            if model_stages:
+                item["modelStages"] = model_stages
             rows.append(item)
         return rows[-limit:]
+
+    @staticmethod
+    def _recall_activity_items(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        rows: list[dict[str, Any]] = []
+        for raw in value:
+            if not isinstance(raw, dict):
+                continue
+            item: dict[str, Any] = {}
+            for key in (
+                "kind",
+                "status",
+                "summary",
+                "commandPreview",
+                "exitCode",
+                "safeReason",
+                "durationMs",
+            ):
+                if raw.get(key) is not None:
+                    item[key] = raw[key]
+            output_preview = raw.get("outputPreview")
+            if output_preview is None:
+                output_preview = raw.get("preview")
+            if output_preview is not None:
+                item["outputPreview"] = str(output_preview)[:2000]
+            if item:
+                rows.append(item)
+        return rows
+
+    @staticmethod
+    def _recall_model_stage_items(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        rows: list[dict[str, Any]] = []
+        for raw in value:
+            if not isinstance(raw, dict):
+                continue
+            stage: dict[str, Any] = {}
+            if raw.get("modelCallId") is not None:
+                stage["modelCallId"] = raw["modelCallId"]
+            if raw.get("status") is not None:
+                stage["status"] = raw["status"]
+            steps: list[dict[str, Any]] = []
+            for raw_step in raw.get("steps", []):
+                if not isinstance(raw_step, dict):
+                    continue
+                step: dict[str, Any] = {}
+                for key in ("kind", "text", "previewText"):
+                    if raw_step.get(key) is not None:
+                        step[key] = str(raw_step[key])[:1000]
+                if raw_step.get("activityId") is not None:
+                    step["activityId"] = raw_step["activityId"]
+                if step:
+                    steps.append(step)
+            if steps:
+                stage["steps"] = steps
+            if stage:
+                rows.append(stage)
+        return rows
+
+    @staticmethod
+    def _recall_search_parts(
+        content: str,
+        activities: list[dict[str, Any]],
+        model_stages: list[dict[str, Any]],
+        task_outcome: dict[str, Any],
+    ) -> list[str]:
+        parts = [content]
+        parts.extend(str(value) for value in task_outcome.values() if value is not None)
+        for activity in activities:
+            parts.extend(str(value) for value in activity.values() if value is not None)
+        for stage in model_stages:
+            parts.extend(str(value) for value in stage.values() if not isinstance(value, list))
+            for step in stage.get("steps", []):
+                if isinstance(step, dict):
+                    parts.extend(str(value) for value in step.values() if value is not None)
+        return parts
 
     def rename_session(self, session_id: str, title: str) -> dict[str, Any]:
         if session_id.startswith("__"):

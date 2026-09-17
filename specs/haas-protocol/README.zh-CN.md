@@ -3,8 +3,8 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-14
-Change ID: unified-runtime-approval-policy
+Last reviewed: 2026-09-15
+Change ID: unified-runtime-approval-policy, long-task-model-proxy-stability
 
 ## 1. 组件定位
 
@@ -236,7 +236,7 @@ readiness、diagnostics 的职责不同：
     "metadata": { "haasTraceId": "tr_abc" },
     "maxOutputTokens": 4096,
     "maxStep": 40,
-    "timeoutSeconds": 900
+    "timeoutSeconds": 86400
   }
 }
 ```
@@ -251,6 +251,9 @@ readiness、diagnostics 的职责不同：
   `EffectiveHarnessProfile`；请求不同 profile 时返回 `409 haas_profile_rebind_required`，
   不启动 invocation。客户端必须通过 native `profile-rebind` 或新建 session 改变已有
   session 的未来 turn 配置。
+- `haas.timeoutSeconds` 是可选的单次 invocation deadline 覆盖。默认值和最大支持值均为
+  `86400` 秒。它是长任务安全兜底，不是 SSE idle timeout 或客户端 HTTP timeout。
+  小于等于 0 的值非法；超过 24 小时的值会被 clamp 到 `86400`。
 
 ### 6.1.1 Profile 与动态配置合同
 
@@ -453,7 +456,7 @@ Invocation（内部 Run）状态：
 | `running` | no | 已接受并执行中 |
 | `completed` | yes | harness 正常完成，stream 关闭 |
 | `failed` | yes | harness 或服务失败，错误可读 |
-| `incomplete` | yes | 预算/超时截断，保留部分输出 |
+| `incomplete` | yes | 被预算/deadline 截断，或重启后可恢复地丢失 native owner；保留部分输出 |
 | `interrupted` | yes | caller 暂停；源 turn 不可变，可作为新 invocation 的续接来源 |
 | `cancelled` | yes | caller 取消，保留已提交事件 |
 
@@ -469,6 +472,11 @@ turn、provider call、tool call 或 workspace mutation。
 接受前失败返回结构化 4xx/5xx，不创建 invocation，也不产生 terminal event。接受后，
 adapter start/stream/finalize、provider、MCP、sandbox、timeout、budget、cancel、runtime
 失败都必须收敛为唯一持久化 canonical terminal event 与对应 ADK projection：
+
+Accepted invocation 默认 deadline 为 24 小时。到达 deadline 使用稳定
+`haas_request_timeout`，`safeReason=long_task_deadline_exceeded`；仅当 native session
+或操作被证明可安全 replay 时，该事件才可 `retryable=true`。Transport timeout 和 stream
+断线只是交付失败，不得单独终止 accepted invocation。
 
 | Surface | Accepted terminal result |
 |---------|--------------------------|

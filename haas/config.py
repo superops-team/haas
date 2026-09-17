@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass, field
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +85,12 @@ class ObservabilityConfig:
 class SessionRuntimeConfig:
     lease_ttl_ms: int = 30_000
     lease_renew_interval_ms: int = 10_000
-    turn_timeout_seconds: float = 900.0
+    turn_timeout_seconds: float = 86_400
+
+    def __post_init__(self) -> None:
+        self.turn_timeout_seconds = _normalize_turn_timeout_seconds(
+            self.turn_timeout_seconds
+        )
 
 
 @dataclass
@@ -132,7 +138,7 @@ def load_config(path: str | None = None) -> AppConfig:
             os.environ["HAAS_SESSION_LEASE_RENEW_INTERVAL_MS"]
         )
     if os.environ.get("HAAS_SESSION_TURN_TIMEOUT_SECONDS"):
-        cfg.session_runtime.turn_timeout_seconds = float(
+        cfg.session_runtime.turn_timeout_seconds = _normalize_turn_timeout_seconds(
             os.environ["HAAS_SESSION_TURN_TIMEOUT_SECONDS"]
         )
     if os.environ.get("HAAS_DELEGATION_IDLE_TTL_SECONDS"):
@@ -158,7 +164,23 @@ def load_config(path: str | None = None) -> AppConfig:
             "HAAS_DELEGATION_ALLOW_UNPINNED_LOCAL_IMAGE"
         ].strip().lower() in {"1", "true", "yes", "on"}
 
+    _normalize_config(cfg)
     return cfg
+
+
+def _normalize_config(cfg: AppConfig) -> None:
+    cfg.session_runtime.turn_timeout_seconds = _normalize_turn_timeout_seconds(
+        cfg.session_runtime.turn_timeout_seconds
+    )
+
+
+def _normalize_turn_timeout_seconds(value: float | int | str) -> float:
+    seconds = float(value)
+    if not isfinite(seconds):
+        raise ValueError("turn_timeout_seconds must be finite")
+    if seconds <= 0:
+        raise ValueError("turn_timeout_seconds must be positive")
+    return min(seconds, 86_400)
 
 
 def _overlay_file(cfg: AppConfig, path: str) -> None:
@@ -215,7 +237,7 @@ def _overlay_file(cfg: AppConfig, path: str) -> None:
                 session_runtime["lease_renew_interval_ms"]
             )
         if "turn_timeout_seconds" in session_runtime:
-            cfg.session_runtime.turn_timeout_seconds = float(
+            cfg.session_runtime.turn_timeout_seconds = _normalize_turn_timeout_seconds(
                 session_runtime["turn_timeout_seconds"]
             )
     codex = (adapters or {}).get("codex") or {}
@@ -289,6 +311,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             app.state.runtime.registry,
             LocalCredentialResolver(int(credential_fd)),
             config.model_proxy.listen,
+            store=app.state.runtime.store,
         )
         app.state.runtime.sessions.model_proxy = proxy
         app.router.lifespan_context = proxy.lifespan

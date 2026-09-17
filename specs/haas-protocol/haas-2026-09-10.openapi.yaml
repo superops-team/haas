@@ -2517,6 +2517,9 @@ components:
             timeoutSeconds:
               type: integer
               minimum: 1
+              maximum: 86400
+              default: 86400
+              description: Per-invocation long-task deadline in seconds; transport timeouts do not terminate accepted work.
           additionalProperties: false
       additionalProperties: true
     Part:
@@ -2644,6 +2647,15 @@ components:
           minimum: 0
         completedAtMs:
           type: [integer, "null"]
+        timeoutSeconds:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 86400
+          description: Effective accepted-invocation long-task deadline in seconds.
+        deadlineAtMs:
+          type: [integer, "null"]
+          minimum: 0
+          description: Wall-clock epoch-millisecond deadline computed from acceptedAtMs plus timeoutSeconds.
         model:
           type: string
         error:
@@ -2998,6 +3010,9 @@ components:
         timeoutSeconds:
           type: integer
           minimum: 1
+          maximum: 86400
+          default: 86400
+          description: Per-invocation long-task deadline in seconds; omitted values use the long-task default.
         maxOutputTokens:
           type: integer
           minimum: 1
@@ -3797,6 +3812,7 @@ components:
         timeoutSeconds:
           type: [integer, "null"]
           deprecated: true
+          maximum: 86400
           description: Legacy projection; use HarnessProfile.budget.timeoutSeconds for new writes.
       additionalProperties: true
     Harness:
@@ -3847,6 +3863,7 @@ components:
           type: [integer, "null"]
         timeoutSeconds:
           type: [integer, "null"]
+          maximum: 86400
         adapterCapabilities:
           type: object
           additionalProperties: true

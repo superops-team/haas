@@ -87,6 +87,7 @@ export function itemsFromMessages(messages: ConversationMessage[]): Item[] {
           ...(Array.isArray(m._haas_model_stages)
             ? { modelStages: m._haas_model_stages }
             : {}),
+          ...(m._haas_task_outcome?.phase ? { taskOutcome: m._haas_task_outcome } : {}),
           ...(m._delegated?.backend === "haas" ? { source: "haas" as const } : {}),
         });
       for (const tc of m.tool_calls || []) {

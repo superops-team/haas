@@ -57,7 +57,14 @@ import { baseName } from "./paths";
 import { itemsFromMessages } from "./itemsFromMessages";
 import { addTurnUsage, emptyUsage, usageFromMessages } from "./usage";
 import { streamMode } from "./streamGate";
-import { appendBoundedActivityText, finalizeCurrentHaasTurn, insertReplayedHaasTool } from "./activity";
+import {
+  appendBoundedActivityText,
+  canReconcileReadback,
+  finalizeCurrentHaasTurn,
+  insertReplayedHaasTool,
+  isTerminalTaskOutcome,
+  latestHaasTaskOutcome,
+} from "./activity";
 import { InboxItemCard, approvalItemFromParked } from "./components/InboxItemCard";
 import { chooseFolder, isTauri, platformOS, startWindowDrag } from "./tauri";
 import { Icon } from "./components/Icon";
@@ -259,6 +266,7 @@ export function App() {
   };
   const seenHaasEventsRef = useRef(new Set<string>());
   const reasoningRef = useRef("");
+  const pendingLocalRunRef = useRef(false);
   const setReasoningStream = (value: string) => {
     reasoningRef.current = value;
     setReasoningStreamState(value);
@@ -267,10 +275,27 @@ export function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [projects, setProjects] = useState<RecentWorkspace[]>([]);
   const [sessionId, setSessionId] = useState<string>(newId());
+  const itemsRef = useRef<Item[]>([]);
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+  const applyTerminalOutcomeFromTranscript = useCallback((nextItems: Item[]) => {
+    const outcome = latestHaasTaskOutcome(nextItems);
+    if (!isTerminalTaskOutcome(outcome)) return false;
+    setRunning(false);
+    setExecutionState(outcome.phase === "interrupted" ? "paused" : "idle");
+    setTaskPhase(outcome.phase);
+    setTaskOutcome(outcome);
+    setStreaming("");
+    setReasoningStream("");
+    setLiveModelStages([]);
+    return true;
+  }, []);
   // Live model-call projections belong to exactly one session. Session changes can happen
   // through several entry points (sidebar, persona, automation, archive/delete), so keep the
   // boundary centralized instead of relying on each caller to clear every transient buffer.
   useEffect(() => {
+    pendingLocalRunRef.current = false;
     streamingRef.current = "";
     setStreamingState("");
     reasoningRef.current = "";
@@ -550,7 +575,9 @@ export function App() {
         }
         try {
           const messages = await getSessionMessages(last.session_id);
-          setItems(itemsFromMessages(messages));
+          const replayed = itemsFromMessages(messages);
+          setItems(replayed);
+          applyTerminalOutcomeFromTranscript(replayed);
           setUsage(usageFromMessages(messages));
         } catch {
           setItems([]);
@@ -626,7 +653,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [applyTerminalOutcomeFromTranscript]);
 
   // Reveal the UI once boot has settled AND the restored session is connected (or we're showing
   // the folder gate). Latched, so later reconnects never flash the splash again.
@@ -698,6 +725,40 @@ export function App() {
     if (surface === "session") rememberLastSession(agent, sessionId, workspace);
   }, [surface, agent, sessionId, workspace]);
 
+  useEffect(() => {
+    if (!running || surface !== "session") return;
+    let cancelled = false;
+    const reconcile = async () => {
+      try {
+        const messages = await getSessionMessages(sessionId);
+        if (cancelled) return;
+        const replayed = itemsFromMessages(messages);
+        if (!latestHaasTaskOutcome(replayed)) return;
+        if (!canReconcileReadback(itemsRef.current, replayed)) return;
+        if (applyTerminalOutcomeFromTranscript(replayed)) {
+          setItems(replayed);
+          setUsage(usageFromMessages(messages));
+          setBrowserRefreshKey((k) => k + 1);
+          refreshSessions();
+        }
+      } catch {
+        /* transient readback failure; the next tick or websocket event will retry */
+      }
+    };
+    const timer = window.setInterval(reconcile, 3000);
+    void reconcile();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    applyTerminalOutcomeFromTranscript,
+    refreshSessions,
+    running,
+    sessionId,
+    surface,
+  ]);
+
   // (re)connect when workspace, session, or agent changes
   useEffect(() => {
     if (booting) return; // wait until boot/resume settles the session before connecting
@@ -742,9 +803,9 @@ export function App() {
           if (d.mode) setMode(d.mode);
           if (typeof d.haas_interaction_supported === "boolean")
             setHaasInteractionSupported(d.haas_interaction_supported);
+          let readyOutcome: TaskOutcome | undefined;
           if (d.haas_task_outcome?.phase) {
-            setTaskPhase(String(d.haas_task_outcome.phase));
-            setTaskOutcome({
+            const outcome: TaskOutcome = {
               phase: String(d.haas_task_outcome.phase),
               ...(d.haas_task_outcome.code ? { code: String(d.haas_task_outcome.code) } : {}),
               ...(d.haas_task_outcome.safeReason
@@ -753,7 +814,10 @@ export function App() {
               ...(typeof d.haas_task_outcome.retryable === "boolean"
                 ? { retryable: d.haas_task_outcome.retryable }
                 : {}),
-            });
+            };
+            readyOutcome = isTerminalTaskOutcome(outcome) ? outcome : undefined;
+            setTaskPhase(outcome.phase);
+            setTaskOutcome(outcome);
           }
           if (d.command_trust?.required) setWorkspaceTrustRequest(d.command_trust);
           // Cowork: adopt the server-provisioned scratch dir (only when we don't already have one).
@@ -762,15 +826,34 @@ export function App() {
           if (typeof d.temp_workspace === "boolean") setTempWorkspace(d.temp_workspace);
           // Server truth on a live turn: a reconnect mid-turn never sees turn_start, so
           // without this the Stop button and waiting row vanish (owner catch 2026-08-24).
-          if (typeof d.running === "boolean") setRunning(d.running);
-          if (d.execution_control?.controlState)
-            setExecutionState(String(d.execution_control.controlState) as ExecutionState);
-          else if (typeof d.running === "boolean")
-            setExecutionState(d.running ? "running" : "idle");
+          const readyControlState = String(d.execution_control?.controlState || "");
+          const keepLocalRunning =
+            pendingLocalRunRef.current &&
+            readyOutcome === undefined &&
+            d.running === false &&
+            (!readyControlState || readyControlState === "idle");
+          if (keepLocalRunning) {
+            // The initial ready snapshot can race a foreground send that was already
+            // handed to the WebSocket. Keep the local in-flight controls until a
+            // concrete turn/control/rejection/close frame settles that handoff.
+          } else if (readyOutcome) {
+            setRunning(false);
+            setExecutionState(readyOutcome.phase === "interrupted" ? "paused" : "idle");
+            setStreaming("");
+            setReasoningStream("");
+            setLiveModelStages([]);
+          } else {
+            if (typeof d.running === "boolean") setRunning(d.running);
+            if (readyControlState)
+              setExecutionState(readyControlState as ExecutionState);
+            else if (typeof d.running === "boolean")
+              setExecutionState(d.running ? "running" : "idle");
+          }
           if (typeof d.execution_control?.pauseSupported === "boolean")
             setPauseSupported(d.execution_control.pauseSupported);
           break;
         case "turn_start":
+          pendingLocalRunRef.current = false;
           setRunning(true);
           setExecutionState("running");
           setTaskPhase("running");
@@ -1097,6 +1180,7 @@ export function App() {
           setItems((p) => [...p, { kind: "notice", tone: "warn", text: t("app.notice.interrupted") }]);
           break;
         case "error":
+          clearSubmittedTurnIfPending();
           flushPartialStream();
           setItems((p) => [
             ...p,
@@ -1104,12 +1188,14 @@ export function App() {
           ]);
           break;
         case "input_rejected":
+          clearSubmittedTurnIfPending();
           setItems((p) => [
             ...p,
             { kind: "notice", tone: "warn", text: d.error || t("app.notice.input_rejected") },
           ]);
           break;
         case "turn_done":
+          pendingLocalRunRef.current = false;
           setRunning(false);
           setExecutionState((state) =>
             state === "pausing" || state === "resuming" || state === "stopping"
@@ -1133,6 +1219,7 @@ export function App() {
           }
           break;
         case "execution_control":
+          pendingLocalRunRef.current = false;
           if (d.controlState)
             setExecutionState(String(d.controlState) as ExecutionState);
           if (typeof d.pauseSupported === "boolean")
@@ -1151,7 +1238,7 @@ export function App() {
         if (p) {
           pendingPromptRef.current = null;
           const shown = p.skill ? `/${p.skill}${p.text ? ` ${p.text}` : ""}` : p.text;
-          beginForegroundFollow();
+          beginSubmittedTurn();
           setItems((prev) => [
             ...prev,
             { kind: "user", text: shown, attachments: p.attachments, ts: Date.now() / 1000 },
@@ -1162,7 +1249,10 @@ export function App() {
           sessionRef.current?.userMessage(p.text, p.attachments, p.model, p.skill);
         }
       },
-      onClose: () => setConnected(false),
+      onClose: () => {
+        setConnected(false);
+        clearSubmittedTurnIfPending();
+      },
     });
     sessionRef.current = session;
     return () => session.close();
@@ -1194,6 +1284,22 @@ export function App() {
     pendingForegroundFollowRef.current = true;
     atBottomRef.current = true;
     setFollowing(true);
+  };
+  const beginSubmittedTurn = () => {
+    pendingLocalRunRef.current = true;
+    setRunning(true);
+    setExecutionState("running");
+    setTaskPhase("running");
+    setTaskOutcome(undefined);
+    beginForegroundFollow();
+  };
+  const clearSubmittedTurnIfPending = () => {
+    if (!pendingLocalRunRef.current) return;
+    pendingLocalRunRef.current = false;
+    setRunning(false);
+    setExecutionState("idle");
+    setTaskPhase(undefined);
+    setTaskOutcome(undefined);
   };
   const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
     const el = scrollRef.current;
@@ -1320,7 +1426,7 @@ export function App() {
     // Force-run shows exactly what the user typed: "/name rest". Must match the server's
     // `display` sidecar formula so the turn_start dedupe recognizes the local echo.
     const shown = skill ? `/${skill}${text ? ` ${text}` : ""}` : text;
-    beginForegroundFollow();
+    beginSubmittedTurn();
     setItems((p) => [...p, { kind: "user", text: shown, attachments, ts: Date.now() / 1000 }]);
     // The visible model rides along with the message (single source of truth per turn).
     sessionRef.current?.userMessage(text, attachments, model, skill);
@@ -1782,9 +1888,6 @@ export function App() {
     openRunSession(r.session_id, r.workspace, r.agent, { id: taskId, title: title || "" });
   };
 
-  // `running` too: a mid-turn reconnect may land before any item is rebuilt — a live
-  // session must show the transcript (waiting row, Stop), never the intro hero.
-  const idle = items.length === 0 && !streaming && !running;
   const pendingApproval = [...items]
     .reverse()
     .find((i): i is Extract<Item, { kind: "approval" }> => i.kind === "approval" && !i.resolved);
@@ -1813,6 +1916,13 @@ export function App() {
     subtitleParts.push(tempWorkspace ? t("root.temporary_space") : baseName(workspace));
   const showSaveAsProject = hasHistory && tempWorkspace && isProjectScoped(personaOf(agent));
   const activeInfo = sessions.find((s) => s.session_id === sessionId);
+  const sessionListWorking = activeInfo?.liveness === "working";
+  const displayRunning = running || sessionListWorking;
+  const displayExecutionState: ExecutionState =
+    executionState === "idle" && displayRunning ? "running" : executionState;
+  // `displayRunning` too: a mid-turn reconnect may land before any item is rebuilt — a live
+  // session must show the transcript (waiting row, Stop), never the intro hero.
+  const idle = items.length === 0 && !streaming && !displayRunning;
   const activeTitle = activeInfo?.title || t("sidebar.new_session");
 
   const desktop = isTauri();
@@ -2205,7 +2315,7 @@ export function App() {
                     key={sessionId}
                     items={items}
                     onApprove={approve}
-                    running={running}
+                    running={displayRunning}
                     taskPhase={taskPhase}
                     taskOutcome={taskOutcome}
                     loadExecutionEvidence={loadExecutionEvidence}
@@ -2220,20 +2330,20 @@ export function App() {
                     // §33 ref #3: sub-threshold streamed text renders INSIDE the live turn
                     // group (header when collapsed, quiet line when expanded) — never as a
                     // floating paragraph.
-                    streamingText={streamMode(streaming, items, running) === "quiet" ? streaming : undefined}
+                    streamingText={streamMode(streaming, items, displayRunning) === "quiet" ? streaming : undefined}
                   />
                   {/* Live thinking (reasoning models): a quiet collapsed block that streams the
                       trace for anyone who expands it; folds into the answer's disclosure when
                       the message finalizes. */}
                   {/* Compaction runs between provider turns (nothing streams during it), so
                       the transient takes over the waiting slot with a specific label. */}
-                  {running && compacting && <WaitingForAgent label={t("app.compacting_context")} />}
-                  {running &&
+                  {displayRunning && compacting && <WaitingForAgent label={t("app.compacting_context")} />}
+                  {displayRunning &&
                     !compacting &&
                     !reasoningStream &&
-                    (!streaming || streamMode(streaming, items, running) === "hold") &&
+                    (!streaming || streamMode(streaming, items, displayRunning) === "hold") &&
                     !lastItemIsAssistant(items) && <WaitingForAgent />}
-                  {streaming && streamMode(streaming, items, running) === "answer" && (
+                  {streaming && streamMode(streaming, items, displayRunning) === "answer" && (
                     <div className="transcript">
                       <div className="bubble-assistant">
                         <div className="who">{t("transcript.who_assistant")}</div>
@@ -2251,7 +2361,7 @@ export function App() {
             {/* Scrolled up while the transcript is still growing → offer the way back down.
                 Zero-height strip keeps the pill floating over the scroll area, above the
                 composer, without reserving layout space. */}
-            {!following && (running || !!streaming) && (
+            {!following && (displayRunning || !!streaming) && (
               <div className="relative h-0 z-10">
                 <button
                   className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-line bg-panel shadow-md text-[12px] text-muted hover:text-ink cursor-pointer whitespace-nowrap"
@@ -2289,7 +2399,7 @@ export function App() {
             )}
             {/* A scheduled agent must never read as a dead one: while a self-wake is
                 pending and no turn is running, say so and offer the obvious action. */}
-            {activeInfo?.liveness === "sleeping" && !running && (
+            {activeInfo?.liveness === "sleeping" && !displayRunning && (
               <div className="sleep-strip" data-testid="sleep-strip">
                 <span className="sleep-dot" />
                 <span className="sleep-text">
@@ -2318,8 +2428,8 @@ export function App() {
               model={model}
               models={models}
               modelLabels={modelLabels}
-              running={running}
-              executionState={executionState}
+              running={displayRunning}
+              executionState={displayExecutionState}
               pauseSupported={pauseSupported}
               gateOpen={!unattended && (!!pendingTeam || !!pendingItemsReq)}
               connected={connected}
@@ -2432,7 +2542,7 @@ export function App() {
             refreshKey={browserRefreshKey}
             toolNames={items.filter((i) => i.kind === "tool").map((i: any) => i.name)}
             todo={todo}
-            running={running}
+            running={displayRunning}
             onPreviewChange={onArtifactPreview}
             // Universal scratch (UX-036): every session has a scratch surface, so the
             // Artifacts section always shows — the server lists the scratch root only.

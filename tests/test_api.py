@@ -3,10 +3,16 @@
 import asyncio
 import json
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from haas.api import HaasError, _validate_local_materialization, build_app
+from haas.api import (
+    HaasError,
+    _timeout_seconds_from_haas,
+    _validate_local_materialization,
+    build_app,
+)
 from haas.harnesses import FakeAdapter
 from haas.harnesses.base import StartTurnRequest
 from haas.identity import Principal
@@ -120,6 +126,80 @@ def test_c3_run_non_streaming() -> None:
     assert isinstance(events, list)
     assert events[0]["content"]["parts"][0]["text"] == "hello"
     assert events[-1]["content"]["role"] == "model"
+
+
+async def test_run_clamps_haas_timeout_override_and_persists_deadline() -> None:
+    class RecordingAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            self.timeout_seconds: float | None = None
+
+        async def start_turn(self, request: StartTurnRequest):
+            self.timeout_seconds = request.timeoutSeconds
+            return await super().start_turn(request)
+
+    adapter = RecordingAdapter()
+    app = build_app(
+        adapter=adapter,
+        identity_tokens={
+            TOKEN: Principal(principalId="p_1", tenantId="t1", userIds=frozenset({"u_1"}))
+        },
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/run",
+            json={
+                "appName": "chrn_codex_default",
+                "userId": "u_1",
+                "sessionId": "hsess_timeout_override",
+                "newMessage": {"role": "user", "parts": []},
+                "haas": {"timeoutSeconds": 172_800},
+            },
+            headers=HEADERS,
+        )
+
+        assert response.status_code == 200
+        invocation_id = response.headers["X-HaaS-Invocation-ID"]
+        detail = await client.get(
+            f"/v1/haas/sessions/hsess_timeout_override/invocations/{invocation_id}",
+            headers=HEADERS,
+        )
+    assert detail.status_code == 200
+    assert adapter.timeout_seconds == 86_400
+    payload = detail.json()["data"]
+    assert payload["timeoutSeconds"] == 86_400
+    assert payload["deadlineAtMs"] >= payload["startedAtMs"] + 86_399_000
+
+
+async def test_run_rejects_invalid_haas_timeout_override() -> None:
+    app = build_app(
+        identity_tokens={
+            TOKEN: Principal(principalId="p_1", tenantId="t1", userIds=frozenset({"u_1"}))
+        },
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/run",
+            json={
+                "appName": "chrn_codex_default",
+                "userId": "u_1",
+                "sessionId": "hsess_bad_timeout",
+                "newMessage": {"role": "user", "parts": []},
+                "haas": {"timeoutSeconds": 0},
+            },
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["haasError"]["safeReason"] == "invalid_timeout_seconds"
+
+
+def test_run_rejects_non_finite_haas_timeout_override() -> None:
+    with pytest.raises(ValueError, match="timeoutSeconds must be finite"):
+        _timeout_seconds_from_haas({"timeoutSeconds": float("nan")})
 
 
 def test_execution_idempotency_expiry_header_and_invocation_readback() -> None:
@@ -654,7 +734,12 @@ async def test_sse_deadline_delivers_terminal_and_replays_cancelled_approval():
         events = [
             json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")
         ]
-        assert events[-1]["actions"]["stateDelta"] == {"status": "failed", "reason": "timeout"}
+        assert events[-1]["actions"]["stateDelta"] == {
+            "status": "failed",
+            "reason": "long_task_deadline_exceeded",
+            "code": "haas_request_timeout",
+            "retryable": True,
+        }
         replay = await client.post("/run_sse", json=body, headers=headers)
         replay_events = [
             json.loads(line[6:]) for line in replay.text.splitlines() if line.startswith("data: ")

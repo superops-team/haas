@@ -404,6 +404,7 @@ export function Composer(props: Props) {
       props.executionState === "resuming" ||
       props.executionState === "stopping" ||
       (props.running && !props.gateOpen) ||
+      !props.connected ||
       dictation?.recording ||
       dictationBusy
     )

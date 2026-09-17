@@ -43,7 +43,7 @@ class StartTurnRequest:
     model: str | None = None
     instructions: str | None = None
     maxStep: int | None = None
-    timeoutSeconds: float = 900.0
+    timeoutSeconds: float = 86_400
     sandbox: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)
     credentials: dict[str, Any] = field(default_factory=dict)

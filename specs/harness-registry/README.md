@@ -151,7 +151,7 @@ async def capability_snapshot(principal, probes: dict[str, AdapterProbe]) -> lis
     "allowlistRuleId": "allow_provider_default"
   },
   "maxStep": 40,
-  "timeoutSeconds": 900,
+  "timeoutSeconds": 86400,
   "adapterCapabilities": {
     "streaming": true,
     "sessionContinuation": true,

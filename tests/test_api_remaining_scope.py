@@ -1052,6 +1052,39 @@ def test_run_for_delegated_session_uses_container_runtime() -> None:
     assert delegated_runtime.runs
 
 
+def test_run_for_delegated_session_passes_clamped_timeout_to_worker() -> None:
+    delegated_runtime = FakeDelegatedContainerRuntime()
+    client = TestClient(
+        build_app(
+            delegated_containers=delegated_runtime,
+            identity_tokens={
+                TOKEN_A: Principal(principalId="p_a", tenantId="t_a", userIds=frozenset({"u_1"}))
+            },
+        )
+    )
+    assert (
+        client.post(
+            "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH_A
+        ).status_code
+        == 200
+    )
+
+    resp = client.post(
+        "/run",
+        json={
+            "appName": "chrn_codex_default",
+            "userId": "u_1",
+            "sessionId": "hsess_delegate",
+            "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+            "haas": {"timeoutSeconds": 172_800},
+        },
+        headers=AUTH_A,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert delegated_runtime.runs[0]["body"]["timeoutSeconds"] == 86_400
+
+
 def test_cancel_running_delegated_invocation_routes_to_container_runtime() -> None:
     delegated_runtime = FakeDelegatedContainerRuntime()
     client = TestClient(

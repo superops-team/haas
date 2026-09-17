@@ -14,7 +14,12 @@ Codex App-Server Adapter 是首期 HaaS 的唯一 P0 concrete harness adapter。
 
 Codex app-server 是内部实现细节。上游不得直接连接 Codex WebSocket、Unix socket 或 stdio，也不得依赖 Codex `threadId`、`turnId`、notification method 或 rollout 文件路径。
 
-内置本地执行通过 `thread/start` 或 `thread/resume` 配置覆盖传入已应用 bare model 与 invocation-scoped loopback provider，遵循固定 0.152.1 schema。Resume 更新 proxy route/token，不替换 native thread identity；`turn/start` 接收所选模型。Harness 只能获得短期 proxy capability，不能获得上游 key 或 credential-resolver descriptor，也不使用个人 Codex 认证。即使 native 私有 checkpoint 保留配置，proxy capability 仍在 turn 完成后撤销并到期失效。
+内置本地执行通过 `thread/start` 或 `thread/resume` 配置覆盖传入已应用 bare model
+与 session-scoped、generationed loopback provider capability，遵循固定 0.152.1
+schema。Resume 或 rebind 更新当前 proxy route/token，不替换 native thread identity；
+`turn/start` 接收所选模型。Harness 只能获得 session-scoped proxy capability，不能获得
+上游 key 或 credential-resolver descriptor，也不使用个人 Codex 认证。Proxy capability
+跨单次 invocation terminal 继续有效，仅在 session 删除/撤销或 runtime shutdown 时撤销。
 
 本地 proxy 集成采用保守的 Responses 工具集合：关闭原生多 agent namespace 和 provider 托管 web search，同时设置 `model_reasoning_summary=auto`，只请求过程时间线所需的 provider 安全推理摘要。Raw reasoning 继续保持私有且绝不投影。支持 Responses 不等于支持其他扩展。普通 function 工具仍受现有 sandbox/policy 管控；proxy 不得静默丢弃工具或改写原生工具调用。Adapter 在 start 和 resume 均应用该配置。真实 Codex wire 测试拒绝 namespace/web-search 声明、确认安全摘要请求与普通 function 工具仍存在；真实 provider smoke 必须通过此链路完成。
 
@@ -225,7 +230,11 @@ Turn 规则：
 ## 8. 安全与权限
 
 - `CODEX_HOME` 必须是 session/workspace scoped 或明确隔离的 runtime home。
-- Codex model provider 不得保存真实 API key。Local API 通过 app-server override 传入 invocation-scoped 短期 loopback proxy capability，并在终态/取消后撤销。Codex 0.152.1 必须先 `thread/unsubscribe` 再 `thread/resume` 才能替换已加载 thread 的 provider override，同时保留原 native thread id。Runtime 退出必须关闭所属 app-server transport。
+- Codex model provider 不得保存真实 API key。Local API 通过 app-server override 传入
+  session-scoped、generationed loopback proxy capability，并在 session 删除/撤销或
+  runtime shutdown 时撤销。Codex 0.152.1 必须先 `thread/unsubscribe` 再
+  `thread/resume` 才能替换已加载 thread 的 provider override，同时保留原 native
+  thread id。Runtime 退出必须关闭所属 app-server transport。
 - Adapter 启动的任何 Codex app-server 子进程都必须接收显式 allowlist 环境变量。默认继承 allowlist 仅限执行 Codex 所需的进程基础项（`PATH`）、解析隔离 home（`HOME`）、创建临时文件（`TMPDIR`/`TMP`/`TEMP`）以及保持 Unicode/locale 行为稳定（`LANG`/`LC_ALL`/`LC_CTYPE`/`LC_MESSAGES`）。Provider key、云凭据、token、password、cookie 和其他 credential-like 变量必须从构造上不被继承；新增任何环境变量都必须先有 spec delta，说明其必要性以及为什么它不是 secret channel。
 - `approvalPolicy=on-request` 是 fresh interactive session 默认值。只有 command approval、
   file-change approval 与 blocking input response 链路都可用且 capability advertise
@@ -303,11 +312,11 @@ Continue 先执行 `thread/resume(excludeTurns=true)`，随后在同一 thread �
 | Stdio frame 超过显式上限或格式错误 | accepted invocation 恰好一次以 `haas_adapter_unavailable` 和有界安全 transport reason 结束；不得误报为 tool failure 或笼统 clean EOF |
 | 接受后 Codex process exit | generation 增加并尝试重启/重连；active turn 使用 failed/incomplete terminal event 结束，HTTP 200 |
 | notification 缺 terminal | timeout 后由 Session Runtime 生成 invocation `failed` 或 `incomplete` |
-| Active turn 中 model-proxy token 失效 | identity/route/turn scope 仍匹配时只刷新一次 invocation-scoped capability；否则以稳定 `model_proxy_token_invalid` 进入 failed，并保留阶段性进展 |
+| active 或可恢复 session 中 model-proxy token 失效 | session/harness/provider scope 与 owned credential channel 仍匹配时只刷新/rebind 一次 session-scoped capability；否则以稳定 `model_proxy_token_invalid` 进入 failed，并保留阶段性进展 |
 | Blocking server request 不支持或无法恢复 | 以稳定 interaction-unsupported/recovery code fail closed；不得伪造答案或猜测选择后继续 |
 | cancel 请求 | 调用 `turn/interrupt`；即使 native cancel 慢，HaaS cancel API 需快速返回 accepted/current state |
 | `turn/interrupt` 返回 `{}` | 仅视为确认收到；继续 drain native notification，不能伪造 terminal |
-| `turn/completed(status=interrupted)` | 生成一个 normalized `harness.turn.interrupted`；Session Runtime 按已持久 Pause 意图映射为 canonical `haas.turn.interrupted`，按 Stop 意图映射为 `haas.turn.cancelled`，随后撤销 invocation-scoped capability |
+| `turn/completed(status=interrupted)` | 生成一个 normalized `harness.turn.interrupted`；Session Runtime 按已持久 Pause 意图映射为 canonical `haas.turn.interrupted`，按 Stop 意图映射为 `haas.turn.cancelled`；session-scoped model proxy capability 持续可用直到 session 删除/撤销或 runtime shutdown |
 | schema drift | probe 失败，阻塞 release；运行时返回 `haas_adapter_incompatible` |
 
 ## 11. 测试计划与验收

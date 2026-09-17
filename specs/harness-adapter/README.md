@@ -174,7 +174,7 @@ retaining its declared mode/enforcement. It MUST NOT silently change to `unsuppo
   "instructions": null,
   "model": "gpt-5.6-terra",
   "maxStep": 40,
-  "timeoutSeconds": 900,
+  "timeoutSeconds": 86400,
   "sandbox": {
     "sandboxId": "sbx_abc",
     "workspaceRoot": "/workspace",

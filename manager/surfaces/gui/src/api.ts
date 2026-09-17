@@ -999,6 +999,8 @@ export interface HaasDelegationSettings {
     pid?: number | null;
     url: string;
     reason?: string | null;
+    logPath?: string | null;
+    managerLogPath?: string | null;
   };
   has_api_token?: boolean;
   error?: string;

@@ -3,7 +3,7 @@
 **English** | [简体中文](ERROR-CODES.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-12
+Last reviewed: 2026-09-15
 
 This file is the sole catalog of all stable HaaS error codes. Errors from `POST /run`,
 `/run_sse`, session paths, and `/v1/haas/*` MUST map to this table.
@@ -91,8 +91,8 @@ ADK/FastAPI style, and `code` is a stable contract.
 | `haas_model_unavailable` | 422 | no | model_unavailable | harness-registry |
 | `haas_provider_error` | 502 | yes | provider_error | model-proxy |
 | `haas_provider_timeout` | 504 | yes | provider_timeout | model-proxy (stream idle timeout exhausted) |
-| `haas_model_proxy_token_invalid` | 502 before acceptance; 200 terminal after acceptance | yes | model_proxy_token_invalid | model-proxy (active invocation capability rejected and refresh failed) |
-| `haas_model_proxy_token_expired` | 502 before acceptance; 200 terminal after acceptance | yes | model_proxy_token_expired | model-proxy (active invocation capability expired and refresh failed) |
+| `haas_model_proxy_token_invalid` | 502 before acceptance; 200 terminal after acceptance | yes | model_proxy_token_invalid | model-proxy (session capability rejected and same-session rebind/refresh failed) |
+| `haas_model_proxy_token_expired` | 502 before acceptance; 200 terminal after acceptance | yes | model_proxy_token_expired | model-proxy (session capability expired and same-session refresh failed) |
 | `haas_mcp_unavailable` | 503 | yes | mcp_unavailable | mcp-tool-skill-runtime (required MCP unavailable) |
 
 ## 7. Sandbox / Runtime
@@ -101,7 +101,7 @@ ADK/FastAPI style, and `code` is a stable contract.
 |------|------|-----------|------------|----------|
 | `haas_sandbox_widening_rejected` | 403 | no | sandbox_widening_rejected | sandbox-runtime |
 | `haas_vault_unavailable` | 503 | yes | vault_unavailable | sandbox-runtime / security-boundary |
-| `haas_request_timeout` | 504 | no | request_timeout | session-runtime |
+| `haas_request_timeout` | 504 before acceptance; 200 terminal after acceptance | conditional | long_task_deadline_exceeded | session-runtime (24-hour invocation deadline exceeded) |
 | `haas_delegation_backend_unavailable` | 503 | yes | delegation_backend_unavailable | manager-delegation |
 | `haas_delegation_restore_failed` | 503 | yes | delegation_restore_failed | manager-delegation / sandbox-runtime |
 | `haas_delegation_mount_invalid` | 403 | no | delegation_mount_invalid | manager-delegation / policy-controller |

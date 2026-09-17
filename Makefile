@@ -14,7 +14,7 @@ HAAS_IMAGE_DEFAULT := haas:lite-local
 # HaaS 开发与提交门禁。
 .PHONY: help setup install-hooks pre-commit secret-scan fmt lint type \
         test-fast test-affected test-integration test-e2e adk-compat \
-        coverage docker-build docker-build-lite docker-build-aio docker-release-lite docker-check \
+        coverage packaged-smoke docker-build docker-build-lite docker-build-aio docker-release-lite docker-check \
         docker-check-lite docker-check-aio full-check
 
 help:
@@ -32,6 +32,7 @@ help:
 	@echo "  make test-e2e         本机 E2E；需 HAAS_E2E=1 或分项开关，否则相关用例 skip"
 	@echo "  make adk-compat       ADK 2.0 协议兼容性套件（adk 标记）"
 	@echo "  make coverage         覆盖率报告（门禁：核心 >=90%，安全路径 >=95%）"
+	@echo "  make packaged-smoke   验证打包 .app 能启动本地 HaaS 并接收一次任务"
 	@echo "  make docker-check     默认 Lite 静态检查；HAAS_DOCKER_BUILD=1 追加真实 build + smoke"
 	@echo "  make docker-check-aio AIO amd64 静态检查；显式开关追加 build + smoke"
 	@echo "  make docker-build     默认构建 Lite（本地 Docker 节点平台）"
@@ -83,6 +84,9 @@ adk-compat:
 coverage:
 	$(UVRUN) coverage run -m pytest -q
 	$(UVRUN) coverage report
+
+packaged-smoke:
+	manager/packaging/smoke_packaged_app.sh
 
 docker-build: docker-build-lite
 

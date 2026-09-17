@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import shlex
@@ -30,6 +31,7 @@ from .haas.credentials import CredentialChannel
 from .secrets import write_private_text
 
 BINDING_KEY = "haas_delegation"
+logger = logging.getLogger("coworker.haas.supervisor")
 
 
 DEFAULT_TRIGGER_KEYWORDS = [
@@ -133,6 +135,12 @@ class LocalHaasSupervisor:
         self._last_error: str | None = None
         self._base_url: str | None = None
 
+    def _log_path(self) -> Path:
+        return self.data_dir / "logs" / "haas-sidecar.log"
+
+    def _manager_log_path(self) -> Path:
+        return self.data_dir / "logs" / "openworker-server.log"
+
     def status(self, config: HaasDelegationConfig) -> dict[str, Any]:
         target = _loopback_target(config.base_url)
         running = self._owns_live_process(config.base_url)
@@ -157,6 +165,8 @@ class LocalHaasSupervisor:
             "pid": self._process.pid if running else None,
             "url": config.base_url.rstrip("/"),
             "reason": reason,
+            "logPath": str(self._log_path()),
+            "managerLogPath": str(self._manager_log_path()),
         }
 
     def token(self) -> str | None:
@@ -180,13 +190,19 @@ class LocalHaasSupervisor:
         if target is None:
             self.stop()
             self._last_error = "local_autostart_requires_loopback"
+            logger.warning(
+                "local HaaS autostart blocked: reason=%s url=%s log_path=%s",
+                self._last_error,
+                config.base_url.rstrip("/"),
+                self._log_path(),
+            )
             return self.status(config)
-        if not config.api_token:
-            config.api_token = self._ensure_random_token()
         base_url = config.base_url.rstrip("/")
+        host, port = target
         running = self._process is not None and self._process.poll() is None
         if running and self._base_url and self._base_url != base_url:
             self.stop()
+            running = False
         if self._healthy(base_url):
             if self._owns_live_process(base_url):
                 self._last_error = None
@@ -195,22 +211,59 @@ class LocalHaasSupervisor:
                 self.stop()
             elif not self._wait_for_listener_to_drain(base_url):
                 self._last_error = "local_sidecar_not_owned"
+                logger.warning(
+                    "local HaaS listener is not owned: reason=%s url=%s log_path=%s",
+                    self._last_error,
+                    base_url,
+                    self._log_path(),
+                )
+                return self.status(config)
+        elif not running and self._port_is_listening(host, port):
+            if not self._wait_for_port_to_drain(host, port):
+                self._last_error = "local_sidecar_port_occupied"
+                logger.warning(
+                    "local HaaS port is occupied by a non-HaaS listener: "
+                    "reason=%s url=%s log_path=%s",
+                    self._last_error,
+                    base_url,
+                    self._log_path(),
+                )
                 return self.status(config)
         if self._process is not None and self._process.poll() is None:
             return self.status(config)
         self._process = None
 
-        host, port = target
-        config_path = self._write_config(config, host=host, port=port)
+        try:
+            if not config.api_token:
+                config.api_token = self._ensure_random_token()
+            config_path = self._write_config(config, host=host, port=port)
+            token_path = self.data_dir / "haas-token"
+        except (HaasDelegationError, OSError):
+            self._last_error = "local_haas_config_write_failed"
+            logger.warning(
+                "local HaaS config write failed: reason=%s url=%s log_path=%s",
+                self._last_error,
+                base_url,
+                self._log_path(),
+                exc_info=True,
+            )
+            return self.status(config)
         cmd = self._command(host=host, port=port, config_path=config_path)
         try:
             env = self._process_env(config_path)
         except HaasDelegationError:
             self._last_error = "bundled_codex_unavailable"
+            logger.warning(
+                "local HaaS startup blocked: reason=%s url=%s log_path=%s",
+                self._last_error,
+                base_url,
+                self._log_path(),
+                exc_info=True,
+            )
             return self.status(config)
         log = self._log_file()
         env["HAAS_CONFIG"] = str(config_path)
-        env["HAAS_STATIC_TOKEN_FILE"] = str(self._token_file(config))
+        env["HAAS_STATIC_TOKEN_FILE"] = str(token_path)
         env.setdefault("HAAS_ADAPTER_BASE", "codex")
         child_socket = None
         spawn_options: dict[str, Any] = {}
@@ -233,6 +286,13 @@ class LocalHaasSupervisor:
             self._base_url = base_url
         except OSError:
             self._last_error = "local_haas_start_failed"
+            logger.warning(
+                "local HaaS process spawn failed: reason=%s url=%s log_path=%s",
+                self._last_error,
+                base_url,
+                self._log_path(),
+                exc_info=True,
+            )
         finally:
             if child_socket is not None:
                 child_socket.close()
@@ -248,8 +308,21 @@ class LocalHaasSupervisor:
                 return self.status(config)
             if self._process.poll() is not None:
                 self._last_error = "local_haas_exited"
+                logger.warning(
+                    "local HaaS process exited before readiness: reason=%s url=%s log_path=%s",
+                    self._last_error,
+                    base_url,
+                    self._log_path(),
+                )
                 return self.status(config)
         self._last_error = "local_haas_starting"
+        logger.warning(
+            "local HaaS process did not become ready before startup deadline: "
+            "reason=%s url=%s log_path=%s",
+            self._last_error,
+            base_url,
+            self._log_path(),
+        )
         return self.status(config)
 
     def grant_credential(self, provider: str, scope: dict[str, str]) -> str:
@@ -291,6 +364,21 @@ class LocalHaasSupervisor:
         for _ in range(20):
             time.sleep(0.1)
             if not self._healthy(base_url):
+                return True
+        return False
+
+    def _port_is_listening(self, host: str, port: int) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                return True
+        except OSError:
+            return False
+
+    def _wait_for_port_to_drain(self, host: str, port: int) -> bool:
+        """Bound startup on a non-HaaS process already bound to the configured port."""
+        for _ in range(20):
+            time.sleep(0.1)
+            if not self._port_is_listening(host, port):
                 return True
         return False
 
@@ -427,10 +515,9 @@ class LocalHaasSupervisor:
         return token
 
     def _log_file(self) -> Any:
-        log_dir = self.data_dir / "logs"
         try:
-            log_dir.mkdir(parents=True, exist_ok=True)
-            return open(log_dir / "haas-sidecar.log", "a", encoding="utf-8")
+            self._log_path().parent.mkdir(parents=True, exist_ok=True)
+            return open(self._log_path(), "a", encoding="utf-8")
         except OSError:
             return None
 

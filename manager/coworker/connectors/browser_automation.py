@@ -6,18 +6,31 @@ tools return a clear setup error instead of breaking engine construction.
 
 from __future__ import annotations
 
+import base64
+import os
 import re
+import sys
 import tempfile
 import threading
 import time
-import base64
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import aisuite as ai
 
+from ..secrets import state_dir
 from ..web.guard import check_url
+
+try:  # Optional dependency: browser tools degrade cleanly when it is absent.
+    from playwright.sync_api import sync_playwright
+except Exception:  # pragma: no cover - exercised in installs without [browser]
+    sync_playwright = None  # type: ignore[assignment]
+
+
+_BROWSER_PROFILE_DIR = "managed-browser-profile"
+_BROWSER_DOWNLOAD_DIR = "managed-browser-downloads"
+_BROWSER_KIND = "managed_chromium"
 
 
 def _meta(name: str, *, approval: bool = False, capabilities: Optional[list[str]] = None):
@@ -79,6 +92,11 @@ class _BrowserController:
             "screenshot_data_url": "",
             "updated_at": None,
             "controls": [],
+            "browser": _BROWSER_KIND,
+            "managed": True,
+            "profile": "app_owned",
+            "executable": "managed_runtime",
+            "headless": True,
         }
 
     def _touch(self, **changes: Any) -> None:
@@ -99,34 +117,188 @@ class _BrowserController:
                 controls=snap.get("controls", [])[:30],
             )
         except Exception as exc:
-            self._touch(open=True, status="error", last_error=str(exc))
+            self._touch(open=True, status="error", last_error=_safe_error_text(exc))
 
     def _setup_error(self, exc: Exception) -> dict[str, str]:
         return {
             "error": (
-                "Interactive browser automation requires Playwright. Install it with "
-                "`pip install playwright` and `python -m playwright install chromium`."
+                "Managed browser automation requires Playwright with its Chromium runtime. "
+                "Install it with `pip install playwright` and "
+                "`python -m playwright install chromium`."
             ),
-            "details": str(exc),
+            "details": _safe_error_text(exc),
         }
+
+    def _teardown_locked(self) -> None:
+        for resource in (self._context, self._browser):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception:
+                pass
+        if self._playwright is not None:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._page = None
+
+    def _managed_paths(self) -> tuple[Path, Path]:
+        root = state_dir() / "browser-harness"
+        profile = root / _BROWSER_PROFILE_DIR
+        downloads = root / _BROWSER_DOWNLOAD_DIR
+        profile.mkdir(parents=True, exist_ok=True)
+        downloads.mkdir(parents=True, exist_ok=True)
+        return profile, downloads
+
+    def _browser_executable(self, browser_type) -> tuple[str | None, str]:
+        override = os.environ.get("OPENHARNESS_BROWSER_EXECUTABLE") or os.environ.get(
+            "BROWSER_EXECUTABLE_PATH"
+        )
+        if override:
+            return str(Path(override).expanduser()), "developer_override"
+        for candidate in self._browser_executable_candidates(browser_type):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate), "managed_runtime"
+        return None, "unavailable"
+
+    def _browser_executable_candidates(self, browser_type) -> list[Path]:
+        candidates: list[Path] = []
+        packaged_root = Path(sys.executable).resolve().parent
+        candidates.extend(
+            _chromium_candidates_from_root(
+                packaged_root / "playwright-browsers", prefer_headless=self._headless()
+            )
+        )
+        candidates.extend(
+            _chromium_candidates_from_root(
+                packaged_root / "_internal" / "ms-playwright", prefer_headless=self._headless()
+            )
+        )
+        expected = getattr(browser_type, "executable_path", None)
+        if expected:
+            expected_path = Path(str(expected)).expanduser()
+            if self._headless():
+                expected_root = _playwright_browser_root(expected_path)
+                if expected_root is not None:
+                    candidates.extend(
+                        _chromium_candidates_from_root(expected_root, prefer_headless=True)
+                    )
+            candidates.append(expected_path)
+        env_root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+        if env_root and env_root != "0":
+            candidates.extend(
+                _chromium_candidates_from_root(
+                    Path(env_root).expanduser(), prefer_headless=self._headless()
+                )
+            )
+        if sys.platform == "darwin":
+            candidates.extend(
+                _chromium_candidates_from_root(
+                    Path.home() / "Library/Caches/ms-playwright",
+                    prefer_headless=self._headless(),
+                )
+            )
+        else:
+            candidates.extend(
+                _chromium_candidates_from_root(
+                    Path.home() / ".cache/ms-playwright", prefer_headless=self._headless()
+                )
+            )
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique
+
+    def _headless(self) -> bool:
+        value = os.environ.get("OPENHARNESS_BROWSER_HEADLESS", "1").strip().lower()
+        return value not in {"0", "false", "no", "off"}
+
+    def _launch_context(self):
+        profile, downloads = self._managed_paths()
+        browser_type = self._playwright.chromium
+        executable_path, executable_source = self._browser_executable(browser_type)
+        if not executable_path:
+            raise RuntimeError(
+                "managed browser executable unavailable: expected bundled or Playwright "
+                "Chrome for Testing runtime, not user Chrome"
+            )
+        kwargs: dict[str, Any] = {
+            "headless": self._headless(),
+            "viewport": {"width": 1280, "height": 900},
+            "accept_downloads": True,
+            "downloads_path": str(downloads),
+            "args": [
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-extensions",
+                "--disable-sync",
+                "--no-default-browser-check",
+                "--no-first-run",
+            ],
+        }
+        if executable_path:
+            kwargs["executable_path"] = executable_path
+        context = browser_type.launch_persistent_context(str(profile), **kwargs)
+        self._context = context
+        self._browser = getattr(context, "browser", None)
+        self._page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
+        self._touch(
+            open=True,
+            status="open",
+            last_action="open managed browser",
+            last_result="ok",
+            last_error="",
+            browser=_BROWSER_KIND,
+            managed=True,
+            profile="app_owned",
+            executable=executable_source,
+            headless=self._headless(),
+        )
+        return self._page
+
+    @staticmethod
+    def _is_closed_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(
+            marker in text
+            for marker in (
+                "target page, context or browser has been closed",
+                "browser has been closed",
+                "target closed",
+                "context closed",
+                "page closed",
+            )
+        )
 
     def page(self):
         with self._lock:
             if self._error:
                 return None, {"error": self._error}
             if self._page is not None:
-                return self._page, None
+                try:
+                    if not self._page.is_closed():
+                        return self._page, None
+                except Exception:
+                    pass
+                self._teardown_locked()
             try:
-                from playwright.sync_api import sync_playwright
-
+                if sync_playwright is None:
+                    raise RuntimeError("playwright is not installed")
                 self._playwright = sync_playwright().start()
-                self._browser = self._playwright.chromium.launch(headless=False)
-                self._context = self._browser.new_context(viewport={"width": 1280, "height": 900})
-                self._page = self._context.new_page()
-                self._touch(open=True, status="open", last_action="open browser", last_error="")
-                return self._page, None
+                return self._launch_context(), None
             except Exception as exc:
-                self._touch(open=False, status="error", last_error=str(exc))
+                self._touch(open=False, status="error", last_error=_safe_error_text(exc))
+                self._teardown_locked()
                 return None, self._setup_error(exc)
 
     def _submit(self, fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
@@ -138,19 +310,10 @@ class _BrowserController:
     def _close_locked(self) -> dict[str, Any]:
         with self._lock:
             try:
-                if self._context is not None:
-                    self._context.close()
-                if self._browser is not None:
-                    self._browser.close()
-                if self._playwright is not None:
-                    self._playwright.stop()
+                self._teardown_locked()
             except Exception as exc:
                 return {"error": str(exc)}
             finally:
-                self._playwright = None
-                self._browser = None
-                self._context = None
-                self._page = None
                 self._touch(open=False, status="closed", url="", title="", controls=[])
             return {"ok": True}
 
@@ -167,40 +330,67 @@ class _BrowserController:
 
     def _screenshot_locked(self) -> dict[str, Any]:
         with self._lock:
-            page, err = self.page()
-            if err:
-                return err
-            try:
-                png = page.screenshot(full_page=False)
-                data_url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
-                self._touch(
-                    screenshot_data_url=data_url,
-                    last_action="screenshot",
-                    last_result="ok",
-                    last_error="",
-                )
-                self._refresh_page_state()
-                return {"ok": True, **dict(self._state)}
-            except Exception as exc:
-                self._touch(last_action="screenshot", last_result="error", last_error=str(exc))
-                return {"error": str(exc)}
+            for attempt in range(2):
+                page, err = self.page()
+                if err:
+                    return err
+                try:
+                    png = page.screenshot(full_page=False)
+                    data_url = "data:image/png;base64," + base64.b64encode(png).decode(
+                        "ascii"
+                    )
+                    self._touch(
+                        screenshot_data_url=data_url,
+                        last_action="screenshot",
+                        last_result="ok",
+                        last_error="",
+                    )
+                    self._refresh_page_state()
+                    return {"ok": True, **dict(self._state)}
+                except Exception as exc:
+                    if attempt == 0 and self._should_rebuild_after_browser_error(exc):
+                        self._touch(
+                            last_action="screenshot",
+                            last_result="restarting",
+                            last_error="managed browser screenshot failed; rebuilding",
+                        )
+                        self._teardown_locked()
+                        continue
+                    error = _safe_error_text(exc)
+                    self._touch(
+                        last_action="screenshot", last_result="error", last_error=error
+                    )
+                    return {"error": error}
+            return {"error": "browser screenshot failed after rebuild"}
 
     def call(self, action: str, fn: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
         def run() -> dict[str, Any]:
             with self._lock:
-                page, err = self.page()
-                if err:
-                    return err
-                self._touch(last_action=action, last_result="running", last_error="")
-                try:
-                    out = fn(page)
-                except Exception as exc:
-                    out = {"error": str(exc)}
+                out: dict[str, Any] = {}
+                for attempt in range(2):
+                    page, err = self.page()
+                    if err:
+                        return err
+                    self._touch(last_action=action, last_result="running", last_error="")
+                    try:
+                        out = fn(page)
+                        break
+                    except Exception as exc:
+                        if attempt == 0 and self._should_rebuild_after_browser_error(exc):
+                            self._touch(
+                                last_action=action,
+                                last_result="restarting",
+                                last_error="managed browser closed; rebuilding",
+                            )
+                            self._teardown_locked()
+                            continue
+                        out = {"error": _safe_error_text(exc)}
+                        break
                 if "error" in out:
                     self._touch(
                         last_action=action,
                         last_result="error",
-                        last_error=str(out["error"]),
+                        last_error=_safe_error_text(out["error"]),
                     )
                 else:
                     self._refresh_page_state()
@@ -208,6 +398,14 @@ class _BrowserController:
                 return out
 
         return self._submit(run)
+
+    @classmethod
+    def _should_rebuild_after_browser_error(cls, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            cls._is_closed_error(exc)
+            or "capturescreenshot" in text.replace(" ", "")
+        )
 
 
 _BROWSER = _BrowserController()
@@ -223,6 +421,62 @@ def browser_take_screenshot() -> dict[str, Any]:
 
 def browser_close_session() -> dict[str, Any]:
     return _BROWSER.close()
+
+
+def _chromium_candidates_from_root(root: Path, *, prefer_headless: bool = True) -> list[Path]:
+    if not root.exists():
+        return []
+    headless_patterns = [
+        "chromium_headless_shell-*/chrome-headless-shell-mac*/chrome-headless-shell",
+        "chromium_headless_shell-*/chrome-linux*/chrome-headless-shell",
+        "chromium_headless_shell-*/chrome-win*/chrome-headless-shell.exe",
+    ]
+    chromium_patterns = [
+        (
+            "chromium-*/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/"
+            "Google Chrome for Testing"
+        ),
+        "chromium-*/chrome-linux*/chrome",
+        "chromium-*/chrome-win*/chrome.exe",
+    ]
+    patterns = (
+        headless_patterns + chromium_patterns
+        if prefer_headless
+        else chromium_patterns + headless_patterns
+    )
+    candidates: list[Path] = []
+    for pattern in patterns:
+        candidates.extend(_sort_playwright_candidates(root.glob(pattern)))
+    return candidates
+
+
+def _playwright_browser_root(path: Path) -> Path | None:
+    for parent in path.parents:
+        if parent.name.startswith("chromium-") or parent.name.startswith("chromium_headless_shell-"):
+            return parent.parent
+    return None
+
+
+def _sort_playwright_candidates(paths) -> list[Path]:
+    def version(path: Path) -> int:
+        for part in path.parts:
+            if part.startswith("chromium-") or part.startswith("chromium_headless_shell-"):
+                return _trailing_int(part)
+        return -1
+
+    return sorted(paths, key=lambda path: (version(path), str(path)), reverse=True)
+
+
+def _trailing_int(value: str) -> int:
+    match = re.search(r"-(\d+)$", value)
+    return int(match.group(1)) if match else -1
+
+
+def _safe_error_text(value: object) -> str:
+    text = str(value)
+    text = re.sub(r"/(?:Users|Applications|private|tmp|var|Volumes)/[^\s\"']+", "[path]", text)
+    text = re.sub(r"[A-Za-z]:\\[^\s\"']+", "[path]", text)
+    return text
 
 
 def _cap(value: int, default: int = 20000, upper: int = 100000) -> int:

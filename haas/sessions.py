@@ -9,6 +9,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any, TypeVar
 
 from haas.events import EventLog
@@ -93,6 +94,7 @@ class RunRequest:
     user_id: str
     message: dict[str, Any]
     session_id: str | None = None
+    timeout_seconds: float | None = None
     sandbox: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)
     effective_profile: dict[str, Any] | None = None
@@ -129,7 +131,7 @@ class SessionRuntime:
     event_log: EventLog
     lease_ttl_ms: int = 30_000
     lease_renew_interval_ms: int = 10_000
-    turn_timeout_s: float = 900.0
+    turn_timeout_s: float = 86_400
     _active: dict[str, _ActiveTurn] = field(default_factory=dict)
     model_proxy: Any = None
 
@@ -138,10 +140,21 @@ class SessionRuntime:
             raise ValueError("lease_ttl_ms must be positive")
         if self.lease_renew_interval_ms <= 0:
             raise ValueError("lease_renew_interval_ms must be positive")
+        self.turn_timeout_s = self._effective_timeout_seconds(self.turn_timeout_s, 86_400)
         if self.lease_renew_interval_ms * 2 >= self.lease_ttl_ms:
             raise ValueError("lease_renew_interval_ms must be less than half of lease_ttl_ms")
         if self.turn_timeout_s <= self.lease_ttl_ms / 1000:
             raise ValueError("turn_timeout_s must be greater than lease_ttl_ms")
+
+    @staticmethod
+    def _effective_timeout_seconds(value: float | None, default: float) -> float:
+        if value is None:
+            return default
+        if not isfinite(value):
+            raise ValueError("timeout_seconds must be finite")
+        if value <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        return min(value, 86_400)
 
     def _key(self, app_name: str, user_id: str, session_id: str) -> tuple[str, str, str]:
         return (app_name, user_id, session_id)
@@ -163,6 +176,8 @@ class SessionRuntime:
         key = self._key(app_name, user_id, session_id)
         self.get_session(app_name, user_id, session_id)
         self.store.delete_session(key)
+        if self.model_proxy is not None and hasattr(self.model_proxy, "revoke_session"):
+            self.model_proxy.revoke_session(session_id)
 
     def update_policy(
         self, session: SessionRecord, *, expected_revision: int, delta: dict[str, Any]
@@ -374,7 +389,13 @@ class SessionRuntime:
         completed_cleanly = False
         streamed_terminal: CanonicalEventRecord | None = None
         credentials: dict[str, str] = {}
-        deadline = asyncio.get_running_loop().time() + self.turn_timeout_s
+        timeout_seconds = self._effective_timeout_seconds(
+            req.timeout_seconds, self.turn_timeout_s
+        )
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        invocation.timeoutSeconds = timeout_seconds
+        invocation.deadlineAtMs = invocation.startedAtMs + int(timeout_seconds * 1000)
+        self.store.put_invocation(invocation)
         try:
             async with asyncio.timeout_at(deadline):
                 if self.model_proxy is not None:
@@ -431,7 +452,7 @@ class SessionRuntime:
                             input=[req.message],
                             model=effective.get("provider", {}).get("model") or app.defaultModel,
                             instructions=app.systemPrompt or None,
-                            timeoutSeconds=self.turn_timeout_s,
+                            timeoutSeconds=timeout_seconds,
                             sandbox=deepcopy(effective_sandbox),
                             policy=deepcopy(adapter_policy),
                             credentials=credentials,
@@ -542,7 +563,16 @@ class SessionRuntime:
                 completed_cleanly = True
             else:
                 event = self._persist_failure_terminal(
-                    app, invocation, turn, session, key, holder, token, reason="timeout"
+                    app,
+                    invocation,
+                    turn,
+                    session,
+                    key,
+                    holder,
+                    token,
+                    reason="long_task_deadline_exceeded",
+                    code="haas_request_timeout",
+                    retryable=True,
                 )
                 session = self.get_session(app.id, req.user_id, session_id)
                 yield event
@@ -804,8 +834,18 @@ class SessionRuntime:
         token: int,
         *,
         reason: str | None = None,
+        code: str | None = None,
+        retryable: bool | None = None,
     ) -> CanonicalEventRecord:
-        terminal = self._terminal_event("failed", app, invocation, turn, reason=reason)
+        terminal = self._terminal_event(
+            "failed",
+            app,
+            invocation,
+            turn,
+            reason=reason,
+            code=code,
+            retryable=retryable,
+        )
         event, _ = self._persist_terminal_event(
             terminal, "failed", app, invocation, turn, session, key, holder, token
         )

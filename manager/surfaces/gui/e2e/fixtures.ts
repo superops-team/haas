@@ -146,6 +146,25 @@ const LIVE_SESSION = {
   subscriptions: [],
 };
 
+// A degraded live-state case: the session list still reports working, but the
+// session socket's initial ready snapshot is stale/idle. The composer must still
+// expose Stop from the session-list liveness until the socket catches up.
+const LIVENESS_ONLY_SESSION = {
+  session_id: "liveness-only-1",
+  title: "Activity still running",
+  workspace: "",
+  agent: "cowork",
+  model: "anthropic:claude-opus-4-8",
+  mode: "interactive",
+  updated_at: "2026-06-19 10:00:00",
+  messages: 2,
+  pinned: false,
+  archived: false,
+  attention: 0,
+  liveness: "working",
+  subscriptions: [],
+};
+
 // §31: a mention-spawned session — lives in the sidebar's collapsed "From Slack" group, never
 // in Recent. Older than everything else so boot-resume stays deterministic.
 const SLACK_SESSION = {
@@ -576,6 +595,7 @@ export async function mockApi(page: import("@playwright/test").Page) {
     ...EXTRA_SESSIONS.map((s) => ({ ...s })),
     { ...OPS_SESSION },
     { ...LIVE_SESSION },
+    { ...LIVENESS_ONLY_SESSION },
     { ...SLACK_SESSION },
   ];
   // Inbox items + the outbound routing binding — mutable for resolve + the inline Slack config.
@@ -683,6 +703,9 @@ export async function mockApi(page: import("@playwright/test").Page) {
       const msg = JSON.parse(String(raw));
       if (msg.type === "user_message") {
         hadTurn = true;
+        if (/delay acceptance/i.test(msg.text)) {
+          return;
+        }
         // Force-run (SKILLS-SPEC §6): like the real server, TURN_START ships the user's
         // literal "/name …" line as `display` so the client dedupes on what the user sees.
         send("turn_start", {

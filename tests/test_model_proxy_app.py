@@ -20,6 +20,7 @@ from haas.model_proxy import (
     RuntimeTokenScope,
 )
 from haas.model_proxy.app import ProxyApp
+from haas.model_proxy.runtime import RuntimeModelProxy
 from haas.policy import (
     NetworkPolicy,
     PolicyCompileInput,
@@ -73,6 +74,7 @@ def _build(
     allow: list[str] | None = None,
     harness: HarnessRecord | None = None,
     frozen_route_resolver: object | None = None,
+    session_scope_resolver: object | None = None,
 ) -> tuple[TestClient, RuntimeTokenManager, dict]:
     seen: dict = {}
 
@@ -97,6 +99,7 @@ def _build(
         registry,
         _effective_policy(allow or ["http://127.0.0.1:18080"]),
         frozen_route_resolver=frozen_route_resolver,  # type: ignore[arg-type]
+        session_scope_resolver=session_scope_resolver,  # type: ignore[arg-type]
     ).build()
     return TestClient(app), tokens, seen
 
@@ -391,10 +394,10 @@ def test_responses_relays_and_injects_credential() -> None:
 
 def test_responses_uses_frozen_session_route_instead_of_live_registry() -> None:
     frozen_url = "https://frozen.example.com/v1"
-    seen_scope: list[tuple[str, str]] = []
+    seen_sessions: list[str] = []
 
-    def frozen_route(session_id: str, invocation_id: str) -> dict[str, str]:
-        seen_scope.append((session_id, invocation_id))
+    def frozen_route(session_id: str) -> dict[str, str]:
+        seen_sessions.append(session_id)
         return {
             "providerId": "frozen",
             "name": "frozen",
@@ -410,17 +413,48 @@ def test_responses_uses_frozen_session_route_instead_of_live_registry() -> None:
         allow=[frozen_url],
         frozen_route_resolver=frozen_route,
     )
-    token = tokens.issue(
-        RuntimeTokenScope(sessionId="hsess_1", invocationId="inv_1", harnessId="chrn_codex_default")
-    )
+    token = tokens.issue(RuntimeTokenScope(sessionId="hsess_1", harnessId="chrn_codex_default"))
     response = client.post(
         "/v1/responses",
         json={"input": "hi"},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200
-    assert seen_scope == [("hsess_1", "inv_1")]
+    assert seen_sessions == ["hsess_1"]
     assert seen["url"].startswith(frozen_url)
+
+
+def test_frozen_session_route_model_cannot_be_overridden_by_body() -> None:
+    requested_models: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_models.append(json.loads(request.content)["model"])
+        return httpx.Response(200, json={"id": "resp_1"})
+
+    frozen_url = "https://frozen.example.com/v1"
+    client, tokens, _ = _build(
+        handler,
+        allow=[frozen_url],
+        frozen_route_resolver=lambda _session_id: {
+            "providerId": "frozen",
+            "name": "frozen",
+            "baseUrl": frozen_url,
+            "model": "frozen-model",
+            "wireApi": "responses",
+            "apiType": "responses",
+            "credentialRef": CREDENTIAL_REF,
+        },
+    )
+    token = tokens.issue(RuntimeTokenScope(sessionId="hsess_1", harnessId="chrn_codex_default"))
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "attacker-model"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert requested_models == ["frozen-model"]
 
 
 def test_responses_never_leaks_provider_key_to_caller() -> None:
@@ -461,6 +495,170 @@ def test_responses_distinguishes_expired_runtime_token() -> None:
     )
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "haas_model_proxy_token_expired"
+
+
+def test_responses_refreshes_expired_session_token_once_before_failing() -> None:
+    calls: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"id": "resp_recovered"})
+
+    frozen_url = "https://frozen.example.com/v1"
+    frozen_route = {
+        "providerId": "frozen",
+        "name": "frozen",
+        "baseUrl": frozen_url,
+        "model": "gpt-5.6-terra",
+        "wireApi": "responses",
+        "apiType": "responses",
+        "credentialRef": CREDENTIAL_REF,
+    }
+    client, tokens, _ = _build(
+        handler,
+        allow=[frozen_url],
+        frozen_route_resolver=lambda _session_id: frozen_route,
+    )
+    token = tokens.issue(
+        RuntimeTokenScope(
+            sessionId="s_1",
+            harnessId="chrn_codex_default",
+            providerScopeKey=RuntimeModelProxy.provider_scope_key(frozen_route),
+            allowedModels=["gpt-5.6-terra"],
+        )
+    )
+    tokens.scope(token, allow_expired=True).expiresAtMs = 1
+
+    resp = client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.6-terra"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "resp_recovered"
+    assert calls == [f"Bearer {REAL_KEY}"]
+
+
+def test_responses_rebinds_parseable_unknown_token_for_same_session() -> None:
+    calls: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"id": "resp_rebound"})
+
+    frozen_url = "https://frozen.example.com/v1"
+    frozen_route = {
+        "providerId": "frozen",
+        "name": "frozen",
+        "baseUrl": frozen_url,
+        "model": "gpt-5.6-terra",
+        "wireApi": "responses",
+        "apiType": "responses",
+        "credentialRef": CREDENTIAL_REF,
+    }
+    provider_scope_key = RuntimeModelProxy.provider_scope_key(frozen_route)
+    client, tokens, _ = _build(
+        handler,
+        allow=[frozen_url],
+        frozen_route_resolver=lambda _session_id: frozen_route,
+        session_scope_resolver=lambda session_id, _token: RuntimeTokenScope(
+            sessionId=session_id,
+            harnessId="chrn_codex_default",
+            providerScopeKey=provider_scope_key,
+            allowedModels=["gpt-5.6-terra"],
+        ),
+    )
+    old_token = tokens.issue(
+        RuntimeTokenScope(
+            sessionId="s_1",
+            harnessId="chrn_codex_default",
+            providerScopeKey=provider_scope_key,
+            allowedModels=["gpt-5.6-terra"],
+        )
+    )
+    tokens.revoke_all()
+
+    resp = client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.6-terra"},
+        headers={"Authorization": f"Bearer {old_token}"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "resp_rebound"
+    assert calls == [f"Bearer {REAL_KEY}"]
+
+
+def test_responses_rejects_rebind_when_provider_scope_changed() -> None:
+    frozen_url = "https://frozen.example.com/v1"
+    frozen_route = {
+        "providerId": "frozen",
+        "name": "frozen",
+        "baseUrl": frozen_url,
+        "model": "gpt-5.6-terra",
+        "wireApi": "responses",
+        "apiType": "responses",
+        "credentialRef": CREDENTIAL_REF,
+    }
+    client, tokens, seen = _build(
+        lambda r: httpx.Response(200, json={"id": "must_not_call"}),
+        allow=[frozen_url],
+        frozen_route_resolver=lambda _session_id: frozen_route,
+        session_scope_resolver=lambda session_id, _token: RuntimeTokenScope(
+            sessionId=session_id,
+            harnessId="chrn_codex_default",
+            providerScopeKey="sha256:different-provider-scope",
+            allowedModels=["gpt-5.6-terra"],
+        ),
+    )
+    old_token = tokens.issue(
+        RuntimeTokenScope(
+            sessionId="s_1",
+            harnessId="chrn_codex_default",
+            providerScopeKey=RuntimeModelProxy.provider_scope_key(frozen_route),
+            allowedModels=["gpt-5.6-terra"],
+        )
+    )
+    tokens.revoke_all()
+
+    resp = client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.6-terra"},
+        headers={"Authorization": f"Bearer {old_token}"},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "haas_model_proxy_token_invalid"
+    assert seen == {}
+
+
+def test_responses_rejects_forged_session_prefixed_token() -> None:
+    frozen_url = "https://frozen.example.com/v1"
+    client, _tokens, seen = _build(
+        lambda r: httpx.Response(200, json={"id": "must_not_call"}),
+        allow=[frozen_url],
+        frozen_route_resolver=lambda _session_id: {
+            "providerId": "frozen",
+            "name": "frozen",
+            "baseUrl": frozen_url,
+            "model": "gpt-5.6-terra",
+            "wireApi": "responses",
+            "apiType": "responses",
+            "credentialRef": CREDENTIAL_REF,
+        },
+        session_scope_resolver=lambda _session_id, _token: None,
+    )
+
+    resp = client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.6-terra"},
+        headers={"Authorization": "Bearer placeholder-model-proxy-token"},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "haas_model_proxy_token_invalid"
+    assert seen == {}
 
 
 def test_responses_rejects_missing_authorization() -> None:

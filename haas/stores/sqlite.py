@@ -12,7 +12,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import MISSING, asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -122,28 +122,41 @@ class SQLiteStore(MemoryStore):
         }
         for row in self._db.execute("SELECT namespace, record_key, payload FROM records"):
             namespace = str(row["namespace"])
-            data = json.loads(row["payload"])
-            if namespace == "harness":
-                provider = data.get("provider")
-                data["provider"] = None if provider is None else ProviderConfig(**provider)
-                harness = HarnessRecord(**data)
-                self._harnesses[harness.id] = harness
+            try:
+                data = json.loads(row["payload"])
+                if namespace == "harness":
+                    data = _normalize_record_payload(HarnessRecord, data)
+                    provider = data.get("provider")
+                    data["provider"] = (
+                        None
+                        if provider is None
+                        else _construct_record(ProviderConfig, provider)
+                    )
+                    harness = HarnessRecord(**data)
+                    self._harnesses[harness.id] = harness
+                    continue
+                if namespace == "delegated_session":
+                    data = _normalize_record_payload(DelegatedSessionRecord, data)
+                    data["runtime"] = _construct_record(
+                        DelegatedRuntimeRecord, data.get("runtime") or {}
+                    )
+                    delegated = DelegatedSessionRecord(**data)
+                    self._delegated_sessions[delegated.id] = delegated
+                    self._delegated_by_manager_session[delegated.managerSessionId] = delegated.id
+                    self._delegated_by_haas_session[delegated.haasSessionId] = delegated.id
+                    continue
+                if namespace == "profile":
+                    profile = _construct_record(ProfileRecord, data)
+                    self._profiles[profile.id] = profile
+                    continue
+                constructor = constructors.get(namespace)
+                if constructor is None:
+                    continue
+                value: Any = _construct_record(constructor, data)
+                if namespace == "session" and not _valid_session_record(value):
+                    continue
+            except (TypeError, ValueError, KeyError):
                 continue
-            if namespace == "delegated_session":
-                data["runtime"] = DelegatedRuntimeRecord(**data["runtime"])
-                delegated = DelegatedSessionRecord(**data)
-                self._delegated_sessions[delegated.id] = delegated
-                self._delegated_by_manager_session[delegated.managerSessionId] = delegated.id
-                self._delegated_by_haas_session[delegated.haasSessionId] = delegated.id
-                continue
-            if namespace == "profile":
-                profile = ProfileRecord(**data)
-                self._profiles[profile.id] = profile
-                continue
-            constructor = constructors.get(namespace)
-            if constructor is None:
-                continue
-            value = constructor(**data)
             if namespace == "session":
                 self._sessions[(value.appName, value.userId, value.id)] = value
             elif namespace == "invocation":
@@ -447,3 +460,50 @@ class SQLiteStore(MemoryStore):
                 record.createdAtMs,
             ),
         )
+
+
+def _construct_record(constructor: type[Any], data: Any) -> Any:
+    if not isinstance(data, dict):
+        raise ValueError("record payload must be an object")
+    normalized = _normalize_record_payload(constructor, data)
+    for field in fields(constructor):
+        if (
+            field.default is MISSING
+            and field.default_factory is MISSING
+            and field.name not in normalized
+        ):
+            raise ValueError(f"record payload missing required field: {field.name}")
+    return constructor(**normalized)
+
+
+def _normalize_record_payload(constructor: type[Any], data: dict[str, Any]) -> dict[str, Any]:
+    if constructor is SessionRecord and "controlState" not in data and "control_state" in data:
+        data = {**data, "controlState": data["control_state"]}
+    if not is_dataclass(constructor):
+        return dict(data)
+    allowed = {field.name for field in fields(constructor)}
+    return {key: value for key, value in data.items() if key in allowed}
+
+
+def _valid_session_record(record: Any) -> bool:
+    return (
+        isinstance(record.id, str)
+        and bool(record.id)
+        and isinstance(record.appName, str)
+        and bool(record.appName)
+        and isinstance(record.userId, str)
+        and bool(record.userId)
+        and record.controlState
+        in {
+            "idle",
+            "running",
+            "pausing",
+            "paused",
+            "resuming",
+            "cancelling",
+            "cancelled",
+            "control_degraded",
+        }
+        and isinstance(record.supportsResume, bool)
+        and (record.resumableInvocationId is None or isinstance(record.resumableInvocationId, str))
+    )

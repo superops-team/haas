@@ -514,8 +514,8 @@ async def test_codex_adapter_timeout_fails_turn() -> None:
         assert events[-1].actions["stateDelta"] == {
             "status": "failed",
             "code": "haas_request_timeout",
-            "reason": "Codex turn timed out",
-            "retryable": False,
+            "reason": "long_task_deadline_exceeded",
+            "retryable": True,
         }
         result = await adapter.finalize_turn(handle)
         assert result.status == "failed"

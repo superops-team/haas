@@ -3,8 +3,8 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-14
-Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy
+Last reviewed: 2026-09-15
+Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Manager Delegation](../manager-delegation/README.md), [Harness Profile](../harness-profile/README.md), [Container Runtime](../container-runtime/README.md), [Config](../config/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
@@ -82,7 +82,7 @@ token_ref = "secret://manager/haas/default"
 connect_timeout_seconds = 5
 response_header_timeout_seconds = 30
 stream_idle_timeout_seconds = 90
-turn_timeout_seconds = 900
+turn_timeout_seconds = 86400
 reconnect_max_attempts = 8
 reconnect_backoff_initial_ms = 250
 reconnect_backoff_max_ms = 10000
@@ -129,6 +129,14 @@ One HTTP client handles both endpoint modes, structured envelopes/errors, separa
 - file upload/list/download/archive when advertised available.
 
 Every mutation except side-effect-free validate carries a persisted operation-scoped Idempotency-Key. `profile-rebind` is usable only for non-delegated clients; Manager never sends it for delegated chats. `RunSseStream` is established only after successful headers include valid `X-HaaS-Invocation-ID` and `X-HaaS-Session-ID`; persist acceptance before GUI-visible output. A structured pre-header integrity error with `accepted=true` also establishes accepted work and triggers readback, not replacement execution. Pause, Continue, and Stop remain distinct Manager intents. Pause waits for the source invocation's `haas.turn.interrupted` terminal before the GUI becomes paused. Continue creates a new HaaS invocation linked to that source, reattaches the normal dual-stream bridge, and persists the new acceptance headers before rendering output. Stop uses cancel and never exposes Continue afterward.
+
+Manager's transport budgets are not execution budgets. `response_header_timeout_seconds`
+guards pre-acceptance connect/header wait, `stream_idle_timeout_seconds` guards one idle
+delivery gap before replay/readback recovery, and `turn_timeout_seconds` mirrors HaaS's
+accepted invocation deadline. The default local-managed deadline is 24 hours and MUST NOT
+be silently lowered for desktop turns. A timeout in an individual shell/tool command is a
+tool failure; it may inform recovery, but it does not cancel the whole user task unless
+the task deadline or an explicit Stop does.
 
 ### 5.3 Discovery and Routing
 
@@ -540,8 +548,18 @@ server-confirmed idempotency expiry may enter the linked-attempt path.
 The desktop execution state is `idle|running|pausing|paused|resuming|stopping`.
 While running, Composer exposes separate Pause and Stop controls. While paused it
 exposes Continue and Stop. Transitional states disable duplicate actions. The state
-comes from persisted HaaS readback on reconnect, not an optimistic boolean. Reviewer
-pause is labelled separately and never changes execution lifecycle.
+comes from persisted HaaS readback on reconnect. For a foreground send that has already
+been handed to the session WebSocket, the GUI may immediately render `running` so Stop
+is available during the pre-acceptance window; the first `turn_start`, `execution_control`,
+`input_rejected`, `error`, `turn_done`, or socket close must clear that pending local
+projection and restore the server-authoritative state. Reviewer pause is labelled
+separately and never changes execution lifecycle.
+The session list `liveness=working` is also an execution-state fallback for the currently
+open session. If the session WebSocket reconnects with a stale `ready.running=false` or
+does not replay process events quickly enough, the GUI must continue to render the
+transcript and Composer in running mode from liveness until an explicit terminal event,
+terminal readback, or refreshed session list clears it. The same effective running value
+must feed Transcript, Composer, waiting-row, jump-to-latest, and side rail controls.
 Manager's session WebSocket carries `pause`, `continue`, and `interrupt` intents. Its
 `ready.data.execution_control` snapshot and subsequent `execution_control` events use
 `controlState`, `supportsResume`, and `resumableInvocationId`; `pause` publishes
@@ -553,6 +571,11 @@ terminal source invocation unchanged. A successful cancel acknowledgement carryi
 `sessionControl` MUST be persisted and published immediately, even when the interrupted source
 stream has not yet exited its Manager `finally` block; an in-memory active-turn record MUST NOT
 keep the desktop in `stopping` after that acknowledgement.
+Continue follows the same authoritative readback rule: once `paused` with a valid
+`resumableInvocationId` is persisted, a user Continue may claim a new linked invocation even
+if the interrupted source stream has not yet reached its local `finally`/`turn_done`. The old
+source stream MUST NOT overwrite the accepted linked invocation, and its delayed cleanup MUST
+NOT clear the new active-turn state.
 The WebSocket receive loop MUST NOT await the long-running Pause request inline: Pause waits
 for authoritative terminal readback, while a following Stop must still be received and dispatched
 concurrently so the stronger cancel intent can win. Control tasks remain session-scoped and do not
@@ -577,9 +600,32 @@ Bearer auth except health/ready. Token references are endpoint-specific. Workspa
 
 Safe manager events include backend_selected, local_sidecar_starting/ready/degraded, remote_probe_failed, binding_created/reused, materialization_requested and linked-attempt creation. Forward `X-HaaS-Trace-ID` as an optional bounded correlation header, never as authorization. Show desired/applied revisions and safe failure separately from invocation outcome.
 
+Local-managed startup and recovery diagnostics are part of the contract, not
+debug-only text. `local_status` exposes a stable `status`, `reason`, `url`,
+`pid`, `managerLogPath` and `logPath` without returning tokens or credential
+material. The common startup failures use stable reasons:
+`local_autostart_requires_loopback`, `local_sidecar_not_owned`,
+`local_sidecar_port_occupied`, `local_haas_config_write_failed`,
+`bundled_codex_unavailable`, `local_haas_start_failed`, `local_haas_exited` and
+`local_haas_starting`.
+Unknown listeners on the configured loopback port are never adopted, killed, or
+used as a fallback HaaS endpoint. Manager waits for a bounded drain window; if
+the port remains occupied it fails closed with `local_sidecar_port_occupied`,
+keeps the main sidecar and WebSocket usable, emits a structured task error plus
+`turn_done`, and points operators at the local HaaS log path.
+
 ## 10. Failure and Recovery
 
 Before acceptance, show not-started errors. After acceptance, preserve binding/partial output and reconcile exact terminal state. Configuration failures gate future turns, not the already-running invocation. Docker/image/secret failures never enable local fallback. Remote P0 workspace limitations are explicit. Session expiration and idempotency expiration are different recovery paths. An active invocation receiving `invalid_token` or `token_expired` is a model-proxy lifecycle failure with a stable safe code, never a generic successful stream close. Manager keeps the same binding and offers only replay-safe recovery.
+
+When retrying or continuing an accepted non-terminal attempt, Manager first reads back the
+existing invocation and native cursor. It MUST NOT rebuild a new `/run_sse` request with a
+new profile solely because the local credential reference, model proxy port, or profile
+version changed. If the HaaS session has the same provider scope, Manager refreshes the
+session-scoped model proxy capability and rebinds the native Codex profile before the next
+model call. If that refresh fails, the task remains failed/incomplete with the exact
+`haas_model_proxy_token_invalid|expired` reason and partial transcript; it is not displayed
+as a completed answer.
 
 ## 11. Test Plan and Acceptance
 
@@ -596,11 +642,33 @@ This evidence makes the following release blockers, not optional polish:
 5. Implement the approval/input bridge before exposing `Ask for approval` on a HaaS-backed chat.
 6. Add task-level completion/verification/continuation state so an interim model message cannot close an unfinished task.
 
+### 11.1.1 Observed Local Failure (2026-09-15)
+
+The latest local session `fead0639-f8c` for workspace
+`/Users/bytedance/workspace/bytedance/slide/why-mpa` exposed two additional
+release blockers. The "install Quarto environment" invocation
+`inv_cafe86d3d0624411` started at 22:30:04 and failed at 22:45:04 after exactly
+the old 900-second deadline. The task was still actively attempting a slow
+Quarto release download; several tool calls had been bounded by their own
+timeouts, partial files grew from tens to hundreds of MiB, and a corrupted
+resume attempt failed `tar xzf` with `gzip decompression failed`. HaaS then
+emitted `haas.turn.failed` with `code=timeout`, so the user task stopped before
+environment setup could complete.
+
+Follow-up questions at 22:45:27 and 23:02:29 failed for a separate reason:
+Codex resumed the same native thread but attempted a model call through an old
+loopback model proxy bearer at `127.0.0.1:65060`, and HaaS returned
+`haas_provider_error` with `haas_model_proxy_token_invalid`. This confirms that
+invocation-scoped token revocation and port-sensitive native profile state are
+not stable enough for long-running local-managed sessions. The fix is
+session-scoped capability registration with exact-scope refresh/rebind, plus
+replay/readback before any new submission.
+
 ### 11.2 Implementation Slices
 
 | Order | Slice | Required failing test first | Exit condition |
 |-------|-------|-----------------------------|----------------|
-| 1 | Terminal and token integrity | Long turn crossing stream-idle; injected invalid/expired token; adapter terminal plus finalize | Exact safe failure or successful refresh; one terminal; partial output retained |
+| 1 | Long-task deadline and token integrity | 24-hour controlled-clock turn; real long download crossing the old 900-second boundary; injected invalid/expired token; adapter terminal plus finalize | No 900-second failure; exact safe failure only at the 24-hour deadline or successful session-scope refresh; one terminal; partial output retained |
 | 2 | Canonical process events | Real 0.152.1 reasoning/item start/output/completed fixtures | Stable redacted reasoning/tool types; no supported event is unparsed |
 | 3 | Concurrent Manager bridge | ADK/native arrival permutations, live native events, disconnect/replay | GUI receives ordered process events during execution with independent cursors and no duplicates |
 | 4 | Interactive bridge | Command/file approval and blocking input request over disconnect/reconnect | One durable request, one explicit response, same invocation resumes; capability becomes `human_bridge` only after all cases pass |
@@ -608,7 +676,7 @@ This evidence makes the following release blockers, not optional polish:
 | 6 | Semantic activity projector | Tool lifecycle replay, missing/unknown activity kind, command exit and recovery linkage | One stable activity per tool call; explicit normalized states; no machine-field copy or heuristic kind inference |
 | 7 | Transcript and Inspector UI | Running/completed/non-success states, keyboard navigation and responsive width matrix | Codex-inspired in-flight stream, completion summary, right Inspector/bottom drawer and secretless details match §5.8 |
 | 8 | Ephemeral command evidence | Adapter capture, scoped memory store, authenticated read, expiry and GUI no-store rendering | Full useful command evidence while live; credentials masked; authorization URL usable but absent from every durable surface |
-| 9 | Packaged acceptance | 3–5 minute real-provider task with tools, interaction, reconnect and verification | App shows the whole lifecycle, completes the requested task, and passes secret/terminal/event-volume/UI checks |
+| 9 | Packaged acceptance | 15+ minute real-provider task with slow tool IO, tools, interaction, reconnect and verification | App remains running past the former 900-second cutoff, shows the whole lifecycle, completes the requested task when dependencies succeed, and passes secret/terminal/event-volume/UI checks |
 | 10 | Terminal reconciliation recovery | More than one session event page, an ADK stream missing its terminal projection, a later canonical failure and reconnect with a stale running binding | The unfiltered page checkpoint advances, authoritative terminal readback closes the bridge, exactly one failure/`turn_end` is emitted, and reconnect presents `failed`/`idle` before `ready` rather than restoring `running` |
 
 - Empty registry, missing Docker/provider, token/port races, stale ready file and two Manager instances; control APIs remain usable and owned files are not overwritten.
@@ -618,7 +686,12 @@ This evidence makes the following release blockers, not optional polish:
 - Server-confirmed replay expiry creates one linked new attempt on use; no timer rerun; ordinary 404 never triggers it; stale policy/approval retries never undo newer state.
 - Real Docker Lite arm64 on Mac, Lite amd64 and AIO amd64 first-turn/follow-up/TTL/cancel/readback gates; unsupported remote workspace and human approval remain unselectable.
 - No provider/MCP secrets, raw tool arguments, host paths or native ids in GUI, bindings, logs and public events. Spec/schema checks alone do not prove runtime completion.
-- A real packaged turn lasting longer than the 90-second stream-idle interval remains active, renders at least one reasoning/progress update and every tool start/terminal pair, and reaches exactly one authoritative terminal event. Injected `invalid_token`/`token_expired` remains visible and cannot be rendered as success.
+- A real packaged turn lasting longer than the 90-second stream-idle interval and
+  the former 900-second runtime cutoff remains active, renders at least one
+  reasoning/progress update and every tool start/terminal pair, and reaches exactly
+  one authoritative terminal event. Injected `invalid_token`/`token_expired` is
+  recovered through the session-scoped capability path when safe; otherwise it
+  remains visible and cannot be rendered as success.
 - Interactive local HaaS acceptance covers command approval, file-change approval, blocking `request_user_input`, disconnect/reconnect while waiting, approve/deny/cancel, and same-invocation continuation. The capability and mode selector remain disabled until this suite passes.
 - Fresh-session defaults are visible and effective end to end: workspace write succeeds inside the
   authorized root, public egress succeeds, and a command requiring escalation produces one human
@@ -658,3 +731,15 @@ prompts beyond the retained visible transcript. The MCP source is optional: if u
 the turn may continue, but Manager records the degraded capability through the HaaS profile
 and ordinary task outcome path. External arbitrary MCP materialization remains unsupported
 for the local Codex path until the full MCP runtime contract is implemented.
+
+Retry and recovery recall MUST merge the persisted transcript with the latest HaaS
+`stream_bridge` checkpoint before filtering. This covers the window where a failed or
+interrupted HaaS turn has persisted its visible user message, terminal notice, and bridge
+state, but the assistant projection has not yet been committed to the transcript because
+the Manager process, browser connection, or stream loop ended early. The synthesized recall
+row is still a transcript fact, not a new user prompt: it may include assistant text,
+task outcome, reasoning summary, model-stage summaries, and bounded activity facts from
+`_haas_activity`, but only from already-sanitized projection fields such as status,
+safeSummary/summary, commandPreview, outputPreview/preview, exitCode, safeReason and
+durationMs. Query filtering MUST search those safe fields as well as assistant text so an
+agent retry can recall what was already attempted without repeating side effects blindly.

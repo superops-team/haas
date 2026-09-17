@@ -146,7 +146,7 @@ async def rebind_session_profile(session_key: SessionKey, request: ProfileRebind
   },
   "budget": {
     "maxStep": 40,
-    "timeoutSeconds": 900,
+    "timeoutSeconds": 86400,
     "maxOutputTokens": 4096
   },
   "profileFingerprint": "sha256:profile",

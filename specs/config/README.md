@@ -3,8 +3,8 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-14
-Change ID: unified-runtime-approval-policy
+Last reviewed: 2026-09-15
+Change ID: unified-runtime-approval-policy, long-task-model-proxy-stability
 Related specs: [Container Runtime](../container-runtime/README.md), [Stores](../stores/README.md), [Identity](../identity/README.md), [HaaS Protocol](../haas-protocol/README.md), [Harness Profile](../harness-profile/README.md), [Manager Delegation](../manager-delegation/README.md)
 
 ## 1. Component Role
@@ -95,7 +95,13 @@ the harness is ready, consistent with the health/ready separation defined by
 | `HAAS_DEFAULT_IMAGE_VARIANT` | Sandbox image variant (`lite` default, `aio` opt-in). Manager and delegated-session `image.variant` override this per session. |
 | `HAAS_SESSION_LEASE_TTL_MS` | Active-turn session lease TTL in milliseconds (default: `30000`) |
 | `HAAS_SESSION_LEASE_RENEW_INTERVAL_MS` | Active-turn lease renewal interval in milliseconds (default: `10000`; must be less than half the TTL) |
-| `HAAS_SESSION_TURN_TIMEOUT_SECONDS` | End-to-end adapter invocation timeout in seconds (default: `900`; must be greater than lease TTL) |
+| `HAAS_SESSION_TURN_TIMEOUT_SECONDS` | End-to-end adapter invocation deadline in seconds (default and maximum: `86400`; must be greater than lease TTL) |
+
+`HAAS_SESSION_TURN_TIMEOUT_SECONDS` is the long-task safety deadline, not the
+HTTP response-header timeout, SSE heartbeat timeout, model stream-idle timeout or
+GUI WebSocket timeout. Values above `86400` are clamped to 24 hours. Values less
+than or equal to zero are invalid. Packaged local-managed execution MUST use the
+same default unless the user explicitly configures a shorter value.
 
 The environment-variable prefix is uniformly `HAAS_`. For example:
 
@@ -155,7 +161,7 @@ adapters:
 session_runtime:
   lease_ttl_ms: 30000
   lease_renew_interval_ms: 10000
-  turn_timeout_seconds: 900
+  turn_timeout_seconds: 86400
 delegation:
   container_backend: disabled  # default; explicit delegated-session profile overrides to docker
   docker_bin: docker

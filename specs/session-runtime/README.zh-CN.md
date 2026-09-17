@@ -3,8 +3,8 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-13
-Change ID: unified-runtime-approval-policy
+Last reviewed: 2026-09-15
+Change ID: unified-runtime-approval-policy, long-task-model-proxy-stability
 Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Harness Adapter](../harness-adapter/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -12,6 +12,19 @@ Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Harness Regis
 Session Runtime 是 HaaS 的执行事实 owner。它管理 session、invocation（ADK 一次 `/run`）、turn、container、lease、idempotency、profile snapshot 和 terminal state，并通过 Harness Adapter 驱动具体 agent。
 
 ADK 的 session 由 `(appName, userId, sessionId)` 三元组唯一标识；`invocation` 是 public 运行单元，`turn` 是 adapter 内部执行单元。首期两者一一对应，但 Session Runtime 必须保留未来一个 invocation 拆成多个内部 turn 或 replay turn 的空间。
+
+### 1.1 长任务后台执行定位
+
+HaaS 面向离线后台 agent 工作，正常 accepted invocation 不得因为短交互客户端超时而
+失败。Runtime turn 默认 deadline 是 24 小时（`86400` 秒），同时也是
+`haas.timeoutSeconds` 的最大可接受值，除非未来 capability 显式发布更长的 durable
+execution class。客户端可以为单次 turn 请求更短 timeout，但 Manager local 默认不得把
+HaaS-backed work 缩短到长任务默认值以下。
+
+该 deadline 是最后安全兜底，不是 activity 或 stream-idle timeout。`/run_sse` 断线、
+GUI WebSocket 断开、超过 model stream-idle 区间、或执行大量 tool call 本身都不得终止
+invocation。Runtime 必须持续续租 active-turn lease，并保持 model/MCP capability 有效或
+安全刷新，直到 invocation 达到权威 terminal、被显式取消，或到达 24 小时 deadline。
 
 ## 2. 来源与依据
 
@@ -47,7 +60,7 @@ ADK 的 session 由 `(appName, userId, sessionId)` 三元组唯一标识；`invo
 - 通过 Event Log 把 adapter event 映射为稳定 canonical `haas.*` event type，并维护 session `state`（ADK `stateDelta`）；terminal outcome 使用 canonical `type`，不得解析人类文本或依赖 stream close。
 - 处理 streaming run（`/run_sse`）和 non-streaming run（`/run`）的一致终态。
 - 对 delegated session，持久化 HaaS session、native session reference、delegated-session reference、approval wait 和后续恢复所需的 runtime generation metadata。
-- 管理 cancel、timeout、step budget、session expiry、session deletion。
+- 管理 cancel、长任务 invocation deadline、step budget、session expiry、session deletion。
 - 在 sidecar restart 后根据持久状态恢复可恢复 session，或 fail closed 为不可恢复状态。
 
 不负责：
@@ -172,6 +185,8 @@ adapter-native config。
   "completedAtMs": null,
   "model": "gpt-5.6-terra",
   "requestedModel": "gpt-5.6-terra",
+  "timeoutSeconds": 86400,
+  "deadlineAtMs": 1786486400000,
   "idempotencyKeyHash": "idem_sha256",
   "terminalEventId": null,
   "continuedFromInvocationId": null,
@@ -392,6 +407,15 @@ Session Runtime 仍负责驱动 adapter cancel，并且只持久化一个 `haas.
 turn/provider/tool/workspace 副作用之前。该写入前的 preflight failure 返回结构化 HTTP
 错误，不创建 invocation；该写入后的所有失败都收敛为 terminal state/event。
 
+每个 accepted invocation 必须存储实际生效的 timeout budget 与计算出的 deadline。
+默认值为 `86400` 秒。服务端必须把超过 24 小时的请求 clamp 到 `86400` 秒，拒绝
+非正数，并在显示 timeout 信息的 readback/diagnostics 中暴露实际生效值。Deadline
+按 accepted invocation 的 wall-clock 执行时间计算，不按单个 SSE client 连接计算。
+到达 deadline 时，HaaS 先尝试 adapter-native interrupt/cancel，然后持久化唯一
+terminal event，`haas.code=haas_request_timeout`、`haas.safeReason=long_task_deadline_exceeded`；
+如果 native session 仍可恢复或操作可安全 replay，`haas.retryable=true`。Partial output
+和 tool evidence 必须保持可读。
+
 Terminal states are immutable。正常到达 terminal 的 accepted invocation 一律 HTTP 200：
 `/run` 返回有序 ADK event array，`/run_sse` 发送 terminal ADK event 后关闭。每个 invocation 必须且只能持久化一个匹配的 canonical terminal type（`haas.turn.completed|failed|incomplete|interrupted|cancelled`），其 `haas.status` 必须等于 `InvocationRecord.status`。Terminal event 写入与对外发送前，Session Runtime 必须在同一 lease/fencing guard 下先持久化对应 invocation/turn 终态并合并 session 终态，除非 store 提供覆盖这些写入的单一原子边界；恢复流程不得看到 terminal event 已完成而 invocation/turn 仍为 `running`。
 
@@ -470,7 +494,9 @@ Session Runtime 产生：
 
 ## 10. 失败与恢复
 
-Adapter 调用（`prepare_session`、`start_turn`、`stream_events`、`finalize_turn`）运行在同一个 invocation timeout budget 内。默认 timeout 为 900 秒，并可在 `SessionRuntime` 配置；该值必须大于 lease TTL，保证正常长 turn 能在 timeout 前至少续租一次。超时后，Runtime 会取消正在等待的 adapter 调用，写入 canonical `type=haas.turn.failed` 与 `haas={status:"failed", safeReason:"timeout", retryable:false}`，并生成兼容的 ADK `actions.stateDelta.status/reason` 投影，持久化 invocation/turn/session 终态，由 API 层释放 admission quota，并用该 failed terminal event 完成幂等 reservation，使重试不再看到 pending key。
+Adapter 调用（`prepare_session`、`start_turn`、`stream_events`、`finalize_turn`）运行在同一个 invocation deadline 内。默认 deadline 为 24 小时（`86400` 秒），并可在 `SessionRuntime` 中按 `1..86400` 的支持范围配置。该值必须大于 lease TTL，保证正常长 turn 在 deadline 前持续续租。Stream-idle、HTTP response-header 和 GUI WebSocket timeout 是独立 transport budget，不得取消已 accepted work。
+
+Deadline 到达后，Runtime 会取消正在等待的 adapter 调用，写入 canonical `type=haas.turn.failed` 与 `haas={status:"failed", code:"haas_request_timeout", safeReason:"long_task_deadline_exceeded"}`，并生成兼容的 ADK `actions.stateDelta.status/reason` 投影，持久化 invocation/turn/session 终态，由 API 层释放 admission quota，并用该 failed terminal event 完成幂等 reservation，使重试不再看到 pending key 或降级 HTTP 状态。若 adapter 能证明 native state 可恢复，terminal 应为 `incomplete` 且 `retryable=true`；否则保持 `failed`，但必须保留 partial progress。
 
 | 场景 | 行为 |
 |------|------|
@@ -478,7 +504,7 @@ Adapter 调用（`prepare_session`、`start_turn`、`stream_events`、`finalize_
 | InvocationRecord accepted 写入成功 | 保留带 accepted=true/invocationId 的 idempotency reservation；所有正常 terminal outcome 都 replay HTTP 200 + 相同 ADK events |
 | sidecar 进程重启 | 首次权威 invocation readback 返回前检查持久化的 `running` invocation。若 adapter 能证明 owner 并 inspect/resume 原 native turn，则恢复同一 invocation；否则使用新的 fencing token 获取 session lease，把 orphan invocation/turn 收敛为不可原生续接的 `incomplete`，追加且只追加一个 `code=safeReason=sidecar_restart_execution_lost`、`retryable=true` 的 `haas.turn.incomplete`，关闭其 pending interaction，把 session control 恢复为 `idle`，并用 canonical event history 完成已 accepted 的 idempotency reservation。若其他进程仍持有未过期 lease，则阻断该次对账，readback 不得覆盖 live owner。此场景不得标记为可恢复的 `interrupted`；后者只用于已确认的 native Pause terminal。 |
 | 重启后取消持久化状态仍为 `running`、但当前进程已无 active adapter handle 的 invocation | 先要求 invocation 确实属于路径 session，且其关联 session、turn、harness 记录均存在；然后使用新的 fencing token 获取 session lease，持久化一致的 invocation/turn `cancelled` 状态；仅在没有更新的 terminal invocation 已取代它时，才合并 session `cancelled` 投影；最后追加且只追加一个 `haas.turn.cancelled` 终态事件后返回。不得把陈旧的 `running` 记录当作取消成功返回；记录缺失/不匹配或 lease conflict 均 fail closed，不修改状态，也不得覆盖当前 owner。 |
-| adapter 无终态 | timeout 后取消 adapter await 并写 terminal `failed` |
+| adapter 在 24 小时 deadline 前无终态 | 取消 adapter await，并写入唯一 `haas_request_timeout` / `long_task_deadline_exceeded` 的 `failed` 或可恢复 `incomplete` terminal |
 | cancel 后断线 | cancel intent 持久化；最终状态仍必须可读 |
 | session lease 续租失败或被 fencing out | 停止 stale write；当前 fencing owner 尽可能持久化 `haas.turn.failed`。Accepted invocation 不得返回未接受 adapter 502；terminal 无法持久化时走 integrity-failure recovery |
 | 接受后 required terminal event 写失败 | 权威 state store 将 invocation/turn/session 持久化 failed，idempotency 完成 accepted=true/invocationId + `503 haas_store_unavailable`，并输出 fallback diagnostics。响应头前返回该 integrity error；SSE 响应头后异常关闭并要求 readback。不得伪造 terminal evidence |
@@ -490,7 +516,7 @@ Adapter 调用（`prepare_session`、`start_turn`、`stream_events`、`finalize_
 | Policy application 失败 | 保留旧 applied revision、暴露安全失败，并阻断新 invocation，直到修正或被新 revision 取代 |
 | structured input 正在等待 | 持久化 `InputRequestRecord`；保持同一 invocation/turn active 和 model capability 有效，仅在收到精确 manager answer 后恢复 |
 | adapter 已发出 terminal | 只提交该事件一次；`finalize_turn` 返回状态但不得再追加 terminal |
-| active model-proxy capability 被拒绝 | 尝试一次 exact-scope refresh；否则持久化稳定 failed terminal 和 partial progress |
+| active model-proxy capability 被拒绝 | 不重新提交 invocation，先尝试 exact-session refresh/rebind；否则持久化稳定 failed terminal 和 partial progress |
 | explicit profile rebind validation failed | 拒绝 rebind，保留旧 `effectiveProfileSnapshot` |
 | active profile changed after session creation | 仅标记 drift；已有 session 继续旧 snapshot，直到显式 rebind 或新建 session |
 
@@ -510,11 +536,11 @@ Adapter 调用（`prepare_session`、`start_turn`、`stream_events`、`finalize_
   running invocation 保持冻结，queued/continued invocation 只能使用 applied revision。并发
   expected-revision 冲突和 apply failure 都不能让 stale work 执行。
 - Task completion：invocation terminal 不能清除仍 pending 的 plan/verification work。Manager 验收覆盖 completed、verifying、可恢复 incomplete、failed、cancelled 和 continuation-budget-exhausted task 状态。
-- Long turn：超过 stream-idle timeout 的 turn 与 tool-heavy turn 都必须保持 lease、model capability，并只生成一个 terminal event。
+- Long turn：24 小时受控时钟 turn、超过 stream-idle timeout 的 turn 与 tool-heavy turn 都必须保持 lease、model capability，并只生成一个 terminal event。
 - Recovery：模拟 sidecar restart、adapter reconnect、missing native ref、expired session、stale holder fencing rejection、adapter timeout terminalization，以及发起进程的本地 adapter handle 已不存在时取消持久化 `running` invocation。后者 read-back 必须为 `cancelled`，仅有一个匹配终态事件，重试仍保持幂等。
 - Compatibility：ADK client bounded session GET/PATCH/DELETE 行为对齐；超预算 session GET 明确返回 413，native pagination 不静默截断。
 - Security：跨 principal 访问全部返回 404；secret-shaped input 不落默认日志。
 
 ## stream-timeout-approval-recovery
 
-invocation deadline 必须作用于当前等待 adapter 的任务。绑定任务的 timeout 上下文不得跨越异步生成器 yield：首事件与后续事件可能由不同任务消费。prepare、start、每次事件等待与 finalize 共用单调时钟 deadline。超时持久化唯一 failed 终态，关闭等待交互并释放资源。测试首事件后的静默执行与审批等待。
+invocation deadline 必须作用于当前等待 adapter 的任务。绑定任务的 timeout 上下文不得跨越异步生成器 yield：首事件与后续事件可能由不同任务消费。prepare、start、每次事件等待与 finalize 共用单调时钟 deadline，默认 24 小时。超时持久化唯一 terminal，关闭等待交互并释放资源。测试首事件后的静默执行、长下载、tool-heavy loop 与审批等待。

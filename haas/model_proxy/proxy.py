@@ -7,7 +7,9 @@ request, and normalizes usage. Credentials never leave this component.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,6 +26,7 @@ from haas.security.redact import safe_upstream_body
 
 _PROVIDER_ERROR_FIELDS = ("code", "type", "param", "message")
 _NAMESPACE_TOOL_CONFLICT = "namespace_tool_bridge_conflict"
+_RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 
 
 class ModelProxyError(Exception):
@@ -99,6 +102,28 @@ class ModelProxy:
         except RuntimeTokenError as exc:
             raise ModelProxyError(str(exc)) from exc
 
+    def recover_expired_scope(self, token: str) -> RuntimeTokenScope:
+        try:
+            return self._tokens.scope(token, allow_expired=True)
+        except RuntimeTokenError as exc:
+            raise ModelProxyError(str(exc)) from exc
+
+    def recover_session_id(self, token: str) -> str | None:
+        return self._tokens.token_session_id(token)
+
+    def renew_token(self, token: str) -> RuntimeTokenScope:
+        try:
+            return self._tokens.renew(token)
+        except RuntimeTokenError as exc:
+            raise ModelProxyError(str(exc)) from exc
+
+    def adopt_token(self, token: str, scope: RuntimeTokenScope) -> RuntimeTokenScope:
+        try:
+            self._tokens.adopt(token, scope)
+            return self._tokens.validate(token)
+        except RuntimeTokenError as exc:
+            raise ModelProxyError(str(exc)) from exc
+
     async def proxy_responses(
         self,
         route: ModelRoute,
@@ -114,20 +139,11 @@ class ModelProxy:
         credential = await self._credential(route, scope)
         headers = {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
 
-        client = await self._client_ctx()
         try:
             json_body, bridge = self._responses_body(route, body)
-            resp = await client.post(
-                f"{route.baseUrl.rstrip('/')}/responses",
-                json=json_body,
-                headers=headers,
-                follow_redirects=False,
-                timeout=route.timeoutMs / 1000,
-            )
         except ValueError as exc:
             raise ModelProxyError(str(exc)) from exc
-        except httpx.HTTPError as exc:
-            raise ModelProxyError("provider_unavailable") from exc
+        resp = await self._post_json_with_retry(route, json_body, headers)
         if resp.status_code >= 300:
             raise _provider_http_error(resp, credential)
         try:
@@ -140,6 +156,39 @@ class ModelProxy:
         data = json.loads(json.dumps(data).replace(credential, "[REDACTED]"))
         usage = normalize_usage(route.provider, data)
         return data, usage
+
+    async def _post_json_with_retry(
+        self, route: ModelRoute, json_body: dict[str, Any], headers: dict[str, str]
+    ) -> httpx.Response:
+        client = await self._client_ctx()
+        last_error: httpx.HTTPError | None = None
+        max_attempts = 3
+        for retry_index in range(max_attempts):
+            try:
+                response = await client.post(
+                    f"{route.baseUrl.rstrip('/')}/responses",
+                    json=json_body,
+                    headers=headers,
+                    follow_redirects=False,
+                    timeout=route.timeoutMs / 1000,
+                )
+            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.PoolTimeout) as exc:
+                last_error = exc
+                if retry_index == max_attempts - 1:
+                    break
+                await asyncio.sleep(model_proxy_retry_delay_seconds(None, retry_index=retry_index))
+                continue
+            except httpx.HTTPError as exc:
+                raise ModelProxyError("provider_unavailable") from exc
+            if response.status_code not in _RETRYABLE_STATUS_CODES:
+                return response
+            if retry_index == max_attempts - 1:
+                return response
+            await response.aclose()
+            await asyncio.sleep(
+                model_proxy_retry_delay_seconds(response, retry_index=retry_index)
+            )
+        raise ModelProxyError("provider_unavailable") from last_error
 
     @staticmethod
     def _responses_body(
@@ -211,10 +260,7 @@ class ModelProxy:
             )
         except ValueError as exc:
             raise ModelProxyError(str(exc)) from exc
-        try:
-            response = await client.send(request, stream=True, follow_redirects=False)
-        except httpx.HTTPError as exc:
-            raise ModelProxyError("provider_unavailable") from exc
+        response = await self._send_stream_with_retry(client, route, request)
         if response.status_code >= 300:
             await response.aread()
             error = _provider_http_error(response, credential)
@@ -226,6 +272,40 @@ class ModelProxy:
         response.extensions["haas_credential"] = credential
         response.extensions["haas_namespace_bridge"] = bridge
         return response
+
+    async def _send_stream_with_retry(
+        self, client: httpx.AsyncClient, route: ModelRoute, request: httpx.Request
+    ) -> httpx.Response:
+        last_error: httpx.HTTPError | None = None
+        max_attempts = 3
+        for retry_index in range(max_attempts):
+            try:
+                response = await client.send(request, stream=True, follow_redirects=False)
+            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.PoolTimeout) as exc:
+                last_error = exc
+                if retry_index == max_attempts - 1:
+                    break
+                await asyncio.sleep(model_proxy_retry_delay_seconds(None, retry_index=retry_index))
+                continue
+            except httpx.HTTPError as exc:
+                raise ModelProxyError("provider_unavailable") from exc
+            if response.status_code not in _RETRYABLE_STATUS_CODES:
+                return response
+            if retry_index == max_attempts - 1:
+                return response
+            await response.aread()
+            await response.aclose()
+            request = client.build_request(
+                "POST",
+                f"{route.baseUrl.rstrip('/')}/responses",
+                content=request.content,
+                headers=request.headers,
+                timeout=request.extensions.get("timeout"),
+            )
+            await asyncio.sleep(
+                model_proxy_retry_delay_seconds(response, retry_index=retry_index)
+            )
+        raise ModelProxyError("provider_unavailable") from last_error
 
     async def relay_stream(self, response: httpx.Response) -> AsyncIterator[str]:
         credential = response.extensions.pop("haas_credential", "")
@@ -352,6 +432,23 @@ def _flatten_namespace_tools(
             used_names.add(flat_name)
             flattened.append(flat_tool)
     return flattened
+
+
+def model_proxy_retry_delay_seconds(
+    response: httpx.Response | None,
+    *,
+    retry_index: int = 0,
+    random_value: float | None = None,
+) -> float:
+    if response is not None:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after is not None:
+            try:
+                return float(min(max(float(retry_after), 0.0), 2.0))
+            except ValueError:
+                pass
+    jitter = random.random() if random_value is None else random_value
+    return float(min(0.05 * (2**retry_index) + jitter * 0.025, 2.0))
 
 
 def _flatten_input_function_calls(

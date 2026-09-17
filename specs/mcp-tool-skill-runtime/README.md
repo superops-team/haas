@@ -145,6 +145,50 @@ credentials, full command output, or hidden prompts. For local Codex, HaaS may m
 this one built-in source before the general external MCP materialization work is complete;
 all other caller-provided MCP sources continue to follow the existing validation and
 support gates.
+For retry/recovery after a failed, interrupted, or process-lost turn, the returned
+transcript MUST include any latest HaaS bridge checkpoint that has not yet been committed
+as a normal assistant transcript message. Such recovered rows expose only safe projection
+fields, including bounded command and output previews, status, exit code, safe reason,
+task outcome and model-stage summaries.
+
+### 6.1.2 Built-In Browser Harness
+
+OpenHarness includes one reserved built-in browser capability. It is not a
+user-supplied connector, MCP server, or personal Chrome attachment. The default
+runtime is an app-owned managed browser harness with:
+
+- an isolated user data directory under the OpenHarness state directory,
+- a controlled Chromium/Chrome-for-Testing executable selected by the runtime,
+- no import of the user's personal Chrome profile, cookies, passwords, or
+  extensions,
+- bounded CDP/browser health checks before every tool action,
+- one automatic runtime rebuild when the browser context, page, or CDP session
+  has crashed or closed,
+- structured state visible through `/v1/browser/state`, including `status`,
+  `last_action`, `last_result`, and a safe `last_error`.
+- packaged desktop builds include the Playwright driver and controlled browser
+  runtime under the bundled sidecar resources.
+
+The Manager MUST NOT default to launching `/Applications/Google Chrome.app` or
+any other user browser profile for agent browser tools. A developer override may
+name a browser executable explicitly, but it still uses the app-owned profile and
+must be reflected in local diagnostics. Browser warmup is optional and MUST NOT
+block overall service readiness.
+
+Browser tool names remain stable for the Manager connector surface:
+`browser_open_url`, `browser_read_page`, `browser_click`, `browser_type`,
+`browser_select`, `browser_upload_file`, `browser_wait`,
+`browser_screenshot`, and `browser_close`. The implementation may route these
+calls through Browser Harness helper/CLI logic internally, but raw CDP endpoints,
+profile paths, cookies, Authorization headers, and full screenshots are never
+written to model-visible logs.
+
+Acceptance requires a source-tree smoke and a packaged-app smoke that call the
+browser screenshot endpoint from an isolated state directory and observe
+`browser=managed_chromium`, `managed=true`, an app-owned profile, and a PNG data
+URL. Missing bundled Chromium, missing Playwright driver resources, or fallback
+to personal Chrome are release blockers.
+
 
 ### 6.2 SkillBundle
 

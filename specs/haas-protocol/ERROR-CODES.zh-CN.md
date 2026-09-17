@@ -3,7 +3,7 @@
 [English](ERROR-CODES.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-12
+Last reviewed: 2026-09-15
 
 本文件是 HaaS 全部稳定错误码的唯一目录。`POST /run`、`/run_sse`、session
 路径与 `/v1/haas/*` 的错误都必须映射到本表；OpenAPI 的
@@ -90,8 +90,8 @@ Last reviewed: 2026-09-12
 | `haas_model_unavailable` | 422 | no | model_unavailable | harness-registry |
 | `haas_provider_error` | 502 | yes | provider_error | model-proxy |
 | `haas_provider_timeout` | 504 | yes | provider_timeout | model-proxy（stream idle 耗尽） |
-| `haas_model_proxy_token_invalid` | acceptance 前 502；accepted 后 HTTP 200 terminal | yes | model_proxy_token_invalid | model-proxy（active invocation capability 被拒且刷新失败） |
-| `haas_model_proxy_token_expired` | acceptance 前 502；accepted 后 HTTP 200 terminal | yes | model_proxy_token_expired | model-proxy（active invocation capability 过期且刷新失败） |
+| `haas_model_proxy_token_invalid` | acceptance 前 502；accepted 后 HTTP 200 terminal | yes | model_proxy_token_invalid | model-proxy（session capability 被拒，且 same-session rebind/refresh 失败） |
+| `haas_model_proxy_token_expired` | acceptance 前 502；accepted 后 HTTP 200 terminal | yes | model_proxy_token_expired | model-proxy（session capability 过期，且 same-session refresh 失败） |
 | `haas_mcp_unavailable` | 503 | yes | mcp_unavailable | mcp-tool-skill-runtime（required MCP 不可用） |
 
 ## 7. Sandbox / Runtime
@@ -100,7 +100,7 @@ Last reviewed: 2026-09-12
 |------|------|-----------|------------|----------|
 | `haas_sandbox_widening_rejected` | 403 | no | sandbox_widening_rejected | sandbox-runtime |
 | `haas_vault_unavailable` | 503 | yes | vault_unavailable | sandbox-runtime / security-boundary |
-| `haas_request_timeout` | 504 | no | request_timeout | session-runtime |
+| `haas_request_timeout` | acceptance 前 504；accepted 后 HTTP 200 terminal | conditional | long_task_deadline_exceeded | session-runtime（24 小时 invocation deadline 到期） |
 | `haas_delegation_backend_unavailable` | 503 | yes | delegation_backend_unavailable | manager-delegation |
 | `haas_delegation_restore_failed` | 503 | yes | delegation_restore_failed | manager-delegation / sandbox-runtime |
 | `haas_delegation_mount_invalid` | 403 | no | delegation_mount_invalid | manager-delegation / policy-controller |

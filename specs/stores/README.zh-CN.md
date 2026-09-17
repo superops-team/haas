@@ -3,7 +3,8 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-10
+Last reviewed: 2026-09-15
+Change ID: long-task-model-proxy-stability
 Related specs: [Session Runtime](../session-runtime/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -181,6 +182,14 @@ migration 由 Event Log & SSE §6.3.1 定义，必须在提供 native event repl
 Migration 必须幂等，保留原 id/order/content/actions；语义不明确的历史 record 映射为
 `haas.adapter.event_unparsed`，不得虚构语义。
 
+持久化 record 解码必须对加法字段前向兼容。较新 writer 可能存入当前进程 dataclass
+尚不认识的可选字段；SQLite/Postgres loader 必须忽略未知 key，记录安全 migration
+诊断，归一化已接受 alias，并对缺失可选字段使用 dataclass 默认值。已知 alias 属于
+migration 合同：`control_state` 与 `controlState` 在构造 `SessionRecord` 前归一为同一
+session control 字段。已知字段类型不符、未知 schema version、非法 terminal state 或
+secret-shaped value 仍必须 fail closed。单条历史 record 不可读不得阻止 sidecar 提供
+health/control API；execution readiness 可降级，直到相关 record 被隔离或迁移。
+
 未发布 2026-08-26 baseline 的 invocation/delegation migration 也只向前：
 
 - 旧 invocation 有 `startedAtMs` 时用它填充 `acceptedAtMs`，否则使用 record
@@ -274,6 +283,9 @@ Logs：
 | store 不可用 | 新请求 fail closed；已冻结 session 的 read 可降级为不可用 |
 | event append 失败 | invocation 不得宣称 completed；Session Runtime 在权威状态 store 持久化 `failed`，用安全错误 envelope 完成幂等记录，并在 Event Log 之外记录 fallback diagnostics |
 | migration 失败 | startup fail closed，不裸跑旧 schema |
+| 当前 binary 不认识 additive record field | 忽略未知 key 并记录安全诊断，control API 继续可用；不得 crash startup |
+| 持久数据出现已知字段 alias | dataclass 构造前归一化 alias，下次写入保留 canonical 字段 |
+| 已知字段类型/取值非法 | 隔离记录或使 execution readiness fail closed；不得虚构替代值 |
 | lease 过期 | 仅允许使用更新的 fencing token 接管；过期 holder 不能 append event 或覆盖 record，接管者必须先 inspect/explain 前 holder 状态 |
 | delegated runtime record 缺失 | restore fail closed；不得从 live container 反推配置 |
 | workspace lock holder 不明确 | 不授予第二个 `rw` lock；返回 `haas_workspace_lock_busy` 或 timeout |
@@ -291,5 +303,8 @@ Logs：
 - Recovery：idle TTL 清理和进程重启后，delegated-session contract、policy snapshot、approval wait 和 workspace-lock state 可恢复。
 - Concurrency：store-backed workspace lock 阻止同一 canonical workspace 的两个 active `rw` delegated session。
 - Schema：forward migration 后旧数据可读；rollback 明确不支持。 Event schema v1 fixture 必须确定性迁移到 v2，包括安全 unparsed fallback。
-- Lifecycle schema：以加法方式迁移缺失的 `controlState` 与 continuation link；重启和 retention 后仍保留 interrupted 源记录及关联后继记录；operation receipt 保证重复 pause/continue key 不触发第二次 native action。
+- Lifecycle schema：以加法方式迁移缺失的 `controlState`、snake_case/camelCase alias
+  与 continuation link；未知可选字段不得导致 startup crash；重启和 retention 后仍保留
+  interrupted 源记录及关联后继记录；operation receipt 保证重复 pause/continue key 不触发
+  第二次 native action。
 - Security：store 全量审计不包含明文 secret（构造输入后反向断言）。

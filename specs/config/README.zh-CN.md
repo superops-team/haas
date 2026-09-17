@@ -3,8 +3,8 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-14
-Change ID: unified-runtime-approval-policy
+Last reviewed: 2026-09-15
+Change ID: unified-runtime-approval-policy, long-task-model-proxy-stability
 Related specs: [Container Runtime](../container-runtime/README.zh-CN.md), [Stores](../stores/README.zh-CN.md), [Identity](../identity/README.zh-CN.md), [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -90,7 +90,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI: ...
 | `HAAS_DEFAULT_IMAGE_VARIANT` | 沙箱镜像变体（`lite` 默认；`aio` 手动切换）。Manager 与 delegated-session `image.variant` 可按 session 覆盖。 |
 | `HAAS_SESSION_LEASE_TTL_MS` | active-turn session lease TTL（毫秒，默认 `30000`） |
 | `HAAS_SESSION_LEASE_RENEW_INTERVAL_MS` | active-turn lease 续租周期（毫秒，默认 `10000`；必须小于 TTL 一半） |
-| `HAAS_SESSION_TURN_TIMEOUT_SECONDS` | adapter invocation 端到端超时（秒，默认 `900`；必须大于 lease TTL） |
+| `HAAS_SESSION_TURN_TIMEOUT_SECONDS` | adapter invocation 端到端 deadline（秒，默认且最大 `86400`；必须大于 lease TTL） |
+
+`HAAS_SESSION_TURN_TIMEOUT_SECONDS` 是长任务安全 deadline，不是 HTTP response-header
+timeout、SSE heartbeat timeout、model stream-idle timeout 或 GUI WebSocket timeout。超过
+`86400` 的值会被 clamp 到 24 小时；小于等于 0 的值非法。打包 local-managed 执行必须
+使用同一默认值，除非用户显式配置更短时间。
 
 环境变量前缀统一为 `HAAS_`，例如：
 
@@ -150,7 +155,7 @@ adapters:
 session_runtime:
   lease_ttl_ms: 30000
   lease_renew_interval_ms: 10000
-  turn_timeout_seconds: 900
+  turn_timeout_seconds: 86400
 delegation:
   container_backend: disabled  # 默认；显式 delegated-session profile 覆盖为 docker
   docker_bin: docker
