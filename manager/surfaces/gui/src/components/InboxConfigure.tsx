@@ -5,7 +5,6 @@ import {
   getDmRoute,
   getInboxRouting,
   getRecentChannels,
-  getSessions,
   getSubscriptions,
   getUnrouted,
   setDmRoute,
@@ -14,6 +13,7 @@ import {
   unsubscribeChannel,
   type RecentChannel,
   type Connector,
+  type InboxBinding,
   type Subscription,
   type UnroutedItem,
 } from "../api";
@@ -30,15 +30,47 @@ const CARD = "rounded-xl2 border border-line bg-panel";
 const SELECT = "px-2.5 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink";
 const BTN_ACCENT_SM = "text-[12px] px-2.5 py-1 rounded-md bg-accent text-white disabled:opacity-50";
 
-export function InboxConfigure() {
+export function InboxConfigure({ sessions }: { sessions: SessionInfo[] }) {
   const { t } = useTranslation();
+  const [recent, setRecent] = useState<RecentChannel[]>([]);
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [bindings, setBindings] = useState<InboxBinding[]>([]);
+  const [dm, setDm] = useState("");
+  const [subscriptions, setSubscriptions] = useState<Subscription[] | null>(null);
+  const [unrouted, setUnrouted] = useState<UnroutedItem[] | null>(null);
+
+  const refresh = () => {
+    getRecentChannels().then(setRecent).catch(() => setRecent([]));
+    getConnectors().then(setConnectors).catch(() => setConnectors([]));
+    getInboxRouting().then(setBindings).catch(() => setBindings([]));
+    getDmRoute().then((next) => setDm(next || "")).catch(() => setDm(""));
+    getSubscriptions().then(setSubscriptions).catch(() => setSubscriptions([]));
+    getUnrouted().then(setUnrouted).catch(() => setUnrouted([]));
+  };
+
+  useEffect(() => {
+    refresh();
+    const timer = setInterval(refresh, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
   return (
     <div data-testid="inbox-configure">
       <div className="grid grid-cols-2 gap-4 mb-4">
-        <InboxRoutingCard />
-        <DmRouteCard />
+        <InboxRoutingCard
+          recent={recent}
+          connectors={connectors}
+          bindings={bindings}
+          onRefresh={refresh}
+        />
+        <DmRouteCard sessions={sessions} dm={dm} onDmChange={setDm} onRefresh={refresh} />
       </div>
-      <SubscriptionsCard />
+      <SubscriptionsCard
+        subscriptions={subscriptions}
+        sessions={sessions}
+        recent={recent}
+        onRefresh={refresh}
+      />
       {/* Unrouted = delivery FAILURES ("messages that never reached you"), so it lives with
           the Inbox now (§28; previously with routing under Connectors, §26). */}
       <div className="mt-6" data-testid="unrouted-section">
@@ -46,7 +78,7 @@ export function InboxConfigure() {
         <p className="text-[13px] text-muted mb-3">
           {t("inbox.unrouted_sub")}
         </p>
-        <UnroutedTable />
+        <UnroutedTable items={unrouted} />
       </div>
     </div>
   );
@@ -54,29 +86,22 @@ export function InboxConfigure() {
 
 // Where an Unattended session's approvals/questions get mirrored as interactive buttons. Targets
 // the "default" route (sessions fall back to it); pick a channel separate from any you subscribe to.
-function InboxRoutingCard() {
-  const [recent, setRecent] = useState<RecentChannel[]>([]);
-  const [connectors, setConnectors] = useState<Connector[]>([]);
-  const [target, setTarget] = useState(""); // current default-binding address, e.g. "slack:C0123"
+function InboxRoutingCard({
+  recent,
+  connectors,
+  bindings,
+  onRefresh,
+}: {
+  recent: RecentChannel[];
+  connectors: Connector[];
+  bindings: InboxBinding[];
+  onRefresh: () => void;
+}) {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const { t: tt } = useTranslation();
-
-  const load = () => {
-    getRecentChannels().then(setRecent).catch(() => setRecent([]));
-    getConnectors().then(setConnectors).catch(() => setConnectors([]));
-    getInboxRouting()
-      .then((bs) => {
-        const def = bs.find((b) => b.name === "default");
-        setTarget(def?.channel ? `${def.channel}:${def.target}` : "");
-      })
-      .catch(() => setTarget(""));
-  };
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, []);
+  const def = bindings.find((b) => b.name === "default");
+  const target = def?.channel ? `${def.channel}:${def.target}` : "";
 
   const save = async () => {
     const addr = draft.trim();
@@ -90,7 +115,7 @@ function InboxRoutingCard() {
     }
     setError(null);
     setDraft("");
-    load();
+    onRefresh();
   };
   const clear = async () => {
     const result = await setInboxBinding("default", null, "");
@@ -99,7 +124,7 @@ function InboxRoutingCard() {
       return;
     }
     setError(null);
-    load();
+    onRefresh();
   };
 
   const draftAddr = draft.trim();
@@ -162,26 +187,24 @@ function InboxRoutingCard() {
 }
 
 // Which session handles incoming DMs to the bot. None → DMs park in the Unrouted section below.
-function DmRouteCard() {
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [dm, setDm] = useState<string>("");
+function DmRouteCard({
+  sessions,
+  dm,
+  onDmChange,
+  onRefresh,
+}: {
+  sessions: SessionInfo[];
+  dm: string;
+  onDmChange: (sessionId: string) => void;
+  onRefresh: () => void;
+}) {
   const { t: tt } = useTranslation();
-
-  const load = () => {
-    getSessions().then(setSessions).catch(() => setSessions([]));
-    getDmRoute().then((s) => setDm(s || "")).catch(() => setDm(""));
-  };
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, []);
 
   const real = sessions.filter((s) => !s.session_id.startsWith("__"));
   const choose = async (sessionId: string) => {
-    setDm(sessionId);
+    onDmChange(sessionId);
     await setDmRoute(sessionId);
-    load();
+    onRefresh();
   };
 
   return (
@@ -209,35 +232,31 @@ function DmRouteCard() {
 
 // Which sessions listen to which channels (inbound), and where each routes its Inbox (outbound).
 // Subscriptions can be created by the agent (it asks you via ask_user) or added here directly.
-function SubscriptionsCard() {
-  const [subs, setSubs] = useState<Subscription[] | null>(null);
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [recent, setRecent] = useState<RecentChannel[]>([]);
+function SubscriptionsCard({
+  subscriptions,
+  sessions,
+  recent,
+  onRefresh,
+}: {
+  subscriptions: Subscription[] | null;
+  sessions: SessionInfo[];
+  recent: RecentChannel[];
+  onRefresh: () => void;
+}) {
   const [addSession, setAddSession] = useState("");
   const [addChannel, setAddChannel] = useState("");
   const { t: tt } = useTranslation();
-
-  const load = () => {
-    getSubscriptions().then(setSubs).catch(() => setSubs([]));
-    getSessions().then(setSessions).catch(() => setSessions([]));
-    getRecentChannels().then(setRecent).catch(() => setRecent([]));
-  };
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, []);
 
   const real = sessions.filter((s) => !s.session_id.startsWith("__"));
   const add = async () => {
     if (!addSession || !addChannel.trim()) return;
     await subscribeChannel(addSession, addChannel.trim());
     setAddChannel("");
-    load();
+    onRefresh();
   };
   const remove = async (sessionId: string, channel: string) => {
     await unsubscribeChannel(sessionId, channel);
-    load();
+    onRefresh();
   };
 
   return (
@@ -250,7 +269,7 @@ function SubscriptionsCard() {
         <span className="text-[12px] text-muted">{tt("inbox.subscriptions_sub")}</span>
       </div>
 
-      {subs && subs.length > 0 ? (
+      {subscriptions && subscriptions.length > 0 ? (
         <table className="w-full text-[13px]">
           <thead className="text-[11px] uppercase tracking-[0.04em] text-faint">
             <tr className="text-left">
@@ -261,7 +280,7 @@ function SubscriptionsCard() {
             </tr>
           </thead>
           <tbody>
-            {subs.map((s, i) => (
+            {subscriptions.map((s, i) => (
               <tr className="border-t border-line" key={i}>
                 <td className="px-4 py-2.5 truncate max-w-[12rem]" title={s.session_title}>
                   {s.session_title}
@@ -329,16 +348,8 @@ function SubscriptionsCard() {
 
 // Dead-letter view: inbound messages that had no destination (e.g. a DM with no session designated)
 // and background turns that failed (e.g. a dead model). Read-only — for visibility/debugging.
-function UnroutedTable() {
-  const [items, setItems] = useState<UnroutedItem[] | null>(null);
+function UnroutedTable({ items }: { items: UnroutedItem[] | null }) {
   const { t: tt } = useTranslation();
-
-  useEffect(() => {
-    const load = () => getUnrouted().then(setItems).catch(() => setItems([]));
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, []);
 
   if (items && items.length === 0)
     return (

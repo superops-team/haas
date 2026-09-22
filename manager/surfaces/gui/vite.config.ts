@@ -39,5 +39,8 @@ export default defineConfig(({ command }) => {
     // Tauri CLI looks for these; harmless for the browser build.
     clearScreen: false,
     envPrefix: ["VITE_", "TAURI_"],
+    build: {
+      manifest: true,
+    },
   };
 });

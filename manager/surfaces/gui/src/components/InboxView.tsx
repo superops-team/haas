@@ -12,10 +12,11 @@ import {
   type Persona,
   type RecentChannel,
 } from "../api";
+import type { SessionInfo } from "../types";
 import { Icon } from "./Icon";
 import { InboxItemCard } from "./InboxItemCard";
 import { InboxConfigure } from "./InboxConfigure";
-import { PanelHead } from "./IntegrationsView";
+import { PanelHead } from "./PagePanelHead";
 import { shortPersonaName } from "../personaScope";
 
 const ICON_FOR: Record<string, "diamond" | "chat" | "code"> = {
@@ -54,8 +55,10 @@ const TAB = (active: boolean) =>
 // editor and is gone.
 export function InboxView({
   onOpenSession,
+  sessions,
 }: {
   onOpenSession: (sessionId: string, workspace: string, agent: string) => void;
+  sessions: SessionInfo[];
 }) {
   const [tab, setTab] = useState<"pending" | "configure">("pending");
   const [items, setItems] = useState<InboxItem[]>([]);
@@ -80,19 +83,23 @@ export function InboxView({
       })
       .catch(() => setRouting(null));
   useEffect(() => {
-    load();
-    loadRouting();
     getPersonas().then(setPersonas).catch(() => {});
     getConnectors()
       .then((cs) => setSlackConnected(!!cs.find((c) => c.name === "slack" && c.connected)))
       .catch(() => {});
     getRecentChannels().then(setRecent).catch(() => setRecent([]));
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "pending") return;
+    load();
+    loadRouting();
     const t = setInterval(() => {
       load();
       loadRouting(); // edits happen on the Configure tab; keep Pending's status line honest
     }, 4000);
     return () => clearInterval(t);
-  }, []);
+  }, [tab]);
 
   const resolve = async (id: string, resolution: string) => {
     await resolveInboxItem(id, resolution);
@@ -155,13 +162,7 @@ export function InboxView({
             <button
               className={TAB(tab === "pending")}
               data-testid="inbox-tab-pending"
-              onClick={() => {
-                setTab("pending");
-                // Configure-tab edits change the mirror target — re-read so the status line
-                // is honest the moment the user lands back on Pending, not a poll later.
-                loadRouting();
-                load();
-              }}
+              onClick={() => setTab("pending")}
             >
               {tt("inbox.tab_pending")}
               {items.length > 0 && (
@@ -185,7 +186,7 @@ export function InboxView({
           </div>
 
           {tab === "configure" ? (
-            <InboxConfigure />
+            <InboxConfigure sessions={sessions} />
           ) : (
             <>
               <div className="text-[12px] text-faint -mt-1 mb-4" data-testid="inbox-routing">

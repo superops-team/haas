@@ -52,7 +52,7 @@ const DETAIL_PAGES: Record<string, (p: DetailProps) => JSX.Element> = {
   hunter: (p) => <AccountsDetail {...p} />,
 };
 
-export function ConnectorsSection() {
+export function ConnectorsSection({ onCountChange }: { onCountChange?: (count: number) => void }) {
   const { t: tt } = useTranslation();
   const [detail, setDetail] = useState<string | null>(null);
   const [connectors, setConnectors] = useState<Connector[]>([]);
@@ -61,7 +61,12 @@ export function ConnectorsSection() {
   const cloud: CloudStatus = { signed_in: false, account: "", user_id: "", telemetry_enabled: false };
 
   const refresh = () => {
-    getConnectors().then(setConnectors).catch(() => setConnectors([]));
+    getConnectors()
+      .then((next) => {
+        setConnectors(next);
+        onCountChange?.(next.length);
+      })
+      .catch(() => setConnectors([]));
     getMcpServers().then(setMcpServers).catch(() => setMcpServers([]));
     getSlackStatus().then(setSlack).catch(() => setSlack(null));
   };

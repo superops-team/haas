@@ -45,7 +45,7 @@ import {
 } from "../tauri";
 import { useThemePref } from "../theme";
 import { Icon } from "./Icon";
-import { PanelHead } from "./IntegrationsView";
+import { PanelHead } from "./PagePanelHead";
 import { ModelsTab } from "./ManageTabs";
 import { MemorySection } from "./MemorySection";
 import { PersonasTab } from "./PersonasTab";

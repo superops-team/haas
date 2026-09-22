@@ -2,18 +2,8 @@ import { useState } from "react";
 import { getI18n, useTranslation } from "react-i18next";
 import type { ApprovalDecision, Item } from "../types";
 import { humanizeApprovalTitle, type HumanLine } from "../humanize";
+import { shortArgs } from "../argSummary";
 import { Icon } from "./Icon";
-
-export function shortArgs(args: any): string {
-  if (!args || typeof args !== "object") return "";
-  return Object.entries(args)
-    .map(([k, v]) => {
-      let s = typeof v === "string" ? v : JSON.stringify(v);
-      if (s.length > 96) s = s.slice(0, 95) + "...";
-      return `${k}=${s.replace(/\n/g, " ")}`;
-    })
-    .join("  ");
-}
 
 // Human verbs kept for the §25 grant lines (the card title now comes from humanize.ts).
 // Values are i18n keys resolved at render time.

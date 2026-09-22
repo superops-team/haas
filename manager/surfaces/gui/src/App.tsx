@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import {
   announceInboxUnlock,
@@ -79,13 +79,6 @@ import { SessionSetupRow } from "./components/SessionSetupRow";
 import { SendFolderDialog } from "./components/SendFolderDialog";
 import { Onboarding } from "./components/Onboarding";
 import { UpdateBanner } from "./components/UpdateBanner";
-import { ScheduledView } from "./components/ScheduledView";
-import { RightRail } from "./components/RightRail";
-import { IntegrationsView } from "./components/IntegrationsView";
-import { SettingsView } from "./components/SettingsView";
-import { PersonaView } from "./components/PersonaView";
-import { AuditView } from "./components/AuditView";
-import { InboxView } from "./components/InboxView";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { ToolRequestCard } from "./components/ToolRequestCard";
 import { DirectoryRequestCard } from "./components/DirectoryRequestCard";
@@ -95,6 +88,28 @@ import { TeamRequestCard } from "./components/TeamRequestCard";
 import { WorkItemsCard } from "./components/WorkItemsCard";
 import { TeamChatView } from "./components/TeamChatView";
 import { WorkspaceTrustPrompt } from "./components/WorkspaceTrustPrompt";
+
+const ScheduledView = lazy(() =>
+  import("./components/ScheduledView").then((module) => ({ default: module.ScheduledView })),
+);
+const IntegrationsView = lazy(() =>
+  import("./components/IntegrationsView").then((module) => ({ default: module.IntegrationsView })),
+);
+const SettingsView = lazy(() =>
+  import("./components/SettingsView").then((module) => ({ default: module.SettingsView })),
+);
+const PersonaView = lazy(() =>
+  import("./components/PersonaView").then((module) => ({ default: module.PersonaView })),
+);
+const AuditView = lazy(() =>
+  import("./components/AuditView").then((module) => ({ default: module.AuditView })),
+);
+const InboxView = lazy(() =>
+  import("./components/InboxView").then((module) => ({ default: module.InboxView })),
+);
+const RightRail = lazy(() =>
+  import("./components/RightRail").then((module) => ({ default: module.RightRail })),
+);
 
 const newId = () =>
   (crypto as any).randomUUID ? crypto.randomUUID().slice(0, 12) : Math.random().toString(36).slice(2, 14);
@@ -143,6 +158,18 @@ const RAIL_HIDDEN_KEY = "coworker:rail-hidden:v1";
 const NAV_COLLAPSED_KEY = "coworker:nav-collapsed:v1";
 
 type LastSession = { sessionId: string; workspace: string; updatedAt: number };
+
+function RouteLoading() {
+  return (
+    <main className="flex-1 min-w-0 flex bg-paper">
+      <div className="flex-1 min-w-0 overflow-y-auto hairline-scroll">
+        <div className="max-w-4xl mx-auto px-7 py-6">
+          <div className="text-[13px] text-muted">Loading…</div>
+        </div>
+      </div>
+    </main>
+  );
+}
 
 function readLastSessions(): Record<string, LastSession> {
   try {
@@ -247,6 +274,10 @@ export function App() {
   }, []);
 
   const [running, setRunning] = useState(false);
+  const runningRef = useRef(false);
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
   const [executionState, setExecutionState] = useState<ExecutionState>("idle");
   const [pauseSupported, setPauseSupported] = useState(false);
   const [taskPhase, setTaskPhase] = useState<string | undefined>();
@@ -323,6 +354,12 @@ export function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [projects, setProjects] = useState<RecentWorkspace[]>([]);
   const [sessionId, setSessionId] = useState<string>(newId());
+  const activeInfo = sessions.find((s) => s.session_id === sessionId);
+  const sessionListWorking = activeInfo?.liveness === "working";
+  const sessionListWorkingRef = useRef(false);
+  useEffect(() => {
+    sessionListWorkingRef.current = sessionListWorking;
+  }, [sessionListWorking]);
   const itemsRef = useRef<Item[]>([]);
   useEffect(() => {
     itemsRef.current = items;
@@ -475,6 +512,8 @@ export function App() {
   // Count of files this Cowork conversation has produced — surfaces an "Artifacts (N)" button in
   // the topbar when the side panel is hidden, so produced files are never buried.
   const [artifactCount, setArtifactCount] = useState(0);
+  const [artifactOpenRequest, setArtifactOpenRequest] =
+    useState<{ path: string; nonce: number } | null>(null);
   // §32 deep link into the rail's Access section (the former Session-settings drawer): bumping
   // the key expands the section and scrolls it into view. Callers also un-hide the rail.
   const [accessKey, setAccessKey] = useState(0);
@@ -485,7 +524,11 @@ export function App() {
   // §34 (UX-016): clicking an artifact chip in the transcript must land somewhere visible —
   // RightRail opens the viewer; this just makes sure the rail isn't hidden.
   useEffect(() => {
-    const show = () => setRailHidden(false);
+    const show = (event: Event) => {
+      const path = String((event as CustomEvent).detail?.path || "");
+      if (path) setArtifactOpenRequest((current) => ({ path, nonce: (current?.nonce ?? 0) + 1 }));
+      setRailHidden(false);
+    };
     window.addEventListener("ocw-open-artifact", show);
     return () => window.removeEventListener("ocw-open-artifact", show);
   }, []);
@@ -787,16 +830,41 @@ export function App() {
     if (surface === "session") rememberLastSession(agent, sessionId, workspace);
   }, [surface, agent, sessionId, workspace]);
 
+  const [terminalReadbackRequest, setTerminalReadbackRequest] = useState(0);
+  const requestTerminalReadback = useCallback(() => {
+    setTerminalReadbackRequest((value) => value + 1);
+  }, []);
+
   useEffect(() => {
-    if (!running || surface !== "session") return;
+    if (surface !== "session" || !connected || running) return;
+    if (sessionListWorking) requestTerminalReadback();
+  }, [connected, requestTerminalReadback, running, sessionListWorking, surface]);
+
+  useEffect(() => {
+    if (terminalReadbackRequest === 0 || surface !== "session") return;
     let cancelled = false;
+    let inFlight = false;
+    let retryTimer: number | null = null;
+    let attempt = 0;
+    const retryDelays = [0, 3000, 6000, 12000, 30000];
+    const clearRetry = () => {
+      if (retryTimer === null) return;
+      window.clearTimeout(retryTimer);
+      retryTimer = null;
+    };
     const reconcile = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
       try {
         const messages = await getSessionMessages(sessionId);
         if (cancelled) return;
         const replayed = itemsFromMessages(messages);
-        if (!latestHaasTaskOutcome(replayed)) return;
-        if (!canReconcileReadback(itemsRef.current, replayed)) return;
+        if (!latestHaasTaskOutcome(replayed) || !canReconcileReadback(itemsRef.current, replayed)) {
+          if (runningRef.current || sessionListWorkingRef.current) {
+            scheduleRetry();
+          }
+          return;
+        }
         if (applyTerminalOutcomeFromTranscript(replayed)) {
           setItems(replayed);
           setUsage(usageFromMessages(messages));
@@ -804,21 +872,30 @@ export function App() {
           refreshSessions();
         }
       } catch {
-        /* transient readback failure; the next tick or websocket event will retry */
+        if (!cancelled && (runningRef.current || sessionListWorkingRef.current)) scheduleRetry();
+      } finally {
+        inFlight = false;
       }
     };
-    const timer = window.setInterval(reconcile, 3000);
+    const scheduleRetry = () => {
+      if (cancelled || retryTimer !== null) return;
+      const delay = retryDelays[Math.min(++attempt, retryDelays.length - 1)];
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        void reconcile();
+      }, delay);
+    };
     void reconcile();
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      clearRetry();
     };
   }, [
     applyTerminalOutcomeFromTranscript,
     refreshSessions,
-    running,
     sessionId,
     surface,
+    terminalReadbackRequest,
   ]);
 
   // (re)connect when workspace, session, or agent changes
@@ -1295,6 +1372,8 @@ export function App() {
       onEvent: handleEvent,
       onOpen: () => {
         setConnected(true);
+        if (runningRef.current || sessionListWorkingRef.current)
+          requestTerminalReadback();
         // Auto-send the pending message once the session connects ("Run now" prompts and
         // UX-029's deferred first send).
         const p = pendingPromptRef.current;
@@ -1314,6 +1393,8 @@ export function App() {
       },
       onClose: () => {
         setConnected(false);
+        if (runningRef.current || sessionListWorkingRef.current)
+          requestTerminalReadback();
         clearSubmittedTurnIfPending();
       },
     });
@@ -1988,9 +2069,8 @@ export function App() {
   if (isProjectScoped(personaOf(agent)) && workspace)
     subtitleParts.push(tempWorkspace ? t("root.temporary_space") : baseName(workspace));
   const showSaveAsProject = hasHistory && tempWorkspace && isProjectScoped(personaOf(agent));
-  const activeInfo = sessions.find((s) => s.session_id === sessionId);
-  const sessionListWorking = activeInfo?.liveness === "working";
   const displayRunning = running || sessionListWorking;
+  const rightRailActive = surface === "session" && agent !== "chat" && !railHidden && !activityInspectorOpen;
   const displayExecutionState: ExecutionState =
     executionState === "idle" && displayRunning ? "running" : executionState;
   // `displayRunning` too: a mid-turn reconnect may land before any item is rebuilt — a live
@@ -2183,44 +2263,56 @@ export function App() {
         onPeekLeave={() => setNavPeek(false)}
       />
       {surface === "scheduled" ? (
-        <ScheduledView
-          onOpenRun={openRunSession}
-          onRunNow={runTaskNow}
-          initialOpenId={scheduledOpenId}
-        />
+        <Suspense fallback={<RouteLoading />}>
+          <ScheduledView
+            onOpenRun={openRunSession}
+            onRunNow={runTaskNow}
+            initialOpenId={scheduledOpenId}
+          />
+        </Suspense>
       ) : surface === "integrations" ? (
-        <IntegrationsView />
+        <Suspense fallback={<RouteLoading />}>
+          <IntegrationsView />
+        </Suspense>
       ) : surface === "settings" ? (
-        <SettingsView
-          key={settingsTab}
-          initialTab={settingsTab}
-          onOpenPersona={(id) => openPersona(id, "settings")}
-          onCreateSkill={(description) => {
-            // The Skills doorway (SKILLS-SPEC §5.2): creation is a conversation. Fresh
-            // session, description in the composer — the user reads and hits send. With
-            // no description, the prefill invites them to finish the sentence there.
-            startNewSession();
-            prefillComposer(
-              description
-                ? t("app.build_skill_prefill", { description })
-                : t("app.build_skill_prefill_empty"),
-            );
-          }}
-        />
+        <Suspense fallback={<RouteLoading />}>
+          <SettingsView
+            key={settingsTab}
+            initialTab={settingsTab}
+            onOpenPersona={(id) => openPersona(id, "settings")}
+            onCreateSkill={(description) => {
+              // The Skills doorway (SKILLS-SPEC §5.2): creation is a conversation. Fresh
+              // session, description in the composer — the user reads and hits send. With
+              // no description, the prefill invites them to finish the sentence there.
+              startNewSession();
+              prefillComposer(
+                description
+                  ? t("app.build_skill_prefill", { description })
+                  : t("app.build_skill_prefill_empty"),
+              );
+            }}
+          />
+        </Suspense>
       ) : surface === "audit" ? (
-        <AuditView />
+        <Suspense fallback={<RouteLoading />}>
+          <AuditView />
+        </Suspense>
       ) : surface === "inbox" ? (
-        <InboxView onOpenSession={openSessionFromInbox} />
+        <Suspense fallback={<RouteLoading />}>
+          <InboxView onOpenSession={openSessionFromInbox} sessions={sessions} />
+        </Suspense>
       ) : surface === "persona" ? (
-        <PersonaView
-          personaId={personaViewId || agent}
-          onBack={() =>
-            personaViewReturn === "settings" ? openSettings("personas") : setSurface("session")
-          }
-          onOpenIntegrations={() => setSurface("integrations")}
-        />
+        <Suspense fallback={<RouteLoading />}>
+          <PersonaView
+            personaId={personaViewId || agent}
+            onBack={() =>
+              personaViewReturn === "settings" ? openSettings("personas") : setSurface("session")
+            }
+            onOpenIntegrations={() => setSurface("integrations")}
+          />
+        </Suspense>
       ) : (
-      <div className={"main" + (surface === "session" && agent !== "chat" && !railHidden && !activityInspectorOpen ? " rail-open" : "")}>
+      <div className={"main" + (rightRailActive ? " rail-open" : "")}>
         <div className="main-topbar">
           {/* Left: the contextual cluster — [sidebar] [+ new session] [search] — rendered ONLY
               while the sidebar is collapsed (§22; the expanded sidebar already owns those
@@ -2621,44 +2713,50 @@ export function App() {
               }
             />
                   </div>
-          <RightRail
-            active={surface === "session" && agent !== "chat" && !railHidden && !activityInspectorOpen}
-            sessionId={sessionId}
-            refreshKey={browserRefreshKey}
-            toolNames={items.filter((i) => i.kind === "tool").map((i: any) => i.name)}
-            todo={todo}
-            running={displayRunning}
-            onPreviewChange={onArtifactPreview}
-            // Universal scratch (UX-036): every session has a scratch surface, so the
-            // Artifacts section always shows — the server lists the scratch root only.
-            showArtifacts
-            personaId={agent}
-            projectScoped={isProjectScoped(personaOf(agent))}
-            workspace={workspace || undefined}
-            branch={branch}
-            scratchPrimary={tempWorkspace || !isProjectScoped(personaOf(agent))}
-            openAccessKey={accessKey}
-            onOpenIntegrations={() => setSurface("integrations")}
-            board={board}
-            onExpandBoard={() => setBoardOpen(true)}
-            onOpenBoardItem={(id) => {
-              setBoardDetailId(id);
-              setBoardOpen(true);
-            }}
-            /* team serializes as {} for plain sessions — lead-ness needs an actual
-               role, else every solo session loses its Progress panel (owner-hit
-               2026-08-21: the rail showed nothing but "More"). */
-            isLead={
-              teamMembers.length > 0 ||
-              (curSession?.team?.role != null && curSession.team.role !== "worker")
-            }
-            teamMembers={teamMembers}
-            teamChatEnabled={!!curSession?.team?.chat_enabled}
-            teamChatUnread={curSession?.team?.chat_unread || 0}
-            onOpenTeamChat={() => setChatTeam(curSession?.team?.team_id || "")}
-            onOpenWorker={(w) => void selectSession(w.session_id, w.workspace, w.agent)}
-            openBoardKey={boardRailKey}
-          />
+          {(rightRailActive || artifactOpenRequest) && (
+          <Suspense fallback={null}>
+            <RightRail
+              active={rightRailActive}
+              sessionId={sessionId}
+              refreshKey={browserRefreshKey}
+              toolNames={items.filter((i) => i.kind === "tool").map((i: any) => i.name)}
+              todo={todo}
+              running={displayRunning}
+              onPreviewChange={onArtifactPreview}
+              // Universal scratch (UX-036): every session has a scratch surface, so the
+              // Artifacts section always shows — the server lists the scratch root only.
+              showArtifacts
+              personaId={agent}
+              projectScoped={isProjectScoped(personaOf(agent))}
+              workspace={workspace || undefined}
+              branch={branch}
+              scratchPrimary={tempWorkspace || !isProjectScoped(personaOf(agent))}
+              openAccessKey={accessKey}
+              onOpenIntegrations={() => setSurface("integrations")}
+              board={board}
+              onExpandBoard={() => setBoardOpen(true)}
+              onOpenBoardItem={(id) => {
+                setBoardDetailId(id);
+                setBoardOpen(true);
+              }}
+              /* team serializes as {} for plain sessions — lead-ness needs an actual
+                 role, else every solo session loses its Progress panel (owner-hit
+                 2026-08-21: the rail showed nothing but "More"). */
+              isLead={
+                teamMembers.length > 0 ||
+                (curSession?.team?.role != null && curSession.team.role !== "worker")
+              }
+              teamMembers={teamMembers}
+              teamChatEnabled={!!curSession?.team?.chat_enabled}
+              teamChatUnread={curSession?.team?.chat_unread || 0}
+              onOpenTeamChat={() => setChatTeam(curSession?.team?.team_id || "")}
+              onOpenWorker={(w) => void selectSession(w.session_id, w.workspace, w.agent)}
+              artifactOpenRequest={artifactOpenRequest}
+              onArtifactOpenConsumed={() => setArtifactOpenRequest(null)}
+              openBoardKey={boardRailKey}
+            />
+          </Suspense>
+          )}
           {boardOpen && board && board.space && (
             <BoardOverlay
               board={board}

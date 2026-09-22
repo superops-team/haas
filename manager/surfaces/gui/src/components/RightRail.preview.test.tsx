@@ -5,7 +5,6 @@
 import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RightRail } from "./RightRail";
-import { OPEN_ARTIFACT_EVENT } from "./Markdown";
 import { downloadArtifact, getArtifacts, readArtifact, revealArtifact } from "../api";
 
 vi.mock("../api", async () => {
@@ -21,7 +20,10 @@ vi.mock("../api", async () => {
   };
 });
 
-function rail(onPreviewChange: (open: boolean) => void) {
+function rail(
+  onPreviewChange: (open: boolean) => void,
+  artifactOpenRequest?: { path: string; nonce: number } | null,
+) {
   return (
     <RightRail
       active
@@ -31,6 +33,7 @@ function rail(onPreviewChange: (open: boolean) => void) {
       todo={[]}
       running={false}
       onPreviewChange={onPreviewChange}
+      artifactOpenRequest={artifactOpenRequest}
     />
   );
 }
@@ -54,18 +57,15 @@ describe("RightRail preview notification", () => {
     await act(async () => {});
     expect(first).not.toHaveBeenCalled(); // closed at mount: no "closed" replay either
 
-    // Open the viewer via a transcript chip event.
-    await act(async () => {
-      window.dispatchEvent(
-        new CustomEvent(OPEN_ARTIFACT_EVENT, { detail: { path: "r.md" } }),
-      );
-    });
+    // Open the viewer through App's transcript-chip handoff into the lazy rail.
+    rerender(rail(first, { path: "r.md", nonce: 1 }));
+    await act(async () => {});
     expect(first).toHaveBeenCalledTimes(1);
     expect(first).toHaveBeenLastCalledWith(true);
 
     // App re-renders with a NEW callback identity (e.g. the user expanded the nav).
     const second = vi.fn();
-    rerender(rail(second));
+    rerender(rail(second, { path: "r.md", nonce: 1 }));
     await act(async () => {});
     // The viewer never transitioned, so the new callback must not be told "open".
     expect(second).not.toHaveBeenCalled();
@@ -149,11 +149,8 @@ describe("RightRail preview notification", () => {
 
     const view = render(rail(vi.fn()));
     await waitFor(() => expect(getArtifacts).toHaveBeenCalledWith("s1"));
-    await act(async () => {
-      window.dispatchEvent(
-        new CustomEvent(OPEN_ARTIFACT_EVENT, { detail: { path: "report.md" } }),
-      );
-    });
+    view.rerender(rail(vi.fn(), { path: "report.md", nonce: 1 }));
+    await act(async () => {});
 
     await waitFor(() => expect(readArtifact).toHaveBeenCalledWith("s1", "report.md"));
     expect(readArtifact).not.toHaveBeenCalledWith("s1", "output/a/report.md");

@@ -3,7 +3,7 @@
 // per-tool templates. `run_shell` is the exception: its optional `description` argument is
 // model-written intent and is preferred when present. Fallback: "Used <tool> — <short args>".
 
-import { shortArgs } from "./components/ApprovalCard";
+import { shortArgs } from "./argSummary";
 
 // A one-line sentence in three segments so the UI can emphasize the object:
 // "Read " + <b>runbook.md</b> + " from the shared folder".

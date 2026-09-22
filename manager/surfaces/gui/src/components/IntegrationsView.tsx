@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getConnectors } from "../api";
 import { ConnectorsSection } from "./connectors/ConnectorsSection";
 import { Icon } from "./Icon";
+import { PanelHead } from "./PagePanelHead";
 
 // The Connectors surface (renamed from "Integrations", §26). The separate "MCP
 // servers" tab is retired (UX-034): custom MCP servers now live on the Connectors
@@ -13,17 +13,8 @@ import { Icon } from "./Icon";
 
 export function IntegrationsView() {
   const { t: tt } = useTranslation();
-  // Sub-nav count: how many connectors exist. Polled so the badge stays live.
+  // Sub-nav count comes from the page's single connectors refresh owner.
   const [connCount, setConnCount] = useState<number | null>(null);
-
-  useEffect(() => {
-    const load = () => {
-      getConnectors().then((cs) => setConnCount(cs.length)).catch(() => {});
-    };
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, []);
 
   return (
     <main className="flex-1 min-w-0 flex bg-paper">
@@ -48,19 +39,10 @@ export function IntegrationsView() {
               title={tt("integrations.connectors_title")}
               sub={tt("integrations.connectors_sub")}
             />
-            <ConnectorsSection />
+            <ConnectorsSection onCountChange={setConnCount} />
           </section>
         </div>
       </div>
     </main>
-  );
-}
-
-export function PanelHead({ title, sub }: { title: string; sub: string }) {
-  return (
-    <div className="mb-4">
-      <h2 className="text-[20px] font-semibold tracking-tight">{title}</h2>
-      <p className="text-[13px] text-muted mt-0.5">{sub}</p>
-    </div>
   );
 }

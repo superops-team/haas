@@ -13,37 +13,35 @@
 // glyphs. (Filename is `.tsx` because the entries are JSX — the spec's `registry.ts` can't hold
 // JSX.)
 
-import type { SimpleIcon } from "simple-icons";
-import {
-  siAsana,
-  siBox,
-  siClickup,
-  siConfluence,
-  siDatadog,
-  siDiscord,
-  siDropbox,
-  siFigma,
-  siGithub,
-  siGitlab,
-  siGmail,
-  siGooglecalendar,
-  siGoogledrive,
-  siHubspot,
-  siJira,
-  siLinear,
-  siMixpanel,
-  siNotion,
-  siPagerduty,
-  siPosthog,
-  siQuickbooks,
-  siStripe,
-  siTelegram,
-  siWhatsapp,
-  siZendesk,
-} from "simple-icons";
+import asanaSvg from "simple-icons/icons/asana.svg?raw";
+import boxSvg from "simple-icons/icons/box.svg?raw";
+import clickupSvg from "simple-icons/icons/clickup.svg?raw";
+import confluenceSvg from "simple-icons/icons/confluence.svg?raw";
+import datadogSvg from "simple-icons/icons/datadog.svg?raw";
+import discordSvg from "simple-icons/icons/discord.svg?raw";
+import dropboxSvg from "simple-icons/icons/dropbox.svg?raw";
+import figmaSvg from "simple-icons/icons/figma.svg?raw";
+import githubSvg from "simple-icons/icons/github.svg?raw";
+import gitlabSvg from "simple-icons/icons/gitlab.svg?raw";
+import gmailSvg from "simple-icons/icons/gmail.svg?raw";
+import googleCalendarSvg from "simple-icons/icons/googlecalendar.svg?raw";
+import googleDriveSvg from "simple-icons/icons/googledrive.svg?raw";
+import hubspotSvg from "simple-icons/icons/hubspot.svg?raw";
+import jiraSvg from "simple-icons/icons/jira.svg?raw";
+import linearSvg from "simple-icons/icons/linear.svg?raw";
+import mixpanelSvg from "simple-icons/icons/mixpanel.svg?raw";
+import notionSvg from "simple-icons/icons/notion.svg?raw";
+import pagerDutySvg from "simple-icons/icons/pagerduty.svg?raw";
+import posthogSvg from "simple-icons/icons/posthog.svg?raw";
+import quickBooksSvg from "simple-icons/icons/quickbooks.svg?raw";
+import stripeSvg from "simple-icons/icons/stripe.svg?raw";
+import telegramSvg from "simple-icons/icons/telegram.svg?raw";
+import whatsAppSvg from "simple-icons/icons/whatsapp.svg?raw";
+import zendeskSvg from "simple-icons/icons/zendesk.svg?raw";
 
 // `JSX` is global with the react-jsx runtime + @types/react.
 type LogoComponent = () => JSX.Element;
+type SimpleIconData = { title: string; path: string };
 
 export interface ConnectorRegistryEntry {
   label: string;
@@ -59,7 +57,14 @@ function pathLogo(d: string): LogoComponent {
   );
 }
 
-function brand(icon: SimpleIcon): ConnectorRegistryEntry {
+function iconFromSvg(svg: string, fallbackTitle: string): SimpleIconData {
+  return {
+    title: svg.match(/<title>([^<]+)<\/title>/)?.[1] || fallbackTitle,
+    path: svg.match(/<path d="([^"]+)"/)?.[1] || "",
+  };
+}
+
+function brand(icon: SimpleIconData): ConnectorRegistryEntry {
   return { label: icon.title, logo: pathLogo(icon.path) };
 }
 
@@ -192,31 +197,31 @@ export const FALLBACK: ConnectorRegistryEntry = { label: "Connector", logo: Plug
 
 export const CONNECTORS: Record<string, ConnectorRegistryEntry> = {
   // Real brand marks from simple-icons.
-  asana: brand(siAsana),
-  box: brand(siBox),
-  clickup: brand(siClickup),
-  confluence: brand(siConfluence),
-  datadog: brand(siDatadog),
-  discord: brand(siDiscord),
-  dropbox: brand(siDropbox),
-  figma: brand(siFigma),
-  github: brand(siGithub),
-  gitlab: brand(siGitlab),
-  gmail: brand(siGmail),
-  google_calendar: brand(siGooglecalendar),
-  google_drive: brand(siGoogledrive),
-  hubspot: brand(siHubspot),
-  jira: brand(siJira),
-  linear: brand(siLinear),
-  mixpanel: brand(siMixpanel),
-  notion: brand(siNotion),
-  pagerduty: brand(siPagerduty),
-  posthog: brand(siPosthog),
-  quickbooks: brand(siQuickbooks),
-  stripe: brand(siStripe),
-  telegram: brand(siTelegram),
-  whatsapp: brand(siWhatsapp),
-  zendesk: brand(siZendesk),
+  asana: brand(iconFromSvg(asanaSvg, "Asana")),
+  box: brand(iconFromSvg(boxSvg, "Box")),
+  clickup: brand(iconFromSvg(clickupSvg, "ClickUp")),
+  confluence: brand(iconFromSvg(confluenceSvg, "Confluence")),
+  datadog: brand(iconFromSvg(datadogSvg, "Datadog")),
+  discord: brand(iconFromSvg(discordSvg, "Discord")),
+  dropbox: brand(iconFromSvg(dropboxSvg, "Dropbox")),
+  figma: brand(iconFromSvg(figmaSvg, "Figma")),
+  github: brand(iconFromSvg(githubSvg, "GitHub")),
+  gitlab: brand(iconFromSvg(gitlabSvg, "GitLab")),
+  gmail: brand(iconFromSvg(gmailSvg, "Gmail")),
+  google_calendar: brand(iconFromSvg(googleCalendarSvg, "Google Calendar")),
+  google_drive: brand(iconFromSvg(googleDriveSvg, "Google Drive")),
+  hubspot: brand(iconFromSvg(hubspotSvg, "HubSpot")),
+  jira: brand(iconFromSvg(jiraSvg, "Jira")),
+  linear: brand(iconFromSvg(linearSvg, "Linear")),
+  mixpanel: brand(iconFromSvg(mixpanelSvg, "Mixpanel")),
+  notion: brand(iconFromSvg(notionSvg, "Notion")),
+  pagerduty: brand(iconFromSvg(pagerDutySvg, "PagerDuty")),
+  posthog: brand(iconFromSvg(posthogSvg, "PostHog")),
+  quickbooks: brand(iconFromSvg(quickBooksSvg, "QuickBooks")),
+  stripe: brand(iconFromSvg(stripeSvg, "Stripe")),
+  telegram: brand(iconFromSvg(telegramSvg, "Telegram")),
+  whatsapp: brand(iconFromSvg(whatsAppSvg, "WhatsApp")),
+  zendesk: brand(iconFromSvg(zendeskSvg, "Zendesk")),
   // Real brand marks vendored from simple-icons v9.
   slack: { label: "Slack", logo: pathLogo(SLACK_PATH) },
   salesforce: { label: "Salesforce", logo: pathLogo(SALESFORCE_PATH) },

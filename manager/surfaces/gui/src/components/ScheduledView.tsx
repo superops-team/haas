@@ -12,7 +12,7 @@ import {
   type AutomationRun,
 } from "../api";
 import { Icon } from "./Icon";
-import { PanelHead } from "./IntegrationsView";
+import { PanelHead } from "./PagePanelHead";
 import { AutomationQuickstart } from "./AutomationQuickstart";
 
 // Shared utility strings (the §28 page shell — mirrors IntegrationsView's constants).

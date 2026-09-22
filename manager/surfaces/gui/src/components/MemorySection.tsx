@@ -12,7 +12,7 @@ import {
   type MemorySettings,
 } from "../api";
 import { Icon } from "./Icon";
-import { PanelHead } from "./IntegrationsView";
+import { PanelHead } from "./PagePanelHead";
 import { Toggle } from "./Toggle";
 
 // MEMORY-SPEC §5.3: the one memory screen. A plain-language list of remembered facts

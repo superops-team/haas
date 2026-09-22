@@ -20,7 +20,7 @@ import type { SessionInfo, TodoItem } from "../types";
 import { AccessSection } from "./AccessSection";
 import { BoardSection } from "./BoardPanel";
 import { Icon } from "./Icon";
-import { Markdown, OPEN_ARTIFACT_EVENT } from "./Markdown";
+import { Markdown } from "./Markdown";
 
 type Panel = "progress" | "artifacts" | "board" | "journal" | "team" | "files";
 
@@ -79,6 +79,8 @@ interface Props {
   teamChatUnread?: number;
   onOpenTeamChat?: () => void;
   onOpenWorker?: (s: SessionInfo) => void;
+  artifactOpenRequest?: { path: string; nonce: number } | null;
+  onArtifactOpenConsumed?: () => void;
   // Bumped when a [.](board:) chip in the transcript is clicked — expands the Board section.
   openBoardKey?: number;
 }
@@ -108,6 +110,8 @@ export function RightRail({
   teamChatUnread = 0,
   onOpenTeamChat,
   onOpenWorker,
+  artifactOpenRequest,
+  onArtifactOpenConsumed,
   openBoardKey = 0,
 }: Props) {
   const { t } = useTranslation();
@@ -202,11 +206,7 @@ export function RightRail({
   // §34 (UX-016): [Title](artifact:path) chips in the transcript open the viewer directly.
   // Resolve against the loaded list first; on a miss, refresh once (the file may be
   // seconds old), then fall back to a minimal record — readArtifact validates the path.
-  // Registered even while the rail is HIDDEN (owner-hit 2026-08-15): the chip fires ONE
-  // event, and App's unhide listener and this one race it — gating this on `active`
-  // dropped the selection, so the first click only opened an empty rail.
-  useEffect(() => {
-    if (!sessionId) return;
+  const openArtifactPath = (path: string) => {
     const minimal = (path: string): ArtifactInfo => ({
       path,
       name: path.split("/").pop() || path,
@@ -220,24 +220,24 @@ export function RightRail({
       const byBasename = list.filter((a) => a.name === path);
       return byBasename.length === 1 ? byBasename[0] : undefined;
     };
-    const onOpen = (e: Event) => {
-      const path = String((e as CustomEvent).detail?.path || "");
-      if (!path) return;
-      const found = match(artifacts, path);
-      if (found) {
-        setSelected(found);
-        return;
-      }
-      getArtifacts(sessionId)
-        .then((list) => {
-          setArtifacts(list);
-          setSelected(match(list, path) ?? minimal(path));
-        })
-        .catch(() => setSelected(minimal(path)));
-    };
-    window.addEventListener(OPEN_ARTIFACT_EVENT, onOpen);
-    return () => window.removeEventListener(OPEN_ARTIFACT_EVENT, onOpen);
-  }, [sessionId, artifacts]);
+    const found = match(artifacts, path);
+    if (found) {
+      setSelected(found);
+      return;
+    }
+    getArtifacts(sessionId)
+      .then((list) => {
+        setArtifacts(list);
+        setSelected(match(list, path) ?? minimal(path));
+      })
+      .catch(() => setSelected(minimal(path)));
+  };
+
+  useEffect(() => {
+    if (!artifactOpenRequest?.path) return;
+    openArtifactPath(artifactOpenRequest.path);
+    onArtifactOpenConsumed?.();
+  }, [artifactOpenRequest?.nonce, artifactOpenRequest?.path]);
 
   if (!active) return null;
 

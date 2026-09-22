@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App, LIVE_PROJECTION_FLUSH_MS } from "./App";
+import { getSessionMessages } from "./api";
 import type { WsEvent } from "./types";
 
 const mockState = vi.hoisted(() => {
@@ -168,12 +169,25 @@ vi.mock("./api", async () => {
   };
 });
 
+function resetGetSessionMessagesMock() {
+  vi.mocked(getSessionMessages).mockImplementation(async (sessionId: string) =>
+    mockState.withHistorySessions
+      ? [
+          { role: "user", content: `question for ${sessionId}` },
+          { role: "assistant", content: `answer for ${sessionId}` },
+        ]
+      : [],
+  );
+}
+
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   mockState.lastSession = null;
   mockState.livenessOnly = false;
   mockState.withHistorySessions = false;
   vi.clearAllMocks();
+  resetGetSessionMessagesMock();
 });
 
 describe("App execution lifecycle controls", () => {
@@ -253,6 +267,72 @@ describe("App execution lifecycle controls", () => {
     render(<App />);
 
     await expectStopOnly();
+  });
+
+  it("does not poll the full transcript during healthy running WebSocket silence", async () => {
+    render(<App />);
+
+    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    vi.mocked(getSessionMessages).mockClear();
+    vi.useFakeTimers();
+
+    fireEvent.change(input, { target: { value: "keep the stream open" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    mockState.lastSession?.handlers.onEvent({
+      type: "turn_start",
+      data: { input: "keep the stream open" },
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(getSessionMessages).not.toHaveBeenCalled();
+    expect(mockState.lastSession?.sent).toHaveLength(1);
+  });
+
+  it("recovers a missed terminal transcript after disconnect with single-flight readback", async () => {
+    render(<App />);
+
+    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    vi.mocked(getSessionMessages).mockClear();
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    vi.mocked(getSessionMessages).mockImplementation(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => window.setTimeout(resolve, 3500));
+      inFlight -= 1;
+      return [
+        { role: "user", content: "recover terminal" },
+        {
+          role: "assistant",
+          content: "done",
+          _haas_task_outcome: { phase: "completed" },
+        },
+      ];
+    });
+
+    fireEvent.change(input, { target: { value: "recover terminal" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    mockState.lastSession?.handlers.onEvent({
+      type: "turn_start",
+      data: { input: "recover terminal" },
+    });
+    await expectStopOnly();
+
+    const submittedSession = mockState.lastSession;
+    vi.useFakeTimers();
+    act(() => submittedSession?.close());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(12_000);
+    });
+
+    expect(screen.getByLabelText("Send")).toBeTruthy();
+    expect(maxInFlight).toBe(1);
+    expect(submittedSession?.sent).toHaveLength(1);
+    expect(screen.getByText("done")).toBeTruthy();
   });
 
   it("coalesces high-frequency stream projection updates and avoids smooth-scroll chasing", async () => {

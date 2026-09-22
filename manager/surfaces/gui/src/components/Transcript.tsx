@@ -8,7 +8,7 @@ import type {
   TaskOutcome,
 } from "../types";
 import type { ExecutionEvidence } from "../api";
-import { shortArgs } from "./ApprovalCard";
+import { shortArgs } from "../argSummary";
 import { humanizeAsk, humanizeTool, type HumanLine } from "../humanize";
 import { projectToolActivity, type ToolActivity } from "../activity";
 import { formatTokens } from "../usage";
