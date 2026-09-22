@@ -322,6 +322,9 @@ restore 或 terminal 语义。对于当前 client 不认识的 public event type
 每个 invocation 的 terminal outcome 必须且只能由 `haas.turn.completed`、
 `haas.turn.failed`、`haas.turn.incomplete`、`haas.turn.interrupted`、
 `haas.turn.cancelled` 之一表达。
+`haas.artifact.registered` 是加法、非终态 fact，只携带 scoped file id、relative path、
+media type、bytes、invocation id 与 preview/download availability。它必须先于该 invocation
+的 terminal event 持久化；artifact list endpoint 仍为权威来源。
 
 Output、reasoning、tool 与 usage fact 可携带 Event Log & SSE 定义的加法关联字段
 `itemId` 与 `modelCallId`。`modelCallId` 标识一次实测模型 round trip，不是 UI row。

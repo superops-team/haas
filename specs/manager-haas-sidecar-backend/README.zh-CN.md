@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-15
-Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability
+Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface
 Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Config](../config/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -364,7 +364,7 @@ Task phase 进入 `completed` 后，turn 默认收敛为 final answer、仅由�
 不显示原始协议 event dump。失败/恢复尝试、跳过的验证、未解决风险及任何非成功事实在
 两种状态下都应保持醒目。用户展开状态仅属于本地展示状态，不改变 task/session。
 
-运行时当前 model-call stage 默认展开；已完成的成功 stage 收起为单行 title、step count 与实测 usage，用户可展开任意 stage，且不改变 task state。失败 stage 保持展开并聚焦失败 action。等待 usage event 时显示“Token 尚未报告”；若 stage 终止仍未收到则变为“Token 未报告”。Turn footer 对 model-call usage 只求和一次，并可把最新 cumulative snapshot 作为单独标注值展示。只有 turn-level usage 的旧历史只在 turn scope 展示该总量，绝不补造 stage 数值。
+运行时 activity projection 必须避免 `Waiting for agent` 到首个 model/tool stage 之间出现空白或生硬切换；同一个紧凑 activity 容器承载 waiting 到 active stage 的过渡。Model-call stage 默认折叠，包括 running stage。折叠标题应使用该 stage 的任务名称：优先取有意义的 tool/activity summary、command preview、action summary、reasoning/output preview，最后才回退到 `Stage N`。用户可展开任意 stage，且不改变 task state。失败 stage 保持醒目，并让失败 action 易于检查。Running stage 使用轻量 active 视觉，例如 accent 渐变边框或背景，同时保持文字可读和明确状态文案；reduced-motion 模式下该 active 视觉保持静态。等待 usage event 时显示“Token 尚未报告”；若 stage 终止仍未收到则变为“Token 未报告”。Turn footer 对 model-call usage 只求和一次，并可把最新 cumulative snapshot 作为单独标注值展示。只有 turn-level usage 的旧历史只在 turn scope 展示该总量，绝不补造 stage 数值。
 
 桌面 viewport 宽度至少 1100 CSS pixel 时，选择 activity 后打开右侧 Inspector，宽度为 `clamp(320px, 30vw, 400px)`。较窄 viewport 使用 chat 工作区内部、composer 上方的非模态底部抽屉，最多占可用 chat 高度的一半，不得覆盖 composer 或 active approval/input card。Inspector/抽屉展示语义标题与状态、时间、duration、安全操作摘要、适用时的 exit code、最多五行持久 preview、省略行数、安全 artifact 和完整 transcript 入口。存在未过期 `evidenceRef` 时，打开 Inspector 按 scope 即时读取，并补充实际命令、工作目录与有界 command output。普通 HTTP(S) URL 可复制、可点击；signed 用户授权 URL 在 evidence 过期前也保持完整可点击，打开时使用 `noopener,noreferrer`，且 URL 不经过 analytics、telemetry 或 Manager redirect log。完整 URL 以外的 credential value 仍脱敏。Codex 0.152.1 的合并输出标为“命令输出”；只有 adapter 提供权威 stream label 时才显示 stdout/stderr 分栏。
 
@@ -380,6 +380,141 @@ Activity row 和 control 必须支持键盘访问。在 row 上按 Enter 或 Spa
 高度变化，让用户立即看到任务已被接受且正在推进。只有提交之后用户再次明确向上滚动
 才退出该轮跟随；后台或 replay 更新不得抢走用户主动固定的阅读位置。程序化滚动必须在
 布局提交后发生，且自身产生的中间 scroll event 不得被误判为用户操作。
+打开、恢复或切换到已持久化 session 时，也必须开启新的视口周期：历史 transcript
+完成渲染后，视口默认对齐到最新内容。上一个 session 的已向上滚动位置不得继承到新打开
+的 session。完成这次初始对齐后，普通的 reader-pinned 行为继续生效，直到用户再次切换
+session 或显式点击“跳到最新”。
+
+assistant text delta、reasoning delta 与 model-stage update 等高频 GUI 投影更新在发布
+React state 前必须合并。一次 live render tick 可以合并多个 transport frame，但必须保留
+追加顺序、terminal flush 语义和 canonical 持久 transcript。流式合并只属于 GUI
+背压规则，不得改变 ADK/HaaS event ordering、response id、task status、durable cursor、
+usage 或恢复行为。视口正在跟随 active foreground turn 时，布局后的跟随滚动应使用
+即时对齐，而不是反复 smooth 动画；用户显式点击“跳到最新”仍可保持动画。这避免 token
+级 smooth scroll 动画与触控板/惯性滚动相互竞争造成页面级抖动。
+所有 live-output 动效，包括流式光标、waiting/activity spinner、thinking pulse 与
+跳到最新滚动，都必须遵守 `prefers-reduced-motion: reduce`：关闭连续动画并使用
+即时滚动对齐。装饰性的 live-output 字符必须对辅助技术隐藏，确保屏幕阅读器只播报
+任务状态与内容。
+
+### 5.9 HaaS 产物展示面
+
+当 Manager session 已绑定 HaaS 时，Manager 自有
+`/v1/sessions/{managerSessionId}/artifacts` 仍是 GUI 合同。GUI 不得直接调用 HaaS
+sidecar，不得暴露 HaaS bearer token，也不得把 HaaS session id 当作路由原语。Manager
+通过 binding 解析 `(endpointId, haasSessionId, principal scope)`，并经 `HaasClient`
+代理 artifact 操作。
+
+非 HaaS 本地路径继续按现有方式扫描 session scratch/workspace。HaaS 路径必须调用权威
+HaaS artifact list endpoint，并把每个 `FileRecord` 映射为现有 GUI artifact 形状和加法
+source 字段：
+
+```json
+{
+  "source": "haas",
+  "id": "file_abc",
+  "path": "output/reports/security-review.html",
+  "name": "security-review.html",
+  "kind": "html",
+  "size": 24576,
+  "modified_at": 1786400240,
+  "preview_status": "available",
+  "download_status": "available"
+}
+```
+
+P0 的默认 HaaS 发布根目录是 `output/`，与 Artifact Store §6.2 一致。Manager 不得通过
+扫描 mounted project directory、recent modified files、`dist/`、`coverage/` 或用户
+workspace root 来扩大产物范围。未来若 profile/session policy 增加额外 publish root，
+Manager 只反映 HaaS 已注册的内容；它不维护独立的 artifact-root policy。GUI 应继续用
+单独的“文件变更”或 workspace diff surface 表达源码改动。
+
+`path` 是 HaaS `relativePath`，也是 transcript link
+`[Security review](artifact:output/reports/security-review.html)` 的唯一稳定 deep-link
+目标。GUI 为兼容旧链接可额外按 basename 匹配，但仅允许当前列表中恰好一个 artifact
+命中该 basename。若多个 artifact 匹配，Manager 必须返回 ambiguous-link 状态，而不是猜测打开
+其中一个。Canonical link form 必须使用相对路径。远程/HaaS artifact 默认不提供 `abs_path`；
+除非已确认它是当前 Manager 可安全 reveal 的
+local-managed 文件，否则复制远程 artifact 的 `relativePath` 不得伪装成本机文件系统路径。
+`kind` 由 `mediaType` 和文件扩展名推导，并复用现有 viewer 分类：markdown、html、image、
+pdf、sheet、office、code、text、folder 或 unknown。
+
+`/v1/sessions/{managerSessionId}/artifacts/read?path=...` 对 HaaS-bound session 也是
+Manager 代理。它按相对路径解析当前 artifact，验证其属于绑定的 HaaS session 与调用方 scope，
+并且仅在 HaaS 报告内容可读时按 `fileId` 拉取内容。HTML 继续使用现有沙箱 viewer 和相同
+CSP 规则渲染。Image、PDF、sheet、markdown、code、text 使用现有 viewer 能力。若 HaaS
+报告 `previewStatus=download_only`，viewer 展示文件 metadata，并把 Download/Open 作为
+主操作，不打开空的 inline preview。若 HaaS 报告 `previewStatus=unavailable`，或 content
+返回 `404 haas_file_not_found`，viewer 展示稳定不可用状态，说明该产物已记录，但当前
+runtime 还不能读取内容。
+`/v1/sessions/{managerSessionId}/artifacts/download?path=...` 是对应的 Manager-owned 下载代理。
+它通过同一绑定会话查找解析 path，再使用返回的 opaque `fileId` 读取，并以 attachment 与
+`nosniff` 响应。GUI 对可读远端产物使用该端点，不得把远端产物交给本机 reveal/open API。
+
+Manager 将可读 HaaS bytes 转换为现有 JSON `ArtifactContent` response，而不是把 HaaS
+attachment 直接返回给浏览器：
+
+```json
+{
+  "ok": true,
+  "source": "haas",
+  "path": "output/reports/security-review.html",
+  "kind": "html",
+  "content": "<!doctype html>...",
+  "download_status": "available",
+  "preview_status": "available"
+}
+```
+
+文本类 artifact 返回有界 UTF-8 `content`，必要时带 `truncated`。Image/PDF/sheet 在现有
+Manager preview size limit 内返回有界 `data_url`。Office、unknown、过大或明确 download-only
+的 artifact 返回 `{ok:true, kind, download_status:"available", preview_status:"download_only"}`
+和 metadata，不携带 inline bytes。不可读的 metadata-only artifact 返回
+`{ok:false, code:"artifact_unavailable", preview_status:"unavailable", download_status:"unavailable"}`。
+这些 JSON response 是 Manager-local UI 合同，不是 HaaS public API 字段。
+
+右侧 rail 的 Artifacts section 对 HaaS-backed session 始终可用。默认折叠；第一次成功
+list 后显示数量 chip。已 accepted 的 HaaS turn 到达终态后，Manager 刷新 artifact list。
+如果 native artifact registration fact 在终态前到达，Manager 可以发布 `artifacts_changed`
+GUI event 提前刷新：
+
+```json
+{"type": "artifacts_changed", "session_id": "manager_session_1", "source": "haas"}
+```
+
+List endpoint 仍是权威，event 不携带文件内容、HaaS bearer token 或 HaaS session id。
+Transcript 中的 `artifact:` chip 即使在右侧 rail 隐藏时也必须第一次点击就打开 viewer。
+若 artifact list 陈旧，viewer 先刷新一次，再 fallback 到 metadata-only selection。
+
+面向用户的文案使用 “Artifacts” / “产物” 表达 session 交付物。空状态为 “No artifacts yet”
+/ “还没有生成产物”。终态数量为 “Generated N artifacts” / “生成了 N 个产物”。已记录但
+不可读的产物使用等价文案：“This artifact was recorded, but preview is not available from
+this runtime yet.” UI 主标签不得暴露 `FileRecord`、`artifactDelta`、`hsess_...` 或
+`file_...` 等内部术语；opaque id 可保留在开发诊断中。
+
+安全约束：
+
+- Manager 不把 artifact 内容转发进 transcript message、log、metric、notification、
+  search index、model context 或 automation summary。
+- 远程 artifact 的 `reveal` 不在本机 shell out。它只能通过带认证的 Manager 代理下载，
+  或在未来合同提供时打开 HaaS 给出的安全 URL。
+- HTML preview 保持当前本地 artifact viewer 的 null-origin sandbox 与离线 CSP；active
+  content 不得从 HaaS API origin 直接渲染。
+- Artifact list metadata 不得包含 host path、隐藏 runtime path、raw prompt、完整 command
+  output、signed URL、Authorization/Cookie 值或 provider credential。
+
+验收：
+
+1. 绑定 HaaS 的 Manager session 中有两个 HaaS `FileRecord` 时，现有 Manager
+   `/v1/sessions/{id}/artifacts` endpoint 返回两个 GUI artifact。
+2. 点击指向 HaaS 相对路径的 `artifact:` chip 时，第一次点击就打开 viewer，陈旧 metadata
+   只刷新一次，且浏览器看不到 HaaS token 或 session id。
+3. HTML artifact 继续在现有 sandbox 中渲染；不可用或 metadata-only 的 HaaS artifact
+   展示明确的不可预览/仅下载状态。
+4. HaaS turn 到达终态后，artifact 数量与右侧 rail 列表自动刷新，不需要手动刷新页面。
+5. 非 HaaS 本地 artifact 扫描行为保持不变。
+6. 测试覆盖 `HaasClient` list/download/archive 方法、Manager route 代理、GUI 映射、chip
+   行为、安全脱敏，以及远程 reveal/download 行为。
 
 Running indicator 来自 task/invocation state，不来自 WebSocket 是否连接。重连先恢复持久 activity projection 与 pending interaction，再续 live cursor。未知 event type 仅增加诊断计数并隐藏，不能转成 assistant text、success、approval UI 或猜测的 activity。
 
@@ -599,3 +734,48 @@ summary、model-stage summary，以及来自 `_haas_activity` 的有界 activity
 outputPreview/preview、exitCode、safeReason 和 durationMs。Query filtering 必须同时
 搜索这些安全字段和 assistant text，确保 agent retry 能 recall 已经尝试过的步骤，
 避免盲目重复 side effect。
+
+### 流式阶段状态与性能增量
+
+Change ID: stream-stage-status-performance。阶段标题必须以本地化可见文字展示运行中、
+已完成、失败、未完成、已取消，且写入无障碍名称。渐变仅辅助文字。历史分组按 items
+身份和 running 边界缓存；实时文本、reasoning、阶段快照不使缓存失效。复用未变化的
+Markdown 渲染，同时保留正文更新、本地化、展开状态与终态语义。仅影响 GUI：ADK/native
+API、持久化、usage、事件顺序及其他组件合同不变。虚拟列表不在本补丁内。验收：测试证明
+状态迁移、展开状态保留、实时更新不重扫/重解析历史、历史变化及时刷新。任务：回归测试、
+实现、GUI 构建/浏览器检查、正确性/可维护性/测试质量审查。
+
+### 自动化与桌面可靠性（automation-desktop-reliability）
+
+背景：定时任务绕过公共执行路由，将流结束误判成功；内存调度占用及通知缺失掩盖失败。
+目标：统一执行、真实终态、可解释恢复、限制本机资源、连续可读的桌面状态。
+非目标：新增 provider 协议或外发消息授权。
+
+1. 定时运行使用 run_turn_events，传入 task session、agent、workspace、选定模型；广播
+Manager 事件并按现有存储 checkpoint。成功必须有成功终态且无错误、中断或未完成任务；
+EOF 不能表示成功。通知前持久化结果，finally 释放占用。
+2. 启动在 catchup 前对账未完成运行：保留原会话，将未知终态记为 error/recovery-required，
+停用所属计划，避免重跑副作用。用户查看原会话后显式启用后续计划；不自动重提或虚构取消成功。
+3. 调度默认最多四个活动任务；其余到期任务保留在持久队列，后续 tick 接纳。可配置超时默认
+沿用 24 小时；同任务不重叠。不虚构金额或 token 预算。
+4. 成功/失败写入持久 Inbox 通知，包含安全状态和原会话入口，再发 app-wide
+ automation_run_finished；保留旧 task_done。通知失败不能改变执行结果，不包含原始结果或
+异常正文，不进行未授权外发。
+5. 桌面检测自己拥有的 Manager 子进程退出，复用参数和鉴权身份，有界退避重启。保持凭据
+通道归属规则；退出停止监督，不杀未知端口进程。耗尽重试提供可见重启说明；进程重启不等于任务重跑。
+6. 窄屏面板在可用区域内覆盖呈现，保留关闭和 composer 操作路径。waiting、reasoning、工具、
+收尾期间始终有状态，不同时显示 Waiting 与活动阶段。
+
+兼容：Manager event 加法，保留 run status 和 session 身份；ADK/native schema、容器、proxy、
+MCP、policy、凭据不变。存储增加恢复操作，不删历史。测试覆盖错误/EOF/终态、路由、重启不重复、
+并发、取消、通知失败、原生监督、窄屏及状态过渡。任务：自动化测试实现、桌面/UI、完整门禁、两轮
+代码审查、Brooks 架构/测试审查，再审计剩余问题。备份迁移、保留期、虚拟列表及更新渠道信任需要
+单独组件设计；记录可行性与剩余缺口，不擅自删数据或编造签名密钥。
+
+第二轮修正：计划次数在副作用执行前持久化；接纳前重读任务以尊重停用/删除。手动自动化
+记录由服务端 turn 收尾，不只依赖浏览器回调。HaaS 审批/输入事件生成指向原会话的持久
+关注提示，不自动批准。Inbox 使用 fsync 和原子替换，持久化失败撤销内存插入。结果通知
+按 run ID 去重，与需要输入提示区分。桌面 WebSocket 有界重连且不重发用户消息。正常
+会话界面挂载前的启动失败也显示恢复说明。
+
+原生结果通知仅接受 ok/error 并使用固定文字；系统拒绝时 Inbox 仍可查看。定时 HaaS 交互当前在原会话审批，旧 name/target grant 不转换为更宽 HaaS 权限。未知运行恢复采用暂停核对，不声称无缝续跑。备份恢复、自动保留期、万条历史虚拟化、可信发布清单/签名密钥迁移仍未实现，已在 Beads 跟踪。

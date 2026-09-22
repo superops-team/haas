@@ -4,7 +4,7 @@
 
 Status: Draft
 Last reviewed: 2026-09-15
-Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability
+Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Manager Delegation](../manager-delegation/README.md), [Harness Profile](../harness-profile/README.md), [Container Runtime](../container-runtime/README.md), [Config](../config/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
@@ -426,13 +426,30 @@ ordered model-stage stream, not raw protocol events. Failed/recovered attempts, 
 verification, unresolved risk, and any non-success fact remain visually prominent in either
 state. User expansion is local presentation state and does not change task/session state.
 
-While running, the current model-call stage is expanded. Completed successful stages collapse
-to a one-line title, step count, and measured usage; the user can expand any stage without
-changing task state. A failed stage remains expanded and focuses the failed action. A stage
-waiting for its usage event shows `Token usage not reported yet`; if it terminates without one,
-the copy becomes `Token usage not reported`. The turn footer sums model-call usage once and may
-show the latest cumulative snapshot as a separately labelled value. Legacy history with only
-turn-level usage shows that total at turn scope and never synthesizes stage numbers.
+Runtime activity projection MUST avoid a blank handoff between `Waiting for agent` and the
+first model/tool stage. The same compact activity container carries the transition from
+waiting to active stage. Model-call stages default to collapsed, including the running stage,
+and the collapsed title SHOULD use the stage's task name: first meaningful tool/activity
+summary, command preview, action summary, reasoning/output preview, then only as a fallback
+`Stage N`. The user can expand any stage without changing task state. Failed stages remain
+visually prominent and keep the failed action easy to inspect. A running stage uses a subtle
+active treatment, such as an accent gradient border or background, while preserving readable
+text and explicit status copy; reduced-motion mode keeps that active treatment static. A
+stage waiting for its usage event shows `Token usage not reported yet`; if it terminates
+without one, the copy becomes `Token usage not reported`. The turn footer sums model-call
+usage once and may show the latest cumulative snapshot as a separately labelled value.
+Legacy history with only turn-level usage shows that total at turn scope and never
+synthesizes stage numbers.
+
+For change ID stream-stage-status-performance, headers MUST expose localized visible status
+for running/completed/failed/incomplete/cancelled, also in accessible names. Gradients supplement
+text. Cache historical grouping by items identity and running boundary; live text, reasoning
+and stage snapshots must not invalidate it. Reuse unchanged Markdown rendering while preserving
+text updates, localization, disclosure and terminal semantics. GUI-only: ADK/native API,
+persistence, usage, event ordering and other component contracts are unaffected. Virtualization
+is outside this patch. Acceptance: tests prove status transitions, disclosure preservation,
+no historical regrouping/reparsing on live updates, and refresh on history changes. Tasks:
+tests, implementation, GUI build/browser checks, correctness/maintainability/test-quality reviews.
 
 On desktop viewports at least 1100 CSS pixels wide, selecting an activity opens a
 right-side Inspector sized `clamp(320px, 30vw, 400px)`. On narrower viewports the same
@@ -482,6 +499,149 @@ the user can immediately see that the accepted task is making progress. Only a n
 upward scroll after submission disengages that epoch; background/replayed updates MUST NOT
 take over a reader-pinned viewport. Programmatic scrolling MUST occur after layout and MUST
 not misclassify its own intermediate scroll events as user intent.
+Opening, restoring, or switching to a persisted session starts a fresh viewport epoch as
+well: once its historical transcript has rendered, the viewport MUST align to the latest
+content by default. The previous session's scrolled-up position MUST NOT be inherited into
+the newly opened session. After that initial alignment, the normal reader-pinned behavior
+applies until the user switches sessions again or explicitly jumps to latest.
+
+High-frequency GUI projection updates from assistant text deltas, reasoning deltas, and
+model-stage updates MUST be coalesced before publishing React state. A live render tick may
+combine multiple transport frames but MUST preserve append order, terminal flush semantics,
+and the canonical persisted transcript. Stream coalescing is a GUI back-pressure rule only; it
+MUST NOT alter ADK/HaaS event ordering, response ids, task status, durable cursors, usage, or
+recovery behavior. While the viewport is following the active foreground turn, layout follow-up
+scrolls SHOULD use immediate post-layout alignment rather than repeated smooth animations; the
+explicit user action to jump to latest MAY remain animated. This prevents token-level smooth
+scroll animations from competing with touchpad/inertial scrolling and causing page-level shake.
+All live-output motion, including stream cursors, waiting/activity spinners, thinking pulses,
+and jump-to-latest scrolling, MUST honor `prefers-reduced-motion`: reduce by disabling
+continuous animation and using instant scroll alignment. Decorative live-output glyphs MUST
+be hidden from assistive technology so screen readers announce only task state and content.
+
+### 5.9 HaaS Artifact Product Surface
+
+When a Manager session is bound to HaaS, the Manager-owned
+`/v1/sessions/{managerSessionId}/artifacts` surface remains the GUI contract. The GUI MUST NOT
+call the HaaS sidecar directly, expose a HaaS bearer token, or learn the HaaS session id as a
+routing primitive. Manager resolves the binding to `(endpointId, haasSessionId, principal scope)`
+and proxies artifact operations through `HaasClient`.
+
+The local non-HaaS path continues to scan the session scratch/workspace as before. The HaaS path
+MUST call the authoritative HaaS artifact list endpoint and map each `FileRecord` into the
+existing GUI artifact shape plus additive source fields:
+
+```json
+{
+  "source": "haas",
+  "id": "file_abc",
+  "path": "output/reports/security-review.html",
+  "name": "security-review.html",
+  "kind": "html",
+  "size": 24576,
+  "modified_at": 1786400240,
+  "preview_status": "available",
+  "download_status": "available"
+}
+```
+
+For P0, the default HaaS publish root is `output/`, matching Artifact Store §6.2. Manager must not
+broaden the scan by walking the mounted project directory, recent modified files, `dist/`, `coverage/`,
+or the user workspace root. If a future profile/session policy adds extra publish roots, Manager only
+reflects what HaaS has already registered; it does not maintain an independent artifact-root policy.
+The GUI should continue to use a separate changed-files or workspace-diff surface for source edits.
+
+`path` is the HaaS `relativePath`; it is the only stable deep-link target for transcript links
+such as `[Security review](artifact:output/reports/security-review.html)`. GUI matching MAY also
+match the basename for old links only when exactly one artifact in the current list has that basename.
+If multiple artifacts match, Manager must return an ambiguous-link state instead of opening one by
+guess. The canonical link form is the relative path. `abs_path` is absent for remote/HaaS artifacts
+unless the artifact is known to be a local-managed file that
+the current Manager may reveal safely; copying a remote artifact's `relativePath` MUST NOT pretend
+to be a host filesystem path. `kind` is derived from `mediaType` and filename extension using the
+same viewer categories as local artifacts: markdown, html, image, pdf, sheet, office, code, text,
+folder, or unknown.
+
+`/v1/sessions/{managerSessionId}/artifacts/read?path=...` is also a Manager proxy for HaaS-bound
+sessions. It resolves the current artifact by relative path, validates that it belongs to the
+bound HaaS session and caller scope, and fetches content by `fileId` only when HaaS reports readable
+content. HTML continues to render inside the existing sandboxed viewer with the same CSP rules.
+Images, PDFs, sheets, markdown, code, and text use the existing viewer capabilities. If HaaS reports
+`previewStatus=download_only`, the viewer shows file metadata and the primary action is Download/Open,
+not an empty inline preview. If HaaS reports `previewStatus=unavailable` or content returns
+`404 haas_file_not_found`, the viewer shows a stable unavailable state that explains that the
+artifact was recorded but content is not currently readable from this runtime.
+`/v1/sessions/{managerSessionId}/artifacts/download?path=...` is the corresponding Manager-owned
+download proxy. It resolves the path through the same bound-session lookup, fetches by the returned
+opaque `fileId`, and responds with attachment disposition plus `nosniff`. The GUI uses this endpoint
+for readable remote artifacts and MUST NOT route remote artifacts through the local reveal/open API.
+
+Manager converts readable HaaS bytes into the existing JSON `ArtifactContent` response instead of
+returning the HaaS attachment directly to the browser:
+
+```json
+{
+  "ok": true,
+  "source": "haas",
+  "path": "output/reports/security-review.html",
+  "kind": "html",
+  "content": "<!doctype html>...",
+  "download_status": "available",
+  "preview_status": "available"
+}
+```
+
+Text-like artifacts return bounded UTF-8 `content` with `truncated` when needed. Image/PDF/sheet
+artifacts return a bounded `data_url` only within the existing Manager preview-size limit. Office,
+unknown, oversized, or explicitly download-only artifacts return `{ok:true, kind, download_status:
+"available", preview_status:"download_only"}` plus metadata and no inline bytes. Unreadable
+metadata-only artifacts return `{ok:false, code:"artifact_unavailable", preview_status:"unavailable",
+download_status:"unavailable"}`. These JSON responses are Manager-local UI contracts, not HaaS
+public API fields.
+
+The artifact section in the right rail is universal for HaaS-backed sessions. It stays collapsed
+by default but shows the count chip after the first successful list. After an accepted HaaS turn
+reaches a terminal state, Manager refreshes the artifact list. If native artifact registration facts
+arrive before terminal, Manager MAY publish an `artifacts_changed` GUI event to refresh earlier:
+
+```json
+{"type": "artifacts_changed", "session_id": "manager_session_1", "source": "haas"}
+```
+
+The list endpoint remains authoritative and the event carries no file content, no HaaS bearer token,
+and no HaaS session id. A transcript `artifact:` chip must open the viewer on the first click even if
+the right rail is hidden. If the artifact list is stale, the viewer refreshes once before falling back
+to a metadata-only selection.
+
+User-facing copy uses "Artifacts" / "产物" for session deliverables. Empty state: "No artifacts yet"
+/ "还没有生成产物". Terminal count: "Generated N artifacts" / "生成了 N 个产物". A recorded but unreadable
+artifact uses copy equivalent to: "This artifact was recorded, but preview is not available from this
+runtime yet." The UI MUST NOT expose internal terms such as `FileRecord`, `artifactDelta`, `hsess_...`,
+or `file_...` as primary labels, although opaque ids may remain in developer diagnostics.
+
+Security constraints:
+
+- Manager never forwards artifact content into transcript messages, logs, metrics, notifications,
+  search indices, model context, or automation summaries.
+- Remote artifact `reveal` does not shell out on the local host. It either downloads through the
+  authenticated Manager proxy or opens a HaaS-provided safe URL when such a future contract exists.
+- HTML preview keeps the null-origin sandbox and offline CSP used by the current local artifact
+  viewer. Active content is never rendered from the HaaS API origin.
+- Artifact list metadata must not include host paths, hidden runtime paths, raw prompt text, complete
+  command output, signed URLs, Authorization/Cookie values, or provider credentials.
+
+Acceptance:
+
+1. A HaaS-bound Manager session with two HaaS `FileRecord`s returns two GUI artifacts through the
+   existing Manager `/v1/sessions/{id}/artifacts` endpoint.
+2. Clicking an `artifact:` chip for a HaaS relative path opens the viewer on the first click, refreshes
+   stale metadata once, and never exposes the HaaS token or session id to the browser.
+3. HTML artifacts still render in the existing sandbox; unavailable or metadata-only HaaS artifacts
+   render an explicit unavailable/download-only state.
+4. Terminal HaaS turns refresh artifact count and right-rail list without requiring a manual page reload.
+5. Local non-HaaS artifact scanning behavior is unchanged.
+6. Tests cover `HaasClient` list/download/archive methods, Manager route proxying, GUI mapping, chip
+   behavior, security redaction, and remote reveal/download behavior.
 
 The running indicator derives from task/invocation state, not WebSocket presence.
 Reconnect first restores the persisted activity projection and pending interaction, then
@@ -743,3 +903,54 @@ task outcome, reasoning summary, model-stage summaries, and bounded activity fac
 safeSummary/summary, commandPreview, outputPreview/preview, exitCode, safeReason and
 durationMs. Query filtering MUST search those safe fields as well as assistant text so an
 agent retry can recall what was already attempted without repeating side effects blindly.
+
+### Automation and desktop reliability (automation-desktop-reliability)
+
+Background: scheduled runs bypass the common execution router and mistake stream EOF for
+success; volatile scheduler claims and missing notifications obscure failures. Goals are
+shared execution, truthful completion, recoverable interruption, bounded local resources,
+and continuous readable desktop status. No new provider protocol or external message grant.
+
+1. Scheduled runs use run_turn_events with the task's session, agent, workspace and selected
+model. Broadcast canonical Manager projections and checkpoint through the existing store.
+Success requires a successful terminal event and no error/interruption or incomplete task;
+EOF alone fails closed. Persist run outcome before notification, release occupancy in finally.
+2. Startup reconciles unfinished scheduled/manual runs before catchup: retain session identity,
+mark unresolved outcomes as error/recovery-required, and disable the owning schedule so no
+blind replay duplicates effects. Users inspect the original conversation and explicitly enable
+future scheduling; this is not automatic resubmission or a claim of successful cancellation.
+3. Scheduler admits at most four active runs by default; excess due work stays durable and
+is admitted on later ticks. A configurable execution timeout defaults to the existing 24h
+contract. Same-task overlap remains suppressed. No fabricated monetary/token budget.
+4. Success/failure creates a durable Inbox notification with safe status and original session
+link, then an app-wide automation_run_finished event. Existing session task_done remains.
+Notification transport failure cannot overwrite execution status; no raw result/error bodies
+in notifications. No unrequested external notification is sent.
+5. Desktop detects its owned Manager child exiting and attempts bounded respawn with backoff,
+reusing launch arguments and auth identity. The child retains credential-channel ownership
+rules. Quit cancels supervision; unknown listeners are never killed. Exhausted recovery stays
+visible with restart guidance; no execution replay is implied by process restart.
+6. Narrow conversation layouts overlay panels within the available area, with an accessible
+close path and usable composer. Active task status remains visible throughout waiting,
+reasoning, tools and finalization; never show Waiting alongside an active stage.
+
+Compatibility: additive Manager events, retained run statuses and session identities. HaaS
+ADK/native schemas, container images, provider proxy, MCP, policies and credentials unchanged.
+Stores add recovery operations without removing historical records. Tests: error/EOF/terminal
+classification, common route invocation, restart no-duplicate, concurrency, cancellation,
+notification failure, native supervisor lifecycle, browser narrow widths and state transitions.
+Tasks: implement tested automation slice, desktop/UI slice, full gates, two code-review rounds,
+Brooks architecture and test reviews, then re-audit outstanding findings. Backup/migration,
+retention controls, virtualization and release-channel trust require separate component designs;
+track their feasibility and residual gaps rather than inventing unsafe deletion or signing keys.
+
+Second-pass corrections: consuming a scheduled occurrence is persisted before executing its
+side effects; queued candidates are re-read to respect disable/delete. Manual automation
+records finalize at the server turn boundary, not solely via the browser callback. HaaS
+approval/input events create a durable attention link to the original conversation; they
+never auto-approve. Inbox writes use fsync plus atomic replacement and rollback failed in-memory
+inserts. Result notification identity is scoped to run ID, separate from attention requests.
+Desktop WebSocket reconnect is bounded and does not resend user messages. Startup failures
+show recovery guidance even before the normal conversation shell mounts.
+
+Native result notifications accept only ok/error and use fixed text; OS delivery denial leaves Inbox as fallback. Scheduled HaaS interactions currently require approval in the original conversation: legacy name/target grants are not translated into broader HaaS permissions. Recovery deliberately freezes unknown runs rather than claiming seamless execution resume. Backup/restore, automatic retention, 10k transcript windowing and trusted release manifest/key migration remain unimplemented product work, tracked in Beads.

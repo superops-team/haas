@@ -235,3 +235,7 @@ startup -> load_config(HAAS_CONFIG) -> validate -> build AppConfig -> create_app
   snapshot；动态 harness 配置只能通过 Harness Profile API 生效。
 - Integration：`create_app(config)` 用 memory store + static identity 启动并过 `/v1/haas/health`。
 - Security：config 文件与 dump 不出现明文 secret。
+
+### Manager 自动化资源限制
+
+Manager 定时执行接受 COWORKER_AUTOMATION_TIMEOUT_SECONDS（正有限秒数，默认 86400）。默认接纳四个定时任务，其余到期工作持久保留。交付超时暂停未来计划以便核对，不代表远端已取消。HaaS HAAS_* 配置不变。

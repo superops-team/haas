@@ -195,6 +195,31 @@ async def _started(transport: FakeTransport, **turn_kwargs: Any) -> tuple[CodexA
     return adapter, handle
 
 
+async def test_same_bare_session_id_does_not_reuse_thread_across_adk_scopes() -> None:
+    results = _default_results()
+    results["thread/start"] = {"thread": {"id": "thr_scope"}}
+    transport = FakeTransport(results)
+    adapter = _adapter_with(transport)
+
+    for app_name, user_id, turn_id in (
+        ("chrn_1", "u_1", "turn_1"),
+        ("chrn_2", "u_2", "turn_2"),
+    ):
+        await adapter.start_turn(
+            StartTurnRequest(
+                invocationId=f"inv_{turn_id}",
+                sessionId="hsess_shared",
+                turnId=turn_id,
+                appName=app_name,
+                userId=user_id,
+                input=[{"text": "hi"}],
+            )
+        )
+
+    assert transport.methods().count("thread/start") == 2
+    assert transport.methods().count("thread/resume") == 0
+
+
 # --- stdio stubs ------------------------------------------------------------
 #
 # StdioTransport.start() always launches `<bin> app-server --listen stdio://`,

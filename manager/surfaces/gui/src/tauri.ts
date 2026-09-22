@@ -136,3 +136,14 @@ export function openExternal(url: string): void {
   }
   window.open(url, "_blank", "noopener,noreferrer");
 }
+
+export async function listenServerStatus(callback: (status: string) => void): Promise<() => void> {
+  const listen = (globalThis as any).__TAURI__?.event?.listen;
+  if (!listen) return () => {};
+  return listen("coworker:server-status", (event: { payload: string }) => callback(event.payload));
+}
+
+export async function notifyAutomationResult(status: unknown): Promise<void> {
+  if (!isTauri() || (status !== "ok" && status !== "error")) return;
+  await invoke("notify_automation_result", { status });
+}

@@ -136,3 +136,7 @@ Out of scope:
   rollback. A release smoke test installs the uploaded DMG through the public
   command and confirms `/Applications/OpenHarness.app` exists without a quarantine
   attribute.
+
+### Automation desktop notifications
+
+The native shell may show a fixed completion/failure notification from an automation_run_finished event. No generated content, prompt or tool arguments cross the notification command. The command accepts only the closed outcome enum; OS notification denial does not affect task success or durable Inbox delivery. Automated tests verify command input/bridge behavior; native notification delivery requires user OS permission.

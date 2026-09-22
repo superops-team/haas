@@ -81,6 +81,11 @@ Runtime maps the recorded control intent to resumable pause or irreversible
 cancel. `resume_session` only validates/restores native session continuity. A
 user Continue still creates a new HaaS invocation/turn through Session Runtime.
 
+Session lifecycle and artifact requests carry the complete ADK session identity
+`(appName, userId, sessionId)`. Adapters MUST key native thread, workspace, and
+artifact-discovery state by that tuple rather than caller-controlled `sessionId` alone;
+the same bare id can validly exist under another app or user.
+
 ### 5.1 Capability Matrix
 
 | Capability | Type | Description |

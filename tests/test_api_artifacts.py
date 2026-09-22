@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from haas.api import DEFAULT_TOKEN, build_app
 from haas.identity import Principal
+from haas.stores import SessionRecord
 
 # /v1/haas/* control-plane surface is part of the published protocol contract.
 pytestmark = pytest.mark.adk
@@ -113,6 +114,26 @@ def test_openapi_tool_activity_metadata_is_additive_and_bounded() -> None:
         schema = components[schema_name]
         assert "activityKind" in schema["properties"]
         assert "activityKind" not in schema["required"]
+
+
+def test_openapi_publishes_artifact_registration_event_contract() -> None:
+    components = _openapi()["components"]["schemas"]
+    metadata = components["ArtifactRegisteredEventMetadata"]
+    assert set(metadata["required"]) == {
+        "fileId",
+        "relativePath",
+        "mediaType",
+        "bytes",
+        "invocationId",
+        "previewStatus",
+        "downloadStatus",
+    }
+    event_types = {
+        branch["allOf"][1]["properties"]["type"].get("const")
+        for branch in components["CanonicalHaasEvent"]["oneOf"]
+        if "const" in branch["allOf"][1]["properties"]["type"]
+    }
+    assert "haas.artifact.registered" in event_types
 
 
 def test_openapi_profile_rebind_excludes_delegated_sessions() -> None:
@@ -226,6 +247,23 @@ def test_openapi_snapshot_content_and_mcp_transport_are_bounded() -> None:
     assert components["AgentsMdSource"]["properties"]["contentRef"]["pattern"] == "^file_"
 
 
+def test_openapi_file_preview_and_download_status_are_published() -> None:
+    file_schema = _openapi()["components"]["schemas"]["File"]
+    assert "previewStatus" in file_schema["properties"]
+    assert file_schema["properties"]["previewStatus"]["enum"] == [
+        "available",
+        "download_only",
+        "unavailable",
+    ]
+    assert "downloadStatus" in file_schema["properties"]
+    assert file_schema["properties"]["downloadStatus"]["enum"] == [
+        "available",
+        "unavailable",
+    ]
+    assert "previewStatus" not in file_schema["required"]
+    assert "downloadStatus" not in file_schema["required"]
+
+
 # --- upload -----------------------------------------------------------------
 
 
@@ -239,6 +277,8 @@ def test_upload_returns_file_envelope() -> None:
     assert data["bytes"] == 5
     assert data["sha256"]
     assert data["mediaType"] == "text/markdown"
+    assert data["previewStatus"] == "available"
+    assert data["downloadStatus"] == "available"
 
 
 def test_upload_requires_auth() -> None:
@@ -293,6 +333,18 @@ def test_download_returns_bytes_with_nosniff() -> None:
     assert resp.headers["content-disposition"].startswith("attachment")
 
 
+def test_download_content_disposition_encodes_untrusted_filename() -> None:
+    client = _client()
+    file_id = _upload(client, name="季度报告.md")["data"]["id"]
+
+    resp = client.get(f"/v1/haas/files/{file_id}/content", headers=AUTH)
+
+    assert resp.status_code == 200
+    assert resp.headers["content-disposition"] == (
+        "attachment; filename*=UTF-8''%E5%AD%A3%E5%BA%A6%E6%8A%A5%E5%91%8A.md"
+    )
+
+
 def test_download_unknown_file_returns_404() -> None:
     resp = _client().get("/v1/haas/files/file_missing/content", headers=AUTH)
     assert resp.status_code == 404
@@ -322,19 +374,27 @@ def test_pdf_preview_not_implemented() -> None:
 # --- session artifact listing ----------------------------------------------
 
 
-def test_list_session_artifacts_empty() -> None:
+def test_list_session_artifacts_requires_a_visible_session() -> None:
     resp = _client().get("/v1/haas/sessions/hsess_none/artifacts", headers=AUTH)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["data"]["artifacts"] == []
-    assert "traceId" in body
+    assert resp.status_code == 404
+    assert resp.json()["haasError"]["code"] == "session_not_found"
 
 
 def test_list_session_artifacts_after_attach() -> None:
     app = build_app()
     client = TestClient(app)
     store = app.state.runtime.artifacts
-    store.register("hsess_1", "output/a.md", b"aa", owner_principal_id="p_dev")
+    app.state.runtime.store.put_session(
+        SessionRecord(id="hsess_1", appName="chrn_codex_default", userId="u_1")
+    )
+    store.register(
+        "hsess_1",
+        "output/a.md",
+        b"aa",
+        owner_principal_id="p_dev",
+        app_name="chrn_codex_default",
+        user_id="u_1",
+    )
     resp = client.get("/v1/haas/sessions/hsess_1/artifacts", headers=AUTH)
     assert resp.status_code == 200
     artifacts = resp.json()["data"]["artifacts"]
@@ -351,8 +411,16 @@ def test_list_session_artifacts_scoped_by_principal() -> None:
         }
     )
     client = TestClient(app)
+    app.state.runtime.store.put_session(
+        SessionRecord(id="hsess_1", appName="chrn_codex_default", userId="u_1")
+    )
     app.state.runtime.artifacts.register(
-        "hsess_1", "output/a.md", b"aa", owner_principal_id="p_dev"
+        "hsess_1",
+        "output/a.md",
+        b"aa",
+        owner_principal_id="p_dev",
+        app_name="chrn_codex_default",
+        user_id="u_1",
     )
     resp = client.get(
         "/v1/haas/sessions/hsess_1/artifacts",
@@ -368,11 +436,24 @@ def test_list_session_artifacts_scoped_by_principal() -> None:
 def test_archive_returns_zip() -> None:
     app = build_app()
     client = TestClient(app)
-    app.state.runtime.artifacts.register(
-        "hsess_1", "output/a.md", b"alpha", owner_principal_id="p_dev"
+    app.state.runtime.store.put_session(
+        SessionRecord(id="hsess_1", appName="chrn_codex_default", userId="u_1")
     )
     app.state.runtime.artifacts.register(
-        "hsess_1", "output/b.txt", b"beta", owner_principal_id="p_dev"
+        "hsess_1",
+        "output/a.md",
+        b"alpha",
+        owner_principal_id="p_dev",
+        app_name="chrn_codex_default",
+        user_id="u_1",
+    )
+    app.state.runtime.artifacts.register(
+        "hsess_1",
+        "output/b.txt",
+        b"beta",
+        owner_principal_id="p_dev",
+        app_name="chrn_codex_default",
+        user_id="u_1",
     )
     resp = client.get("/v1/haas/sessions/hsess_1/artifacts/archive", headers=AUTH)
     assert resp.status_code == 200
@@ -384,9 +465,32 @@ def test_archive_returns_zip() -> None:
 
 
 def test_archive_empty_session_returns_404() -> None:
-    resp = _client().get("/v1/haas/sessions/hsess_none/artifacts/archive", headers=AUTH)
+    app = build_app()
+    app.state.runtime.store.put_session(
+        SessionRecord(id="hsess_none", appName="chrn_codex_default", userId="u_1")
+    )
+    resp = TestClient(app).get(
+        "/v1/haas/sessions/hsess_none/artifacts/archive", headers=AUTH
+    )
     assert resp.status_code == 404
     assert resp.json()["haasError"]["code"] == "haas_file_not_found"
+
+
+def test_list_session_artifacts_rejects_ambiguous_bare_session_id() -> None:
+    app = build_app()
+    app.state.runtime.store.put_session(
+        SessionRecord(id="hsess_shared", appName="chrn_codex_default", userId="u_1")
+    )
+    app.state.runtime.store.put_session(
+        SessionRecord(id="hsess_shared", appName="chrn_codex_default", userId="u_2")
+    )
+
+    resp = TestClient(app).get(
+        "/v1/haas/sessions/hsess_shared/artifacts", headers=AUTH
+    )
+
+    assert resp.status_code == 404
+    assert resp.json()["haasError"]["code"] == "session_not_found"
 
 
 # --- status / diagnostics ---------------------------------------------------

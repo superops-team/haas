@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { App } from "./App";
+import { App, LIVE_PROJECTION_FLUSH_MS } from "./App";
 import type { WsEvent } from "./types";
 
 const mockState = vi.hoisted(() => {
   let livenessOnly = false;
+  let withHistorySessions = false;
 
   class FakeSession {
     handlers: { onEvent: (event: WsEvent) => void; onOpen?: () => void; onClose?: () => void };
@@ -67,6 +68,12 @@ const mockState = vi.hoisted(() => {
     set livenessOnly(value: boolean) {
       livenessOnly = value;
     },
+    get withHistorySessions() {
+      return withHistorySessions;
+    },
+    set withHistorySessions(value: boolean) {
+      withHistorySessions = value;
+    },
   };
 });
 
@@ -104,7 +111,30 @@ vi.mock("./api", async () => {
       },
     ]),
     getSessions: vi.fn(async () =>
-      mockState.livenessOnly
+      mockState.withHistorySessions
+        ? [
+            {
+              session_id: "s2",
+              title: "Long previous conversation",
+              workspace: "",
+              agent: "cowork",
+              model: "gpt-5.6-sol",
+              mode: "interactive",
+              updated_at: "2026-09-18T00:00:00Z",
+              messages: 2,
+            },
+            {
+              session_id: "s1",
+              title: "Earlier conversation",
+              workspace: "",
+              agent: "cowork",
+              model: "gpt-5.6-sol",
+              mode: "interactive",
+              updated_at: "2026-09-17T00:00:00Z",
+              messages: 2,
+            },
+          ]
+        : mockState.livenessOnly
         ? [
             {
               session_id: "s1",
@@ -121,7 +151,14 @@ vi.mock("./api", async () => {
         : [],
     ),
     getRecentWorkspaces: vi.fn(async () => []),
-    getSessionMessages: vi.fn(async () => []),
+    getSessionMessages: vi.fn(async (sessionId: string) =>
+      mockState.withHistorySessions
+        ? [
+            { role: "user", content: `question for ${sessionId}` },
+            { role: "assistant", content: `answer for ${sessionId}` },
+          ]
+        : [],
+    ),
     getArtifacts: vi.fn(async () => []),
     getInbox: vi.fn(async () => []),
     getUnattended: vi.fn(async () => false),
@@ -135,12 +172,22 @@ afterEach(() => {
   cleanup();
   mockState.lastSession = null;
   mockState.livenessOnly = false;
+  mockState.withHistorySessions = false;
   vi.clearAllMocks();
 });
 
 describe("App execution lifecycle controls", () => {
   beforeEach(() => {
     Element.prototype.scrollTo = vi.fn();
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: vi.fn().mockImplementation(() => ({
+        matches: false,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
   });
 
   it("shows Stop immediately after sending before the server sends turn_start", async () => {
@@ -206,6 +253,121 @@ describe("App execution lifecycle controls", () => {
     render(<App />);
 
     await expectStopOnly();
+  });
+
+  it("coalesces high-frequency stream projection updates and avoids smooth-scroll chasing", async () => {
+    const scrollTo = vi.fn();
+    Element.prototype.scrollTo = scrollTo;
+    render(<App />);
+
+    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 800 });
+    fireEvent.change(input, { target: { value: "stream a detailed answer" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await expectStopOnly();
+
+    mockState.lastSession?.handlers.onEvent({
+      type: "turn_start",
+      data: { input: "stream a detailed answer" },
+    });
+
+    const words = Array.from({ length: 45 }, (_, index) => `word${index}`);
+    for (const word of words) {
+      mockState.lastSession?.handlers.onEvent({
+        type: "assistant_delta",
+        data: { text: `${word} ` },
+      });
+    }
+
+    expect(screen.queryByText(/word44/)).toBeNull();
+
+    await waitFor(() => expect(screen.getByText(/word44/)).toBeTruthy(), {
+      timeout: LIVE_PROJECTION_FLUSH_MS + 1000,
+    });
+    expect(document.querySelector(".stream-cursor")?.getAttribute("aria-hidden")).toBe("true");
+
+    expect(scrollTo).toHaveBeenCalled();
+    expect(scrollTo).toHaveBeenLastCalledWith(
+      expect.objectContaining({ behavior: "auto" }),
+    );
+
+    scroller.scrollTop = 500;
+    fireEvent.scroll(scroller);
+    expect(await screen.findByTestId("jump-to-latest")).toBeTruthy();
+
+    mockState.lastSession?.handlers.onEvent({
+      type: "assistant_delta",
+      data: { text: "after-user-scroll " },
+    });
+    await waitFor(() => expect(screen.getByText(/after-user-scroll/)).toBeTruthy(), {
+      timeout: LIVE_PROJECTION_FLUSH_MS + 1000,
+    });
+    expect(screen.getByTestId("jump-to-latest")).toBeTruthy();
+  });
+
+  it("uses instant jump-to-latest scrolling when reduced motion is enabled", async () => {
+    const scrollTo = vi.fn();
+    Element.prototype.scrollTo = scrollTo;
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    render(<App />);
+
+    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 800 });
+    fireEvent.change(input, { target: { value: "stream with reduced motion" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await expectStopOnly();
+
+    const words = Array.from({ length: 45 }, (_, index) => `motion${index}`);
+    for (const word of words) {
+      mockState.lastSession?.handlers.onEvent({
+        type: "assistant_delta",
+        data: { text: `${word} ` },
+      });
+    }
+    await waitFor(() => expect(screen.getByText(/motion44/)).toBeTruthy(), {
+      timeout: LIVE_PROJECTION_FLUSH_MS + 1000,
+    });
+
+    scroller.scrollTop = 500;
+    fireEvent.scroll(scroller);
+    fireEvent.click(await screen.findByTestId("jump-to-latest"));
+
+    expect(scrollTo).toHaveBeenLastCalledWith(
+      expect.objectContaining({ behavior: "auto" }),
+    );
+  });
+
+  it("opens restored sessions at the latest content even after the previous session was scrolled up", async () => {
+    mockState.withHistorySessions = true;
+    const scrollTo = vi.fn();
+    Element.prototype.scrollTo = scrollTo;
+    render(<App />);
+
+    expect(await screen.findByText("answer for s2")).toBeTruthy();
+    const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1200 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 300 });
+    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 200 });
+    fireEvent.scroll(scroller);
+
+    scrollTo.mockClear();
+    fireEvent.click(screen.getByText("Earlier conversation"));
+
+    await waitFor(() => expect(screen.getByText("answer for s1")).toBeTruthy());
+    expect(scrollTo).toHaveBeenCalledWith(
+      expect.objectContaining({ top: 1200, behavior: "auto" }),
+    );
+    expect(screen.queryByTestId("jump-to-latest")).toBeNull();
   });
 });
 

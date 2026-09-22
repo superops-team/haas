@@ -45,6 +45,9 @@ const TURN: Item[] = [
   { kind: "assistant", text: "Posted to #all-openworker." },
 ];
 
+const stageSummary = () =>
+  screen.getByTestId("model-call-stage").querySelector("summary")!;
+
 describe("TurnGroup (Transcript §33)", () => {
   it("keeps hook order stable when restored history switches between HaaS and legacy projections", () => {
     const legacy: Item[] = [
@@ -261,6 +264,45 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     );
   });
 
+  it.each([
+    ["running", "Running"], ["completed", "Completed"], ["failed", "Failed"],
+    ["incomplete", "Incomplete"], ["cancelled", "Cancelled"],
+  ] as const)("exposes the %s stage status in its collapsed header", (status, label) => {
+    render(<Transcript items={HAAS_TURN.slice(0, 2)} onApprove={vi.fn()} running
+      modelStages={[{ ...MODEL_STAGES[0], status }]} />);
+    expect(stageSummary().querySelector(".model-stage-status")?.textContent).toBe(label);
+    expect(stageSummary().getAttribute("aria-label")).toContain(label);
+  });
+
+  it("updates visible stage status without closing a user-expanded stage", () => {
+    const items = HAAS_TURN.slice(0, 2);
+    const approve = vi.fn();
+    const view = render(<Transcript items={items} onApprove={approve} running
+      modelStages={[{ ...MODEL_STAGES[0], status: "running" }]} />);
+    fireEvent.click(stageSummary());
+    view.rerender(<Transcript items={items} onApprove={approve} running
+      modelStages={[{ ...MODEL_STAGES[0], status: "completed" }]} />);
+    expect(stageSummary().querySelector(".model-stage-status")?.textContent).toBe("Completed");
+    expect(screen.getByTestId("model-call-stage").hasAttribute("open")).toBe(true);
+  });
+
+  it("reuses history grouping across live updates and refreshes changed history", () => {
+    let reads = 0;
+    const historical: Item = { kind: "assistant", get text() { reads++; return "Saved answer"; } };
+    const items: Item[] = [{ kind: "user", text: "Old question" }, historical,
+      { kind: "user", text: "Current question" }];
+    const approve = vi.fn();
+    const view = render(<Transcript items={items} onApprove={approve} running />);
+    reads = 0;
+    view.rerender(<Transcript items={items} onApprove={approve} running
+      streamingText="Live update" reasoningText="Progress" modelStages={MODEL_STAGES} />);
+    expect(reads).toBe(0);
+    view.rerender(<Transcript items={[items[0], { kind: "assistant", text: "Changed answer" }, items[2]]}
+      onApprove={approve} running modelStages={MODEL_STAGES} />);
+    expect(screen.getByText("Changed answer")).toBeTruthy();
+    expect(screen.queryByText("Saved answer")).toBeNull();
+  });
+
   it("renders commentary, reasoning, actions and results as distinct ordered steps with measured usage", () => {
     render(
       <Transcript
@@ -273,12 +315,14 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     );
 
     const stage = screen.getByTestId("model-call-stage");
-    expect(stage.textContent).toContain("Stage 1");
+    expect(stage.textContent).toContain("Run the focused test suite");
     expect(stage.textContent).toContain("4 steps");
     expect(stage.textContent).toContain("↓ 8.1k");
     expect(stage.textContent).toContain("↑ 746");
     expect(stage.textContent).toContain("Reasoning 214");
     expect(stage.textContent).toContain("Cache 3.6k");
+    expect(stage.hasAttribute("open")).toBe(false);
+    fireEvent.click(stageSummary());
     expect(screen.getByText("Progress note")).toBeTruthy();
     expect(screen.getByText("Reasoning summary")).toBeTruthy();
     expect(screen.getByText("Action")).toBeTruthy();
@@ -310,7 +354,11 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
     );
 
     expect(screen.getByTestId("model-call-stage")).toBeTruthy();
-    expect(screen.getByText("Measured summary")).toBeTruthy();
+    expect(screen.getByTestId("model-call-stage").hasAttribute("open")).toBe(false);
+    fireEvent.click(stageSummary());
+    expect(screen.getByTestId("reasoning-preview").textContent).toBe(
+      "Measured summary",
+    );
     expect(screen.queryByText("legacy duplicate")).toBeNull();
   });
 
@@ -340,6 +388,7 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
       />,
     );
 
+    fireEvent.click(stageSummary());
     expect(screen.getByTestId("reasoning-preview").textContent).toBe(preview);
     const detail = screen.getByTestId("reasoning-detail") as HTMLDetailsElement;
     expect(detail.open).toBe(false);
@@ -373,6 +422,7 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
       />,
     );
 
+    fireEvent.click(stageSummary());
     expect(screen.getByTestId("reasoning-preview").textContent).toHaveLength(
       240,
     );
@@ -405,7 +455,7 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
         modelStages={MODEL_STAGES}
       />,
     );
-    const summary = screen.getByText(/Stage 1/).closest("summary")!;
+    const summary = stageSummary();
     fireEvent.click(summary);
     expect(screen.getByTestId("model-call-stage").hasAttribute("open")).toBe(
       true,
@@ -435,6 +485,7 @@ describe("Codex-inspired activity experience (FV-20–FV-22)", () => {
       />,
     );
 
+    fireEvent.click(stageSummary());
     fireEvent.click(
       screen.getByRole("button", { name: /Run the focused test suite/ }),
     );
@@ -942,6 +993,9 @@ describe("live turns (§33 flicker fix)", () => {
     expect(screen.getByTestId("turn-live-stream").textContent).toContain(
       "quote endpoint rate-limited",
     );
+    expect(
+      screen.getByTestId("turn-live-stream").querySelector(".stream-cursor")?.getAttribute("aria-hidden"),
+    ).toBe("true");
   });
 
   it("a PENDING approval neither splits the turn nor promotes the narration", () => {

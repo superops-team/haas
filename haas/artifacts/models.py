@@ -11,12 +11,16 @@ class FileRecord:
     sessionId: str
     filename: str
     relativePath: str
+    appName: str = ""
+    userId: str = ""
     bytes: int = 0
     mediaType: str = "application/octet-stream"
     sha256: str = ""
     invocationId: str = ""
     createdAtMs: int = 0
     ownerPrincipalId: str = ""
+    previewStatus: str = "available"
+    downloadStatus: str = "available"
 
     def to_dict(self) -> dict[str, object]:
         """Serialize to the OpenAPI `File` shape (object is a required const)."""
@@ -31,6 +35,8 @@ class FileRecord:
             "mediaType": self.mediaType,
             "sha256": self.sha256,
             "createdAtMs": self.createdAtMs,
+            "previewStatus": self.previewStatus,
+            "downloadStatus": self.downloadStatus,
         }
 
 

@@ -3,7 +3,8 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-10
+Last reviewed: 2026-09-20
+Change ID: haas-artifact-product-surface
 Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
@@ -71,9 +72,9 @@ async def store_input_file(file: UploadFile, ctx: RequestContext) -> FileRecord:
 async def materialize_input_file(file_id: str, session: SessionRecord) -> SafePath: ...
 async def scan_artifacts(session: SessionRecord, policy: ArtifactPolicy) -> ArtifactScanResult: ...
 async def register_artifact(session: SessionRecord, path: SafePath) -> FileRecord: ...
-async def list_artifacts(session_id: str, ctx: RequestContext) -> list[FileRecord]: ...
+async def list_artifacts(session: SessionRecord, ctx: RequestContext) -> list[FileRecord]: ...
 async def open_artifact(container_id: str, file_id: str, ctx: RequestContext) -> FileStream: ...
-async def build_archive(session_id: str, ctx: RequestContext) -> ArchiveStream: ...
+async def build_archive(session: SessionRecord, ctx: RequestContext) -> ArchiveStream: ...
 ```
 
 ## 6. 数据模型
@@ -105,10 +106,12 @@ async def build_archive(session_id: str, ctx: RequestContext) -> ArchiveStream: 
 | 来源 | 内容位置 | 读取方式 |
 |------|----------|----------|
 | `POST /v1/haas/files` 上传 | Artifact Store 自持 content store（S6 为进程内，后续可换 Drive/OSS 后端） | 直接按 `file_id` 读回 |
-| harness 产出（scan/register） | session container workspace | 经 Container Runtime 按 `relativePath` 读取 |
+| harness 产出（P0 scan/register） | 发布时写入 Artifact Store 自持的不可变 bytes snapshot | 按 scoped opaque `file_id` 读取；`relativePath` 仅用于展示/deep link |
 
-S6 只实现上传态内容的回读与归档；container 内容读取在 S5 sandbox 投影可用后
-接入。`GET /v1/haas/files/{id}/content` 命中无内容可回读的 record 时返回
+P0 将每个通过校验的 produced file 快照到与 upload 相同的 content store。这样发布后的
+文件无需暴露 host path，也不依赖仍然存活的 container，即可在 turn 结束后读取。未来大文件
+或远程 backend 可以将内容保留在 session runtime，但必须保持相同的 scoped `file_id` 读取
+合同与 availability 字段。`GET /v1/haas/files/{id}/content` 命中无内容可回读的 record 时返回
 `404 haas_file_not_found`，不得返回空 body 伪装成功。
 
 ### 6.1.2 Principal Scope（S6）
@@ -119,6 +122,13 @@ S6 只实现上传态内容的回读与归档；container 内容读取在 S5 san
 - 上传时记录调用方 principal。
 - `list` / `get` / `content` / `archive` 必须按 principal 过滤。
 - 跨 principal 访问返回 `404 haas_file_not_found`，不返回 403，避免存在性泄漏。
+
+关联到 session 的 artifact 还必须以完整 ADK session identity
+`(appName, userId, sessionId)` 作为存储和删除 scope，裸 `sessionId` 不具备全局唯一性。
+仅携带 `{session_id}` 的 native route 必须先解析出唯一的 caller-visible session，再按该
+完整 scope 执行 list/archive；零个或多个匹配都返回与其他 native session route 一致的
+not-found 响应。删除一个 ADK session 时，只能删除该 tuple 下当前及历史版本的 artifact，
+不得误删复用了同一 caller-supplied `sessionId` 的其他 tuple 的 artifact。
 
 ### 6.2 ArtifactPolicy
 
@@ -139,6 +149,73 @@ policy root 都必须先 canonicalize；规范化后的路径必须等于某个 
 `includeRoots=["output"]` 允许 `output/report.md`，但不得允许
 `output_secret/report.md`。空 `includeRoots` 对发布无效，必须 fail closed，
 拒绝所有候选 artifact 路径。
+
+P0 将默认可发布根目录固定为 `output/`。这是产品与安全约定：用户可见交付物写在这里；
+源码改动、依赖缓存、构建目录、coverage 目录和 runtime 日志不会因为发生变化就自动成为
+artifact。固定默认值让首期 HaaS 路径更安全、可测试，也让 agent instruction 可以明确写：
+“需要用户打开的文件写入 `output/`”。代价是写到项目原生目录的文件，例如 `docs/`、
+`reports/`、`coverage/` 或 `dist/`，不会被默认展示；除非后续 profile/session policy
+显式加入这些根目录。这个遗漏优于默认扫描整个仓库。
+
+`includeRoots` 保留为未来加法配置字段。Profile 或 session policy 可以在通过同样的
+canonicalization、exclude、数量、大小和隐藏路径检查后，添加 `reports` 或 `coverage`
+等根目录。它不得默认指向 workspace root、用户 HOME、依赖目录、隐藏 runtime 目录或
+无界 recent-file diff。UI 应将“产物”与“文件变更”区分开：源码改动和 workspace diff
+也是任务结果，但不会自动成为可下载 artifact。
+
+### 6.3 产物展示合同
+
+产物是面向用户的交付物，不是原始文件系统杂项。只有 HaaS 从允许的 adapter 报告
+或输出目录扫描中注册 `FileRecord` 后，产物才进入可见列表。最小展示 record 为：
+
+```json
+{
+  "id": "file_abc",
+  "filename": "security-review.html",
+  "relativePath": "output/reports/security-review.html",
+  "bytes": 24576,
+  "mediaType": "text/html",
+  "createdAtMs": 1786400240000,
+  "previewStatus": "available",
+  "downloadStatus": "available"
+}
+```
+
+`previewStatus` 取值为 `available`、`download_only` 或 `unavailable`。
+`downloadStatus` 取值为 `available` 或 `unavailable`。这些字段是从存储边界、
+媒体类型、policy 和当前 runtime 能力推导出的加法展示提示；它们不授予访问权限，
+也不能替代 content read 时的 object-scope 检查。当前阶段若某个 harness-produced
+record 只有 metadata 而不能读回内容，必须优先展示 `previewStatus=unavailable`
+与 `downloadStatus=unavailable`，而不是打开一个损坏的空预览。若 archive 只能包含
+可读产物，列表 record 仍必须让不可读条目可区分，使 client 能解释缺口。
+
+状态组合：
+
+| previewStatus | downloadStatus | 含义 |
+|---------------|----------------|------|
+| `available` | `available` | 内容可读，且 Manager/UI 可按媒体类型 inline preview。 |
+| `download_only` | `available` | 内容可读，但 inline preview 不支持或文件过大；client 展示 metadata 和 download/open 操作。 |
+| `unavailable` | `unavailable` | 产物已记录，但当前无法读取内容；client 展示明确不可用说明。 |
+
+其他组合无效。HaaS 只可为向后兼容省略这些字段；新 producer 应显式设置。
+
+HaaS 在 turn 终态扫描或 adapter 报告发布新文件时，应该发出或持久化
+`haas.artifact.registered`。该 event 的 `haas` metadata 只能包含安全 metadata
+（`fileId`、`relativePath`、`mediaType`、`bytes`、`invocationId`、`previewStatus`
+和 `downloadStatus`），不得包含文件内容、raw prompt、完整 tool 参数、host path、
+signed URL、credential 或隐藏 runtime path。Client 可以用该 event 刷新产物列表，
+但 list endpoint 仍是权威来源。若 terminal 时注册多个 artifact，HaaS 可以逐文件发
+event，也可以发有界 batch event；两种形式都必须遵守相同 metadata 限制。
+同一 turn 的 artifact 注册事件必须先于该 turn 的 terminal event 持久化并输出，保证
+terminal 仍是 invocation 的最后一个事件。artifact discovery 是 best-effort：扫描或读取
+失败不得把原本成功的 turn 改写为失败。同一 session-relative path 的内容摘要未变化时，
+重复 terminal 扫描不得追加新的可见 record 或注册 event；该路径内容变化时，当前 artifact
+列表只能展示最新 record。
+
+面向用户的文案应称这些对象为 “Artifacts” / “产物”：agent 为当前 session 创建的
+文件、报告、图片、表格、归档或其他持久输出。build artifacts、cache entries、
+container layers 和内部日志等实现或打包概念不属于此展示面，除非它们被明确注册到
+允许的输出根目录下。
 
 ## 7. 运行模型与状态机
 
@@ -161,7 +238,8 @@ Artifact lifecycle follows session lifecycle. Deleting a session makes its artif
 
 - File ids are opaque and scoped; do not derive paths directly from ids.
 - Relative paths are canonicalized under the session container root.
-- Symlink traversal outside the container root is rejected.
+- Publish root 自身及每个 candidate file 都必须不是 symlink；即使 target 仍在 workspace
+  内也拒绝 symlink traversal。
 - Hidden/runtime directories are excluded by default.
 - Downloads set `X-Content-Type-Options: nosniff`.
 - Active content should be served as attachment or from a separate origin.
@@ -206,3 +284,7 @@ Metrics:
 - Security：encoded `../` traversal and cross-principal file access return not found/rejected。
 - Compatibility：ADK inline file（`inlineData`）round-trip、download 与 archive 行为。
 - E2E：Codex writes a file under allowed output root and response annotation can download it。
+- Product surface：turn 终态发布 artifact 后，client 可见列表刷新；metadata-only
+  artifact 以明确的不可预览/仅下载状态展示，而不是打开损坏 viewer。
+- Regression：hidden directory、host path、raw command output、prompt text、signed URL
+  和 credential 不出现在 artifact list metadata 或 registration event 中。

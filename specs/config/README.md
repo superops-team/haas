@@ -247,3 +247,7 @@ startup -> load_config(HAAS_CONFIG) -> validate -> build AppConfig -> create_app
   only through Harness Profile APIs.
 - Integration: `create_app(config)` starts with a memory store and static identity and passes `/v1/haas/health`.
 - Security: configuration files and dumps contain no plaintext secrets.
+
+### Manager automation resource limits
+
+Manager scheduled execution accepts COWORKER_AUTOMATION_TIMEOUT_SECONDS as a positive finite number of seconds (default 86400). Admission defaults to four scheduled runs; pending due work stays persisted. A delivery timeout freezes future schedule execution for readback rather than asserting remote cancellation. No changes to HaaS HAAS_* configuration.

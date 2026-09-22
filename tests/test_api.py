@@ -14,7 +14,7 @@ from haas.api import (
     build_app,
 )
 from haas.harnesses import FakeAdapter
-from haas.harnesses.base import StartTurnRequest
+from haas.harnesses.base import ArtifactRef, ListArtifactsRequest, StartTurnRequest
 from haas.identity import Principal
 from haas.stores import InvocationRecord, SessionRecord
 
@@ -365,6 +365,54 @@ def test_run_sse_passes_sandbox_to_adapter() -> None:
 
     assert adapter.requests[0].sandbox["workspaceRoot"] == "/tmp/project"
     assert adapter.requests[0].sandbox["mode"] == "workspace-write"
+
+
+def test_run_sse_publishes_adapter_artifacts() -> None:
+    class ArtifactAdapter(FakeAdapter):
+        async def list_artifacts(self, request: ListArtifactsRequest):
+            assert request.sessionId == "hsess_artifacts"
+            return [
+                ArtifactRef(
+                    name="report.md",
+                    path="output/report.md",
+                    content=b"# Report",
+                    mediaType="text/markdown",
+                )
+            ]
+
+    client = make_client(adapter=ArtifactAdapter())
+    body = {
+        "appName": "chrn_codex_default",
+        "userId": "u_1",
+        "sessionId": "hsess_artifacts",
+        "newMessage": {"role": "user", "parts": [{"text": "write report"}]},
+    }
+
+    with client.stream("POST", "/run_sse", json=body, headers=HEADERS) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    events = client.get(
+        "/v1/haas/sessions/hsess_artifacts/events-page",
+        headers=HEADERS,
+    ).json()["data"]
+    assert any(item["type"] == "haas.artifact.registered" for item in events)
+    invocation_events = [
+        item
+        for item in events
+        if item["invocationId"] == events[-1]["invocationId"]
+    ]
+    assert invocation_events[-2]["type"] == "haas.artifact.registered"
+    assert invocation_events[-1]["type"] == "haas.turn.completed"
+    listed = client.get(
+        "/v1/haas/sessions/hsess_artifacts/artifacts",
+        headers=HEADERS,
+    ).json()["data"]["artifacts"]
+    assert listed[0]["relativePath"] == "output/report.md"
+    assert listed[0]["previewStatus"] == "available"
+    content = client.get(f"/v1/haas/files/{listed[0]['id']}/content", headers=HEADERS)
+    assert content.status_code == 200
+    assert content.content == b"# Report"
 
 
 def test_c4_run_sse_and_parity() -> None:

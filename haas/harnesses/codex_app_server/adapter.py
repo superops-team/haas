@@ -10,9 +10,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import os
+import stat
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from haas.execution_evidence import MAX_EVIDENCE_BYTES, ExecutionEvidenceStore
@@ -66,6 +69,8 @@ DEFAULT_CWD = "/workspace"
 DEFAULT_APPROVAL_POLICY = "on-request"
 DEFAULT_TIMEOUT_SECONDS = 86_400.0
 BUILTIN_COWORK_RECALL_MCP_NAME = "manager-cowork-recall"
+MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
+SessionScope = tuple[str, str, str]
 
 # Codex notification methods that terminate a turn, mapped to canonical status.
 _TERMINAL_METHODS: dict[str, str] = {
@@ -271,11 +276,12 @@ class CodexAdapter:
         self._codex_bin = codex_bin
         self._rpc = CodexJsonRpc(endpoint, codex_bin=codex_bin, request_timeout=request_timeout)
         self._connect_lock = asyncio.Lock()
-        self._session_threads: dict[str, str] = {}
+        self._session_threads: dict[SessionScope, str] = {}
         self._turn_contexts: dict[str, _TurnContext] = {}
         self._turn_index: dict[str, str] = {}  # codexTurnId -> turnId
+        self._session_cwds: dict[tuple[str, str, str], str] = {}
         self._generation = 0
-        self._non_resumable: set[str] = set()
+        self._non_resumable: set[SessionScope] = set()
         self._interaction_store: MemoryStore | None = None
         self._pending_interactions: set[str] = set()
         self._execution_evidence: ExecutionEvidenceStore | None = None
@@ -425,6 +431,19 @@ class CodexAdapter:
             approvalMode=DEFAULT_APPROVAL_POLICY,
         )
 
+    def _request_scope(
+        self, session_id: str, app_name: str = "", user_id: str = ""
+    ) -> SessionScope:
+        requested = (app_name, user_id, session_id)
+        if app_name or user_id:
+            return requested
+        known = {
+            key
+            for key in (*self._session_threads, *self._session_cwds, *self._non_resumable)
+            if key[2] == session_id
+        }
+        return next(iter(known)) if len(known) == 1 else requested
+
     # --- session lifecycle --------------------------------------------------
 
     async def prepare_session(self, request: PrepareSessionRequest) -> PreparedSession:
@@ -436,13 +455,14 @@ class CodexAdapter:
 
     async def resume_session(self, request: ResumeSessionRequest) -> PreparedSession:
         await self._ensure_connected()
-        thread_id = self._session_threads.get(request.sessionId, "")
+        scope = self._request_scope(request.sessionId, request.appName, request.userId)
+        thread_id = self._session_threads.get(scope, "")
         if not thread_id:
             opaque = request.opaque or {}
             thread_id = str(opaque.get("threadId", ""))
         if thread_id:
             try:
-                resumed = await self._resume_thread(thread_id, request.sessionId)
+                resumed = await self._resume_thread(thread_id, scope)
             except CodexConnectionError:
                 resumed = ""
             if resumed:
@@ -456,14 +476,15 @@ class CodexAdapter:
         )
 
     async def inspect_session(self, request: InspectSessionRequest) -> SessionInspection:
-        thread_id = self._session_threads.get(request.sessionId, "")
-        if request.sessionId in self._non_resumable:
+        scope = self._request_scope(request.sessionId, request.appName, request.userId)
+        thread_id = self._session_threads.get(scope, "")
+        if scope in self._non_resumable:
             return SessionInspection(status="non_resumable")
         if not thread_id:
             return SessionInspection(status="unknown")
         try:
             await self._ensure_connected()
-            resumed = await self._resume_thread(thread_id, request.sessionId)
+            resumed = await self._resume_thread(thread_id, scope)
         except CodexConnectionError:
             resumed = ""
         if resumed:
@@ -471,11 +492,14 @@ class CodexAdapter:
                 status="active",
                 nativeRef={"threadId": resumed, "generation": self._generation},
             )
-        self._non_resumable.add(request.sessionId)
+        self._non_resumable.add(scope)
         return SessionInspection(status="non_resumable")
 
     async def cleanup_session(self, request: CleanupSessionRequest) -> CleanupResult:
-        self._session_threads.pop(request.sessionId, None)
+        scope = self._request_scope(request.sessionId, request.appName, request.userId)
+        self._session_threads.pop(scope, None)
+        self._session_cwds.pop(scope, None)
+        self._non_resumable.discard(scope)
         return CleanupResult(status="cleaned")
 
     # --- turn lifecycle -----------------------------------------------------
@@ -486,6 +510,14 @@ class CodexAdapter:
         sandbox = request.sandbox
         mode = str(sandbox.get("mode", "workspace-write"))
         cwd = str(sandbox.get("workspaceRoot", DEFAULT_CWD))
+        scope = (request.appName, request.userId, request.sessionId)
+        legacy_scope = ("", "", request.sessionId)
+        if scope not in self._session_threads and legacy_scope in self._session_threads:
+            self._session_threads[scope] = self._session_threads.pop(legacy_scope)
+        if scope not in self._non_resumable and legacy_scope in self._non_resumable:
+            self._non_resumable.remove(legacy_scope)
+            self._non_resumable.add(scope)
+        self._session_cwds[scope] = cwd
         writable_roots = sandbox.get("writableRoots") or [cwd]
         if not isinstance(writable_roots, list):
             writable_roots = [cwd]
@@ -493,13 +525,13 @@ class CodexAdapter:
             sandbox["network"] if "network" in sandbox else request.policy.get("network")
         )
 
-        thread_id = self._session_threads.get(request.sessionId, "")
+        thread_id = self._session_threads.get(scope, "")
         if thread_id:
             thread_id = await self._resume_or_drop_thread(
-                thread_id, request.sessionId, cwd, request
+                thread_id, scope, cwd, request
             )
         if not thread_id:
-            thread_id = await self._start_thread(request.sessionId, cwd, mode, request)
+            thread_id = await self._start_thread(scope, cwd, mode, request)
 
         turn_params: JsonObject = {
             "threadId": thread_id,
@@ -817,7 +849,7 @@ class CodexAdapter:
 
     async def _start_thread(
         self,
-        session_id: str,
+        scope: SessionScope,
         cwd: str,
         mode: str,
         request: StartTurnRequest,
@@ -840,24 +872,24 @@ class CodexAdapter:
         thread_id = str(thread.get("id", "")) if isinstance(thread, dict) else ""
         if not thread_id:
             raise CodexConnectionError("thread/start returned no thread id")
-        self._session_threads[session_id] = thread_id
-        self._non_resumable.discard(session_id)
+        self._session_threads[scope] = thread_id
+        self._non_resumable.discard(scope)
         return thread_id
 
     async def _resume_or_drop_thread(
         self,
         thread_id: str,
-        session_id: str,
+        scope: SessionScope,
         cwd: str,
         request: StartTurnRequest | None = None,
     ) -> str:
         """Validate an existing thread via thread/resume; drop it if it is gone."""
         try:
-            return await self._resume_thread(thread_id, session_id, cwd, request)
+            return await self._resume_thread(thread_id, scope, cwd, request)
         except CodexConnectionError as exc:
             if not _is_thread_not_found(exc):
                 raise
-        self._session_threads.pop(session_id, None)
+        self._session_threads.pop(scope, None)
         return ""
 
     @staticmethod
@@ -929,7 +961,7 @@ class CodexAdapter:
     async def _resume_thread(
         self,
         thread_id: str,
-        session_id: str,
+        scope: SessionScope,
         cwd: str = DEFAULT_CWD,
         request: StartTurnRequest | None = None,
     ) -> str:
@@ -951,7 +983,7 @@ class CodexAdapter:
         thread = resume_result.get("thread", {})
         resumed = str(thread.get("id", "")) if isinstance(thread, dict) else ""
         if resumed:
-            self._session_threads[session_id] = resumed
+            self._session_threads[scope] = resumed
         return resumed or thread_id
 
     async def cancel_turn(self, request: CancelTurnRequest) -> CancelResult:
@@ -970,7 +1002,65 @@ class CodexAdapter:
     # --- artifacts ----------------------------------------------------------
 
     async def list_artifacts(self, request: ListArtifactsRequest) -> list[ArtifactRef]:
-        return []
+        return await asyncio.to_thread(
+            self._list_artifacts_sync, request.appName, request.userId, request.sessionId
+        )
+
+    def _list_artifacts_sync(
+        self, app_name: str, user_id: str, session_id: str
+    ) -> list[ArtifactRef]:
+        cwd = self._session_cwds.get((app_name, user_id, session_id))
+        if cwd is None:
+            return []
+        workspace_root = Path(cwd).resolve()
+        output_candidate = workspace_root / "output"
+        if output_candidate.is_symlink() or not output_candidate.is_dir():
+            return []
+        refs: list[ArtifactRef] = []
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            output_fd = os.open(
+                output_candidate,
+                flags | getattr(os, "O_DIRECTORY", 0),
+            )
+        except OSError:
+            return []
+        try:
+            for root, dirnames, filenames, dir_fd in os.fwalk(
+                ".", topdown=True, follow_symlinks=False, dir_fd=output_fd
+            ):
+                dirnames[:] = sorted(name for name in dirnames if not name.startswith("."))
+                for filename in sorted(filenames):
+                    if len(refs) >= 20:
+                        return refs
+                    relative_path = Path(root, filename)
+                    if filename.startswith("."):
+                        continue
+                    try:
+                        file_fd = os.open(filename, flags, dir_fd=dir_fd)
+                        with os.fdopen(file_fd, "rb") as file_obj:
+                            metadata = os.fstat(file_obj.fileno())
+                            if (
+                                not stat.S_ISREG(metadata.st_mode)
+                                or metadata.st_size > MAX_ARTIFACT_BYTES
+                            ):
+                                continue
+                            content = file_obj.read(MAX_ARTIFACT_BYTES + 1)
+                    except OSError:
+                        continue
+                    if len(content) > MAX_ARTIFACT_BYTES:
+                        continue
+                    normalized = relative_path.as_posix().removeprefix("./")
+                    refs.append(
+                        ArtifactRef(
+                            name=filename,
+                            path=f"output/{normalized}",
+                            content=content,
+                        )
+                    )
+        finally:
+            os.close(output_fd)
+        return refs
 
     # --- event normalization ------------------------------------------------
 

@@ -103,11 +103,15 @@ class HarnessSandboxDecl:
 class ResumeSessionRequest:
     sessionId: str
     opaque: dict[str, Any] = field(default_factory=dict)
+    appName: str = ""
+    userId: str = ""
 
 
 @dataclass
 class InspectSessionRequest:
     sessionId: str
+    appName: str = ""
+    userId: str = ""
 
 
 @dataclass
@@ -119,18 +123,24 @@ class SessionInspection:
 @dataclass
 class ListArtifactsRequest:
     sessionId: str
+    appName: str = ""
+    userId: str = ""
 
 
 @dataclass
 class ArtifactRef:
     name: str
     path: str
+    content: bytes | None = None
+    mediaType: str | None = None
 
 
 @dataclass
 class CleanupSessionRequest:
     sessionId: str
     reason: str = "deleted"
+    appName: str = ""
+    userId: str = ""
 
 
 @dataclass

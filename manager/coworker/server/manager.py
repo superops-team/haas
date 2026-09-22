@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -143,6 +144,9 @@ _SCOPES = {s.value for s in Scope}
 HAAS_COWORK_RECALL_MCP_NAME = "manager-cowork-recall"
 
 logger = logging.getLogger("coworker.manager")
+HAAS_ARTIFACT_UNAVAILABLE_MESSAGE = (
+    "This artifact was recorded, but preview is not available from this runtime yet."
+)
 
 
 def _grants_of(engine) -> dict[str, Any]:
@@ -4844,6 +4848,9 @@ class SessionManager:
         return None
 
     def list_artifacts(self, session_id: str) -> list[dict[str, Any]]:
+        haas = self._list_haas_artifacts(session_id)
+        if haas is not None:
+            return haas
         root = self._artifact_scan_root(session_id)
         if root is None or not root.is_dir():
             return []
@@ -4916,6 +4923,93 @@ class SessionManager:
 
     MAX_BINARY_PREVIEW = 25 * 1024 * 1024  # base64-over-JSON gets heavy past this
 
+    def _list_haas_artifacts(self, session_id: str) -> list[dict[str, Any]] | None:
+        record = self.session_store.load(session_id)
+        binding = binding_from_record(record)
+        if binding is None:
+            return None
+        try:
+            client, haas_session_id = self._haas_interaction_client(session_id)
+            result = _run_sync(client.list_artifacts(haas_session_id))
+            artifacts = result.data if hasattr(result, "data") else result
+        except (HaasClientError, HaasDelegationError, ValueError):
+            return []
+        if not isinstance(artifacts, list):
+            return []
+        return [self._haas_artifact_info(item) for item in artifacts if isinstance(item, dict)]
+
+    def _haas_artifact_info(self, record: dict[str, Any]) -> dict[str, Any]:
+        relative_path = str(record.get("relativePath") or record.get("filename") or "")
+        filename = str(record.get("filename") or Path(relative_path).name or relative_path)
+        created = record.get("createdAtMs")
+        modified_at = int(created / 1000) if isinstance(created, int | float) else 0
+        size = record.get("bytes")
+        if not isinstance(size, int) or size < 0:
+            size = 0
+        preview_status = str(record.get("previewStatus") or "available")
+        download_status = str(record.get("downloadStatus") or "available")
+        if (preview_status, download_status) not in {
+            ("available", "available"),
+            ("download_only", "available"),
+            ("unavailable", "unavailable"),
+        }:
+            preview_status = "unavailable"
+            download_status = "unavailable"
+        return {
+            "source": "haas",
+            "id": str(record.get("id") or ""),
+            "path": relative_path,
+            "name": filename,
+            "kind": _artifact_kind_from_name_and_media_type(
+                filename or relative_path, str(record.get("mediaType") or "")
+            ),
+            "size": size,
+            "modified_at": modified_at,
+            "preview_status": preview_status,
+            "download_status": download_status,
+        }
+
+    def _resolve_haas_artifact(
+        self, session_id: str, path: str
+    ) -> tuple[Any | None, str | None, dict[str, Any] | None]:
+        record = self.session_store.load(session_id)
+        if binding_from_record(record) is None:
+            return None, None, None
+        try:
+            client, haas_session_id = self._haas_interaction_client(session_id)
+            result = _run_sync(client.list_artifacts(haas_session_id))
+            artifacts = result.data if hasattr(result, "data") else result
+        except (HaasClientError, HaasDelegationError, ValueError):
+            return None, None, {
+                "_error": "artifact_unavailable",
+                "relativePath": path,
+            }
+        if not isinstance(artifacts, list):
+            return None, None, None
+        candidates = [item for item in artifacts if isinstance(item, dict)]
+        exact = [item for item in candidates if item.get("relativePath") == path]
+        if exact:
+            # Older HaaS deployments could retain several versions of one path.
+            # Prefer the newest record; basename fallback remains ambiguity-safe.
+            newest = max(
+                exact,
+                key=lambda item: (
+                    item.get("createdAtMs")
+                    if isinstance(item.get("createdAtMs"), int)
+                    else 0
+                ),
+            )
+            return client, haas_session_id, newest
+        basename = [item for item in candidates if item.get("filename") == path]
+        if len(basename) == 1:
+            return client, haas_session_id, basename[0]
+        if len(basename) > 1:
+            return client, haas_session_id, {
+                "_error": "artifact_ambiguous",
+                "matches": [item.get("relativePath") for item in basename],
+            }
+        return client, haas_session_id, None
+
     def _artifact_target(
         self, session_id: str, path: str, *, allow_dir: bool = False
     ) -> tuple[Path | None, str | None]:
@@ -4963,6 +5057,9 @@ class SessionManager:
         return None, "path escapes workspace"
 
     def read_artifact(self, session_id: str, path: str) -> dict[str, Any]:
+        haas = self._read_haas_artifact(session_id, path)
+        if haas is not None:
+            return haas
         # Folders are readable too (a model sometimes links a whole package, e.g. a skill
         # build dir): return a listing the viewer can render instead of a dead end.
         target, err = self._artifact_target(session_id, path, allow_dir=True)
@@ -5023,11 +5120,189 @@ class SessionManager:
             "truncated": len(text) > 500000,
         }
 
+    def _read_haas_artifact(self, session_id: str, path: str) -> dict[str, Any] | None:
+        client, _haas_session_id, artifact = self._resolve_haas_artifact(session_id, path)
+        if client is None and artifact is None:
+            return None
+        if artifact is None:
+            return {
+                "ok": False,
+                "source": "haas",
+                "code": "artifact_not_found",
+                "error": "This artifact is not available for this conversation.",
+                "preview_status": "unavailable",
+                "download_status": "unavailable",
+            }
+        if artifact.get("_error") == "artifact_ambiguous":
+            return {
+                "ok": False,
+                "source": "haas",
+                "code": "artifact_ambiguous",
+                "error": "More than one artifact has this name. Open it by its full output path.",
+                "matches": artifact.get("matches") or [],
+                "preview_status": "unavailable",
+                "download_status": "unavailable",
+            }
+        if artifact.get("_error") == "artifact_unavailable":
+            return {
+                "ok": False,
+                "source": "haas",
+                "code": "artifact_unavailable",
+                "error": HAAS_ARTIFACT_UNAVAILABLE_MESSAGE,
+                "path": str(artifact.get("relativePath") or path),
+                "kind": _artifact_kind_from_name_and_media_type(path, ""),
+                "preview_status": "unavailable",
+                "download_status": "unavailable",
+            }
+        info = self._haas_artifact_info(artifact)
+        if info["download_status"] == "unavailable" or info["preview_status"] == "unavailable":
+            return {
+                "ok": False,
+                "source": "haas",
+                "code": "artifact_unavailable",
+                "error": HAAS_ARTIFACT_UNAVAILABLE_MESSAGE,
+                "path": info["path"],
+                "kind": info["kind"],
+                "preview_status": "unavailable",
+                "download_status": "unavailable",
+            }
+        if info["preview_status"] == "download_only" or info["kind"] in {"office", "unknown"}:
+            return {
+                "ok": True,
+                "source": "haas",
+                "path": info["path"],
+                "kind": info["kind"],
+                "preview_status": "download_only",
+                "download_status": "available",
+            }
+        try:
+            content, media_type = _run_sync(
+                client.download_file(str(artifact.get("id") or ""))
+            )
+        except (HaasClientError, HaasDelegationError, ValueError):
+            return {
+                "ok": False,
+                "source": "haas",
+                "code": "artifact_unavailable",
+                "error": HAAS_ARTIFACT_UNAVAILABLE_MESSAGE,
+                "path": info["path"],
+                "kind": info["kind"],
+                "preview_status": "unavailable",
+                "download_status": "unavailable",
+            }
+        kind = _artifact_kind_from_name_and_media_type(info["name"], media_type)
+        if kind in ("image", "pdf", "sheet"):
+            import base64
+
+            if len(content) > self.MAX_BINARY_PREVIEW:
+                return {
+                    "ok": True,
+                    "source": "haas",
+                    "path": info["path"],
+                    "kind": kind,
+                    "preview_status": "download_only",
+                    "download_status": "available",
+                }
+            data = base64.b64encode(content).decode("ascii")
+            return {
+                "ok": True,
+                "source": "haas",
+                "path": info["path"],
+                "kind": kind,
+                "data_url": f"data:{media_type};base64,{data}",
+                "preview_status": "available",
+                "download_status": "available",
+            }
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            return {
+                "ok": True,
+                "source": "haas",
+                "path": info["path"],
+                "kind": kind,
+                "preview_status": "download_only",
+                "download_status": "available",
+            }
+        return {
+            "ok": True,
+            "source": "haas",
+            "path": info["path"],
+            "kind": kind,
+            "content": text[:500000],
+            "truncated": len(text) > 500000,
+            "preview_status": "available",
+            "download_status": "available",
+        }
+
+    def download_artifact(
+        self, session_id: str, path: str
+    ) -> tuple[bytes, str, str] | dict[str, Any]:
+        client, _haas_session_id, artifact = self._resolve_haas_artifact(session_id, path)
+        if client is None and artifact is None:
+            target, err = self._artifact_target(session_id, path)
+            if target is None:
+                return {"ok": False, "code": "artifact_not_found", "error": err}
+            try:
+                return target.read_bytes(), _artifact_media_type(target), target.name
+            except OSError:
+                return {
+                    "ok": False,
+                    "code": "artifact_unavailable",
+                    "error": HAAS_ARTIFACT_UNAVAILABLE_MESSAGE,
+                }
+        if artifact is None:
+            return {
+                "ok": False,
+                "code": "artifact_not_found",
+                "error": "This artifact is not available for this conversation.",
+            }
+        if artifact.get("_error") == "artifact_ambiguous":
+            return {
+                "ok": False,
+                "code": "artifact_ambiguous",
+                "error": (
+                    "More than one artifact has this name. "
+                    "Download it by its full output path."
+                ),
+                "matches": artifact.get("matches") or [],
+            }
+        if artifact.get("_error") == "artifact_unavailable":
+            return {
+                "ok": False,
+                "code": "artifact_unavailable",
+                "error": HAAS_ARTIFACT_UNAVAILABLE_MESSAGE,
+            }
+        info = self._haas_artifact_info(artifact)
+        if info["download_status"] != "available":
+            return {
+                "ok": False,
+                "code": "artifact_unavailable",
+                "error": HAAS_ARTIFACT_UNAVAILABLE_MESSAGE,
+            }
+        try:
+            content, media_type = _run_sync(
+                client.download_file(str(artifact.get("id") or ""))
+            )
+        except (HaasClientError, HaasDelegationError, ValueError):
+            return {
+                "ok": False,
+                "code": "artifact_unavailable",
+                "error": HAAS_ARTIFACT_UNAVAILABLE_MESSAGE,
+            }
+        return content, media_type, info["name"]
+
     def reveal_artifact(self, session_id: str, path: str, mode: str = "reveal") -> dict[str, Any]:
         """Show the file in the OS file manager (`reveal`) or open it with its default app
         (`open`). The server runs on the user's machine in both desktop and browser builds, so
         this is local. Cross-platform: macOS `open`, Windows Explorer/ShellExecute, Linux
         `xdg-open`."""
+        if binding_from_record(self.session_store.load(session_id)) is not None:
+            return {
+                "ok": False,
+                "code": "remote_artifact_reveal_unavailable",
+                "error": "Remote artifacts can be previewed or downloaded from OpenHarness.",
+            }
         import os
         import subprocess
         import sys
@@ -6220,6 +6495,13 @@ class SessionManager:
         # Team steering/kicks are dispatched from tool threads; they need the app loop.
         self._loop = asyncio.get_running_loop()
         self._ensure_local_haas(self._haas_config(self.default_workspace))
+        for recovered_run in self.task_store.recover_unfinished_runs():
+            recovered_task = self.task_store.get(recovered_run.task_id)
+            if recovered_task:
+                try:
+                    await self._notify_task_done(recovered_task, recovered_run)
+                except Exception:
+                    logger.warning("Recovered automation notification delivery failed")
         self.scheduler.start()  # tick scheduler for automations (independent of connectors)
         return await self._build_and_start_gateway()
 
@@ -7310,7 +7592,19 @@ class SessionManager:
         # Each run is a real, persisted conversation thread: it runs the instructions under its
         # own session id, then saves the transcript. The user can reopen that session and ask a
         # follow-up — the scheduled agent is no longer fire-and-forget.
-        engine = self._build_task_engine(task, session_id=run.session_id)
+        try:
+            engine = self._build_task_engine(task, session_id=run.session_id)
+            engine.model = task.model or self.model
+            self.unattended.set(run.session_id, True)
+        except Exception:
+            run.status, run.error = "error", "automation_setup_failed"
+            run.finished_at = _epoch()
+            self.task_store.add_run(run)
+            try:
+                await self._notify_task_done(task, run)
+            except Exception:
+                logger.warning("Automation setup-failure notification delivery failed")
+            return run
         # Register the live engine up-front: a parked approval persists the session
         # mid-run (durable suspend), and resolving from the Inbox must find this engine.
         self._engines[run.session_id] = engine
@@ -7323,40 +7617,131 @@ class SessionManager:
             "result. The schedule already exists — do not create or modify any scheduled tasks.\n\n"
             f"{task.instructions}"
         )
+        if not self.try_mark_running(run.session_id):
+            raise RuntimeError("Scheduled session is already occupied")
+        turn_token = self.active_turn_token(run.session_id)
+        failure = False
+        terminal = False
+        task_phase = ""
         try:
-            async for _event in engine.run(opening):
-                pass
+            timeout_seconds = float(os.environ.get("COWORKER_AUTOMATION_TIMEOUT_SECONDS", "86400"))
+            if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+                raise ValueError("Invalid automation execution timeout")
+
+            async def consume():
+                nonlocal failure, terminal, task_phase
+                async for event in self.run_turn_events(
+                    run.session_id, engine, opening, agent=task.agent, workspace=task.workspace
+                ):
+                    data = event.data or {}
+                    kind = event.type.value
+                    await self.broadcast_session(run.session_id, {"type": kind, "data": data})
+                    if kind in {"error", "interrupted"}:
+                        failure = True
+                    if kind in {"permission_required", "question_requested"}:
+                        request_id = data.get("approvalId") or data.get("inputRequestId")
+                        if request_id:
+                            self.inbox.add(
+                                run.session_id,
+                                "notification",
+                                "Automation needs your input",
+                                body="Open the original conversation to review and answer the request.",
+                                tool_call_id=f"automation-interaction:{request_id}",
+                            )
+                    if kind == "task_state":
+                        task_phase = str(data.get("phase") or "")
+                    if kind == "turn_end" and data.get("taskPhase"):
+                        task_phase = str(data["taskPhase"])
+                    if kind == "turn_end":
+                        status = data.get("status")
+                        # Legacy engine reports finish_reason rather than HaaS status.
+                        terminal = status == "completed" or (
+                            status is None and data.get("finish_reason") == "stop"
+                        )
+                        failure = failure or not terminal
+                    if kind in {"turn_start", "iteration_end", "permission_required"}:
+                        self.save(run.session_id, engine)
+
+            await asyncio.wait_for(consume(), timeout=timeout_seconds)
             run.result_text = _last_assistant_text(engine.messages)
             run.artifacts = _recent_files(task.workspace, since=run.started_at)
-            run.status = "ok"
-            if task.notify_on_completion:
-                await self._notify_task_done(task, run)
-        except Exception as exc:
-            run.status, run.error = "error", str(exc)
+            run.status = (
+                "ok" if terminal and not failure and task_phase in {"", "completed"} else "error"
+            )
+            if run.status == "error":
+                run.error = "automation_incomplete: inspect the original session for details"
+                if not terminal:
+                    current_task = self.task_store.get(task.id)
+                    if current_task:
+                        current_task.enabled = False
+                        self.task_store.save(current_task)
+        except asyncio.CancelledError:
+            run.status = "error"
+            run.error = "recovery_required: execution interrupted during shutdown"
+            current_task = self.task_store.get(task.id)
+            if current_task:
+                current_task.enabled = False
+                self.task_store.save(current_task)
+            raise
+        except Exception:
+            run.status = "error"
+            run.error = "automation_failed: inspect the original session before retrying"
+            # Delivery timeout does not prove remote execution stopped. Freeze future runs.
+            current_task = self.task_store.get(task.id)
+            if current_task:
+                current_task.enabled = False
+                self.task_store.save(current_task)
         finally:
             run.finished_at = _epoch()
-            # Persist the run as a continuable session + keep the live engine for an immediate
-            # follow-up; record the run (now carrying its session_id).
+            self.mark_idle(run.session_id, token=turn_token)
             try:
                 self.save(run.session_id, engine)
-                self._engines[run.session_id] = engine
             except Exception:
-                pass
+                run.status = "error"
+                run.error = "automation_persistence_failed"
             self.task_store.add_run(run)
+            await self.broadcast_session(run.session_id, {"type": "turn_done", "data": {}})
+        if task.notify_on_completion or run.status != "ok":
+            try:
+                await self._notify_task_done(task, run)
+            except Exception:
+                logger.warning("Automation notification delivery failed for %s", run.run_id)
         return run
 
     async def _notify_task_done(self, task, run: TaskRun) -> None:
-        summary = (run.result_text or "").strip()[:280]
-        # Notify any socket viewing this scheduled run's session (it's a durable session of its own).
+        # Durable attention first; never include provider bodies or generated content.
+        label = "completed" if run.status == "ok" else "needs attention"
+        if any(
+            item.tool_call_id == f"automation-result:{run.run_id}"
+            and item.session_id == run.session_id
+            for item in self.inbox.list()
+        ):
+            return
+        self.inbox.add(
+            run.session_id,
+            "notification",
+            f"Automation {label}",
+            body="Open the original conversation to inspect the result before retrying.",
+            tool_call_id=f"automation-result:{run.run_id}",
+        )
+        data = {
+            "task_id": task.id,
+            "run_id": run.run_id,
+            "session_id": run.session_id,
+            "workspace": task.workspace,
+            "agent": task.agent,
+            "status": run.status,
+        }
+        await self.broadcast_event({"type": "automation_run_finished", "data": data})
         await self.broadcast_session(
             run.session_id,
             {
                 "type": "task_done",
                 "data": {
+                    **data,
                     "task": task.title,
                     "id": task.id,
-                    "text": summary,
-                    "run_id": run.run_id,
+                    "text": f"Automation {label}. Open the original conversation for details.",
                 },
             },
         )
@@ -7364,20 +7749,17 @@ class SessionManager:
             from ..connectors.base import parse_target
             from ..connectors.senders import DEFAULT_SENDERS
 
-            try:
-                platform, chat_id, thread = parse_target(task.notify_target)
-                sender = DEFAULT_SENDERS.get(platform)
-                creds = self.secrets.get(f"{platform}:default") or {}
-                if sender and creds.get("bot_token"):
-                    await asyncio.to_thread(
-                        sender,
-                        creds["bot_token"],
-                        chat_id,
-                        f"✓ {task.title}\n\n{summary}",
-                        thread,
-                    )
-            except Exception:
-                pass
+            platform, chat_id, thread = parse_target(task.notify_target)
+            sender = DEFAULT_SENDERS.get(platform)
+            creds = self.secrets.get(f"{platform}:default") or {}
+            if sender and creds.get("bot_token"):
+                await asyncio.to_thread(
+                    sender,
+                    creds["bot_token"],
+                    chat_id,
+                    f"Automation {label}. Open OpenHarness for details.",
+                    thread,
+                )
 
     # -- automation REST --------------------------------------------------------
     def list_automations(self) -> dict[str, Any]:
@@ -7499,6 +7881,8 @@ class SessionManager:
         task = self.task_store.get(task_id)
         if task is None:
             return {"ok": False, "error": "not found"}
+        if self.task_store.has_running_run(task_id):
+            return {"ok": False, "error": "automation_busy: inspect the active run"}
         Path(task.workspace).mkdir(parents=True, exist_ok=True)
         run = TaskRun(task_id=task.id, trigger="manual")  # status "running", session_id auto
         self.task_store.add_run(run)
@@ -7517,14 +7901,20 @@ class SessionManager:
             ),
         }
 
-    def finalize_manual_run(self, task_id: str, run_id: str) -> dict[str, Any]:
+    def finalize_manual_run(
+        self, task_id: str, run_id: str, *, execution_ok: bool | None = None
+    ) -> dict[str, Any]:
         """Mark a manual run complete once its first turn finished (the WS already saved the
         session). Pulls result text + artifacts from the persisted transcript/workspace.
         """
-        run = next((r for r in self.task_store.runs(task_id) if r.run_id == run_id), None)
+        run = self.task_store.find_run(run_id)
+        if run is not None and run.task_id != task_id:
+            return {"ok": False, "error": "not found"}
         task = self.task_store.get(task_id)
         if run is None or task is None:
             return {"ok": False, "error": "not found"}
+        if self.is_running(run.session_id):
+            return {"ok": True, "run": run.to_dict()}
         if run.status == "running":
             record = self.session_store.load(run.session_id)
             run.result_text = _last_assistant_text(record.messages) if record else None
@@ -7542,7 +7932,10 @@ class SessionManager:
                 if task_phase in {"failed", "incomplete", "cancelled", "verifying"}
                 else terminal_status
             )
-            if failure_phase in {"failed", "incomplete", "cancelled", "verifying"}:
+            if execution_ok is False:
+                run.status = "error"
+                run.error = "automation_incomplete: inspect the original session"
+            elif failure_phase in {"failed", "incomplete", "cancelled", "verifying"}:
                 run.status = "error"
                 safe_reason = (
                     task_state.get("safeReason")
@@ -7554,10 +7947,14 @@ class SessionManager:
             elif task_phase in {"waiting_for_input", "waiting_for_approval", "running"}:
                 run.status = "error"
                 run.error = f"HaaS task {task_phase}"
+            elif bridge and task_phase != "completed":
+                run.status = "error"
+                run.error = "automation_terminal_missing: inspect the original session"
+            elif record is None:
+                run.status = "error"
+                run.error = "automation_transcript_missing"
             else:
-                # Legacy/direct-engine runs do not have a HaaS bridge. A delegated
-                # run is successful only after its persisted completion barrier says
-                # completed; the failure states above must never be promoted to ok.
+                # Legacy runs retain compatibility; HaaS requires its completion barrier.
                 run.status = "ok"
             run.finished_at = _epoch()
             self.task_store.add_run(run)
@@ -8805,6 +9202,49 @@ def _artifact_kind(path: Path) -> str:
     if suffix in {".py", ".js", ".ts", ".tsx", ".css", ".json"}:
         return "code"
     return "text"
+
+
+def _artifact_kind_from_name_and_media_type(name: str, media_type: str) -> str:
+    lowered = media_type.lower().split(";", 1)[0].strip()
+    if lowered.startswith("image/"):
+        return "image"
+    if lowered == "application/pdf":
+        return "pdf"
+    if lowered in {"text/html", "application/xhtml+xml"}:
+        return "html"
+    if lowered in {"text/markdown", "text/x-markdown"}:
+        return "markdown"
+    if lowered in {"text/csv", "text/tab-separated-values"}:
+        return "csv"
+    if lowered in {
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }:
+        return "sheet"
+    if lowered in {
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }:
+        return "office"
+    if lowered.startswith("text/"):
+        return "text"
+    return _artifact_kind(Path(name))
+
+
+def _artifact_media_type(path: Path) -> str:
+    import mimetypes
+
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+def _run_sync(awaitable: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+    raise RuntimeError("synchronous artifact routes cannot run inside an active event loop")
 
 
 def _redact(raw: dict[str, Any]) -> dict[str, Any]:

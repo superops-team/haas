@@ -277,6 +277,64 @@ class ExpiredReplayHaasClient(FakeHaasClient):
             yield event
 
 
+@pytest.mark.asyncio
+async def test_delegation_client_lists_and_downloads_artifacts() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/artifacts"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "artifacts": [
+                            {
+                                "id": "file_report",
+                                "object": "file",
+                                "filename": "report.md",
+                                "relativePath": "output/report.md",
+                                "bytes": 7,
+                            }
+                        ]
+                    },
+                    "traceId": "tr_artifacts",
+                },
+            )
+        if request.url.path.endswith("/files/file_report/content"):
+            return httpx.Response(
+                200,
+                content=b"# Report",
+                headers={"content-type": "text/markdown"},
+            )
+        if request.url.path.endswith("/artifacts/archive"):
+            return httpx.Response(
+                200,
+                content=b"zip",
+                headers={"content-type": "application/zip"},
+            )
+        raise AssertionError(request.url.path)
+
+    client = HaasDelegationClient(
+        HaasDelegationConfig(base_url="https://haas.example.com", api_token="token"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    artifacts = await client.list_artifacts("hsess_1")
+    assert artifacts[0]["relativePath"] == "output/report.md"
+    content, media_type = await client.download_file("file_report")
+    assert content == b"# Report"
+    assert media_type == "text/markdown"
+    archive, archive_media_type = await client.download_artifact_archive("hsess_1")
+    assert archive == b"zip"
+    assert archive_media_type == "application/zip"
+    assert [item.url.path for item in seen] == [
+        "/v1/haas/sessions/hsess_1/artifacts",
+        "/v1/haas/files/file_report/content",
+        "/v1/haas/sessions/hsess_1/artifacts/archive",
+    ]
+
+
 class FakeDirectRunStream:
     def __init__(self, client: FakeDirectHaasClient) -> None:
         self.accepted = AcceptedInvocationHeaders("inv_direct_1", "hsess_s1", 1786400000000)
@@ -4324,3 +4382,27 @@ async def test_adk_disconnect_waits_for_delayed_native_terminal(tmp_path, monkey
     assert terminals[0].data["code"] == "haas_request_timeout"
     assert len(direct.runs) == 1
     assert manager.session_store.load("s1").bindings["haas_delegation"]["control_state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_run_uses_real_manager_haas_route(tmp_path, monkeypatch):
+    from coworker.automation import Schedule, ScheduledTask
+
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    provider = ScriptedProvider()
+    manager = SessionManager(workspace=tmp_path, provider=provider)
+    manager._haas_supervisor = FakeLocalHaasSupervisor()
+    direct = FakeDirectHaasClient(cfg)
+    manager._haas_direct_client_factory = lambda _: direct
+    task = ScheduledTask(title="Check deployment", instructions="Check deployment",
+                         schedule=Schedule(kind="cron", cron="* * * * *"),
+                         workspace=str(tmp_path), agent="cowork")
+    manager.task_store.save(task)
+    run = await manager._run_scheduled_task(task, "schedule")
+    assert run.status == "ok"
+    assert provider.calls == 0
+    assert len(direct.runs) == 1
+    assert direct.runs[0]["body"]["sessionId"] == "hsess_" + run.session_id
+    assert manager.session_store.load(run.session_id).bindings["haas_delegation"]["execution_mode"] == "local_api"
+    assert manager.inbox.pending(run.session_id)

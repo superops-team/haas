@@ -89,7 +89,126 @@ def test_store_register_and_list() -> None:
     assert record.relativePath == "output/report.md"
     assert record.bytes == 5
     assert record.sha256
+    assert record.previewStatus == "available"
+    assert record.downloadStatus == "available"
     assert [r.id for r in store.list("s_1")] == [record.id]
+
+
+def test_store_marks_metadata_only_artifact_unavailable() -> None:
+    store = ArtifactStore()
+    record = store.register(
+        "s_1",
+        "output/report.md",
+        b"hello",
+        store_content=False,
+    )
+    assert record.previewStatus == "unavailable"
+    assert record.downloadStatus == "unavailable"
+    payload = record.to_dict()
+    assert payload["previewStatus"] == "unavailable"
+    assert payload["downloadStatus"] == "unavailable"
+
+
+def test_store_produced_artifact_deduplicates_and_replaces_current_path() -> None:
+    store = ArtifactStore()
+    first, created = store.register_produced(
+        "s_1",
+        "output/report.md",
+        b"one",
+        invocation_id="inv_1",
+        owner_principal_id="p_1",
+        media_type="text/markdown",
+    )
+    same, duplicate_created = store.register_produced(
+        "s_1",
+        "output/report.md",
+        b"one",
+        invocation_id="inv_2",
+        owner_principal_id="p_1",
+        media_type="text/markdown",
+    )
+    replacement, replacement_created = store.register_produced(
+        "s_1",
+        "output/report.md",
+        b"two",
+        invocation_id="inv_3",
+        owner_principal_id="p_1",
+        media_type="text/markdown",
+    )
+
+    assert created is True
+    assert duplicate_created is False
+    assert same.id == first.id
+    assert replacement_created is True
+    assert replacement.id != first.id
+    assert [record.id for record in store.list("s_1", owner_principal_id="p_1")] == [
+        replacement.id
+    ]
+    assert store.read_content(first.id, owner_principal_id="p_1") == b"one"
+
+
+def test_store_delete_session_removes_current_and_superseded_artifacts() -> None:
+    store = ArtifactStore()
+    first, _ = store.register_produced(
+        "s_1",
+        "output/report.md",
+        b"one",
+        invocation_id="inv_1",
+        owner_principal_id="p_1",
+        app_name="chrn_1",
+        user_id="u_1",
+    )
+    replacement, _ = store.register_produced(
+        "s_1",
+        "output/report.md",
+        b"two",
+        invocation_id="inv_2",
+        owner_principal_id="p_1",
+        app_name="chrn_1",
+        user_id="u_1",
+    )
+
+    store.delete_session("s_1", app_name="chrn_1", user_id="u_1")
+
+    assert store.list("s_1") == []
+    for file_id in (first.id, replacement.id):
+        with pytest.raises(ArtifactNotFoundError):
+            store.read_content(file_id, owner_principal_id="p_1")
+
+
+def test_store_same_bare_session_id_isolated_by_full_adk_scope() -> None:
+    store = ArtifactStore()
+    first, _ = store.register_produced(
+        "shared",
+        "output/report.md",
+        b"first",
+        invocation_id="inv_1",
+        owner_principal_id="p_1",
+        app_name="chrn_1",
+        user_id="u_1",
+    )
+    second, _ = store.register_produced(
+        "shared",
+        "output/report.md",
+        b"second",
+        invocation_id="inv_2",
+        owner_principal_id="p_1",
+        app_name="chrn_2",
+        user_id="u_2",
+    )
+
+    assert [record.id for record in store.list(
+        "shared", app_name="chrn_1", user_id="u_1"
+    )] == [first.id]
+    assert [record.id for record in store.list(
+        "shared", app_name="chrn_2", user_id="u_2"
+    )] == [second.id]
+
+    store.delete_session("shared", app_name="chrn_1", user_id="u_1")
+
+    with pytest.raises(ArtifactNotFoundError):
+        store.read_content(first.id, owner_principal_id="p_1")
+    assert store.read_content(second.id, owner_principal_id="p_1") == b"second"
 
 
 def test_store_register_rejects_traversal() -> None:

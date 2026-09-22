@@ -391,12 +391,16 @@ export async function getJournalCases(): Promise<JournalCase[]> {
 }
 
 export interface ArtifactInfo {
+  source?: "haas" | string;
+  id?: string;
   path: string; // workspace-relative (the display/API identifier)
   abs_path?: string; // absolute — what "Copy path" copies
   name: string;
   kind: "markdown" | "html" | "image" | "code" | "text" | string;
   size: number;
   modified_at: number;
+  preview_status?: "available" | "download_only" | "unavailable";
+  download_status?: "available" | "unavailable";
   // Which rail surface opened it — drives the viewer's breadcrumb ("Artifacts" vs
   // "Files"). Absent = artifacts (UX-037).
   origin?: "artifacts" | "files";
@@ -404,12 +408,15 @@ export interface ArtifactInfo {
 
 export interface ArtifactContent {
   ok: boolean;
+  source?: "haas" | string;
   error?: string;
   path: string;
   kind: string;
   content?: string;
   data_url?: string;
   truncated?: boolean;
+  preview_status?: "available" | "download_only" | "unavailable";
+  download_status?: "available" | "unavailable";
   // kind === "folder": a directory listing (models sometimes link a whole package dir).
   entries?: { name: string; dir: boolean; size: number }[];
 }
@@ -437,6 +444,27 @@ export async function revealArtifact(
     body: JSON.stringify({ path, mode }),
   });
   return res.json();
+}
+
+export async function downloadArtifact(
+  sessionId: string,
+  path: string,
+  filename: string,
+): Promise<void> {
+  const q = new URLSearchParams({ path });
+  const res = await fetch(
+    `${httpBase()}/v1/sessions/${encodeURIComponent(sessionId)}/artifacts/download?${q.toString()}`,
+  );
+  if (!res.ok) throw new Error(`artifact download failed: ${res.status}`);
+  const url = URL.createObjectURL(await res.blob());
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  // Keep the object URL alive until the browser has consumed the synthetic click.
+  globalThis.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 // -- session roots (orphan Cowork: scratch + added folders) -------------------

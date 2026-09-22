@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { getI18n, useTranslation } from "react-i18next";
 import type {
@@ -645,7 +645,7 @@ function HaasTurnGroup({
       {streamingText && (
         <div className="activity-live-answer" data-testid="turn-live-stream">
           <Markdown text={streamingText} />
-          <span className="stream-cursor">▍</span>
+          <span className="stream-cursor" aria-hidden="true">▍</span>
         </div>
       )}
       {selected &&
@@ -716,6 +716,47 @@ function ModelStageTimeline({
   );
 }
 
+function compactStageTitle(
+  stage: ModelCallStage,
+  activityById: Map<string, ToolActivity>,
+  fallback: string,
+) {
+  const genericActivityTitles = new Set([
+    "Run command",
+    "Ran a command",
+    "Read files",
+    "Searched",
+    "Edited files",
+    "Used a tool",
+  ]);
+  for (const step of stage.steps) {
+    if (step.kind !== "tool") continue;
+    const activity = activityById.get(step.activityId);
+    const candidates = [
+      activity?.summary,
+      activity?.commandPreview,
+      activity?.title,
+      activity?.legacyLine?.obj,
+      activity?.legacyLine?.pre,
+    ];
+    for (const candidate of candidates) {
+      const title = String(candidate || "").trim();
+      if (title && !genericActivityTitles.has(title)) return title;
+    }
+  }
+  for (const step of stage.steps) {
+    if ("text" in step) {
+      const text = String(
+        (step.kind === "reasoning_summary" ? step.previewText : undefined) ||
+          step.text ||
+          "",
+      ).trim();
+      if (text) return Array.from(text).slice(0, 96).join("");
+    }
+  }
+  return fallback;
+}
+
 function ModelStageCard({
   stage,
   index,
@@ -732,15 +773,19 @@ function ModelStageCard({
   ) => void;
 }) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(stage.status !== "completed");
+  const [open, setOpen] = useState(stage.status === "failed");
   const priorStatus = useRef(stage.status);
   useEffect(() => {
     if (stage.status !== priorStatus.current) {
-      setOpen(stage.status !== "completed");
+      if (stage.status === "failed") setOpen(true);
       priorStatus.current = stage.status;
     }
   }, [stage.status]);
   const usage = stage.usage;
+  const fallbackTitle = t("transcript.activity.stage", { number: index + 1 });
+  const title = compactStageTitle(stage, activityById, fallbackTitle);
+  const stepsLabel = t("transcript.turn.steps_label", { count: stage.steps.length });
+  const statusLabel = t("transcript.activity.stage_status." + stage.status);
   const reasoningPreview = (text: string, projected?: string) =>
     Array.from(projected ?? text)
       .slice(0, 240)
@@ -753,16 +798,19 @@ function ModelStageCard({
     >
       <summary
         className="model-stage-head"
+        aria-label={[title, statusLabel, stepsLabel].join(" · ")}
         onClick={(event) => {
           event.preventDefault();
           setOpen((value) => !value);
         }}
       >
-        <span className="model-stage-title">
-          {stage.status === "completed" ? "✓ " : ""}
-          {t("transcript.activity.stage", { number: index + 1 })}
-          {" · "}
-          {t("transcript.turn.steps_label", { count: stage.steps.length })}
+        <span className="model-stage-title" title={title}>
+          <span className="model-stage-status-mark" aria-hidden="true">
+            {stage.status === "completed" ? "✓" : stage.status === "running" ? "" : "!"}
+          </span>
+          <span className="model-stage-title-text">{title}</span>
+          <span className="model-stage-status">{statusLabel}</span>
+          <span className="model-stage-step-count">{stepsLabel}</span>
         </span>
         {usage ? (
           <span className="model-stage-usage">
@@ -1326,7 +1374,7 @@ function LegacyTurnGroup({
               data-testid="turn-live-stream"
             >
               <Markdown text={streamingText} />
-              <span className="stream-cursor">▍</span>
+              <span className="stream-cursor" aria-hidden="true">▍</span>
             </div>
           )}
         </div>
@@ -1424,6 +1472,19 @@ function McpNotice({
   );
 }
 
+const AssistantMessage = memo(function AssistantMessage({ item }: { item: AssistantItem }) {
+  const { t } = useTranslation();
+  if (!item.text && item.reasoning) return <div><ThinkingBlock text={item.reasoning} /></div>;
+  return (
+    <div className="group bubble-assistant">
+      <div className="who">{t("transcript.who_assistant")}</div>
+      {item.reasoning && <ThinkingBlock text={item.reasoning} />}
+      <Markdown text={item.text} />
+      <BubbleMeta text={item.text} ts={item.ts} align="left" />
+    </div>
+  );
+});
+
 export function Transcript({
   items,
   running,
@@ -1455,83 +1516,87 @@ export function Transcript({
   // breakers (user, connector, notices, plan/dir requests…). Trailing assistant texts are the
   // ANSWER and render as bubbles after the group; interior assistant texts are narration and
   // stay inside. A run with no activity at all is just bubbles (unchanged chat behavior).
-  const blocks: Array<
-    | {
-        turn: TurnItem[];
-        live?: boolean;
-        reasoningText?: string;
-        modelStages?: ModelCallStage[];
-      }
-    | { item: Item; i: number }
-  > = [];
-  let run: TurnItem[] = [];
-  const flush = (live = false) => {
-    if (!run.length) return;
-    const turn = [...run];
-    run = [];
-    const answers: AssistantItem[] = [];
-    const savedReasoning = [...turn]
-      .reverse()
-      .find(
-        (item): item is AssistantItem =>
-          item.kind === "assistant" && !!item.reasoning,
-      )?.reasoning;
-    const savedStages = [...turn]
-      .reverse()
-      .find(
-        (item): item is AssistantItem =>
-          item.kind === "assistant" && !!item.modelStages?.length,
-      )?.modelStages;
-    const hasHaasActivity =
-      !!savedStages?.length ||
-      turn.some((item) => item.kind === "tool" && item.source === "haas");
-    // A live run with tool activity keeps its trailing text inside as the status line;
-    // a live run with NO activity is a plain streaming reply — bubbles, as ever.
-    const keepTrailing = live && turn.some((it) => it.kind !== "assistant");
-    if (!keepTrailing)
-      while (turn.length && turn[turn.length - 1].kind === "assistant")
-        answers.unshift(turn.pop() as AssistantItem);
-    if (turn.some((it) => it.kind !== "assistant") || savedStages?.length)
-      blocks.push({
-        turn,
-        live,
-        reasoningText: savedReasoning,
-        modelStages: savedStages,
+  const historyBlocks = useMemo(() => {
+    const blocks: Array<
+      | {
+          turn: TurnItem[];
+          live?: boolean;
+          reasoningText?: string;
+          modelStages?: ModelCallStage[];
+        }
+      | { item: Item; i: number }
+    > = [];
+    let run: TurnItem[] = [];
+    const flush = (live = false) => {
+      if (!run.length) return;
+      const turn = [...run];
+      run = [];
+      const answers: AssistantItem[] = [];
+      const savedReasoning = [...turn]
+        .reverse()
+        .find(
+          (item): item is AssistantItem =>
+            item.kind === "assistant" && !!item.reasoning,
+        )?.reasoning;
+      const savedStages = [...turn]
+        .reverse()
+        .find(
+          (item): item is AssistantItem =>
+            item.kind === "assistant" && !!item.modelStages?.length,
+        )?.modelStages;
+      const hasHaasActivity =
+        !!savedStages?.length ||
+        turn.some((item) => item.kind === "tool" && item.source === "haas");
+      // A live run with tool activity keeps its trailing text inside as the status line;
+      // a live run with NO activity is a plain streaming reply — bubbles, as ever.
+      const keepTrailing = live && turn.some((it) => it.kind !== "assistant");
+      if (!keepTrailing)
+        while (turn.length && turn[turn.length - 1].kind === "assistant")
+          answers.unshift(turn.pop() as AssistantItem);
+      if (turn.some((it) => it.kind !== "assistant") || savedStages?.length)
+        blocks.push({
+          turn,
+          live,
+          reasoningText: savedReasoning,
+          modelStages: savedStages,
+        });
+      else turn.forEach((t) => blocks.push({ item: t, i: -1 }));
+      answers.forEach((answer) => {
+        const visibleAnswer =
+          hasHaasActivity && answer.reasoning
+            ? { ...answer, reasoning: undefined }
+            : answer;
+        if (visibleAnswer.text || visibleAnswer.reasoning)
+          blocks.push({ item: visibleAnswer, i: -1 });
       });
-    else turn.forEach((t) => blocks.push({ item: t, i: -1 }));
-    answers.forEach((answer) => {
-      const visibleAnswer =
-        hasHaasActivity && answer.reasoning
-          ? { ...answer, reasoning: undefined }
-          : answer;
-      if (visibleAnswer.text || visibleAnswer.reasoning)
-        blocks.push({ item: visibleAnswer, i: -1 });
+    };
+    items.forEach((item, i) => {
+      if (
+        item.kind === "tool" ||
+        item.kind === "assistant" ||
+        (item.kind === "approval" && item.resolved)
+      )
+        run.push(item);
+      else if (
+        // PENDING interactive items render elsewhere (approval/question → composer head) and
+        // nothing here — if they broke the run, the trailing narration would flash into an
+        // answer bubble exactly while the user is being asked to decide.
+        (item.kind === "approval" ||
+          item.kind === "dirreq" ||
+          item.kind === "planreq" ||
+          item.kind === "question") &&
+        !item.resolved
+      ) {
+        return;
+      } else {
+        flush();
+        blocks.push({ item, i });
+      }
     });
-  };
-  items.forEach((item, i) => {
-    if (
-      item.kind === "tool" ||
-      item.kind === "assistant" ||
-      (item.kind === "approval" && item.resolved)
-    )
-      run.push(item);
-    else if (
-      // PENDING interactive items render elsewhere (approval/question → composer head) and
-      // nothing here — if they broke the run, the trailing narration would flash into an
-      // answer bubble exactly while the user is being asked to decide.
-      (item.kind === "approval" ||
-        item.kind === "dirreq" ||
-        item.kind === "planreq" ||
-        item.kind === "question") &&
-      !item.resolved
-    ) {
-      return;
-    } else {
-      flush();
-      blocks.push({ item, i });
-    }
-  });
-  flush(!!running);
+    flush(!!running);
+    return blocks;
+  }, [items, running]);
+  const blocks = [...historyBlocks];
   if (
     running &&
     modelStages?.length &&
@@ -1629,21 +1694,7 @@ export function Transcript({
               </div>
             );
           case "assistant":
-            // Thinking-only item (stopped mid-reasoning): just the disclosure, no bubble.
-            if (!item.text && item.reasoning)
-              return (
-                <div key={bi}>
-                  <ThinkingBlock text={item.reasoning} />
-                </div>
-              );
-            return (
-              <div className="group bubble-assistant" key={bi}>
-                <div className="who">{t("transcript.who_assistant")}</div>
-                {item.reasoning && <ThinkingBlock text={item.reasoning} />}
-                <Markdown text={item.text} />
-                <BubbleMeta text={item.text} ts={item.ts} align="left" />
-              </div>
-            );
+            return <AssistantMessage item={item} key={bi} />;
           case "dirreq":
             if (!item.resolved) return null;
             return (

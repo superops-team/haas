@@ -12,11 +12,13 @@ from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any, TypeVar
 
+from haas.artifacts import ArtifactStore
 from haas.events import EventLog
 from haas.harnesses import (
     CancelTurnRequest,
     HarnessAdapter,
     HarnessEvent,
+    ListArtifactsRequest,
     PrepareSessionRequest,
     ResumeSessionRequest,
     StartTurnRequest,
@@ -134,6 +136,7 @@ class SessionRuntime:
     turn_timeout_s: float = 86_400
     _active: dict[str, _ActiveTurn] = field(default_factory=dict)
     model_proxy: Any = None
+    artifacts: ArtifactStore | None = None
 
     def __post_init__(self) -> None:
         if self.lease_ttl_ms <= 0:
@@ -176,6 +179,10 @@ class SessionRuntime:
         key = self._key(app_name, user_id, session_id)
         self.get_session(app_name, user_id, session_id)
         self.store.delete_session(key)
+        if self.artifacts is not None:
+            self.artifacts.delete_session(
+                session_id, app_name=app_name, user_id=user_id
+            )
         if self.model_proxy is not None and hasattr(self.model_proxy, "revoke_session"):
             self.model_proxy.revoke_session(session_id)
 
@@ -412,6 +419,8 @@ class SessionRuntime:
                             ResumeSessionRequest(
                                 sessionId=session_id,
                                 opaque=deepcopy(session.nativeSessionRef or {}),
+                                appName=app.id,
+                                userId=req.user_id,
                             )
                         ),
                     )
@@ -433,6 +442,8 @@ class SessionRuntime:
                             ResumeSessionRequest(
                                 sessionId=session_id,
                                 opaque=deepcopy(session.nativeSessionRef or {}),
+                                appName=app.id,
+                                userId=req.user_id,
                             )
                         ),
                     )
@@ -508,6 +519,9 @@ class SessionRuntime:
                     # canonical invocation contract permits exactly one terminal.
                     if streamed_terminal is not None:
                         continue
+                    artifact_events = await self._publish_turn_artifacts(
+                        app, invocation, turn, key, holder, token
+                    )
                     active = self._active.get(invocation.id)
                     if (
                         status == "interrupted"
@@ -528,6 +542,8 @@ class SessionRuntime:
                         token,
                     )
                     streamed_terminal = event
+                    for artifact_event in artifact_events:
+                        yield artifact_event
                 else:
                     event = self._append_harness_event(
                         harness_event, app, invocation, turn, key, holder, token
@@ -543,6 +559,9 @@ class SessionRuntime:
                 terminal = result.terminalEvent or self._terminal_event(
                     result.status, app, invocation, turn
                 )
+                artifact_events = await self._publish_turn_artifacts(
+                    app, invocation, turn, key, holder, token
+                )
                 event, session = self._persist_terminal_event(
                     terminal,
                     result.status,
@@ -554,6 +573,8 @@ class SessionRuntime:
                     holder,
                     token,
                 )
+                for artifact_event in artifact_events:
+                    yield artifact_event
                 yield event
             completed_cleanly = True
         except TimeoutError as exc:
@@ -850,6 +871,95 @@ class SessionRuntime:
             terminal, "failed", app, invocation, turn, session, key, holder, token
         )
         return event
+
+    async def _publish_turn_artifacts(
+        self,
+        app: HarnessRecord,
+        invocation: InvocationRecord,
+        turn: TurnRecord,
+        key: tuple[str, str, str],
+        holder: str,
+        token: int,
+    ) -> list[CanonicalEventRecord]:
+        if self.artifacts is None:
+            return []
+        self.store.assert_lease(key, holder, token)
+        try:
+            async with asyncio.timeout(5):
+                refs = await self._guarded_adapter_call(
+                    key,
+                    holder,
+                    token,
+                    lambda: self.adapter.list_artifacts(
+                        ListArtifactsRequest(
+                            sessionId=invocation.sessionId,
+                            appName=invocation.appName,
+                            userId=invocation.userId,
+                        )
+                    ),
+                )
+        except LeaseFencingError:
+            raise
+        except Exception:
+            return []
+        published: list[CanonicalEventRecord] = []
+        for ref in refs:
+            content = getattr(ref, "content", None)
+            if not isinstance(content, bytes):
+                continue
+            try:
+                self.store.assert_lease(key, holder, token)
+                record, created = self.artifacts.register_produced(
+                    invocation.sessionId,
+                    str(ref.path),
+                    content,
+                    invocation_id=invocation.id,
+                    owner_principal_id=str(
+                        invocation.executionContext.get("principalId") or ""
+                    ),
+                    media_type=(
+                        ref.mediaType
+                        if isinstance(getattr(ref, "mediaType", None), str)
+                        and ref.mediaType
+                        else None
+                    ),
+                    app_name=invocation.appName,
+                    user_id=invocation.userId,
+                )
+                if not created:
+                    continue
+                published.append(
+                    self.event_log.append_typed(
+                        type_="haas.artifact.registered",
+                        app_name=app.id,
+                        user_id=invocation.userId,
+                        invocation_id=invocation.id,
+                        session_id=invocation.sessionId,
+                        turn_id=turn.id,
+                        harness_id=app.id,
+                        adapter_id=self.adapter.adapter_id,
+                        author="haas",
+                        content={"role": "model", "parts": []},
+                        actions={"artifactDelta": {}},
+                        haas={
+                            "fileId": record.id,
+                            "relativePath": record.relativePath,
+                            "mediaType": record.mediaType,
+                            "bytes": record.bytes,
+                            "invocationId": invocation.id,
+                            "previewStatus": record.previewStatus,
+                            "downloadStatus": record.downloadStatus,
+                        },
+                    )
+                )
+            except LeaseFencingError:
+                raise
+            except Exception:
+                # Artifact publication is best-effort. A malformed or unreadable
+                # candidate, storage failure, or event-log failure must not rewrite
+                # an otherwise successful harness turn.
+                continue
+        return published
 
     def _persist_terminal_event(
         self,

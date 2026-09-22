@@ -1055,6 +1055,46 @@ class HaasDelegationClient:
         except httpx.HTTPError as exc:
             raise HaasDelegationError("HaaS delegated backend is unreachable.") from exc
 
+    async def list_artifacts(self, haas_session_id: str) -> list[dict[str, Any]]:
+        _require_haas_id(haas_session_id, "hsess_", "session")
+        try:
+            async with self._client() as client:
+                resp = await client.get(
+                    f"/v1/haas/sessions/{haas_session_id}/artifacts",
+                    headers=self._headers(),
+                )
+            return _checked_artifacts_data(resp)
+        except httpx.HTTPError as exc:
+            raise HaasDelegationError("HaaS delegated backend is unreachable.") from exc
+
+    async def download_file(self, file_id: str) -> tuple[bytes, str]:
+        _require_haas_id(file_id, "file_", "file")
+        try:
+            async with self._client() as client:
+                resp = await client.get(
+                    f"/v1/haas/files/{file_id}/content",
+                    headers=self._headers(),
+                )
+            if resp.status_code >= 400:
+                raise _delegation_http_error(resp)
+            return resp.content, resp.headers.get("content-type", "application/octet-stream")
+        except httpx.HTTPError as exc:
+            raise HaasDelegationError("HaaS delegated backend is unreachable.") from exc
+
+    async def download_artifact_archive(self, haas_session_id: str) -> tuple[bytes, str]:
+        _require_haas_id(haas_session_id, "hsess_", "session")
+        try:
+            async with self._client() as client:
+                resp = await client.get(
+                    f"/v1/haas/sessions/{haas_session_id}/artifacts/archive",
+                    headers=self._headers(),
+                )
+            if resp.status_code >= 400:
+                raise _delegation_http_error(resp)
+            return resp.content, resp.headers.get("content-type", "application/zip")
+        except httpx.HTTPError as exc:
+            raise HaasDelegationError("HaaS delegated backend is unreachable.") from exc
+
     async def events_page(
         self,
         haas_session_id: str,
@@ -1306,6 +1346,30 @@ def _checked_list_data(resp: httpx.Response) -> list[dict[str, Any]]:
     if not isinstance(inner, list) or not all(isinstance(item, dict) for item in inner):
         raise HaasDelegationError("HaaS returned an invalid response.")
     return inner
+
+
+def _checked_artifacts_data(resp: httpx.Response) -> list[dict[str, Any]]:
+    if resp.status_code >= 400:
+        raise _delegation_http_error(resp)
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise HaasDelegationError("HaaS returned malformed JSON.") from exc
+    data = body.get("data") if isinstance(body, dict) else None
+    artifacts = data.get("artifacts") if isinstance(data, dict) else None
+    if not isinstance(artifacts, list) or not all(
+        isinstance(item, dict) for item in artifacts
+    ):
+        raise HaasDelegationError("HaaS returned an invalid response.")
+    return artifacts
+
+
+def _require_haas_id(value: str, prefix: str, resource_name: str) -> None:
+    if not isinstance(value, str) or not value.startswith(prefix):
+        raise ValueError(f"invalid {resource_name} id")
+    suffix = value[len(prefix) :]
+    if not suffix or not all(ch.isalnum() or ch in {"_", "-"} for ch in suffix):
+        raise ValueError(f"invalid {resource_name} id")
 
 
 def _response_cursor(resp: httpx.Response) -> str | None:

@@ -4,6 +4,7 @@ import type { TFunction } from "i18next";
 // Emits the asset URL only; the worker itself loads lazily with the pdfjs chunk.
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
+  downloadArtifact,
   getArtifacts,
   getJournalCases,
   getRoots,
@@ -142,6 +143,7 @@ export function RightRail({
   const [journal, setJournal] = useState<JournalCase[]>([]);
   const [selected, setSelected] = useState<ArtifactInfo | null>(null);
   const [content, setContent] = useState<ArtifactContent | null>(null);
+  const firstLocalArtifact = artifacts.find((artifact) => artifact.source !== "haas");
 
   const refreshArtifacts = () => getArtifacts(sessionId).then(setArtifacts).catch(() => setArtifacts([]));
 
@@ -212,8 +214,12 @@ export function RightRail({
       size: 0,
       modified_at: 0,
     });
-    const match = (list: ArtifactInfo[], path: string) =>
-      list.find((a) => a.path === path || a.path.endsWith("/" + path) || a.name === path);
+    const match = (list: ArtifactInfo[], path: string) => {
+      const exact = list.find((a) => a.path === path);
+      if (exact) return exact;
+      const byBasename = list.filter((a) => a.name === path);
+      return byBasename.length === 1 ? byBasename[0] : undefined;
+    };
     const onOpen = (e: Event) => {
       const path = String((e as CustomEvent).detail?.path || "");
       if (!path) return;
@@ -339,10 +345,13 @@ export function RightRail({
             onToggle={() => setOpen({ ...open, artifacts: !open.artifacts })}
             action={
               <>
-                {artifacts.length > 0 && (
+                {firstLocalArtifact && (
                   <button
                     className="rail-mini-btn"
-                    onClick={(e) => { e.stopPropagation(); revealArtifact(sessionId, artifacts[0].path, "reveal"); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      revealArtifact(sessionId, firstLocalArtifact.path, "reveal");
+                    }}
                     title={t("rail.show_folder")}
                   >
                     <Icon name="folder" size={13} />
@@ -599,6 +608,12 @@ function ArtifactViewer({
   const isApp = content?.kind === "sheet" || content?.kind === "pdf" || content?.kind === "office";
   // Text-bearing kinds can copy their contents; images/PDFs/sheets have nothing textual to copy.
   const copyableText = typeof content?.content === "string" && !content?.error;
+  const isRemote = artifact.source === "haas" || content?.source === "haas";
+  const downloadable =
+    artifact.download_status !== "unavailable" &&
+    content?.download_status !== "unavailable" &&
+    !content?.error;
+  const downloadOnly = content?.preview_status === "download_only";
   const crumbRoot = artifact.origin === "files" ? t("rail.crumb_files") : t("rail.artifacts_title");
   const item = (
     testid: string,
@@ -671,17 +686,22 @@ function ArtifactViewer({
                   navigator.clipboard?.writeText(artifact.abs_path || artifact.path),
                 )}
                 <div className="artifact-menu-div" />
-                {isHtml &&
+                {isRemote && downloadable &&
+                  item("artifact-download", "panelOpen", t("rail.download"), () =>
+                    void downloadArtifact(sessionId, artifact.path, artifact.name),
+                  )}
+                {!isRemote && isHtml &&
                   item("artifact-open-browser", "panelOpen", t("rail.open_in_browser"), () =>
                     revealArtifact(sessionId, artifact.path, "open"),
                   )}
-                {isApp &&
+                {!isRemote && isApp &&
                   item("artifact-open-app", "panelOpen", t("rail.open_in_default"), () =>
                     revealArtifact(sessionId, artifact.path, "open"),
                   )}
-                {item("artifact-reveal", "folder", t("rail.reveal_in_finder"), () =>
-                  revealArtifact(sessionId, artifact.path, "reveal"),
-                )}
+                {!isRemote &&
+                  item("artifact-reveal", "folder", t("rail.reveal_in_finder"), () =>
+                    revealArtifact(sessionId, artifact.path, "reveal"),
+                  )}
               </div>
             )}
           </div>
@@ -701,6 +721,19 @@ function ArtifactViewer({
           <div className="rail-muted">{t("rail.loading")}</div>
         ) : content.error ? (
           <div className="rail-error">{content.error}</div>
+        ) : downloadOnly ? (
+          <div className="artifact-open-prompt">
+            <Icon name="file" size={28} />
+            <p>{t("rail.download_only")}</p>
+            {downloadable && (
+              <button
+                className="btn sm"
+                onClick={() => void downloadArtifact(sessionId, artifact.path, artifact.name)}
+              >
+                {t("rail.download")}
+              </button>
+            )}
+          </div>
         ) : content.kind === "html" ? (
           <iframe
             key={`${artifact.path}-${reloadKey}`}

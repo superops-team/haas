@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from coworker.delegation import BINDING_KEY as HAAS_DELEGATION_BINDING_KEY
 from coworker.delegation import HaasDelegationError
+from coworker.haas import HaasEnvelope
 from coworker.providers import (
     AssistantTurn,
     ModelCapabilities,
@@ -211,6 +213,229 @@ def test_artifact_read_rejects_path_escape(tmp_path):
     ).json()
     assert escaped["ok"] is False
     assert "escapes" in escaped["error"]
+
+
+class _ArtifactHaasClient:
+    def __init__(self):
+        self.downloaded: list[str] = []
+
+    async def list_artifacts(self, session_id: str):
+        assert session_id == "hsess_s1"
+        return HaasEnvelope(
+            data=[
+                {
+                    "id": "file_report",
+                    "object": "file",
+                    "sessionId": "hsess_s1",
+                    "invocationId": "inv_1",
+                    "filename": "report.md",
+                    "relativePath": "output/report.md",
+                    "bytes": 8,
+                    "mediaType": "text/markdown",
+                    "createdAtMs": 1786400240000,
+                    "previewStatus": "available",
+                    "downloadStatus": "available",
+                },
+                {
+                    "id": "file_second",
+                    "object": "file",
+                    "sessionId": "hsess_s1",
+                    "invocationId": "inv_1",
+                    "filename": "report.md",
+                    "relativePath": "output/other/report.md",
+                    "bytes": 3,
+                    "mediaType": "text/markdown",
+                    "createdAtMs": 1786400241000,
+                    "previewStatus": "available",
+                    "downloadStatus": "available",
+                },
+                {
+                    "id": "file_missing",
+                    "object": "file",
+                    "sessionId": "hsess_s1",
+                    "invocationId": "inv_1",
+                    "filename": "trace.bin",
+                    "relativePath": "output/trace.bin",
+                    "bytes": 4,
+                    "mediaType": "application/octet-stream",
+                    "createdAtMs": 1786400242000,
+                    "previewStatus": "unavailable",
+                    "downloadStatus": "unavailable",
+                },
+                {
+                    "id": "file_bad_status",
+                    "object": "file",
+                    "sessionId": "hsess_s1",
+                    "invocationId": "inv_1",
+                    "filename": "bad.txt",
+                    "relativePath": "output/bad.txt",
+                    "bytes": 3,
+                    "mediaType": "text/plain",
+                    "createdAtMs": 1786400243000,
+                    "previewStatus": "future_status",
+                    "downloadStatus": "available",
+                },
+            ],
+            trace_id="tr_artifacts",
+        )
+
+    async def download_file(self, file_id: str):
+        self.downloaded.append(file_id)
+        assert file_id == "file_report"
+        return b"# Report", "text/markdown"
+
+
+def _haas_bound_manager(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([]))
+    manager._prefs["haas_delegation"] = {
+        "enabled": True,
+        "mode": "local_managed",
+        "execution_mode": "local_api",
+        "base_url": "http://127.0.0.1:8092",
+        "api_token": "test-token",
+        "harness_id": "chrn_codex_default",
+        "user_id": "manager",
+    }
+    client = _ArtifactHaasClient()
+    manager._haas_direct_client_factory = lambda _config: client  # type: ignore[assignment]
+    manager.session_store.save(
+        SessionRecord(
+            session_id="s1",
+            workspace=str(tmp_path),
+            model="gpt-5.5",
+            mode="interactive",
+            agent="cowork",
+            bindings={
+                HAAS_DELEGATION_BINDING_KEY: {
+                    "binding": "haas_bound",
+                    "execution_mode": "local_api",
+                    "haas_session_id": "hsess_s1",
+                    "harness_id": "chrn_codex_default",
+                    "haas_user_id": "manager",
+                    "config_snapshot": manager._haas_config(str(tmp_path)).__dict__,
+                }
+            },
+        )
+    )
+    return manager, client
+
+
+def test_haas_bound_artifacts_list_maps_file_records(tmp_path):
+    manager, _haas = _haas_bound_manager(tmp_path)
+    client = TestClient(create_app(manager))
+
+    artifacts = client.get("/v1/sessions/s1/artifacts").json()["artifacts"]
+
+    assert artifacts[0] == {
+        "source": "haas",
+        "id": "file_report",
+        "path": "output/report.md",
+        "name": "report.md",
+        "kind": "markdown",
+        "size": 8,
+        "modified_at": 1786400240,
+        "preview_status": "available",
+        "download_status": "available",
+    }
+    assert all("abs_path" not in item for item in artifacts)
+    invalid_status = next(item for item in artifacts if item["name"] == "bad.txt")
+    assert invalid_status["preview_status"] == "unavailable"
+    assert invalid_status["download_status"] == "unavailable"
+
+
+def test_haas_bound_artifact_read_and_ambiguous_basename(tmp_path):
+    manager, haas = _haas_bound_manager(tmp_path)
+    client = TestClient(create_app(manager))
+
+    read = client.get(
+        "/v1/sessions/s1/artifacts/read", params={"path": "output/report.md"}
+    ).json()
+    assert read["ok"] is True
+    assert read["source"] == "haas"
+    assert read["kind"] == "markdown"
+    assert read["content"] == "# Report"
+    assert haas.downloaded == ["file_report"]
+
+    ambiguous = client.get(
+        "/v1/sessions/s1/artifacts/read", params={"path": "report.md"}
+    ).json()
+    assert ambiguous["ok"] is False
+    assert ambiguous["code"] == "artifact_ambiguous"
+
+    unavailable = client.get(
+        "/v1/sessions/s1/artifacts/read", params={"path": "output/trace.bin"}
+    ).json()
+    assert unavailable["ok"] is False
+    assert unavailable["code"] == "artifact_unavailable"
+
+
+def test_haas_bound_artifact_reveal_does_not_shell_out(tmp_path):
+    manager, _haas = _haas_bound_manager(tmp_path)
+    client = TestClient(create_app(manager))
+
+    revealed = client.post(
+        "/v1/sessions/s1/artifacts/reveal",
+        json={"path": "output/report.md", "mode": "reveal"},
+    ).json()
+
+    assert revealed["ok"] is False
+    assert revealed["code"] == "remote_artifact_reveal_unavailable"
+
+
+def test_haas_bound_artifact_download_proxies_bytes_with_safe_headers(tmp_path):
+    manager, haas = _haas_bound_manager(tmp_path)
+    client = TestClient(create_app(manager))
+
+    response = client.get(
+        "/v1/sessions/s1/artifacts/download",
+        params={"path": "output/report.md"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"# Report"
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert response.headers["content-disposition"] == (
+        "attachment; filename*=UTF-8''report.md"
+    )
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert haas.downloaded == ["file_report"]
+
+
+def test_haas_bound_artifact_download_rejects_ambiguous_basename(tmp_path):
+    manager, haas = _haas_bound_manager(tmp_path)
+    client = TestClient(create_app(manager))
+
+    response = client.get(
+        "/v1/sessions/s1/artifacts/download", params={"path": "report.md"}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "artifact_ambiguous"
+    assert haas.downloaded == []
+
+
+def test_haas_bound_artifact_read_does_not_fallback_to_local_workspace(tmp_path):
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "report.md").write_text("# local", encoding="utf-8")
+    manager, _haas = _haas_bound_manager(tmp_path)
+
+    class BrokenArtifactClient:
+        async def list_artifacts(self, _session_id: str):
+            raise HaasDelegationError("artifact backend unavailable")
+
+    manager._haas_direct_client_factory = (  # type: ignore[assignment]
+        lambda _config: BrokenArtifactClient()
+    )
+    client = TestClient(create_app(manager))
+
+    read = client.get(
+        "/v1/sessions/s1/artifacts/read", params={"path": "output/report.md"}
+    ).json()
+
+    assert read["ok"] is False
+    assert read["source"] == "haas"
+    assert read["code"] == "artifact_unavailable"
+    assert "local" not in str(read)
 
 
 def test_sessions_hide_scheduled_internal_runs(tmp_path):
@@ -494,6 +719,7 @@ def test_server_sets_explicit_websocket_frame_limit(tmp_path, monkeypatch):
         SimpleNamespace(run=lambda app, **kwargs: seen.update(app=app, **kwargs)),
     )
 
+    monkeypatch.setenv("COWORKER_PORT", "8765")
     server_run.main(["--cwd", str(tmp_path), "--port", "8766"])
 
     assert seen["app"] is fake_app

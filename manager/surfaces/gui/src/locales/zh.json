@@ -187,6 +187,7 @@
       "hide": "收起活动",
       "progress": "思考进度",
       "stage": "阶段 {{number}}",
+      "stage_status": {"running": "运行中", "completed": "已完成", "failed": "失败", "incomplete": "未完成", "cancelled": "已取消"},
       "reasoning_tokens": "推理",
       "cache_tokens": "缓存",
       "cache_write_tokens": "缓存写入",
@@ -338,6 +339,8 @@
     "root_read_write": "可读写",
     "root_read_only": "只读",
     "copy_contents": "复制内容",
+    "download": "下载",
+    "download_only": "此产物无法在这里预览，请下载后打开。",
     "open_in_browser": "在浏览器中打开",
     "reveal_in_finder": "在访达中显示",
     "folder_empty": "此文件夹为空。",
@@ -513,6 +516,8 @@
     "automation_fallback": "自动化"
   },
   "app": {
+    "server_restarting": "执行服务正在恢复。重试前将核对已有任务。",
+    "server_failed": "执行服务不可用。请退出并重新打开 OpenHarness，核对原任务后再决定是否重试。",
     "notice": {
       "max_iterations": "已停止：达到最大迭代次数。",
       "model_switched": "模型已切换",

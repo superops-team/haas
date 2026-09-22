@@ -338,6 +338,56 @@ class HaasClient:
         )
         return _object_envelope(envelope, "execution evidence")
 
+    async def list_artifacts(self, session_id: str) -> HaasEnvelope[list[dict[str, Any]]]:
+        _require_id(session_id, "hsess_", "session")
+        envelope = await self._request("GET", f"/v1/haas/sessions/{session_id}/artifacts")
+        data = envelope.data
+        if not isinstance(data, dict):
+            raise HaasProtocolError("HaaS artifact list must be an object")
+        artifacts = data.get("artifacts")
+        if not isinstance(artifacts, list) or not all(
+            isinstance(item, dict) for item in artifacts
+        ):
+            raise HaasProtocolError("HaaS artifact list must contain file objects")
+        return HaasEnvelope(artifacts, envelope.trace_id, envelope.next_cursor)
+
+    async def download_file(self, file_id: str) -> tuple[bytes, str]:
+        _require_id(file_id, "file_", "file")
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.endpoint.base_url,
+                verify=self.endpoint.tls_verify,
+                timeout=self._timeout,
+                transport=self._transport,
+            ) as client:
+                response = await client.get(
+                    f"/v1/haas/files/{file_id}/content", headers=self._headers()
+                )
+        except httpx.HTTPError as exc:
+            raise HaasTransportError("HaaS endpoint is unreachable") from exc
+        if response.status_code >= 400:
+            raise _remote_error(response)
+        return response.content, response.headers.get("content-type", "application/octet-stream")
+
+    async def download_artifact_archive(self, session_id: str) -> tuple[bytes, str]:
+        _require_id(session_id, "hsess_", "session")
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.endpoint.base_url,
+                verify=self.endpoint.tls_verify,
+                timeout=self._timeout,
+                transport=self._transport,
+            ) as client:
+                response = await client.get(
+                    f"/v1/haas/sessions/{session_id}/artifacts/archive",
+                    headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            raise HaasTransportError("HaaS endpoint is unreachable") from exc
+        if response.status_code >= 400:
+            raise _remote_error(response)
+        return response.content, response.headers.get("content-type", "application/zip")
+
     async def events_page(
         self,
         session_id: str,

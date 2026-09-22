@@ -66,7 +66,7 @@ import {
   latestHaasTaskOutcome,
 } from "./activity";
 import { InboxItemCard, approvalItemFromParked } from "./components/InboxItemCard";
-import { chooseFolder, isTauri, platformOS, startWindowDrag } from "./tauri";
+import { notifyAutomationResult, listenServerStatus, chooseFolder, isTauri, platformOS, startWindowDrag } from "./tauri";
 import { Icon } from "./components/Icon";
 import { Sidebar } from "./components/Sidebar";
 import { Transcript } from "./components/Transcript";
@@ -109,6 +109,14 @@ const SUGGESTION_KEYS = [
 
 // Tools whose success means a new/changed file should show up under Artifacts right away.
 const FILE_WRITE_TOOLS = new Set(["write_file", "apply_patch", "apply_unified_diff", "replace_in_file"]);
+
+// GUI-only back pressure for token/reasoning/model-stage streams. It keeps transport semantics
+// intact while avoiding one React render + Markdown parse + scroll pass per token frame.
+export const LIVE_PROJECTION_FLUSH_MS = 33;
+
+function prefersReducedMotion() {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+}
 
 // Models sometimes pass todo items as bare strings instead of {content, status} objects (the
 // backend tool normalizes them the same way; the GUI reads the raw proposal args, so mirror it).
@@ -228,6 +236,16 @@ export function App() {
   const [mode, setMode] = useState("interactive");
   const [haasInteractionSupported, setHaasInteractionSupported] = useState(true);
   const [connected, setConnected] = useState(false);
+  const [serverStatus, setServerStatus] = useState("");
+  useEffect(() => {
+    let disposed = false;
+    let stop = () => {};
+    void listenServerStatus((value) => { if (!disposed) setServerStatus(value); })
+      .then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; })
+      .catch(() => {});
+    return () => { disposed = true; stop(); };
+  }, []);
+
   const [running, setRunning] = useState(false);
   const [executionState, setExecutionState] = useState<ExecutionState>("idle");
   const [pauseSupported, setPauseSupported] = useState(false);
@@ -241,36 +259,66 @@ export function App() {
   const [compacting, setCompacting] = useState(false);
   const [items, setItems] = useState<Item[]>([]);
   const [streaming, setStreamingState] = useState("");
-  // Ref mirror of `streaming`: the WS handler closure is built once per socket and can't read
-  // fresh state — the interrupted/error flush below needs the live buffer at event time.
-  // Mode markers in the transcript: which session has already seen the full Auto-approve
-  // explanation, and what mode the transcript last recorded (so a switch can be told apart
-  // Which session the current `mode` value is CONFIRMED for. On a session switch, `mode`
-  // still holds the previous session's value until the server's `ready` event delivers the
-  // real one — announcing anything in that window posts the old session's banner into the
-  // new transcript (seen 2026-08-22: a fresh Ask-for-approval session opened with the
-  // Auto-approve banner, then a stray "Ask for approval is on." marker when `ready` landed).
+  // Ref mirrors hold the canonical live buffers synchronously so terminal/error flushes never
+  // lose a delta. Publishing those refs into React state is coalesced for high-frequency
+  // transport frames below.
   const streamingRef = useRef("");
-  const setStreaming = (value: string | ((s: string) => string)) => {
-    streamingRef.current = typeof value === "function" ? value(streamingRef.current) : value;
-    setStreamingState(streamingRef.current);
-  };
-  // The turn's live thinking text (reasoning_delta events) — same ref-mirror pattern.
-  // Folded onto the assistant item when the message finalizes; cleared on turn_start.
+  // The turn's live thinking text (reasoning_delta events) — folded onto the assistant item when
+  // the message finalizes; cleared on turn_start.
   const [reasoningStream, setReasoningStreamState] = useState("");
   const [modelStages, setModelStages] = useState<ModelCallStage[]>([]);
-  const modelStagesRef = useRef<ModelCallStage[]>([]);
-  const setLiveModelStages = (value: ModelCallStage[]) => {
-    modelStagesRef.current = value;
-    setModelStages(value);
-  };
-  const seenHaasEventsRef = useRef(new Set<string>());
   const reasoningRef = useRef("");
-  const pendingLocalRunRef = useRef(false);
+  const modelStagesRef = useRef<ModelCallStage[]>([]);
+  const liveProjectionFlushTimerRef = useRef<number | null>(null);
+  const cancelScheduledLiveProjection = () => {
+    if (liveProjectionFlushTimerRef.current === null) return;
+    window.clearTimeout(liveProjectionFlushTimerRef.current);
+    liveProjectionFlushTimerRef.current = null;
+  };
+  const publishLiveProjectionNow = () => {
+    cancelScheduledLiveProjection();
+    setStreamingState(streamingRef.current);
+    setReasoningStreamState(reasoningRef.current);
+    setModelStages(modelStagesRef.current);
+  };
+  const scheduleLiveProjectionPublish = () => {
+    if (liveProjectionFlushTimerRef.current !== null) return;
+    liveProjectionFlushTimerRef.current = window.setTimeout(() => {
+      liveProjectionFlushTimerRef.current = null;
+      setStreamingState(streamingRef.current);
+      setReasoningStreamState(reasoningRef.current);
+      setModelStages(modelStagesRef.current);
+    }, LIVE_PROJECTION_FLUSH_MS);
+  };
+  const setStreaming = (value: string | ((s: string) => string)) => {
+    streamingRef.current = typeof value === "function" ? value(streamingRef.current) : value;
+    publishLiveProjectionNow();
+  };
+  const appendStreamingDelta = (text: string) => {
+    if (!text) return;
+    streamingRef.current += text;
+    scheduleLiveProjectionPublish();
+  };
   const setReasoningStream = (value: string) => {
     reasoningRef.current = value;
-    setReasoningStreamState(value);
+    publishLiveProjectionNow();
   };
+  const appendReasoningDelta = (text: string) => {
+    if (!text) return;
+    reasoningRef.current = appendBoundedActivityText(reasoningRef.current, text);
+    scheduleLiveProjectionPublish();
+  };
+  const setLiveModelStages = (value: ModelCallStage[]) => {
+    modelStagesRef.current = value;
+    publishLiveProjectionNow();
+  };
+  const updateLiveModelStages = (value: ModelCallStage[]) => {
+    modelStagesRef.current = value;
+    scheduleLiveProjectionPublish();
+  };
+  useEffect(() => () => cancelScheduledLiveProjection(), []);
+  const seenHaasEventsRef = useRef(new Set<string>());
+  const pendingLocalRunRef = useRef(false);
   const [todo, setTodo] = useState<TodoItem[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [projects, setProjects] = useState<RecentWorkspace[]>([]);
@@ -554,6 +602,20 @@ export function App() {
   // Latched: keep the boot splash up until the restored session is actually CONNECTED (not just
   // until `booting` clears), so an early click can't land on a session that's still settling.
   const [uiReady, setUiReady] = useState(false);
+  useEffect(() => {
+    if (!uiReady || connected || serverStatus === "failed") return;
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      if (++attempts > 6) {
+        window.clearInterval(timer);
+        setServerStatus("failed");
+        return;
+      }
+      setConnectNonce((value) => value + 1);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [uiReady, connected, serverStatus]);
+
 
   // On boot with no seeded workspace, reopen the last thing the user had — most recent
   // conversation (restores its folder + agent + transcript), else the most recent project
@@ -799,6 +861,7 @@ export function App() {
       switch (ev.type) {
         case "ready":
           setConnected(true);
+          setServerStatus("");
           if (d.model) setModel(d.model);
           if (d.mode) setMode(d.mode);
           if (typeof d.haas_interaction_supported === "boolean")
@@ -891,13 +954,13 @@ export function App() {
           }
           break;
         case "assistant_delta":
-          setStreaming((s) => s + (d.text || ""));
+          appendStreamingDelta(String(d.text || ""));
           break;
         case "reasoning_delta":
-          setReasoningStream(appendBoundedActivityText(reasoningRef.current, String(d.text || "")));
+          appendReasoningDelta(String(d.text || ""));
           break;
         case "model_stage_updated":
-          if (Array.isArray(d.modelStages)) setLiveModelStages(d.modelStages);
+          if (Array.isArray(d.modelStages)) updateLiveModelStages(d.modelStages);
           break;
         case "assistant_message": {
           if (d.usage) setUsage((u) => addTurnUsage(u, d.usage));
@@ -948,7 +1011,7 @@ export function App() {
           break;
         case "permission_required":
           // Unattended → the backend parked it in the Inbox; don't also surface a live card.
-          if (unattendedRef.current) break;
+          if (unattendedRef.current && !d.approvalId && !d.inputRequestId) break;
           setItems((p) => [
             ...p,
             {
@@ -1301,16 +1364,20 @@ export function App() {
     setTaskPhase(undefined);
     setTaskOutcome(undefined);
   };
-  const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
+  const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
     const el = scrollRef.current;
     if (!el) return;
-    autoScrollingRef.current = true;
+    autoScrollingRef.current = behavior === "smooth";
     el.scrollTo({ top: el.scrollHeight, behavior });
+    if (behavior !== "smooth") {
+      lastScrollTopRef.current = Math.max(0, el.scrollHeight - el.clientHeight);
+      autoScrollingRef.current = false;
+    }
   };
   const followLatest = () => {
     atBottomRef.current = true;
     setFollowing(true);
-    scrollToBottom();
+    scrollToBottom(prefersReducedMotion() ? "auto" : "smooth");
   };
   const handleScroll = () => {
     const el = scrollRef.current;
@@ -1332,7 +1399,7 @@ export function App() {
   // A different session is a fresh viewport — never inherit a scrolled-up state. Declared
   // BEFORE the auto-scroll effect: when a session switch and its hydrated items land in one
   // commit, the reset must run first or the stale ref would skip the initial bottom-scroll.
-  useEffect(() => {
+  useLayoutEffect(() => {
     atBottomRef.current = true;
     setFollowing(true);
   }, [sessionId]);
@@ -1678,6 +1745,12 @@ export function App() {
   } | null>(null);
   useEffect(() => {
     const stop = connectEvents((msg) => {
+      if (msg.type === "automation_run_finished") {
+        void notifyAutomationResult(msg.data?.status);
+        announceAutomationsChanged();
+        refreshSessions();
+        return;
+      }
       if (msg.type !== "automation_run_started") return;
       const d = (msg.data ?? {}) as Record<string, string>;
       setRunToast({
@@ -1923,6 +1996,11 @@ export function App() {
   // `displayRunning` too: a mid-turn reconnect may land before any item is rebuilt — a live
   // session must show the transcript (waiting row, Stop), never the intro hero.
   const idle = items.length === 0 && !streaming && !displayRunning;
+  let currentTurnStart = items.length - 1;
+  while (currentTurnStart >= 0 && items[currentTurnStart].kind !== "user" && items[currentTurnStart].kind !== "connector") currentTurnStart--;
+  const hasCurrentActivity = modelStages.length > 0 || items.slice(currentTurnStart + 1).some(
+    (item) => item.kind === "tool" && item.source === "haas",
+  );
   const activeTitle = activeInfo?.title || t("sidebar.new_session");
 
   const desktop = isTauri();
@@ -1961,7 +2039,9 @@ export function App() {
           <Icon name="logo" size={38} />
         </div>
         <div className="boot-text">
-          {resumedExisting ? t("boot.restoring") : t("boot.starting")}
+          {serverStatus === "failed" ? t("app.server_failed") :
+            serverStatus === "restarting" ? t("app.server_restarting") :
+            resumedExisting ? t("boot.restoring") : t("boot.starting")}
           <span className="beta-tag">BETA</span>
         </div>
       </div>
@@ -2281,6 +2361,11 @@ export function App() {
                 </button>
               </div>
             )}
+            {serverStatus && (
+              <div role="status" className="notice notice-block">
+                {t(serverStatus === "failed" ? "app.server_failed" : "app.server_restarting")}
+              </div>
+            )}
             <div className="conversation-body">
             <div className="main-scroll" ref={scrollRef} onScroll={handleScroll}>
               {idle ? (
@@ -2341,14 +2426,14 @@ export function App() {
                   {displayRunning &&
                     !compacting &&
                     !reasoningStream &&
-                    (!streaming || streamMode(streaming, items, displayRunning) === "hold") &&
-                    !lastItemIsAssistant(items) && <WaitingForAgent />}
+                    !hasCurrentActivity &&
+                    (!streaming || streamMode(streaming, items, displayRunning) === "hold") && <WaitingForAgent />}
                   {streaming && streamMode(streaming, items, displayRunning) === "answer" && (
                     <div className="transcript">
                       <div className="bubble-assistant">
                         <div className="who">{t("transcript.who_assistant")}</div>
                         <Markdown text={streaming} />
-                        <span className="stream-cursor">▍</span>
+                        <span className="stream-cursor" aria-hidden="true">▍</span>
                       </div>
                     </div>
                   )}
@@ -2658,21 +2743,12 @@ export function App() {
   );
 }
 
-function lastItemIsAssistant(items: Item[]): boolean {
-  for (let i = items.length - 1; i >= 0; i--) {
-    const item = items[i];
-    if (item.kind === "notice") continue;
-    return item.kind === "assistant";
-  }
-  return false;
-}
-
 function WaitingForAgent({ label }: { label?: string }) {
   const { t } = useTranslation();
   return (
     <div className="waiting-transcript">
       <div className="waiting-row" aria-live="polite">
-        <span className="waiting-spinner" />
+        <span className="waiting-spinner" aria-hidden="true" />
         <span>{label || t("app.waiting_for_agent")}</span>
       </div>
     </div>

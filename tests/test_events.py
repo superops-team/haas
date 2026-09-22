@@ -192,6 +192,50 @@ def test_plan_event_rejects_inconsistent_counts() -> None:
         )
 
 
+def test_artifact_registered_event_requires_safe_complete_metadata() -> None:
+    log = EventLog(store=MemoryStore())
+    base = {
+        "type_": "haas.artifact.registered",
+        "app_name": "chrn_1",
+        "user_id": "u_1",
+        "invocation_id": "inv_1",
+        "session_id": "hsess_1",
+        "turn_id": "turn_1",
+        "harness_id": "chrn_1",
+        "adapter_id": "codex",
+        "author": "haas",
+        "content": {"role": "model", "parts": []},
+        "actions": {"artifactDelta": {}},
+        "haas": {
+            "fileId": "file_1",
+            "relativePath": "output/report.md",
+            "mediaType": "text/markdown",
+            "bytes": 8,
+            "invocationId": "inv_1",
+            "previewStatus": "available",
+            "downloadStatus": "available",
+        },
+    }
+
+    event = log.append_typed(**base)
+    assert event.haas["relativePath"] == "output/report.md"
+
+    invalid = {**base, "haas": {**base["haas"], "hostPath": "/tmp/report.md"}}
+    with pytest.raises(ValueError, match="artifact metadata"):
+        log.append_typed(**invalid)
+
+    invalid = {
+        **base,
+        "haas": {
+            **base["haas"],
+            "previewStatus": "available",
+            "downloadStatus": "unavailable",
+        },
+    }
+    with pytest.raises(ValueError, match="artifact metadata"):
+        log.append_typed(**invalid)
+
+
 @pytest.mark.parametrize(
     ("adapter_type", "canonical_type"),
     [

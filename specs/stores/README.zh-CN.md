@@ -261,6 +261,54 @@ Session volume 跨 TTL/重建保留 native state 和完整材料化内容；cont
 - Store 层 event index 仍必须通过完整 session scope key 实现命名空间隔离；
   只在 API 层过滤是不充分的。
 
+### 8.1 Manager 状态备份与恢复
+
+Manager V1 backup 是离线、用户自主管理的迁移机制，用于迁移会话历史、memory
+索引数据、persona、偏好设置与计划任务定义。它不是实时 runtime checkpoint，
+不得宣称能保留正在运行的 turn、活跃 HaaS child process、connector OAuth
+session、sidecar token 或系统通知状态。
+
+备份产物是 ZIP 文件，包含：
+
+- `manifest.json`，字段包括 `format="openharness-state-backup"`、`version=1`、
+  `createdAt`、`source`、`included`、`excluded` 和 warning。
+- 以 Manager state directory 为根的可迁移文件白名单。
+- 对合法 SQLite 数据库必须使用 SQLite backup API 复制，避免 WAL 模式下产生
+  撕裂归档。
+
+V1 可迁移白名单刻意收窄：
+
+| 类别 | 纳入 |
+|------|------|
+| 会话 | `conversations/*.jsonl`，文件名必须是安全单级路径组件 |
+| SQLite 数据 | `coworker.db`、`automation.db`、`journal.db`、`teams.db`、`chat.db` |
+| 用户设置 | `prefs.json`、`memory-settings.json`、`personas.json`、`persona_connections.json`、`session_connections.json`、`session_skills.json`、`inbox_routing.json` |
+| 团队附件 | `attachments/**` 中位于附件根目录下的普通文件 |
+
+导出器必须排除已知携带 secret、机器绑定或 runtime-resume 语义的文件：
+`secrets.json`、`.env`、`board-tokens.json`、`haas-token`、`sidecar-*.token`、
+`haas-supervised.yaml`、`haas.db*`、`logs/**`、Python cache、临时文件、socket、
+FIFO、设备文件、symlink，以及所有未命中白名单的路径。Manifest 只记录排除类别，
+不得记录 secret 值。导出器必须拒绝把备份产物写到源 state directory 内。
+
+Restore 只接受 V1 ZIP；所有 entry 必须是相对归一化路径，不得包含 `..`、不得是
+绝对路径、不得是 link，并且必须满足配置的 entry 数量与总大小限制。默认只恢复到
+全新的空 state directory。覆盖非空目标必须显式 force；即使 force，也必须先写入
+同级临时 staging directory，完成校验和恢复后安全转换，再原子替换目标，或保持旧
+目标不变。
+
+恢复后的安全转换是强制的：
+
+- 清空 `sessions` index 中的 session-scoped grants，让迁移后的会话重新询问授权；
+- 禁用所有计划任务并清空 `next_run`，导入的自动化在用户重新启用前不得执行；
+- 将导入时仍处于 running 的 task run 标记为带 restore-required 说明的 `error`；
+- 保持 task/session id 和非执行类 project binding 便于检查，但移除 Manager
+  `haas_delegation` runtime binding 与 runtime token。
+
+CLI/API 必须返回纳入文件、排除类别、总字节和 warning，不得打印原始会话内容、
+tool arguments、credential、token 或完整附件路径。Backup 与 restore 都是本地文件
+系统操作，不访问云服务或模型 provider。
+
 ## 9. 可观测性
 
 Metrics：
@@ -293,6 +341,10 @@ Logs：
 | approval decision 与已解析或 terminal-cancelled 记录冲突 | 返回 `haas_approval_state_conflict` |
 | invocation 进入 `failed`、`incomplete`、`interrupted` 或 `cancelled` | 在同一 store 临界区内取消该 invocation 所有仍 waiting 的 approval/input，避免 restart/replay 暴露 stale interaction card |
 | 部分写入 | 事务回滚；无跨 store 的分布式事务保证，必要时用 Outbox 补 |
+| 备份包包含不安全路径、symlink、超限 payload 或不支持版本 | 写入恢复状态前拒绝归档 |
+| restore 会覆盖非空目标且未显式 force | fail closed，并保持目标不变 |
+| 恢复的自动化包含未来启用计划 | 禁用计划任务，要求用户显式重新启用后才能调度 |
+| 恢复的 session 携带 standing grants | 清空 grants，并在恢复后的安装中重新请求授权 |
 
 ## 11. 测试计划与验收
 
@@ -308,3 +360,12 @@ Logs：
   interrupted 源记录及关联后继记录；operation receipt 保证重复 pause/continue key 不触发
   第二次 native action。
 - Security：store 全量审计不包含明文 secret（构造输入后反向断言）。
+- Manager backup：用包含 conversations、SQLite 数据、secrets、tokens、logs 与不安全
+  文件名的 fixture 做 V1 archive 单测；断言归档只包含白名单 entry，manifest 只记录
+  排除类别。
+- Manager restore：单测覆盖恢复到空目录、拒绝路径穿越/超限/不支持版本、非 force
+  不覆盖、session grants 清空、计划任务禁用，以及 running run 的恢复标记。
+
+### Manager 自动化恢复边界
+
+Manager automation.db 保留既有 task/run JSON schema，执行前持久化本次计划消耗。启动时在同一事务内将未知 running 记录标记为带 recovery_required 的 error 并停用所属计划，原 session ID 保留用于核对。不删除历史、不重放执行。HaaS store 接口不变。

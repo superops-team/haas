@@ -189,6 +189,7 @@
       "hide": "Hide activity",
       "progress": "Progress",
       "stage": "Stage {{number}}",
+      "stage_status": {"running": "Running", "completed": "Completed", "failed": "Failed", "incomplete": "Incomplete", "cancelled": "Cancelled"},
       "reasoning_tokens": "Reasoning",
       "cache_tokens": "Cache",
       "cache_write_tokens": "Cache write",
@@ -342,6 +343,8 @@
     "root_read_write": "read-write",
     "root_read_only": "read-only",
     "copy_contents": "Copy contents",
+    "download": "Download",
+    "download_only": "This artifact can't be previewed here. Download it to open it.",
     "open_in_browser": "Open in browser",
     "reveal_in_finder": "Reveal in Finder",
     "folder_empty": "This folder is empty.",
@@ -521,6 +524,8 @@
     "automation_fallback": "Automation"
   },
   "app": {
+    "server_restarting": "Execution service is restarting. Existing work will be checked before any retry.",
+    "server_failed": "Execution service is unavailable. Quit and reopen OpenHarness, then inspect the original task before retrying.",
     "notice": {
       "max_iterations": "Stopped: max iterations reached.",
       "model_switched": "Model switched",

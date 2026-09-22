@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Annotated, Any, cast
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -550,6 +551,10 @@ def build_app(
     seed_codex(registry, scopes=_configured_scopes(identity))
     event_log = EventLog(store=store)
     admission = AdmissionControl(store=store, run_quota=run_quota, rate_limit=rate_limit)
+    artifact_policy = ArtifactPolicy()
+    if max_file_bytes is not None:
+        artifact_policy.maxFileBytes = max_file_bytes
+    artifacts = ArtifactStore(artifact_policy)
     sessions = SessionRuntime(
         store=store,
         registry=registry,
@@ -558,10 +563,8 @@ def build_app(
         lease_ttl_ms=session_lease_ttl_ms,
         lease_renew_interval_ms=session_lease_renew_interval_ms,
         turn_timeout_s=session_turn_timeout_s,
+        artifacts=artifacts,
     )
-    artifact_policy = ArtifactPolicy()
-    if max_file_bytes is not None:
-        artifact_policy.maxFileBytes = max_file_bytes
     runtime = _Runtime(
         store=store,
         registry=registry,
@@ -570,7 +573,7 @@ def build_app(
         identity=identity,
         sessions=sessions,
         adapter=adapter,
-        artifacts=ArtifactStore(artifact_policy),
+        artifacts=artifacts,
         delegated_containers=delegated_containers or DisabledDelegatedContainerRuntime(),
         metrics=Metrics(),
         logger=StructuredLogger(),
@@ -1432,6 +1435,7 @@ def build_app(
         except ArtifactNotFoundError as exc:
             raise HaasError(404, "invalid_request_error", "haas_file_not_found") from exc
         runtime.metrics.incr("haas_artifact_download_total")
+        encoded_name = quote(record.filename, safe="")
         return Response(
             content=content,
             media_type=record.mediaType,
@@ -1439,7 +1443,7 @@ def build_app(
                 "X-Content-Type-Options": "nosniff",
                 # Active content (HTML/JS/SVG) must never render inline
                 # from this origin (specs/security-boundary §8.4).
-                "Content-Disposition": f'attachment; filename="{record.filename}"',
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
             },
         )
 
@@ -1455,7 +1459,13 @@ def build_app(
     @app.get("/v1/haas/sessions/{session_id}/artifacts")
     async def list_session_artifacts(session_id: str, request: Request) -> dict[str, Any]:
         principal = await _authenticate(runtime.identity, request)
-        records = runtime.artifacts.list(session_id, owner_principal_id=principal.principalId)
+        session = _resolve_visible_session(runtime, principal, session_id)
+        records = runtime.artifacts.list(
+            session_id,
+            app_name=session.appName,
+            user_id=session.userId,
+            owner_principal_id=principal.principalId,
+        )
         return {
             "data": {"artifacts": [r.to_dict() for r in records]},
             "traceId": f"tr_{uuid.uuid4().hex[:16]}",
@@ -1464,7 +1474,13 @@ def build_app(
     @app.get("/v1/haas/sessions/{session_id}/artifacts/archive")
     async def download_session_archive(session_id: str, request: Request) -> Response:
         principal = await _authenticate(runtime.identity, request)
-        records = runtime.artifacts.list(session_id, owner_principal_id=principal.principalId)
+        session = _resolve_visible_session(runtime, principal, session_id)
+        records = runtime.artifacts.list(
+            session_id,
+            app_name=session.appName,
+            user_id=session.userId,
+            owner_principal_id=principal.principalId,
+        )
         if not records:
             raise HaasError(404, "invalid_request_error", "haas_file_not_found")
         buffer = io.BytesIO()

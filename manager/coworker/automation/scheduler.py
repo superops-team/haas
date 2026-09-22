@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
 
 from .models import ScheduledTask, TaskRun
 from .store import TaskStore
@@ -27,14 +27,18 @@ class Scheduler:
         runner: Runner,
         *,
         tick_seconds: float = 30.0,
-        extra_tick: Optional[Callable[[], Awaitable[None]]] = None,
+        max_concurrent_runs: int = 4,
+        extra_tick: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.store = store
         self.runner = runner
+        if max_concurrent_runs < 1:
+            raise ValueError("max_concurrent_runs must be positive")
+        self.max_concurrent_runs = max_concurrent_runs
         self.tick_seconds = tick_seconds
         # An extra per-tick coroutine (self-wake resumption: resume sessions whose wakes are due).
         self.extra_tick = extra_tick
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._running_ids: set[str] = set()  # overlap guard
         self._spawned: set[asyncio.Task] = set()  # keep spawned runs referenced
 
@@ -94,20 +98,28 @@ class Scheduler:
                 logger.exception("scheduler extra_tick (wake resume) failed")
 
     def _claim(self, task_id: str) -> bool:
-        if task_id in self._running_ids:  # skip-on-overlap
+        if task_id in self._running_ids or self.store.has_running_run(task_id):  # skip-on-overlap
             logger.info("skipping %s — previous run still going", task_id)
+            return False
+        if len(self._running_ids) >= self.max_concurrent_runs:
             return False
         self._running_ids.add(task_id)
         return True
 
-    async def run_task(self, task: ScheduledTask, *, trigger: str) -> Optional[TaskRun]:
+    async def run_task(self, task: ScheduledTask, *, trigger: str) -> TaskRun | None:
         if not self._claim(task.id):
             return None
         return await self._run_claimed(task, trigger=trigger)
 
-    async def _run_claimed(self, task: ScheduledTask, *, trigger: str) -> Optional[TaskRun]:
+    async def _run_claimed(self, task: ScheduledTask, *, trigger: str) -> TaskRun | None:
         try:
-            run = await self.runner(task, trigger)
+            # Consume this scheduled occurrence durably before performing external effects.
+            fresh = self.store.get(task.id)
+            if fresh is None or not fresh.enabled:
+                return None
+            fresh.run_count += 1
+            self.store.save(fresh)
+            run = await self.runner(fresh, trigger)
         except Exception as exc:
             logger.exception("task %s run failed", task.id)
             run = TaskRun(task_id=task.id, status="error", error=str(exc), trigger=trigger)
@@ -117,7 +129,6 @@ class Scheduler:
         # advance the task (run_count/last_run) → save recomputes next_run.
         fresh = self.store.get(task.id)
         if fresh is not None:
-            fresh.run_count += 1
             fresh.last_run = run.started_at if run else None
             fresh.last_status = run.status if run else "error"
             self.store.save(fresh)

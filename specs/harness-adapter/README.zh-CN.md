@@ -79,6 +79,11 @@ Adapter 必须把 native `interrupted` 保留为 `harness.turn.interrupted`；Se
 已持久化的 control intent 映射为可恢复 Pause 或不可逆 Cancel。`resume_session` 只验证或恢复
 native session 连续性；用户 Continue 仍必须由 Session Runtime 创建新的 HaaS invocation/turn。
 
+Session lifecycle 与 artifact request 必须携带完整 ADK session identity
+`(appName, userId, sessionId)`。Adapter 必须以该 tuple 作为 native thread、workspace 和
+artifact discovery 状态的 key，不得仅使用 caller-controlled `sessionId`；另一个 app 或
+user 可以合法复用同一裸 ID。
+
 ### 5.1 Capability Matrix
 
 | Capability | Type | 说明 |

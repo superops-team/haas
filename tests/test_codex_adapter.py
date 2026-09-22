@@ -14,6 +14,7 @@ import pytest
 from haas.execution_evidence import ExecutionEvidenceStore
 from haas.harnesses.base import (
     CancelTurnRequest,
+    ListArtifactsRequest,
     PrepareSessionRequest,
     StartTurnRequest,
     TurnHandle,
@@ -99,6 +100,78 @@ def test_command_output_delta_accumulates_in_ephemeral_evidence() -> None:
 
     evidence_ref = adapter._command_evidence_refs[("turn_1", "call_1")]
     assert store.get(evidence_ref).output == "API_KEY=[REDACTED]\nhello"
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_scans_output_root(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "output" / "reports").mkdir(parents=True)
+    (workspace / "output" / "reports" / "report.md").write_text(
+        "# Report", encoding="utf-8"
+    )
+    (workspace / "output_secret").mkdir()
+    (workspace / "output_secret" / "leak.md").write_text("secret", encoding="utf-8")
+    (workspace / "output" / ".hidden.md").write_text("hidden", encoding="utf-8")
+
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    adapter._session_cwds[("chrn_1", "u_1", "hsess_1")] = str(workspace)
+
+    artifacts = await adapter.list_artifacts(
+        ListArtifactsRequest(sessionId="hsess_1", appName="chrn_1", userId="u_1")
+    )
+
+    assert [(item.name, item.path, item.content) for item in artifacts] == [
+        ("report.md", "output/reports/report.md", b"# Report")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_rejects_symlink_files_and_output_root(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "output" / "leak.txt").symlink_to(outside)
+
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    adapter._session_cwds[("chrn_1", "u_1", "hsess_file_link")] = str(workspace)
+    assert await adapter.list_artifacts(
+        ListArtifactsRequest(
+            sessionId="hsess_file_link", appName="chrn_1", userId="u_1"
+        )
+    ) == []
+
+    # Replace the real output directory with a link to prove the root itself is rejected.
+    (workspace / "output" / "leak.txt").unlink()
+    (workspace / "output").rmdir()
+    (workspace / "output").symlink_to(tmp_path)
+    adapter._session_cwds[("chrn_1", "u_1", "hsess_root_link")] = str(workspace)
+    assert await adapter.list_artifacts(
+        ListArtifactsRequest(
+            sessionId="hsess_root_link", appName="chrn_1", userId="u_1"
+        )
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_scopes_same_session_id_by_app_and_user(tmp_path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for workspace, content in ((first, "first"), (second, "second")):
+        (workspace / "output").mkdir(parents=True)
+        (workspace / "output" / "report.txt").write_text(content, encoding="utf-8")
+
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    adapter._session_cwds[("chrn_1", "u_1", "hsess_shared")] = str(first)
+    adapter._session_cwds[("chrn_2", "u_2", "hsess_shared")] = str(second)
+
+    artifacts = await adapter.list_artifacts(
+        ListArtifactsRequest(
+            sessionId="hsess_shared", appName="chrn_2", userId="u_2"
+        )
+    )
+
+    assert [artifact.content for artifact in artifacts] == [b"second"]
 
 
 def test_command_output_delta_keeps_100001_byte_evidence_complete() -> None:

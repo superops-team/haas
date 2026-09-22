@@ -281,6 +281,62 @@ Migrate older delegated records to desiredRevision=appliedRevision=1 only after 
 - Store-level event indexes still enforce namespace separation by requiring the
   full session scope key on reads; API-layer filtering alone is insufficient.
 
+### 8.1 Manager State Backup and Restore
+
+Manager V1 backup is an offline, user-owned portability mechanism for conversation
+history, memory index data, personas, preferences, and scheduled-task definitions. It
+is not a live runtime checkpoint and MUST NOT claim to preserve a running turn,
+active HaaS child process, connector OAuth session, sidecar token, or OS notification
+state.
+
+The backup artifact is a ZIP file containing:
+
+- `manifest.json`, with `format="openharness-state-backup"`, `version=1`,
+  `createdAt`, `source`, `included`, `excluded`, and warning fields.
+- A whitelist of portable files rooted at the Manager state directory.
+- SQLite databases copied through SQLite's backup API when they are valid SQLite
+  files, so a writer using WAL mode does not produce a torn archive.
+
+The V1 portable whitelist is deliberately narrow:
+
+| Class | Included |
+|-------|----------|
+| Conversations | `conversations/*.jsonl` with safe one-component names |
+| SQLite data | `coworker.db`, `automation.db`, `journal.db`, `teams.db`, `chat.db` |
+| User settings | `prefs.json`, `memory-settings.json`, `personas.json`, `persona_connections.json`, `session_connections.json`, `session_skills.json`, `inbox_routing.json` |
+| Team artifacts | `attachments/**` regular files below the attachment root |
+
+The exporter MUST exclude known secret-bearing, machine-bound, or runtime-resume
+files: `secrets.json`, `.env`, `board-tokens.json`, `haas-token`,
+`sidecar-*.token`, `haas-supervised.yaml`, `haas.db*`, `logs/**`, Python caches,
+temporary files, sockets, FIFOs, device files, symlinks, and every path not matched
+by the whitelist. The archive manifest records these exclusions by category, not by
+secret value. The exporter MUST reject archive output paths inside the source state
+directory.
+
+Restore accepts only V1 ZIP artifacts whose entries are relative normalized paths,
+do not contain `..`, are not absolute, are not links, and fit configured entry-count
+and total-size limits. Restore writes into a fresh empty state directory by default.
+Replacing a non-empty target requires an explicit force option; even then the
+implementation MUST stage into a sibling temporary directory, validate, apply
+post-restore safety transforms, then atomically move it into place or leave the
+previous target untouched.
+
+Post-restore safety transforms are mandatory:
+
+- clear session-scoped grants from the `sessions` index so migrated sessions ask for
+  approval again;
+- disable all scheduled tasks and clear `next_run` so imported automations cannot
+  execute until the user re-enables them;
+- mark any imported running task run as `error` with a restore-required explanation;
+- keep task/session ids and non-execution project bindings stable for inspection, but
+  remove the Manager `haas_delegation` runtime binding and runtime tokens.
+
+The CLI/API surface MUST report included files, excluded categories, total bytes,
+and warnings without printing raw conversation content, tool arguments, credentials,
+tokens, or full attachment paths. Backup and restore are local filesystem
+operations; they do not contact cloud services or model providers.
+
 ## 9. Observability
 
 Metrics:
@@ -313,6 +369,10 @@ Logs:
 | Approval decision conflicts with resolved or terminal-cancelled record | Return `haas_approval_state_conflict` |
 | Invocation reaches `failed`, `incomplete`, `interrupted`, or `cancelled` | In the same store critical section, cancel all still-waiting approval and input records for that invocation so restart/replay cannot surface stale interaction cards |
 | Partial write | Roll back the transaction; no distributed transaction is guaranteed across stores, and use an Outbox when necessary |
+| Backup artifact contains an unsafe path, symlink, oversize payload, or unsupported version | Reject the archive before writing restored state |
+| Restore would overwrite a non-empty target without explicit force | Fail closed and leave target unchanged |
+| Restored automation had future runs enabled | Disable it and require explicit user re-enable before dispatch |
+| Restored session carried standing grants | Clear the grants and require fresh approval in the restored installation |
 
 ## 11. Test Plan and Acceptance Criteria
 
@@ -331,3 +391,13 @@ Logs:
   records across restart/retention; operation receipts make duplicate
   pause/continue keys replay without a second native action.
 - Security: a full store audit contains no plaintext secrets, verified with negative assertions after constructed inputs.
+- Manager backup: unit-test V1 archive creation against a fixture containing
+  conversations, SQLite data, secrets, tokens, logs, and unsafe filenames; assert the
+  archive contains only whitelisted entries and a manifest with exclusion categories.
+- Manager restore: unit-test restore into a fresh directory, rejection of path
+  traversal/oversize/unsupported archives, atomic non-overwrite behavior, cleared
+  session grants, disabled schedules, and running-run recovery markers.
+
+### Manager automation recovery boundary
+
+Manager automation.db preserves existing task/run JSON schemas. Scheduled occurrence consumption is persisted before execution. On startup unresolved running records become error with recovery_required and owning schedules are disabled in one transaction; original session IDs remain inspectable. No historical record is deleted and no execution replay occurs. HaaS store interfaces are unchanged.

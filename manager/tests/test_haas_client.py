@@ -216,6 +216,75 @@ async def test_client_exposes_recovery_and_configuration_surfaces() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_lists_and_downloads_artifacts() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/artifacts"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "artifacts": [
+                            {
+                                "id": "file_report",
+                                "object": "file",
+                                "sessionId": "hsess_1",
+                                "filename": "report.md",
+                                "relativePath": "output/report.md",
+                                "bytes": 7,
+                                "mediaType": "text/markdown",
+                                "previewStatus": "available",
+                                "downloadStatus": "available",
+                            }
+                        ]
+                    },
+                    "traceId": "tr_artifacts",
+                },
+            )
+        if request.url.path.endswith("/files/file_report/content"):
+            return httpx.Response(
+                200,
+                content=b"# Report",
+                headers={"content-type": "text/markdown"},
+            )
+        if request.url.path.endswith("/artifacts/archive"):
+            return httpx.Response(200, content=b"zip", headers={"content-type": "application/zip"})
+        raise AssertionError(request.url.path)
+
+    client = HaasClient(
+        _endpoint(), token_resolver=lambda _: "token", transport=httpx.MockTransport(handler)
+    )
+
+    listed = await client.list_artifacts("hsess_1")
+    assert listed.data == [
+        {
+            "id": "file_report",
+            "object": "file",
+            "sessionId": "hsess_1",
+            "filename": "report.md",
+            "relativePath": "output/report.md",
+            "bytes": 7,
+            "mediaType": "text/markdown",
+            "previewStatus": "available",
+            "downloadStatus": "available",
+        }
+    ]
+    content, media_type = await client.download_file("file_report")
+    assert content == b"# Report"
+    assert media_type == "text/markdown"
+    archive, archive_media_type = await client.download_artifact_archive("hsess_1")
+    assert archive == b"zip"
+    assert archive_media_type == "application/zip"
+    assert [item.url.path for item in seen] == [
+        "/v1/haas/sessions/hsess_1/artifacts",
+        "/v1/haas/files/file_report/content",
+        "/v1/haas/sessions/hsess_1/artifacts/archive",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_client_resolves_human_bridge_requests_with_stable_ids() -> None:
     seen: list[httpx.Request] = []
 

@@ -2102,6 +2102,31 @@ components:
         inputRequestId: {type: string, pattern: "^inreq_"}
         status: {type: string, enum: [answered, expired, cancelled]}
       additionalProperties: false
+    ArtifactRegisteredEventMetadata:
+      type: object
+      required: [fileId, relativePath, mediaType, bytes, invocationId, previewStatus, downloadStatus]
+      properties:
+        fileId: {type: string, pattern: "^file_"}
+        relativePath: {type: string, minLength: 1}
+        mediaType: {type: string, minLength: 1}
+        bytes: {type: integer, minimum: 0}
+        invocationId: {type: string, pattern: "^inv_"}
+        previewStatus: {type: string, enum: [available, download_only, unavailable]}
+        downloadStatus: {type: string, enum: [available, unavailable]}
+      allOf:
+        - if:
+            properties:
+              previewStatus: {const: unavailable}
+          then:
+            properties:
+              downloadStatus: {const: unavailable}
+        - if:
+            properties:
+              previewStatus: {enum: [available, download_only]}
+          then:
+            properties:
+              downloadStatus: {const: available}
+      additionalProperties: false
     EventUnparsedMetadata:
       type: object
       required: [safeReason, retryable]
@@ -2320,6 +2345,13 @@ components:
               properties:
                 type: {type: string, const: haas.input.resolved}
                 haas: {$ref: "#/components/schemas/InputResolvedEventMetadata"}
+        - allOf:
+            - $ref: "#/components/schemas/CanonicalHaasEventBase"
+            - type: object
+              required: [type, haas]
+              properties:
+                type: {type: string, const: haas.artifact.registered}
+                haas: {$ref: "#/components/schemas/ArtifactRegisteredEventMetadata"}
         - allOf:
             - $ref: "#/components/schemas/CanonicalHaasEventBase"
             - type: object
@@ -3755,6 +3787,14 @@ components:
         createdAtMs:
           type: integer
           minimum: 0
+        previewStatus:
+          type: string
+          enum: [available, download_only, unavailable]
+          description: Additive presentation hint for clients; authorization is still enforced by content reads.
+        downloadStatus:
+          type: string
+          enum: [available, unavailable]
+          description: Additive presentation hint for whether raw bytes are currently readable through the Artifact Store.
       additionalProperties: true
     HarnessCreate:
       type: object

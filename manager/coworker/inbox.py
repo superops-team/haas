@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -112,10 +114,17 @@ class InboxStore:
         if not self.path:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps({"items": [asdict(i) for i in self._items.values()]}, indent=2),
-            encoding="utf-8",
-        )
+        payload = json.dumps({"items": [asdict(i) for i in self._items.values()]}, indent=2)
+        fd, temporary = tempfile.mkstemp(prefix=".inbox-", dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, self.path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     # -- adding -----------------------------------------------------------------
     def add(
@@ -159,7 +168,11 @@ class InboxStore:
         )
         with self._lock:
             self._items[item.id] = item
-            self._save()
+            try:
+                self._save()
+            except Exception:
+                self._items.pop(item.id, None)
+                raise
         return item
 
     def for_tool_call(self, session_id: str, tool_call_id: str) -> Optional[InboxItem]:

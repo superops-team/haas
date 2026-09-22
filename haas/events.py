@@ -344,6 +344,39 @@ def _validate_typed_metadata(type_: str, haas: dict[str, Any]) -> None:
         ):
             raise ValueError("invalid typed plan metadata")
         return
+    if type_ == "haas.artifact.registered":
+        expected = {
+            "fileId",
+            "relativePath",
+            "mediaType",
+            "bytes",
+            "invocationId",
+            "previewStatus",
+            "downloadStatus",
+        }
+        status = (haas.get("previewStatus"), haas.get("downloadStatus"))
+        if (
+            set(haas) != expected
+            or not isinstance(haas.get("fileId"), str)
+            or not haas["fileId"].startswith("file_")
+            or not isinstance(haas.get("relativePath"), str)
+            or not haas["relativePath"]
+            or not isinstance(haas.get("mediaType"), str)
+            or not haas["mediaType"]
+            or not isinstance(haas.get("bytes"), int)
+            or isinstance(haas["bytes"], bool)
+            or haas["bytes"] < 0
+            or not isinstance(haas.get("invocationId"), str)
+            or not haas["invocationId"]
+            or status
+            not in {
+                ("available", "available"),
+                ("download_only", "available"),
+                ("unavailable", "unavailable"),
+            }
+        ):
+            raise ValueError("invalid typed artifact metadata")
+        return
     if type_ in interaction_required:
         missing = sorted(interaction_required[type_] - haas.keys())
         if missing:

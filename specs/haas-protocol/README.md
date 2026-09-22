@@ -338,6 +338,9 @@ client contract explicitly supports them; they MUST never be interpreted as appr
 or successful terminal events. Terminal outcome is represented by exactly one of
 `haas.turn.completed`, `haas.turn.failed`, `haas.turn.incomplete`,
 `haas.turn.interrupted`, or `haas.turn.cancelled` per invocation.
+`haas.artifact.registered` is an additive, non-terminal fact containing only the scoped file id,
+relative path, media type, byte count, invocation id, and preview/download availability. It is
+persisted before the invocation terminal event; the artifact list endpoint remains authoritative.
 
 Output, reasoning, tool, and usage facts MAY carry the additive correlation fields
 `itemId` and `modelCallId` defined by Event Log & SSE. `modelCallId` identifies one measured

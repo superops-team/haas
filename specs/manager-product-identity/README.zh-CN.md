@@ -106,3 +106,7 @@ Manager Product Identity 定义 HaaS 配套 manager 应用的对外产品身份�
 - 离线合同测试覆盖 platform/architecture 拒绝、不可变 release 资产选择、先校验后
   mount、限定范围的 `xattr`、清理和回滚。release smoke 必须通过公开命令安装已上传
   DMG，并确认 `/Applications/OpenHarness.app` 存在且不带 quarantine 属性。
+
+### 自动化桌面通知
+
+原生 shell 根据 automation_run_finished 显示固定完成/失败通知，不传生成内容、prompt 或工具参数。命令仅接受封闭 outcome 枚举；系统通知权限拒绝不影响任务结果或持久 Inbox。自动测试验证命令参数和桥接；系统通知实际展示依赖用户 OS 权限。

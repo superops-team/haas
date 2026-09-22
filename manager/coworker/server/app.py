@@ -11,6 +11,7 @@ import asyncio
 import base64
 import binascii
 import json
+import logging
 import os
 import re
 import secrets
@@ -19,6 +20,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -808,6 +810,25 @@ def create_app(manager: SessionManager) -> FastAPI:
         body = body or {}
         return manager.reveal_artifact(
             session_id, str(body.get("path", "")), str(body.get("mode", "reveal"))
+        )
+
+    @app.get("/v1/sessions/{session_id}/artifacts/download")
+    def session_artifact_download(session_id: str, path: str):
+        from fastapi.responses import Response
+
+        result = manager.download_artifact(session_id, path)
+        if isinstance(result, dict):
+            status = 409 if result.get("code") == "artifact_ambiguous" else 404
+            return JSONResponse(result, status_code=status)
+        content, media_type, filename = result
+        encoded_name = quote(filename, safe="")
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     # Agent teams (OPE-96): the session's board (workspace-keyed space) + journal
@@ -2330,6 +2351,8 @@ def create_app(manager: SessionManager) -> FastAPI:
             # The receive loop atomically claims this session before scheduling the task.
             # Keeping the claim outside prevents two back-to-back frames from both starting.
             haas_turn_started = False
+            execution_terminal = False
+            execution_failed = False
             turn_token = manager.active_turn_token(session_id)
             try:
                 events = manager.run_turn_events(
@@ -2342,6 +2365,11 @@ def create_app(manager: SessionManager) -> FastAPI:
                     retry=retry,
                 )
                 async for event in events:
+                    if event.type.value in {"error", "interrupted"}:
+                        execution_failed = True
+                    if event.type.value == "turn_end":
+                        execution_terminal = event.data.get("status") == "completed"
+                        execution_failed = execution_failed or not execution_terminal
                     # Broadcast to every socket viewing this session (this socket included — it's a
                     # registered client), so a second view of the same session stays in sync too.
                     await manager.broadcast_session(
@@ -2381,6 +2409,23 @@ def create_app(manager: SessionManager) -> FastAPI:
             finally:
                 manager.mark_idle(session_id, token=turn_token)
                 manager.save(session_id, engine)
+                if session_id.startswith("__run__"):
+                    run_id = session_id[len("__run__"):]
+                    run = manager.task_store.find_run(run_id)
+                    if run and run.trigger == "manual":
+                        result = manager.finalize_manual_run(
+                            run.task_id, run.run_id,
+                            execution_ok=execution_terminal and not execution_failed,
+                        )
+                        task = manager.task_store.get(run.task_id)
+                        final_run = manager.task_store.find_run(run_id)
+                        if task and final_run and result.get("ok") and (
+                            task.notify_on_completion or final_run.status != "ok"
+                        ):
+                            try:
+                                await manager._notify_task_done(task, final_run)
+                            except Exception:
+                                logging.getLogger(__name__).warning("Automation notification delivery failed")
                 terminal_control = manager.haas_control_state(session_id)
                 # Pause already publishes its authoritative `paused` readback in
                 # the control request path. Other terminal paths (notably Stop)

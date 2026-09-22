@@ -427,6 +427,16 @@ body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+@media (prefers-reduced-motion: reduce) {
+  .stream-cursor,
+  .waiting-spinner,
+  .spinner,
+  .activity-spinner,
+  .thinking-live {
+    animation: none !important;
+  }
+}
+
 .tool {
   border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
   padding: 8px 11px; font-size: 13px; color: var(--muted);
@@ -1508,13 +1518,37 @@ html[data-theme="dark"] :not(.connector-badge) > .connector-icon[data-dark-mark]
 .model-stage-list { display: flex; flex-direction: column; gap: 9px; padding: 10px 0 3px; }
 .model-stage { overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
 .model-stage[open] { border-color: var(--line-strong); }
+.model-stage.is-running {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent-soft) 65%, transparent), transparent 58%),
+    var(--panel);
+}
 .model-stage-head {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
   padding: 9px 11px; cursor: pointer; list-style: none;
 }
 .model-stage-head::-webkit-details-marker { display: none; }
-.model-stage-title { color: var(--ink); font-size: 12px; font-weight: 650; white-space: nowrap; }
+.model-stage-title {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0;
+  color: var(--ink); font-size: 12px; font-weight: 650;
+}
+.model-stage-status-mark {
+  display: grid; place-items: center; width: 13px; height: 13px; flex: none;
+  border-radius: 999px; color: var(--panel); background: var(--faint);
+  font-size: 9px; line-height: 1;
+}
+.model-stage.is-running .model-stage-status-mark {
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 58%, var(--ok)));
+}
+.model-stage-status { flex: none; padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 11px; font-weight: 500; white-space: nowrap; }
+.model-stage-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-stage-step-count { flex: none; color: var(--faint); font-weight: 520; white-space: nowrap; }
 .model-stage.is-completed .model-stage-title { color: var(--muted); }
+.model-stage.is-completed .model-stage-status-mark { background: var(--ok); }
+.model-stage.is-failed .model-stage-status-mark,
+.model-stage.is-incomplete .model-stage-status-mark,
+.model-stage.is-cancelled .model-stage-status-mark { background: var(--danger); }
 .model-stage-usage {
   display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 9px;
   color: var(--muted); font: 11px var(--mono); font-variant-numeric: tabular-nums;
@@ -2237,4 +2271,26 @@ html[data-platform="linux"] ::-webkit-scrollbar-thumb:hover { background-color: 
   background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
   font-family: var(--mono); font-size: var(--fs-mono); line-height: 1.5;
   color: var(--muted); white-space: pre-wrap; text-align: left;
+}
+
+/* Compact windows keep the conversation usable even with a remembered open rail. */
+@media (max-width: 800px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .app .sidebar { position: absolute; z-index: 40; height: 100%; }
+  .app.nav-collapsed:not(.nav-peek) .sidebar { visibility: hidden; pointer-events: none; }
+  .main.rail-open .main-chat,
+  .main.rail-open:has(.right-rail.artifact-mode) .main-chat { margin-right: 0; }
+  .main.rail-open .main-topbar,
+  .main.rail-open:has(.right-rail.artifact-mode) .main-topbar { right: 0; }
+  .main .right-rail { z-index: 25; top: 48px; bottom: 140px; width: min(332px, 85%); }
+  .main-topbar .main-title { min-width: 0; flex: 1; overflow: hidden; }
+  .main-topbar .topbar-icon-btn { flex-shrink: 0; }
+  .main-scroll { min-width: 0; padding-inline: 16px; }
+}
+
+@media (max-width: 800px) {
+  .composer-controls { flex-wrap: wrap; }
+  .composer-controls > * { max-width: 100%; }
+  .composer-wrap { padding-inline: 16px; }
+  .main-title { pointer-events: none; }
 }

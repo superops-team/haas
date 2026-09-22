@@ -8,13 +8,16 @@ from typing import Any
 import httpx
 import pytest
 
+from haas.artifacts import ArtifactNotFoundError, ArtifactStore
 from haas.events import EventLog
 from haas.harnesses import FakeAdapter
 from haas.harnesses.base import (
     AdapterTurnResult,
+    ArtifactRef,
     CancelResult,
     CancelTurnRequest,
     HarnessEvent,
+    ListArtifactsRequest,
     PreparedSession,
     ResumeSessionRequest,
     StartTurnRequest,
@@ -65,6 +68,67 @@ async def test_run_creates_session_invocation_events(runtime: SessionRuntime) ->
     assert result.events
     assert result.events[-1].actions["stateDelta"]["status"] == "completed"
     assert result.session.id.startswith("hsess_")
+
+
+async def test_terminal_is_persisted_before_artifact_event_is_yielded() -> None:
+    class TerminalArtifactAdapter(FakeAdapter):
+        async def stream_events(
+            self, handle: TurnHandle
+        ) -> AsyncIterator[HarnessEvent]:
+            yield HarnessEvent(
+                type="harness.turn.completed",
+                invocationId=handle.invocationId,
+                sessionId=handle.sessionId,
+                turnId=handle.turnId,
+                author="fake",
+                content={"role": "model", "parts": []},
+                actions={"stateDelta": {"status": "completed"}},
+            )
+
+        async def list_artifacts(
+            self, request: ListArtifactsRequest
+        ) -> list[ArtifactRef]:
+            return [
+                ArtifactRef(
+                    name="report.md",
+                    path="output/report.md",
+                    content=b"# Report",
+                )
+            ]
+
+    store = MemoryStore()
+    registry = HarnessRegistry(store=store)
+    app = seed_codex(registry)
+    runtime = SessionRuntime(
+        store=store,
+        registry=registry,
+        adapter=TerminalArtifactAdapter(),
+        event_log=EventLog(store=store),
+        artifacts=ArtifactStore(),
+    )
+    stream = runtime.run_stream(
+        RunRequest(
+            app=app,
+            user_id="u_1",
+            session_id="hsess_disconnect",
+            message={"role": "user", "parts": []},
+            principal_id="p_1",
+        )
+    )
+
+    artifact_event = await anext(stream)
+    invocation = store.get_invocation(artifact_event.invocationId)
+    persisted = store.read_invocation(
+        (app.id, "u_1", "hsess_disconnect"),
+        artifact_event.invocationId,
+    )
+    assert artifact_event.type == "haas.artifact.registered"
+    assert invocation is not None and invocation.status == "completed"
+    assert [event.type for event in persisted[-2:]] == [
+        "haas.artifact.registered",
+        "haas.turn.completed",
+    ]
+    await stream.aclose()
 
 
 async def test_followup_resumes_from_persisted_native_session_ref() -> None:
@@ -220,6 +284,72 @@ def test_get_and_delete_session(runtime: SessionRuntime) -> None:
     runtime.delete_session("chrn_codex_default", "u_1", "hsess_1")
     with pytest.raises(SessionNotFoundError):
         runtime.get_session("chrn_codex_default", "u_1", "hsess_1")
+
+
+def test_delete_session_makes_artifacts_unreachable() -> None:
+    store = MemoryStore()
+    registry = HarnessRegistry(store=store)
+    app = seed_codex(registry)
+    artifacts = ArtifactStore()
+    runtime = SessionRuntime(
+        store=store,
+        registry=registry,
+        adapter=FakeAdapter(),
+        event_log=EventLog(store=store),
+        artifacts=artifacts,
+    )
+    store.put_session(SessionRecord(id="hsess_artifacts", appName=app.id, userId="u_1"))
+    record = artifacts.register(
+        "hsess_artifacts",
+        "output/report.md",
+        b"report",
+        owner_principal_id="p_1",
+        app_name=app.id,
+        user_id="u_1",
+    )
+
+    runtime.delete_session(app.id, "u_1", "hsess_artifacts")
+
+    with pytest.raises(ArtifactNotFoundError):
+        artifacts.read_content(record.id, owner_principal_id="p_1")
+
+
+def test_delete_session_preserves_same_id_artifacts_in_another_adk_scope() -> None:
+    store = MemoryStore()
+    registry = HarnessRegistry(store=store)
+    app = seed_codex(registry)
+    artifacts = ArtifactStore()
+    runtime = SessionRuntime(
+        store=store,
+        registry=registry,
+        adapter=FakeAdapter(),
+        event_log=EventLog(store=store),
+        artifacts=artifacts,
+    )
+    for user_id in ("u_1", "u_2"):
+        store.put_session(SessionRecord(id="shared", appName=app.id, userId=user_id))
+    first = artifacts.register(
+        "shared",
+        "output/report.md",
+        b"first",
+        owner_principal_id="p_1",
+        app_name=app.id,
+        user_id="u_1",
+    )
+    second = artifacts.register(
+        "shared",
+        "output/report.md",
+        b"second",
+        owner_principal_id="p_1",
+        app_name=app.id,
+        user_id="u_2",
+    )
+
+    runtime.delete_session(app.id, "u_1", "shared")
+
+    with pytest.raises(ArtifactNotFoundError):
+        artifacts.read_content(first.id, owner_principal_id="p_1")
+    assert artifacts.read_content(second.id, owner_principal_id="p_1") == b"second"
 
 
 def test_delete_session_revokes_model_proxy_capability(runtime: SessionRuntime) -> None:

@@ -3,7 +3,8 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-10
+Last reviewed: 2026-09-20
+Change ID: haas-artifact-product-surface
 Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Container Runtime](../container-runtime/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
@@ -71,9 +72,9 @@ async def store_input_file(file: UploadFile, ctx: RequestContext) -> FileRecord:
 async def materialize_input_file(file_id: str, session: SessionRecord) -> SafePath: ...
 async def scan_artifacts(session: SessionRecord, policy: ArtifactPolicy) -> ArtifactScanResult: ...
 async def register_artifact(session: SessionRecord, path: SafePath) -> FileRecord: ...
-async def list_artifacts(session_id: str, ctx: RequestContext) -> list[FileRecord]: ...
+async def list_artifacts(session: SessionRecord, ctx: RequestContext) -> list[FileRecord]: ...
 async def open_artifact(container_id: str, file_id: str, ctx: RequestContext) -> FileStream: ...
-async def build_archive(session_id: str, ctx: RequestContext) -> ArchiveStream: ...
+async def build_archive(session: SessionRecord, ctx: RequestContext) -> ArchiveStream: ...
 ```
 
 ## 6. Data Models
@@ -104,9 +105,14 @@ async def build_archive(session_id: str, ctx: RequestContext) -> ArchiveStream: 
 | Source | Content location | Read method |
 |--------|------------------|-------------|
 | Upload through `POST /v1/haas/files` | Artifact Store-owned content store (in-process for S6; replaceable by a Drive/OSS backend later) | Read directly by `file_id` |
-| harness output (scan/register) | session container workspace | Read through Container Runtime by `relativePath` |
+| harness output (P0 scan/register) | Artifact Store-owned immutable byte snapshot captured at publication | Read by scoped opaque `file_id`; `relativePath` remains display/deep-link metadata |
 
-S6 implements content readback and archiving only for uploaded content; container content reading is integrated after S5 sandbox projection becomes available. When `GET /v1/haas/files/{id}/content` matches a record whose content cannot be read back, it MUST return `404 haas_file_not_found` and MUST NOT return an empty body that falsely indicates success.
+P0 snapshots each accepted produced file into the same content store used for uploads. This makes a
+published file readable after the turn without exposing a host path or depending on a live container.
+Future large-file or remote backends MAY retain content in the session runtime, but must preserve the
+same scoped `file_id` read contract and availability fields. When
+`GET /v1/haas/files/{id}/content` matches a record whose content cannot be read back, it MUST return
+`404 haas_file_not_found` and MUST NOT return an empty body that falsely indicates success.
 
 ### 6.1.2 Principal Scope (S6)
 
@@ -115,6 +121,14 @@ S6 implements content readback and archiving only for uploaded content; containe
 - Record the caller principal at upload time.
 - `list` / `get` / `content` / `archive` MUST filter by principal.
 - Cross-principal access returns `404 haas_file_not_found`, not 403, to prevent existence disclosure.
+
+Artifacts attached to a session MUST additionally use the complete ADK session identity
+`(appName, userId, sessionId)` as their storage and deletion scope. A bare `sessionId` is not
+globally unique. Native routes containing only `{session_id}` MUST first resolve exactly one
+caller-visible session and then list/archive that full scope; zero or multiple matches return the
+same not-found response used by other native session routes. Deleting one ADK session MUST remove
+only that tuple's current and superseded artifacts, never artifacts owned by another tuple that
+reuses the same caller-supplied `sessionId`.
 
 ### 6.2 ArtifactPolicy
 
@@ -137,6 +151,84 @@ example, `includeRoots=["output"]` allows `output/report.md` but MUST NOT
 allow `output_secret/report.md`. An empty `includeRoots` list is invalid for
 publishing and MUST fail closed by rejecting every candidate artifact path.
 
+P0 fixes the default publishable root to `output/`. This is a product and
+security convention: user-visible deliverables belong there, while source
+edits, dependency caches, build trees, coverage directories, and runtime logs
+are not artifacts merely because they changed. The fixed default keeps the
+first HaaS path safe and testable, and lets agent instructions say: "write
+files the user should open to `output/`." It also means HaaS will intentionally
+miss files written to project-native locations such as `docs/`, `reports/`,
+`coverage/`, or `dist/` unless a later profile/session policy adds those roots.
+That omission is preferable to scanning the whole repository by default.
+
+`includeRoots` remains a policy field for future additive configuration. A
+profile or session policy MAY add roots such as `reports` or `coverage` after
+the same canonicalization, exclusion, count, size, and hidden-path checks pass.
+It MUST NOT default to the workspace root, user home, dependency directories,
+hidden runtime directories, or an unbounded recent-file diff. UI surfaces SHOULD
+keep "Artifacts" distinct from "Changed files": source edits and workspace diffs
+are task results, but they are not automatically downloadable artifacts.
+
+### 6.3 Produced Artifact Surface Contract
+
+Produced artifacts are user-facing deliverables, not raw filesystem trivia. A produced
+artifact becomes visible only after HaaS has registered a `FileRecord` from an allowed
+adapter report or output-root scan. The minimum display record is:
+
+```json
+{
+  "id": "file_abc",
+  "filename": "security-review.html",
+  "relativePath": "output/reports/security-review.html",
+  "bytes": 24576,
+  "mediaType": "text/html",
+  "createdAtMs": 1786400240000,
+  "previewStatus": "available",
+  "downloadStatus": "available"
+}
+```
+
+`previewStatus` is `available`, `download_only`, or `unavailable`. `downloadStatus` is
+`available` or `unavailable`. These fields are additive presentation hints derived from
+the storage boundary, media type, policy, and current runtime capability; they do not grant
+access and do not replace object-scope checks on content reads. When a harness-produced
+record is metadata-only in the current stage, `previewStatus=unavailable` and
+`downloadStatus=unavailable` are preferable to a broken empty preview. If archive can include
+only readable artifacts, the list record MUST still make unreadable entries distinguishable
+so clients can explain the gap.
+
+Status combinations:
+
+| previewStatus | downloadStatus | Meaning |
+|---------------|----------------|---------|
+| `available` | `available` | Content is readable and the Manager/UI can render an inline preview for the media type. |
+| `download_only` | `available` | Content is readable, but inline preview is unsupported or too large; the client should show metadata plus a download/open action. |
+| `unavailable` | `unavailable` | The artifact is recorded but content is not currently readable; the client should show an explanatory unavailable state. |
+
+Other combinations are invalid. HaaS may omit these fields only for backward compatibility;
+new producers SHOULD set them explicitly.
+
+HaaS SHOULD emit or persist `haas.artifact.registered` when a turn terminal scan or adapter
+report publishes new files. The event's `haas` metadata MUST include only safe metadata
+(`fileId`, `relativePath`, `mediaType`, `bytes`, `invocationId`, `previewStatus`, and
+`downloadStatus`). It MUST NOT include file contents, raw prompts, complete tool arguments,
+host paths, signed URLs, credentials, or hidden runtime paths. Clients MAY use this event to
+refresh their artifact list, but the list endpoint remains authoritative. If multiple artifacts
+are registered at terminal, HaaS MAY emit one event per file or one bounded batch event; either
+form must preserve the same metadata restrictions.
+Artifact registration events for a turn MUST be persisted and streamed before that turn's
+terminal event so the terminal remains the final invocation event. Artifact discovery is
+best-effort: a scan/read failure MUST NOT rewrite an otherwise successful turn to failed.
+Repeated terminal scans MUST NOT append another visible record or registration event when the
+same session-relative path still has the same content digest. If the content at that path changes,
+the current artifact list MUST expose only the newest record for that path.
+
+User-facing terminology SHOULD describe these objects as "Artifacts" / "产物": the files,
+reports, images, tables, archives, or other durable outputs created by the agent for the
+current session. Implementation or packaging terms such as build artifacts, cache entries,
+container layers, and internal logs are not part of this surface unless explicitly registered
+under the allowed output roots.
+
 ## 7. Runtime Model and State Machine
 
 ```text
@@ -158,7 +250,8 @@ The artifact lifecycle follows the session lifecycle. Deleting a session makes i
 
 - File IDs are opaque and scoped; paths MUST NOT be derived directly from IDs.
 - Relative paths are canonicalized under the session container root.
-- Symlink traversal outside the container root is rejected.
+- The publish root itself and every candidate file MUST be non-symlinks; symlink traversal is
+  rejected even when the target resolves inside the workspace.
 - Hidden/runtime directories are excluded by default.
 - Downloads set `X-Content-Type-Options: nosniff`.
 - Active content SHOULD be served as an attachment or from a separate origin.
@@ -203,3 +296,7 @@ Metrics:
 - Security: encoded `../` traversal and cross-principal file access return not found/rejected.
 - Compatibility: ADK inline-file (`inlineData`) round trip, download, and archive behavior.
 - E2E: Codex writes a file under an allowed output root and the response annotation can download it.
+- Product surface: terminal artifact publication refreshes the client-visible list; metadata-only
+  artifacts render with an explicit unavailable/download-only state instead of a broken viewer.
+- Regression: hidden directories, host paths, raw command output, prompt text, signed URLs, and
+  credentials never appear in artifact list metadata or registration events.

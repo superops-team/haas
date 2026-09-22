@@ -27,3 +27,4 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 # Kept outside the Tauri shell so another product can depend on the same local STT engine.
 ocw-stt = { path = "../../../stt" }
+tauri-plugin-notification = "2"

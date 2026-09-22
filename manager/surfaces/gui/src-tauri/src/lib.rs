@@ -30,7 +30,45 @@ use tauri_plugin_autostart::ManagerExt;
 use uuid::Uuid;
 
 /// The sidecar server child — killed on exit (orphaned servers have bitten us before).
-struct ServerProcess(Mutex<Option<Child>>);
+struct ServerProcess {
+    child: Mutex<Option<Child>>,
+    stopping: AtomicBool,
+}
+
+fn server_restart_delay(attempts: u32, stopping: bool) -> Option<std::time::Duration> {
+    if stopping || attempts >= 3 { None }
+    else { Some(std::time::Duration::from_secs(1 << attempts)) }
+}
+
+fn supervise_server(app: tauri::AppHandle, mut command: Command) {
+    std::thread::spawn(move || {
+        let mut attempts = 0u32;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let state = app.state::<ServerProcess>();
+            if state.stopping.load(Ordering::SeqCst) { return; }
+            let mut child = state.child.lock().unwrap();
+            let exited = match child.as_mut() {
+                Some(process) => matches!(process.try_wait(), Ok(Some(_))),
+                None => true,
+            };
+            if !exited { continue; }
+            let Some(delay) = server_restart_delay(attempts, false) else {
+                let _ = app.emit("coworker:server-status", "failed");
+                return;
+            };
+            *child = None;
+            drop(child);
+            let _ = app.emit("coworker:server-status", "restarting");
+            std::thread::sleep(delay);
+            let mut child = state.child.lock().unwrap();
+            if state.stopping.load(Ordering::SeqCst) { return; }
+            attempts += 1;
+            *child = command.spawn().ok();
+            // Connection readiness is established by the authenticated GUI handshake.
+        }
+    });
+}
 /// The active keep-awake guard while keep-awake is on (None when off). Dropping the guard
 /// releases the hold (kills `caffeinate` on macOS, clears the execution state on Windows).
 struct KeepAwake(Mutex<Option<KeepAwakeGuard>>);
@@ -708,6 +746,18 @@ async fn install_update(
     app.restart();
 }
 
+#[tauri::command]
+fn notify_automation_result(app: tauri::AppHandle, status: String) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    let body = match status.as_str() {
+        "ok" => "Automation completed. Open Inbox to inspect the result.",
+        "error" => "Automation needs attention. Open Inbox before retrying.",
+        _ => return Err("invalid automation status".into()),
+    };
+    app.notification().builder().title("OpenHarness").body(body).show()
+        .map_err(|_| "Desktop notification unavailable; result is in Inbox".into())
+}
+
 pub fn run() {
     let port = free_port();
     let api_token = launch_token();
@@ -729,6 +779,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -753,7 +804,8 @@ pub fn run() {
             check_for_update,
             download_update,
             clear_pending_update,
-            install_update
+            install_update,
+            notify_automation_result
         ])
         .setup(move |app| {
             // 1. Start the Python server sidecar on the chosen port (inherits our env).
@@ -814,7 +866,8 @@ pub fn run() {
                     None
                 }
             };
-            app.manage(ServerProcess(Mutex::new(child)));
+            app.manage(ServerProcess { child: Mutex::new(child), stopping: AtomicBool::new(false) });
+            supervise_server(app.handle().clone(), server_cmd);
 
             // Restore keep-awake from the last session.
             let ka = if read_keep_awake_pref() {
@@ -926,7 +979,8 @@ pub fn run() {
             // a preceding ExitRequested (observed with macOS Cmd+Q under the tray setup).
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
                 if let Some(state) = app.try_state::<ServerProcess>() {
-                    if let Some(mut child) = state.0.lock().unwrap().take() {
+                    state.stopping.store(true, Ordering::SeqCst);
+                    if let Some(mut child) = state.child.lock().unwrap().take() {
                         let _ = child.kill();
                     }
                 }
@@ -936,4 +990,18 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod supervisor_tests {
+    use super::server_restart_delay;
+    #[test]
+    fn restart_backoff_is_bounded_and_quit_suppresses_restart() {
+        for (attempt, seconds) in [(0, 1), (1, 2), (2, 4)] {
+            assert_eq!(server_restart_delay(attempt, false).unwrap().as_secs(), seconds);
+            assert!(server_restart_delay(attempt, true).is_none());
+        }
+        assert!(server_restart_delay(3, false).is_none());
+        assert!(server_restart_delay(u32::MAX, false).is_none());
+    }
 }
