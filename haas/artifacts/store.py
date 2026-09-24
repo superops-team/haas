@@ -15,6 +15,18 @@ class ArtifactNotFoundError(Exception):
     """Raised when an artifact id is unknown or out of caller scope."""
 
 
+class ArtifactQuotaExceeded(Exception):
+    """Raised when a session exceeds its file-count or published-file quota.
+
+    Additive error code (P1-2 S2-003); callers map this to a structured
+    ``haas_artifact_quota_exceeded`` northbound error.
+    """
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
 class ArtifactStore:
     """Metadata index plus the S6 in-process content store.
 
@@ -22,6 +34,10 @@ class ArtifactStore:
     accepted harness-produced files are readable as immutable byte snapshots.
     Explicit metadata-only records surface ``haas_file_not_found`` on download
     rather than an empty body.
+
+    Memory is bounded (P1-2 S2-002): superseded produced versions free their
+    bytes eagerly, and a global ``maxContentBytes`` ceiling evicts the
+    least-recently-accessed non-current-version snapshots when exceeded.
     """
 
     def __init__(self, policy: ArtifactPolicy | None = None) -> None:
@@ -29,6 +45,8 @@ class ArtifactStore:
         self._files: dict[str, FileRecord] = {}
         self._by_session: dict[tuple[str, str, str], list[str]] = {}
         self._content: dict[str, bytes] = {}
+        # Last access monotonic timestamp per held content id, for LRU eviction.
+        self._access: dict[str, float] = {}
 
     @property
     def policy(self) -> ArtifactPolicy:
@@ -46,10 +64,17 @@ class ArtifactStore:
         media_type: str | None = None,
         app_name: str = "",
         user_id: str = "",
+        publish: bool = False,
     ) -> FileRecord:
         normalized = safe_relative_path(relative_path, self._policy)
         if len(content) > self._policy.maxFileBytes:
             raise ArtifactPathRejected("file_too_large")
+
+        scope = (app_name, user_id, session_id)
+        # Produced (publish) callers enforce maxPublishFiles themselves with
+        # supersede awareness; uploads enforce maxFiles here.
+        if not publish and len(self._by_session.get(scope, [])) >= self._policy.maxFiles:
+            raise ArtifactQuotaExceeded("maxFiles")
 
         file_id = f"file_{uuid.uuid4().hex[:16]}"
         record = FileRecord(
@@ -69,9 +94,11 @@ class ArtifactStore:
             downloadStatus="available" if store_content else "unavailable",
         )
         self._files[file_id] = record
-        self._by_session.setdefault((app_name, user_id, session_id), []).append(file_id)
+        self._by_session.setdefault(scope, []).append(file_id)
         if store_content:
             self._content[file_id] = content
+            self._access[file_id] = _monotonic()
+            self._evict_if_needed()
         return record
 
     def register_produced(
@@ -90,7 +117,8 @@ class ArtifactStore:
 
         Terminal scans revisit the complete output root. Keep unchanged files
         stable and replace only the session listing entry when content changes;
-        old opaque ids remain readable for callers that already hold one.
+        old opaque ids remain metadata-readable but their bytes are freed from
+        the in-process content store (P1-2 S2-002).
         """
         normalized = safe_relative_path(relative_path, self._policy)
         digest = hashlib.sha256(content).hexdigest()
@@ -108,6 +136,12 @@ class ArtifactStore:
             if current.sha256 == digest and current.mediaType == effective_media_type:
                 return current, False
 
+        # Quota: a brand-new published path adds a slot; superseding an existing
+        # path reuses its slot and never consumes an extra one.
+        post_count = len(current_ids) - len(matching) + 1
+        if post_count > self._policy.maxPublishFiles:
+            raise ArtifactQuotaExceeded("maxPublishFiles")
+
         record = self.register(
             session_id,
             normalized,
@@ -117,12 +151,18 @@ class ArtifactStore:
             media_type=media_type,
             app_name=app_name,
             user_id=user_id,
+            publish=True,
         )
         if matching:
             hidden = set(matching)
             self._by_session[scope] = [
                 file_id for file_id in self._by_session[scope] if file_id not in hidden
             ]
+            # Free the superseded versions' bytes immediately. Metadata records
+            # stay resolvable; the body is dropped from the content store.
+            for old_id in hidden:
+                self._content.pop(old_id, None)
+                self._access.pop(old_id, None)
         return record, True
 
     def list(
@@ -154,6 +194,7 @@ class ArtifactStore:
         for file_id in file_ids:
             self._files.pop(file_id, None)
             self._content.pop(file_id, None)
+            self._access.pop(file_id, None)
 
     def get(self, file_id: str, *, owner_principal_id: str | None = None) -> FileRecord:
         record = self._files.get(file_id)
@@ -163,15 +204,44 @@ class ArtifactStore:
             # Security Boundary §8.3: cross-scope access is indistinguishable
             # from "missing" so existence is not leaked.
             raise ArtifactNotFoundError(file_id)
+        self._touch(file_id)
         return record
 
     def read_content(self, file_id: str, *, owner_principal_id: str | None = None) -> bytes:
         record = self.get(file_id, owner_principal_id=owner_principal_id)
         content = self._content.get(record.id)
         if content is None:
-            # Metadata-only records never masquerade as readable empty files.
+            # Metadata-only records (or evicted/superseded bodies) never
+            # masquerade as readable empty files.
             raise ArtifactNotFoundError(file_id)
         return content
+
+    # --- memory bounds --------------------------------------------------
+
+    def _touch(self, file_id: str) -> None:
+        if file_id in self._content:
+            self._access[file_id] = _monotonic()
+
+    def _evict_if_needed(self) -> None:
+        """Evict least-recently-accessed non-current content under budget.
+
+        Current-version snapshots (reachable through ``_by_session``) are never
+        evicted: a caller holding a current id must keep downloading. Only
+        superseded / non-current snapshots are reclaimable.
+        """
+        while sum(len(chunk) for chunk in self._content.values()) > self._policy.maxContentBytes:
+            current = {
+                file_id
+                for ids in self._by_session.values()
+                for file_id in ids
+            }
+            victims = [fid for fid in self._content if fid not in current]
+            if not victims:
+                return
+            victims.sort(key=lambda fid: self._access.get(fid, 0.0))
+            oldest = victims[0]
+            self._content.pop(oldest, None)
+            self._access.pop(oldest, None)
 
 
 def _basename(path: str) -> str:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
@@ -314,8 +316,31 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             store=app.state.runtime.store,
         )
         app.state.runtime.sessions.model_proxy = proxy
-        app.router.lifespan_context = proxy.lifespan
+        app.router.lifespan_context = _compose_lifespans(
+            app.router.lifespan_context, proxy.lifespan
+        )
     return app
+
+
+def _compose_lifespans(
+    *lifespans: Any,
+) -> Any:
+    """Run one or more ASGI lifespan context managers together with AsyncExitStack.
+
+    Rather than replacing the app's lifespan outright (P2-02 S1-009), the model
+    proxy startup/shutdown is stacked on top of the existing app lifespan so
+    both run on the same startup/shutdown boundary and tear down in reverse
+    order.
+    """
+
+    @asynccontextmanager
+    async def composed(app: FastAPI) -> AsyncIterator[None]:
+        async with AsyncExitStack() as stack:
+            for lifespan in lifespans:
+                await stack.enter_async_context(lifespan(app))
+            yield
+
+    return composed
 
 
 def build_store(config: AppConfig) -> Any:
