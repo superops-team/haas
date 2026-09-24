@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from typing import Protocol, cast
 
+from haas.security.redact import safe_upstream_body
 from haas.stores import DelegatedRuntimeRecord, DelegatedSessionRecord
 
 
@@ -141,8 +142,14 @@ async def _subprocess_runner(args: list[str]) -> str:
     )
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
-        detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
-        raise DelegatedContainerUnavailable(detail or "docker_command_failed")
+        raw_detail = (
+            stderr.decode(errors="replace").strip()
+            or stdout.decode(errors="replace").strip()
+        )
+        # Docker stderr may echo host bind-mount paths, volume names and
+        # injection; redact before it becomes a public exception message.
+        detail = safe_upstream_body(raw_detail) if raw_detail else "docker_command_failed"
+        raise DelegatedContainerUnavailable(detail)
     return stdout.decode(errors="replace").strip()
 
 

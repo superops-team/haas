@@ -56,6 +56,7 @@ class RuntimeModelProxy:
         cleanup_margin_seconds: int = 30,
         store: MemoryStore | None = None,
     ) -> None:
+        self._validate_listen(listen)
         self.resolver = resolver
         self.listen = listen
         self.registry = registry
@@ -67,6 +68,25 @@ class RuntimeModelProxy:
         self._capabilities: dict[str, _SessionCapability] = {}
         self._refresh_attempted: set[tuple[str, int]] = set()
         self.base_url = ""
+
+    @staticmethod
+    def _validate_listen(listen: str) -> None:
+        """Validate ``host:port`` at construction time (P2-13).
+
+        A malformed listen previously surfaced as an opaque ``ValueError`` deep
+        inside lifespan startup. Fail fast with a clear message instead.
+        """
+        if listen.count(":") != 1:
+            raise ValueError(f"invalid listen address (expected host:port): {listen!r}")
+        host, port_text = listen.rsplit(":", 1)
+        if host != "127.0.0.1":
+            raise ValueError("model proxy must bind IPv4 loopback")
+        try:
+            port = int(port_text)
+        except ValueError:
+            raise ValueError(f"invalid listen port: {port_text!r}") from None
+        if not 0 <= port <= 65535:
+            raise ValueError(f"listen port out of range: {port}")
 
     @staticmethod
     def provider_scope_key(route: dict[str, Any]) -> str:

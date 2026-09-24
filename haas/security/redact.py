@@ -47,7 +47,13 @@ _INLINE_CREDENTIAL_VALUE = re.compile(
     r"([^\s,;&\"'}\]]+)(\2)"
 )
 
-_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]*\b")
+# Host filesystem paths are redacted, but URL paths (``scheme://host/...``) are
+# application surface, not bind-mounts. The trailing ``/`` in the lookbehind
+# excludes the ``//host`` authority separator so ordinary URLs are untouched
+# while standalone host paths (``/workspace/tmp/out.json``) still match.
+_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_./])/(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]*\b"
+)
 
 _HEADER_FIELD_NAMES = frozenset({"authorization", "proxy-authorization", "cookie", "set-cookie"})
 
