@@ -8,15 +8,17 @@ execution boundary where duplicate side effects must be prevented.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import MISSING, asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
 from haas.stores.memory import (
+    KNOWN_CONTROL_STATES,
     ApprovalRecord,
     CanonicalEventRecord,
     DelegatedRuntimeRecord,
@@ -53,12 +55,86 @@ class SQLiteStore(MemoryStore):
     ) -> None:
         super().__init__(clock_ms=clock_ms, idempotency_ttl_ms=idempotency_ttl_ms)
         self._lock = threading.RLock()
+        # Nesting depth of explicit ``transaction()`` blocks. Inner single-record
+        # writers must not issue their own BEGIN/COMMIT while an outer atomic
+        # block is already open.
+        self._txn_depth = 0
         self._db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode = WAL")
+        # Wait up to 5s on a locked database instead of failing immediately with
+        # SQLITE_BUSY when a second connection/process holds the write lock
+        # (P0-3 / S2-004). Must be set after journal_mode.
+        self._db.execute("PRAGMA busy_timeout = 5000")
         self._db.execute("PRAGMA foreign_keys = ON")
         self._migrate()
         self._load()
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Atomic multi-record write boundary.
+
+        Opens ``BEGIN IMMEDIATE`` (which in WAL mode takes a RESERVED lock and
+        does not block readers), flushes all nested writes, then ``COMMIT``. On
+        any exception the transaction is ``ROLLBACK``-ed and the in-memory record
+        mutations made inside the block are restored to their pre-write values,
+        so memory and the durable log never diverge silently (P0-3).
+        """
+        with self._lock:
+            nested = self._txn_depth > 0
+            self._txn_depth += 1
+            snapshot = None
+            if not nested:
+                snapshot = self._memory_checkpoint()
+                self._db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                if not nested:
+                    self._db.execute("ROLLBACK")
+                    self._restore_memory_checkpoint(snapshot)
+                raise
+            else:
+                if not nested:
+                    self._db.execute("COMMIT")
+            finally:
+                self._txn_depth -= 1
+
+    def _memory_checkpoint(self) -> dict[str, Any]:
+        """Shallow snapshot of the mutable record mappings for rollback.
+
+        Records are replaced (not mutated in place) by the put paths, so copying
+        the top-level dict entries is enough to restore prior values on failure.
+        """
+        return {
+            "sessions": dict(self._sessions),
+            "invocations": dict(self._invocations),
+            "turns": dict(self._turns),
+            "approvals": dict(self._approvals),
+            "input_requests": dict(self._input_requests),
+            "events_by_session": {k: list(v) for k, v in self._events_by_session.items()},
+            "events_by_invocation": {k: list(v) for k, v in self._events_by_invocation.items()},
+            "next_event_number": self._next_event_number,
+        }
+
+    def _restore_memory_checkpoint(self, snapshot: dict[str, Any] | None) -> None:
+        if snapshot is None:
+            return
+        self._sessions.clear()
+        self._sessions.update(snapshot["sessions"])
+        self._invocations.clear()
+        self._invocations.update(snapshot["invocations"])
+        self._turns.clear()
+        self._turns.update(snapshot["turns"])
+        self._approvals.clear()
+        self._approvals.update(snapshot["approvals"])
+        self._input_requests.clear()
+        self._input_requests.update(snapshot["input_requests"])
+        self._events_by_session.clear()
+        self._events_by_session.update(snapshot["events_by_session"])
+        self._events_by_invocation.clear()
+        self._events_by_invocation.update(snapshot["events_by_invocation"])
+        self._next_event_number = snapshot["next_event_number"]
 
     @property
     def schema_version(self) -> int:
@@ -205,25 +281,73 @@ class SQLiteStore(MemoryStore):
             (namespace, key, payload),
         )
 
+    @staticmethod
+    def _rollback_memory(bucket: dict[Any, Any], key: Any, prior: Any) -> None:
+        """Restore a single record mapping to its pre-write value.
+
+        Used when ``_put_record`` raises after the in-memory write already
+        succeeded, so a durable write failure cannot leave memory ahead of the
+        database (P0-3 / S2-006).
+        """
+        if prior is None:
+            bucket.pop(key, None)
+        else:
+            bucket[key] = prior
+
+    def _rollback_event_memory(
+        self,
+        session_key: SessionKey,
+        inv_key: tuple[str, str, str, str] | None,
+        prior_session_list: list[CanonicalEventRecord] | None,
+        prior_inv_list: list[CanonicalEventRecord] | None,
+        prior_next: int,
+    ) -> None:
+        if prior_session_list is None:
+            self._events_by_session.pop(session_key, None)
+        else:
+            self._events_by_session[session_key] = prior_session_list
+        if inv_key is not None:
+            if prior_inv_list is None:
+                self._events_by_invocation.pop(inv_key, None)
+            else:
+                self._events_by_invocation[inv_key] = prior_inv_list
+        self._next_event_number = prior_next
+
     def put_session(self, session: SessionRecord) -> SessionRecord:
         with self._lock:
-            record = super().put_session(session)
-            self._put_record(
-                "session", "|".join((record.appName, record.userId, record.id)), record
-            )
-            return record
+            dict_key = (session.appName, session.userId, session.id)
+            prior = self._sessions.get(dict_key)
+            try:
+                record = super().put_session(session)
+                self._put_record(
+                    "session", "|".join(dict_key), record
+                )
+                return record
+            except BaseException:
+                self._rollback_memory(self._sessions, dict_key, prior)
+                raise
 
     def save_harness(self, harness: HarnessRecord) -> HarnessRecord:
         with self._lock:
-            record = super().save_harness(harness)
-            self._put_record("harness", record.id, record)
-            return record
+            prior = self._harnesses.get(harness.id)
+            try:
+                record = super().save_harness(harness)
+                self._put_record("harness", record.id, record)
+                return record
+            except BaseException:
+                self._rollback_memory(self._harnesses, harness.id, prior)
+                raise
 
     def save_profile(self, profile: ProfileRecord) -> ProfileRecord:
         with self._lock:
-            record = super().save_profile(profile)
-            self._put_record("profile", record.id, record)
-            return record
+            prior = self._profiles.get(profile.id)
+            try:
+                record = super().save_profile(profile)
+                self._put_record("profile", record.id, record)
+                return record
+            except BaseException:
+                self._rollback_memory(self._profiles, profile.id, prior)
+                raise
 
     def delete_harness(self, harness_id: str) -> None:
         with self._lock:
@@ -235,15 +359,43 @@ class SQLiteStore(MemoryStore):
 
     def delete_session(self, key: SessionKey) -> None:
         with self._lock:
+            # Collect owned record ids BEFORE super() cascades the in-memory maps.
+            session_id = key[2]
+            invocation_ids = [
+                inv.id for inv in self._invocations.values() if inv.sessionId == session_id
+            ]
+            turn_ids = [t.id for t in self._turns.values() if t.sessionId == session_id]
+            approval_ids = [
+                a.id for a in self._approvals.values() if a.sessionId == session_id
+            ]
+            request_ids = [
+                r.id for r in self._input_requests.values() if r.sessionId == session_id
+            ]
+            event_ids = [e.eventId for e in self._events_by_session.get(key, [])]
             super().delete_session(key)
             self._db.execute(
                 "DELETE FROM records WHERE namespace='session' AND record_key=?",
                 ("|".join(key),),
             )
+            for namespace, ids in (
+                ("invocation", invocation_ids),
+                ("turn", turn_ids),
+                ("approval", approval_ids),
+                ("input_request", request_ids),
+                ("event", event_ids),
+            ):
+                for record_id in ids:
+                    self._db.execute(
+                        "DELETE FROM records WHERE namespace=? AND record_key=?",
+                        (namespace, record_id),
+                    )
 
     def put_invocation(self, invocation: InvocationRecord) -> InvocationRecord:
         with self._lock:
-            self._db.execute("BEGIN IMMEDIATE")
+            prior = self._invocations.get(invocation.id)
+            own_txn = self._txn_depth == 0
+            if own_txn:
+                self._db.execute("BEGIN IMMEDIATE")
             try:
                 record = super().put_invocation(invocation)
                 self._put_record("invocation", record.id, record)
@@ -254,22 +406,41 @@ class SQLiteStore(MemoryStore):
                     for request in self._input_requests.values():
                         if request.invocationId == record.id:
                             self._put_record("input_request", request.id, request)
-                self._db.execute("COMMIT")
+                if own_txn:
+                    self._db.execute("COMMIT")
                 return record
             except BaseException:
-                self._db.execute("ROLLBACK")
+                if own_txn:
+                    self._db.execute("ROLLBACK")
+                self._rollback_memory(self._invocations, invocation.id, prior)
                 raise
 
     def put_turn(self, turn: TurnRecord) -> TurnRecord:
         with self._lock:
-            record = super().put_turn(turn)
-            self._put_record("turn", record.id, record)
-            return record
+            prior = self._turns.get(turn.id)
+            try:
+                record = super().put_turn(turn)
+                self._put_record("turn", record.id, record)
+                return record
+            except BaseException:
+                self._rollback_memory(self._turns, turn.id, prior)
+                raise
 
     def append(self, event: CanonicalEventRecord) -> None:
         with self._lock:
-            super().append(event)
-            self._put_record("event", event.eventId, event)
+            session_key = (event.appName, event.userId, event.sessionId)
+            inv_key = (*session_key, event.invocationId) if event.invocationId else None
+            prior_session_list = self._events_by_session.get(session_key)
+            prior_inv_list = self._events_by_invocation.get(inv_key) if inv_key else None
+            prior_next = self._next_event_number
+            try:
+                super().append(event)
+                self._put_record("event", event.eventId, event)
+            except BaseException:
+                self._rollback_event_memory(
+                    session_key, inv_key, prior_session_list, prior_inv_list, prior_next
+                )
+                raise
 
     def next_event_id(self) -> str:
         with self._lock:
@@ -493,17 +664,7 @@ def _valid_session_record(record: Any) -> bool:
         and bool(record.appName)
         and isinstance(record.userId, str)
         and bool(record.userId)
-        and record.controlState
-        in {
-            "idle",
-            "running",
-            "pausing",
-            "paused",
-            "resuming",
-            "cancelling",
-            "cancelled",
-            "control_degraded",
-        }
+        and record.controlState in KNOWN_CONTROL_STATES
         and isinstance(record.supportsResume, bool)
         and (record.resumableInvocationId is None or isinstance(record.resumableInvocationId, str))
     )

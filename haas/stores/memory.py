@@ -10,15 +10,31 @@ by session/event-log/idempotency/registry first.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 SessionKey = tuple[str, str, str]  # (appName, userId, sessionId)
 InvocationEventKey = tuple[str, str, str, str]  # (appName, userId, sessionId, invocationId)
 AccountKey = tuple[str | None, str | None]  # (tenantId, workspaceId)
+
+#: Canonical session control states (specs/session-runtime/). Kept as a module
+#: constant so the durable loader and the in-memory writer agree on the set.
+KNOWN_CONTROL_STATES = frozenset(
+    {
+        "idle",
+        "running",
+        "pausing",
+        "paused",
+        "resuming",
+        "cancelling",
+        "cancelled",
+        "control_degraded",
+    }
+)
 
 
 def default_session_policy() -> dict[str, Any]:
@@ -125,6 +141,13 @@ class SessionRecord:
     createdAtMs: int = field(default_factory=_now_ms)
     updatedAtMs: int = field(default_factory=_now_ms)
     expiresAtMs: int | None = None
+
+    def __post_init__(self) -> None:
+        # Lightweight boundary validation (P2-06): bare dataclasses otherwise
+        # let typo'd control states flow through writes unchecked. The durable
+        # loader still quarantines bad rows; this guards the trusted write path.
+        if self.controlState not in KNOWN_CONTROL_STATES:
+            raise ValueError(f"invalid session controlState: {self.controlState!r}")
 
 
 @dataclass
@@ -440,6 +463,17 @@ class MemoryStore:
         self._approvals: dict[str, ApprovalRecord] = {}
         self._input_requests: dict[str, InputRequestRecord] = {}
 
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """No-op transaction boundary for the in-memory backend.
+
+        The durable SQLite backend overrides this with a real ``BEGIN
+        IMMEDIATE``/``COMMIT``/``ROLLBACK`` so multi-record writes (e.g. terminal
+        persistence) are atomic. Memory writes are already atomic with respect to
+        the process, so this is just a reentrancy-safe context.
+        """
+        yield None
+
     # --- RegistryStore --------------------------------------------------
 
     def save_harness(self, harness: HarnessRecord) -> HarnessRecord:
@@ -504,7 +538,39 @@ class MemoryStore:
         return record
 
     def delete_session(self, key: SessionKey) -> None:
-        self._sessions.pop(key, None)
+        removed = self._sessions.pop(key, None)
+        if removed is None:
+            return
+        session_id = key[2]
+        # Cascade every record owned by the session so deletion cannot leave
+        # orphaned events, invocations, turns, interactions, or idempotency rows
+        # resident in memory (P1-2 / S2-001).
+        invocation_ids = {
+            inv.id for inv in self._invocations.values() if inv.sessionId == session_id
+        }
+        turn_ids = {
+            turn.id for turn in self._turns.values() if turn.sessionId == session_id
+        }
+        self._events_by_session.pop(key, None)
+        for invocation_id in invocation_ids:
+            self._events_by_invocation.pop((*key, invocation_id), None)
+        for invocation_id in invocation_ids:
+            self._invocations.pop(invocation_id, None)
+        for turn_id in turn_ids:
+            self._turns.pop(turn_id, None)
+        for approval_id in [
+            record.id for record in self._approvals.values() if record.sessionId == session_id
+        ]:
+            self._approvals.pop(approval_id, None)
+        for request_id in [
+            record.id
+            for record in self._input_requests.values()
+            if record.sessionId == session_id
+        ]:
+            self._input_requests.pop(request_id, None)
+        for key_hash, record in list(self._idempotency.items()):
+            if record.invocationId in invocation_ids:
+                self._idempotency.pop(key_hash, None)
 
     def count_sessions(self) -> int:
         """Low-cardinality aggregate for observability status only."""
@@ -856,6 +922,11 @@ class MemoryStore:
             if existing.requestHash != request_hash:
                 raise IdempotencyConflictError(key_hash)
             return IdempotencyReservation(keyHash=key_hash, replay=True, result=existing.result)
+        # Fresh slot: lazily garbage-collect long-expired tombstones so the
+        # idempotency dict cannot grow unboundedly over a long-running sidecar
+        # (P1-2 / S2-010). The tombstone protecting `key_hash` itself is handled
+        # by the branch above, so sweeping here cannot reject the current key.
+        self.sweep_expired()
         record = IdempotencyRecord(
             keyHash=key_hash, requestHash=request_hash, createdAtMs=self._clock_ms()
         )
@@ -914,3 +985,23 @@ class MemoryStore:
         ):
             record.result = None
             record.tombstone = True
+
+    def sweep_expired(self, now_ms: int | None = None) -> int:
+        """Remove tombstones whose TTL has fully elapsed. Returns the count removed.
+
+        A tombstone marks a completed execution whose cached result has already
+        been evicted. Once its ``expiresAtMs`` is in the past it no longer needs
+        to be retained (a retry may claim a fresh slot); sweeping bounds the
+        in-memory idempotency table for long-running deployments.
+        """
+        now = self._clock_ms() if now_ms is None else now_ms
+        removed = 0
+        for key_hash, record in list(self._idempotency.items()):
+            if (
+                record.tombstone
+                and record.expiresAtMs is not None
+                and now >= record.expiresAtMs
+            ):
+                del self._idempotency[key_hash]
+                removed += 1
+        return removed
