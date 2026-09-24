@@ -463,3 +463,38 @@ def test_empty_delta_is_dropped() -> None:
         normalize_notification(_notification("item/agentMessage/delta", {"delta": ""}), **CTX)
         is None
     )
+
+
+# --- P1-4: unknown notification observability ------------------------------
+
+from haas.harnesses.codex_app_server import normalizer as _norm
+from haas.harnesses.codex_app_server.normalizer import (
+    normalize_notification,
+    reset_unparsed_notification_counts,
+    unparsed_notification_counts,
+)
+
+
+def test_unknown_notification_is_counted(caplog) -> None:
+    reset_unparsed_notification_counts()
+    with caplog.at_level("DEBUG", logger="haas.harness.codex.normalizer"):
+        event = normalize_notification(
+            _notification("some/future/newMethod", {"a": 1}),
+            **CTX,
+        )
+    assert event is None
+    counts = unparsed_notification_counts()
+    assert counts.get("some/future/newMethod") == 1
+    assert any(
+        record.message == "adapter_event_unparsed" for record in caplog.records
+    )
+    reset_unparsed_notification_counts()
+
+
+def test_known_notification_not_counted() -> None:
+    reset_unparsed_notification_counts()
+    normalize_notification(
+        _notification("item/agentMessage/delta", {"delta": "hi"}),
+        **CTX,
+    )
+    assert unparsed_notification_counts() == {}

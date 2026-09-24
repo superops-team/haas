@@ -177,8 +177,10 @@ async def test_secret_resolver_register_after_construction() -> None:
 
 async def test_unknown_credential_ref_raises() -> None:
     resolver = InMemorySecretResolver()
-    with pytest.raises(SecretResolutionError, match="credential ref not found"):
+    with pytest.raises(SecretResolutionError, match="credential ref not found") as excinfo:
         await resolver.resolve("secret://t/missing")
+    # P2-14: the internal credential ref must not be echoed into the message.
+    assert "secret://t/missing" not in str(excinfo.value)
 
 
 async def test_resolver_error_does_not_leak_other_secrets() -> None:

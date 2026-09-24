@@ -363,8 +363,10 @@ def test_run_sse_passes_sandbox_to_adapter() -> None:
         assert resp.status_code == 200
         list(resp.iter_lines())
 
-    assert adapter.requests[0].sandbox["workspaceRoot"] == "/tmp/project"
-    assert adapter.requests[0].sandbox["mode"] == "workspace-write"
+    sandbox = adapter.requests[0].sandbox
+    # sandbox is a typed SandboxSpec (Pydantic model): use attribute access.
+    assert getattr(sandbox, "workspaceRoot", None) == "/tmp/project" or sandbox["workspaceRoot"] == "/tmp/project"
+    assert getattr(sandbox, "mode", None) == "workspace-write" or sandbox["mode"] == "workspace-write"
 
 
 def test_run_sse_publishes_adapter_artifacts() -> None:

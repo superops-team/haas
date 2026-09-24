@@ -375,3 +375,49 @@ def test_models_catalog_groups_by_backend() -> None:
 
 def test_models_requires_auth() -> None:
     assert _client().get("/v1/haas/models").status_code == 401
+
+
+# --- response_model hardening (P1-1 Stage 2) --------------------------------
+
+_FORBIDDEN_KEY_SUBSTRINGS = ("apikey", "api_key", "secret", "rawtoken", "password", "privatekey")
+
+
+def _walk_forbidden(obj: Any, path: str = "") -> list[str]:
+    found: list[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            lk = str(k).lower()
+            if any(bad in lk for bad in _FORBIDDEN_KEY_SUBSTRINGS):
+                found.append(f"{path}.{k}")
+            found.extend(_walk_forbidden(v, f"{path}.{k}"))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            found.extend(_walk_forbidden(v, f"{path}[{i}]"))
+    return found
+
+
+def test_harness_get_response_model_strips_raw_secret_material() -> None:
+    client = _client()
+    created = _create(client, AUTH_A, provider={
+        "providerId": "openai",
+        "name": "openai-compatible",
+        "baseUrl": "https://provider.example.com/v1",
+        "wireApi": "responses",
+        "apiType": "responses",
+        "credentialRef": "secret://tenant/provider/default",
+        "apiKey": "sk-leak-me-not",  # must never round-trip
+    })
+    resp = client.get(f"/v1/haas/harnesses/{created['id']}", headers=AUTH_A)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert not _walk_forbidden(body), f"raw secret key leaked: {_walk_forbidden(body)}"
+    # credentialRef (the public reference) is still present per spec section 8.
+    assert body["data"]["provider"]["credentialRef"] == "secret://tenant/provider/default"
+
+
+def test_harness_list_response_model_strips_raw_secret_material() -> None:
+    client = _client()
+    _create(client, AUTH_A, name="listed-prot")
+    resp = client.get("/v1/haas/harnesses", headers=AUTH_A)
+    assert resp.status_code == 200
+    assert not _walk_forbidden(resp.json()), f"raw secret key leaked: {_walk_forbidden(resp.json())}"

@@ -683,6 +683,31 @@ def test_public_stages_are_detached_snapshots() -> None:
     assert len(snapshot[0]["steps"]) == 1
 
 
+def test_dedup_sets_are_truncated_after_invocation_completion() -> None:
+    bridge = _bridge()
+    bridge.consume_adk(event_id="evt_1", cursor="adk_1", text="partial")
+    bridge.consume_native(
+        event_id="evt_tool",
+        cursor="native_tool",
+        event_type="haas.tool.started",
+        payload={"toolCallId": "call_1", "safeSummary": "run"},
+    )
+    assert bridge._seen
+    assert bridge._tool_seen
+    assert bridge._content_seen
+
+    bridge.consume_native(event_id="evt_2", cursor="native_2", event_type="invocation.completed")
+    actions = bridge.consume_adk(event_id="evt_2", cursor="adk_2", terminal=True)
+
+    assert actions[-1].kind == "turn_end"
+    assert bridge.completed
+    # After the invocation closes, per-invocation dedup state is truncated so it
+    # cannot grow unbounded across a long-lived bridge (P1-2 S1-012).
+    assert bridge._seen == set()
+    assert bridge._tool_seen == set()
+    assert bridge._content_seen == set()
+
+
 def test_model_call_stages_survive_restart_and_terminal_message() -> None:
     bridge = _bridge()
     bridge.consume_native(

@@ -678,7 +678,7 @@ def test_responses_rejects_unknown_harness() -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 400
-    assert resp.json()["error"] == "harness_not_found"
+    assert resp.json()["error"] == "haas_model_proxy_harness_not_found"
 
 
 def test_responses_rejects_inactive_harness() -> None:
@@ -693,7 +693,7 @@ def test_responses_rejects_inactive_harness() -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 400
-    assert resp.json()["error"] == "harness_not_found"
+    assert resp.json()["error"] == "haas_model_proxy_harness_not_found"
 
 
 def test_responses_rejects_disallowed_provider_url() -> None:
@@ -709,7 +709,7 @@ def test_responses_rejects_disallowed_provider_url() -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 400
-    assert "provider_url_not_allowed" in resp.json()["error"]
+    assert resp.json()["error"] == "haas_model_proxy_url_not_allowed"
 
 
 def test_responses_surfaces_upstream_error_without_body_leak() -> None:

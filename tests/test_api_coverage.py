@@ -480,4 +480,7 @@ def test_readiness_probe_exception_is_reported_as_safe_unavailability() -> None:
     client = TestClient(_app(adapter=_ReadinessProbeAdapter(raises=True)))
     response = client.get("/v1/haas/ready?scope=execution")
     assert response.status_code == 503
-    assert response.json()["haasError"]["safeReason"] == "safe probe failure"
+    # P0-1 secretless boundary: raw str(exc) ("safe probe failure") must not
+    # leak northbound; only the fixed safe code is surfaced.
+    assert response.json()["haasError"]["safeReason"] == "adapter_probe_failed"
+    assert "safe probe failure" not in response.text
