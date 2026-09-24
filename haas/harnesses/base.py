@@ -4,7 +4,52 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError
+
+__all__ = [
+    "AdapterProbe",
+    "AdapterTurnResult",
+    "AdapterTurnStartError",
+    "ArtifactRef",
+    "CancelResult",
+    "CancelTurnRequest",
+    "CleanupResult",
+    "CleanupSessionRequest",
+    "CredentialHandle",
+    "HarnessAdapter",
+    "HarnessEvent",
+    "HarnessSandboxDecl",
+    "InspectSessionRequest",
+    "ListArtifactsRequest",
+    "McpServerConfig",
+    "PreparedSession",
+    "PrepareSessionRequest",
+    "ResumeSessionRequest",
+    "SandboxSpec",
+    "SessionInspection",
+    "StartTurnRequest",
+    "TurnHandle",
+    "TypedHarnessEvent",
+    "KNOWN_HARNESS_EVENT_TYPES",
+    "ValidationError",
+]
+
+
+class AdapterTurnStartError(Exception):
+    """Structured error raised when a harness turn cannot be started.
+
+    Sessions/manager layer imports this to map start-turn failures onto
+    northbound error codes without depending on harness-native exceptions
+    (adapter isolation, AGENTS.md 铁律 #5).
+    """
+
+    def __init__(self, code: str, retryable: bool = True, detail: str | None = None) -> None:
+        self.code = code
+        self.retryable = retryable
+        self.detail = detail
+        super().__init__(f"{code}: {detail or ''}")
 
 
 @dataclass
@@ -33,8 +78,55 @@ class PreparedSession:
     nativeRef: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class StartTurnRequest:
+# --- Typed request models (P1-3 type safety) ---------------------------------
+
+
+class SandboxSpec(BaseModel):
+    """Typed view of the sandbox/exec environment handed to a turn.
+
+    ``extra="allow"`` keeps this an additive transition: the manager/sessions
+    layer may still pass additional keys (e.g. ``workspaceRoot``) which are
+    retained in ``model_extra`` and exposed via attribute access.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    mode: Literal["read-only", "workspace-write", "danger-full-access"] = "workspace-write"
+    network: Any = None
+    writableRoot: str | None = None
+    workspaceRoot: str | None = None
+    writableRoots: Any = None
+
+
+class CredentialHandle(BaseModel):
+    """A secretless reference to a provider credential (never the raw secret)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    ref: str
+
+
+class McpServerConfig(BaseModel):
+    """Typed MCP server declaration. Extra fields are retained for the adapter."""
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    url: HttpUrl | None = None
+    transport: Literal["stdio", "sse", "http"] = "stdio"
+
+
+class StartTurnRequest(BaseModel):
+    """Typed turn request. Accepts dict inputs from the sessions layer.
+
+    ``extra="allow"`` is a transitional tolerance: callers (sessions.py, owned
+    by another agent) keep passing keyword arguments including nested dicts.
+    Pydantic coerces ``sandbox``/``mcpServers`` into their typed views while
+    unknown top-level keys are preserved.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
     invocationId: str
     sessionId: str
     turnId: str
@@ -44,10 +136,10 @@ class StartTurnRequest:
     instructions: str | None = None
     maxStep: int | None = None
     timeoutSeconds: float = 86_400
-    sandbox: dict[str, Any] = field(default_factory=dict)
-    policy: dict[str, Any] = field(default_factory=dict)
-    credentials: dict[str, Any] = field(default_factory=dict)
-    mcpServers: list[dict[str, Any]] = field(default_factory=list)
+    sandbox: SandboxSpec = Field(default_factory=lambda: SandboxSpec())
+    policy: dict[str, Any] = Field(default_factory=dict)
+    credentials: dict[str, Any] = Field(default_factory=dict)
+    mcpServers: list[McpServerConfig] = Field(default_factory=list)
     principalId: str = ""
     userId: str = ""
 
@@ -71,6 +163,75 @@ class CancelTurnRequest:
 @dataclass
 class CancelResult:
     status: str  # accepted | cancelled | unsupported
+
+
+# --- Canonical harness events ------------------------------------------------
+
+#: Every harness.* event type an adapter may legitimately emit. Unknown types
+#: fail boundary validation (TypedHarnessEvent) rather than degrading silently.
+KNOWN_HARNESS_EVENT_TYPES = frozenset(
+    {
+        "harness.text.delta",
+        "harness.reasoning.delta",
+        "harness.output.item.completed",
+        "harness.tool.started",
+        "harness.tool.output",
+        "harness.tool.completed",
+        "harness.tool.failed",
+        "harness.plan.updated",
+        "harness.usage",
+        "harness.turn.started",
+        "harness.turn.completed",
+        "harness.turn.failed",
+        "harness.turn.incomplete",
+        "harness.turn.interrupted",
+        "harness.turn.cancelled",
+        "haas.approval.required",
+        "haas.approval.resolved",
+        "haas.input.required",
+        "haas.input.resolved",
+    }
+)
+
+HarnessEventType = Literal[
+    "harness.text.delta",
+    "harness.reasoning.delta",
+    "harness.output.item.completed",
+    "harness.tool.started",
+    "harness.tool.output",
+    "harness.tool.completed",
+    "harness.tool.failed",
+    "harness.plan.updated",
+    "harness.usage",
+    "harness.turn.started",
+    "harness.turn.completed",
+    "harness.turn.failed",
+    "harness.turn.incomplete",
+    "harness.turn.interrupted",
+    "harness.turn.cancelled",
+    "haas.approval.required",
+    "haas.approval.resolved",
+    "haas.input.required",
+    "haas.input.resolved",
+]
+
+
+class TypedHarnessEvent(BaseModel):
+    """Boundary-validated harness event.
+
+    The internal :class:`HarnessEvent` dataclass remains the carrier produced
+    by adapters/normalizers; this model is the typed boundary that rejects
+    unknown event types (discriminated on ``type``) instead of degrading them
+    silently. ``extra="allow"`` preserves payload/action detail.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: HarnessEventType
+    invocationId: str
+    sessionId: str
+    turnId: str
+    author: str
 
 
 @dataclass

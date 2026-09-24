@@ -21,6 +21,7 @@ from haas.harnesses.codex_app_server.transport import (
     CodexTransport,
     connect_endpoint,
 )
+from haas.security.redact import safe_upstream_body
 
 JSONRPC_VERSION = "2.0"
 DEFAULT_REQUEST_TIMEOUT = 60.0
@@ -226,7 +227,11 @@ class CodexJsonRpc:
                 msg = str(error.get("message", "unknown error"))
             else:
                 msg = str(error)
-            raise CodexConnectionError(f"JSON-RPC error ({method}): {msg}")
+            # Native harness error text may echo credentials, raw prompts or
+            # tool payloads; redact before it reaches any exception/log/event.
+            raise CodexConnectionError(
+                f"jsonrpc_error:{method}:{safe_upstream_body(msg)}"
+            )
         result = response.get("result", {})
         return result if isinstance(result, dict) else {}
 

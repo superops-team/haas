@@ -22,6 +22,7 @@ from haas.execution_evidence import MAX_EVIDENCE_BYTES, ExecutionEvidenceStore
 from haas.harnesses.base import (
     AdapterProbe,
     AdapterTurnResult,
+    AdapterTurnStartError,
     ArtifactRef,
     CancelResult,
     CancelTurnRequest,
@@ -31,6 +32,7 @@ from haas.harnesses.base import (
     HarnessSandboxDecl,
     InspectSessionRequest,
     ListArtifactsRequest,
+    McpServerConfig,
     PreparedSession,
     PrepareSessionRequest,
     ResumeSessionRequest,
@@ -47,6 +49,7 @@ from haas.harnesses.codex_app_server.normalizer import (
 from haas.harnesses.codex_app_server.rpc import (
     CodexConnectionError,
     CodexJsonRpc,
+    CodexRequestTimeout,
     CodexSubscriberOverloaded,
 )
 from haas.harnesses.codex_app_server.sandbox import (
@@ -216,14 +219,49 @@ def _terminal_failure_details(notification: JsonObject) -> tuple[str, str, bool]
     return code, safe_upstream_body(message), retryable
 
 
-def _to_codex_input(items: list[Any]) -> list[JsonObject]:
+def _disabled_tools(policy: dict[str, Any]) -> list[str]:
+    """Return the policy-declared disabled tool names (advisory enforcement).
+
+    Codex cannot hard-block individual tools, so a disabled tool is surfaced
+    to the model as an instruction (``toolRestriction="advisory"``).
+    """
+    tools = policy.get("tools")
+    if not isinstance(tools, dict):
+        return []
+    disabled = tools.get("disabled")
+    if not isinstance(disabled, list):
+        return []
+    return [str(name) for name in disabled if isinstance(name, str) and name]
+
+
+class HaaSTurnInputInvalid(Exception):
+    """Raised when northbound input fails adapter-side validation.
+
+    Carries a stable structured error code (``haas_input_invalid``) so the
+    sessions/API layer can map it without inspecting harness-native text.
+    """
+
+    def __init__(self, detail: str) -> None:
+        self.code = "haas_input_invalid"
+        super().__init__(f"haas_input_invalid: {detail}")
+
+
+def _to_codex_input(
+    items: list[Any], *, allow_native_passthrough: bool = False
+) -> list[JsonObject]:
     """Convert HaaS/ADK input items to Codex app-server ``turn/start`` input.
 
     The SessionRuntime passes ADK message objects (``{"role": "user",
     "parts": [{"text": "..."}]}``) as the ``input`` list.  Codex app-server
     expects ``[{"type": "text", "text": "..."}]``.  This function normalises
-    both ADK messages and already-native Codex items to the Codex format,
-    keeping the conversion inside the adapter (adapter isolation, 铁律 #5).
+    ADK messages into the Codex format, keeping the conversion inside the
+    adapter (adapter isolation, 铁律 #5).
+
+    Native Codex items (``{"type": ...}``) are only accepted when the caller
+    explicitly opts in via ``allow_native_passthrough=True`` (internal
+    delegation / test fixtures). On the northbound ADK path they are rejected
+    with :class:`HaaSTurnInputInvalid` rather than silently trusted (P0-4
+    capability honesty).
     """
     if not items:
         return [{"type": "text", "text": ""}]
@@ -233,14 +271,24 @@ def _to_codex_input(items: list[Any]) -> list[JsonObject]:
         if not isinstance(item, dict):
             continue
 
-        # Already in Codex native format: {"type": "text", "text": "..."}
+        # Already in Codex native format: {"type": "text", "text": "..."}.
+        # Rejected on the northbound path unless explicitly permitted.
         if "type" in item:
+            if not allow_native_passthrough:
+                raise HaaSTurnInputInvalid(
+                    "native harness input items are not accepted on the northbound path"
+                )
             codex_input.append(item)
             continue
 
         # ADK message format: {"role": "user", "parts": [{"text": "..."}, ...]}
         parts = item.get("parts")
         if isinstance(parts, list):
+            extra = set(item) - {"role", "parts"}
+            if extra:
+                raise HaaSTurnInputInvalid(
+                    f"unexpected input fields: {sorted(extra)!r}"
+                )
             for part in parts:
                 if not isinstance(part, dict):
                     continue
@@ -249,7 +297,7 @@ def _to_codex_input(items: list[Any]) -> list[JsonObject]:
                     codex_input.append({"type": "text", "text": text})
             continue
 
-        # Simplified format: {"text": "..."} (used in some tests)
+        # Simplified format: {"text": "..."} (used in some tests).
         text = item.get("text")
         if isinstance(text, str):
             codex_input.append({"type": "text", "text": text})
@@ -405,8 +453,6 @@ class CodexAdapter:
         path = listen_url[len("unix://") :] if listen_url.startswith("unix://") else ""
         if not path:
             return "codex_socket_not_configured"
-        import os
-
         return None if os.path.exists(path) else "codex_socket_unavailable"
 
     def _capabilities(self) -> dict[str, Any]:
@@ -508,8 +554,8 @@ class CodexAdapter:
         await self._ensure_connected()
 
         sandbox = request.sandbox
-        mode = str(sandbox.get("mode", "workspace-write"))
-        cwd = str(sandbox.get("workspaceRoot", DEFAULT_CWD))
+        mode = sandbox.mode
+        cwd = str(sandbox.workspaceRoot or DEFAULT_CWD)
         scope = (request.appName, request.userId, request.sessionId)
         legacy_scope = ("", "", request.sessionId)
         if scope not in self._session_threads and legacy_scope in self._session_threads:
@@ -518,11 +564,13 @@ class CodexAdapter:
             self._non_resumable.remove(legacy_scope)
             self._non_resumable.add(scope)
         self._session_cwds[scope] = cwd
-        writable_roots = sandbox.get("writableRoots") or [cwd]
+        writable_roots = sandbox.writableRoots or [cwd]
         if not isinstance(writable_roots, list):
             writable_roots = [cwd]
         network_policy = (
-            sandbox["network"] if "network" in sandbox else request.policy.get("network")
+            sandbox.network
+            if sandbox.network is not None
+            else request.policy.get("network")
         )
 
         thread_id = self._session_threads.get(scope, "")
@@ -533,6 +581,16 @@ class CodexAdapter:
         if not thread_id:
             thread_id = await self._start_thread(scope, cwd, mode, request)
 
+        instructions = request.instructions
+        disabled_tools = _disabled_tools(request.policy)
+        if disabled_tools:
+            notice = (
+                "Do not use the following tools: "
+                + ", ".join(disabled_tools)
+                + ". They are disabled by policy."
+            )
+            instructions = f"{instructions}\n\n{notice}" if instructions else notice
+
         turn_params: JsonObject = {
             "threadId": thread_id,
             "input": _to_codex_input(request.input),
@@ -540,11 +598,26 @@ class CodexAdapter:
             "approvalPolicy": request.policy.get("approvalPolicy", DEFAULT_APPROVAL_POLICY),
             "cwd": cwd,
         }
+        if instructions:
+            turn_params["instructions"] = instructions
         if request.model:
             turn_params["model"] = request.model
         notification_cursor = self._rpc.notification_cursor
         server_request_cursor = self._rpc.server_request_cursor
-        turn_result = await self._rpc.request("turn/start", turn_params)
+        try:
+            turn_result = await self._rpc.request("turn/start", turn_params)
+        except CodexRequestTimeout as exc:
+            raise AdapterTurnStartError(
+                "haas_request_timeout",
+                retryable=True,
+                detail="turn/start did not respond in time",
+            ) from exc
+        except CodexConnectionError as exc:
+            raise AdapterTurnStartError(
+                "haas_adapter_unavailable",
+                retryable=True,
+                detail="turn/start connection failure",
+            ) from exc
         turn = turn_result.get("turn", {})
         codex_turn_id = (
             str(turn.get("id", request.turnId)) if isinstance(turn, dict) else request.turnId
@@ -807,7 +880,10 @@ class CodexAdapter:
             raise CodexConnectionError("interaction is not pending on this connection")
         if isinstance(record, ApprovalRecord):
             mapping = {"approved": "accept", "denied": "decline", "cancelled": "cancel"}
-            result: JsonObject = {"decision": mapping[str(payload["decision"])]}
+            decision = payload.get("decision")
+            if decision not in mapping:
+                raise CodexConnectionError("invalid_interaction_decision")
+            result: JsonObject = {"decision": mapping[decision]}
         else:
             supplied = payload.get("answers") or {}
             result = {
@@ -922,18 +998,19 @@ class CodexAdapter:
     def _mcp_server_overrides(request: StartTurnRequest) -> JsonObject:
         servers: JsonObject = {}
         for server in request.mcpServers:
-            if not isinstance(server, dict):
+            data = server.model_dump(mode="json") if isinstance(server, McpServerConfig) else server
+            if not isinstance(data, dict):
                 continue
             if (
-                server.get("name") != BUILTIN_COWORK_RECALL_MCP_NAME
-                or server.get("haas_builtin") is not True
-                or server.get("transport") != "http"
+                data.get("name") != BUILTIN_COWORK_RECALL_MCP_NAME
+                or data.get("haas_builtin") is not True
+                or data.get("transport") != "http"
             ):
                 continue
-            url = server.get("url")
+            url = data.get("url")
             if not isinstance(url, str) or not url.startswith("http://127.0.0.1:"):
                 continue
-            raw_headers = server.get("headers")
+            raw_headers = data.get("headers")
             if not isinstance(raw_headers, dict):
                 continue
             headers: dict[str, Any] = raw_headers
@@ -951,9 +1028,9 @@ class CodexAdapter:
                     for key, value in headers.items()
                     if isinstance(key, str) and isinstance(value, str)
                 },
-                "enabled": bool(server.get("enabled", True)),
-                "required": bool(server.get("required", False)),
-                "tool_timeout_sec": float(server.get("timeoutSeconds") or 10),
+                "enabled": bool(data.get("enabled", True)),
+                "required": bool(data.get("required", False)),
+                "tool_timeout_sec": float(data.get("timeoutSeconds") or 10),
                 "enabled_tools": ["recall"],
             }
         return servers

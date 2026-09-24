@@ -8,13 +8,30 @@ notifications are mapped to HaaS canonical events and projected to ADK
 
 from __future__ import annotations
 
+import logging
 import shlex
 from typing import Any
 
 from haas.harnesses.base import HarnessEvent
 from haas.security.redact import bounded_redacted_preview
 
+_logger = logging.getLogger("haas.harness.codex.normalizer")
+
 JsonObject = dict[str, Any]
+
+#: In-memory counter of unknown Codex notification methods dropped by the
+#: normalizer (``adapter_event_unparsed_total``). Keyed by method name.
+_UNPARSED_METHODS: dict[str, int] = {}
+
+
+def unparsed_notification_counts() -> dict[str, int]:
+    """Return a copy of the unknown-notification counter (method -> count)."""
+    return dict(_UNPARSED_METHODS)
+
+
+def reset_unparsed_notification_counts() -> None:
+    """Reset the unknown-notification counter (used by tests)."""
+    _UNPARSED_METHODS.clear()
 
 # Codex v2 notification methods that carry visible delta content.
 _TEXT_DELTA_METHODS = {"item/agentMessage/delta"}
@@ -358,6 +375,11 @@ def normalize_notification(
             actions={"haas": {"counts": counts, "total": len(plan)}},
         )
 
+    # Unknown notification method: do not drop silently. Record an
+    # observability signal so harness upgrades that introduce new notifications
+    # are noticed (P1-4), then return None (no upstream-visible event).
+    _UNPARSED_METHODS[method] = _UNPARSED_METHODS.get(method, 0) + 1
+    _logger.debug("adapter_event_unparsed", extra={"method": method})
     return None
 
 
