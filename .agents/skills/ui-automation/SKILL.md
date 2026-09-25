@@ -20,9 +20,10 @@ description: HaaS GUI browser and desktop runtime verification. Use when running
    - Use for UI behavior that does not require the real Python sidecar.
 
 2. **Production preview browser evidence**
-   - Run `npm run build` first.
-   - Serve with `npm run preview -- --host 127.0.0.1 --port <port> --strictPort`.
-   - Use a temporary Playwright config/spec for focused measurements, then delete it before delivery.
+   - Preferred stable command: from the repository root, run `make gui-preview-smoke`.
+   - Equivalent GUI-local command: `cd manager/surfaces/gui && npm run e2e:preview`.
+   - The command rebuilds the production bundle before starting `vite preview`.
+   - Use temporary Playwright specs only for extra measurements not covered by the checked-in preview smoke, then delete them before delivery.
    - Capture request counts, chunk names, console errors, long tasks, and user-visible assertions.
 
 3. **Packaged desktop smoke**
@@ -70,7 +71,13 @@ NODE
 
 ### Production Preview E2E
 
-Create temporary config only when needed:
+Use the checked-in preview smoke first:
+
+```bash
+make gui-preview-smoke
+```
+
+Create temporary config only when the stable command does not cover the needed measurement:
 
 ```ts
 import { defineConfig, devices } from "@playwright/test";

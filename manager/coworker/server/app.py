@@ -802,14 +802,19 @@ def create_app(manager: SessionManager) -> FastAPI:
         return {"artifacts": manager.list_artifacts(session_id)}
 
     @app.get("/v1/sessions/{session_id}/artifacts/read")
-    def session_artifact_read(session_id: str, path: str) -> dict[str, Any]:
-        return manager.read_artifact(session_id, path)
+    def session_artifact_read(
+        session_id: str, path: str, origin: str = "artifacts"
+    ) -> dict[str, Any]:
+        return manager.read_artifact(session_id, path, origin=origin)
 
     @app.post("/v1/sessions/{session_id}/artifacts/reveal")
     def session_artifact_reveal(session_id: str, body: dict) -> dict[str, Any]:
         body = body or {}
         return manager.reveal_artifact(
-            session_id, str(body.get("path", "")), str(body.get("mode", "reveal"))
+            session_id,
+            str(body.get("path", "")),
+            str(body.get("mode", "reveal")),
+            origin=str(body.get("origin") or "artifacts"),
         )
 
     @app.get("/v1/sessions/{session_id}/artifacts/download")

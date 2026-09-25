@@ -44,8 +44,8 @@ Skip it for small read-only questions, simple command output, pure status checks
 
 5. **Verify**
    - Start with the smallest relevant tests, then escalate by risk.
-   - Typical GUI path: focused Vitest -> `npm test -- --run` -> `npm run build` -> production `vite preview` Playwright -> `make pre-commit`.
-   - Cross-component/final path: `make full-check`.
+   - Typical GUI path: focused Vitest -> `make gui-check` -> `make gui-preview-smoke` when production-bundle browser evidence is needed -> `make pre-commit`.
+   - Cross-component/final path: `make full-check`; it includes GUI unit/build evidence through `make gui-check`.
    - Packaging path: close running installed app, run `manager/packaging/build_dmg.sh`, then `manager/packaging/smoke_packaged_app.sh` against the built or installed app.
 
 6. **Review and close**

@@ -426,8 +426,13 @@ export async function getArtifacts(sessionId: string): Promise<ArtifactInfo[]> {
   return (await res.json()).artifacts ?? [];
 }
 
-export async function readArtifact(sessionId: string, path: string): Promise<ArtifactContent> {
+export async function readArtifact(
+  sessionId: string,
+  path: string,
+  origin?: ArtifactInfo["origin"],
+): Promise<ArtifactContent> {
   const q = new URLSearchParams({ path });
+  if (origin) q.set("origin", origin);
   const res = await fetch(`${httpBase()}/v1/sessions/${encodeURIComponent(sessionId)}/artifacts/read?${q.toString()}`);
   return res.json();
 }
@@ -437,11 +442,12 @@ export async function revealArtifact(
   sessionId: string,
   path: string,
   mode: "reveal" | "open" = "reveal",
+  origin?: ArtifactInfo["origin"],
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch(`${httpBase()}/v1/sessions/${encodeURIComponent(sessionId)}/artifacts/reveal`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, mode }),
+    body: JSON.stringify({ path, mode, origin }),
   });
   return res.json();
 }

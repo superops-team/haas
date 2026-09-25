@@ -599,6 +599,15 @@ metadata-only artifacts return `{ok:false, code:"artifact_unavailable", preview_
 download_status:"unavailable"}`. These JSON responses are Manager-local UI contracts, not HaaS
 public API fields.
 
+The same right-rail viewer also backs the Manager-local Files explorer. Files is not the artifact
+surface: it browses session roots (workspace, scratch, and user-granted directories) and must not
+require the selected path to be present in the HaaS artifact list. Manager therefore treats
+`origin=files` on the local `/v1/sessions/{managerSessionId}/artifacts/read` and `/reveal` wrappers as
+a roots-browser request. For HaaS-bound sessions, `origin=files` resolves only through the Manager
+session roots and remains subject to path traversal, root membership, and local reveal/open rules.
+The default origin remains `artifacts`, so transcript `artifact:` links and the Artifacts section keep
+the stricter HaaS artifact-scope validation.
+
 The artifact section in the right rail is universal for HaaS-backed sessions. It stays collapsed
 by default but shows the count chip after the first successful list. After an accepted HaaS turn
 reaches a terminal state, Manager refreshes the artifact list. If native artifact registration facts
@@ -640,7 +649,12 @@ Acceptance:
    render an explicit unavailable/download-only state.
 4. Terminal HaaS turns refresh artifact count and right-rail list without requiring a manual page reload.
 5. Local non-HaaS artifact scanning behavior is unchanged.
-6. Tests cover `HaasClient` list/download/archive methods, Manager route proxying, GUI mapping, chip
+6. Packaged acceptance creates a HaaS-bound Manager session and reads its workspace root through the
+   Files surface with `origin=files`. The bundled-sidecar smoke must prove the origin returns a local
+   folder/file view while omitting it remains artifact-scoped and unavailable. A launch of the newly
+   built `.app` must additionally show that the packaged WebView sends `origin=files` and renders the
+   workspace listing, preventing a fresh frontend build from being replaced by stale packaged assets.
+7. Tests cover `HaasClient` list/download/archive methods, Manager route proxying, GUI mapping, chip
    behavior, security redaction, and remote reveal/download behavior.
 
 The running indicator derives from task/invocation state, not WebSocket presence.

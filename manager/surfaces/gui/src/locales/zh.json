@@ -341,6 +341,7 @@
     "copy_contents": "复制内容",
     "download": "下载",
     "download_only": "此产物无法在这里预览，请下载后打开。",
+    "preview_unavailable": "产物预览不可用。",
     "open_in_browser": "在浏览器中打开",
     "reveal_in_finder": "在访达中显示",
     "folder_empty": "此文件夹为空。",

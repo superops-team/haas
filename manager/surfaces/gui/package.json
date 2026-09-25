@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "e2e": "playwright test",
+    "e2e:preview": "npm run build && playwright test -c playwright.preview.config.ts e2e/preview-observability.spec.ts e2e/rail-default.spec.ts e2e/artifacts.spec.ts e2e/files-explorer.spec.ts e2e/inbox.spec.ts e2e/connectors-list.spec.ts",
     "e2e:ui": "playwright test --ui",
     "e2e:live": "playwright test -c playwright.live.config.ts",
     "tauri": "tauri"

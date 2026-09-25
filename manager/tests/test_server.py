@@ -438,6 +438,74 @@ def test_haas_bound_artifact_read_does_not_fallback_to_local_workspace(tmp_path)
     assert "local" not in str(read)
 
 
+def test_haas_bound_files_origin_browses_session_roots(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "notes.md").write_text("# local", encoding="utf-8")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.write_text("# outside", encoding="utf-8")
+    manager, haas = _haas_bound_manager(tmp_path)
+    client = TestClient(create_app(manager))
+
+    listing = client.get(
+        "/v1/sessions/s1/artifacts/read",
+        params={"path": str(tmp_path), "origin": "files"},
+    ).json()
+    assert listing["ok"] is True
+    assert listing["kind"] == "folder"
+    assert any(item["name"] == "docs" and item["dir"] for item in listing["entries"])
+    assert haas.downloaded == []
+
+    read = client.get(
+        "/v1/sessions/s1/artifacts/read",
+        params={"path": str(tmp_path / "docs" / "notes.md"), "origin": "files"},
+    ).json()
+    assert read["ok"] is True
+    assert read["kind"] == "markdown"
+    assert read["content"] == "# local"
+    assert haas.downloaded == []
+
+    escaped = client.get(
+        "/v1/sessions/s1/artifacts/read",
+        params={"path": str(outside), "origin": "files"},
+    ).json()
+    assert escaped["ok"] is False
+    assert "escapes" in escaped["error"]
+    assert haas.downloaded == []
+
+
+def test_haas_bound_files_origin_reveal_uses_local_roots(tmp_path, monkeypatch):
+    (tmp_path / "docs").mkdir()
+    target = tmp_path / "docs" / "notes.md"
+    target.write_text("# local", encoding="utf-8")
+    manager, _haas = _haas_bound_manager(tmp_path)
+    client = TestClient(create_app(manager))
+    calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, args, **_kwargs):
+            calls.append(list(args))
+
+    monkeypatch.setattr("subprocess.Popen", FakePopen)
+    response = client.post(
+        "/v1/sessions/s1/artifacts/reveal",
+        json={"path": str(target), "mode": "reveal", "origin": "files"},
+    ).json()
+
+    assert response["ok"] is True
+    assert calls
+
+    calls.clear()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.write_text("# outside", encoding="utf-8")
+    escaped = client.post(
+        "/v1/sessions/s1/artifacts/reveal",
+        json={"path": str(outside), "mode": "open", "origin": "files"},
+    ).json()
+    assert escaped["ok"] is False
+    assert "escapes" in escaped["error"]
+    assert calls == []
+
+
 def test_sessions_hide_scheduled_internal_runs(tmp_path):
     manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([]))
     manager.session_store.save(

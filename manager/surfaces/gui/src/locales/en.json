@@ -345,6 +345,7 @@
     "copy_contents": "Copy contents",
     "download": "Download",
     "download_only": "This artifact can't be previewed here. Download it to open it.",
+    "preview_unavailable": "Artifact preview is unavailable.",
     "open_in_browser": "Open in browser",
     "reveal_in_finder": "Reveal in Finder",
     "folder_empty": "This folder is empty.",

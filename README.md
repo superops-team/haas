@@ -193,6 +193,8 @@ make adk-compat         # ADK 2.0 protocol compatibility tests
 make lint               # Ruff
 make type               # mypy --strict
 make coverage           # Coverage gates
+make gui-check          # GUI Vitest + production Vite build
+make gui-preview-smoke  # Production Vite preview Playwright smoke
 make docker-check       # Fast static container-contract checks
 make full-check         # Complete local release gate
 ```
@@ -204,6 +206,10 @@ as not_run, not passed. Run a real Docker build and smoke test with:
 ```bash
 HAAS_DOCKER_BUILD=1 make docker-check
 ```
+
+`make full-check` includes `make gui-check`. Run `make gui-preview-smoke` for
+GUI performance, routing, artifact-viewer, or release-candidate changes that
+need production-bundle browser evidence.
 
 All images must explicitly build and run as linux/amd64. The default base image
 is digest-pinned. Use make docker-build so the host architecture never silently

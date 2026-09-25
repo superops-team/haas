@@ -38,6 +38,11 @@ From `manager/surfaces/gui`:
   `npm test -- --run`.
 - Build/typecheck/bundle proof:
   `npm run build`.
+- Root reusable gates:
+  - `make gui-test` runs the full GUI Vitest suite.
+  - `make gui-build` runs the TypeScript + production Vite build.
+  - `make gui-check` runs both and is included in `make full-check`.
+  - `make gui-preview-smoke` runs the production Vite preview Playwright smoke.
 - Production browser/runtime proof belongs to `ui-automation`, not this skill.
 
 ### Packaging / Desktop
@@ -55,7 +60,8 @@ From `manager/surfaces/gui`:
 ### Final Gates
 
 - Always run `make pre-commit` before commit.
-- Run `make full-check` for cross-component changes, release readiness, high-risk runtime work, or when the user asks for a full local gate.
+- Run `make full-check` for cross-component changes, release readiness, high-risk runtime work, or when the user asks for a full local gate. It includes GUI unit/build evidence through `make gui-check`.
+- Run `make gui-preview-smoke` for GUI performance, route loading, artifact viewer, or release-candidate work that needs production-bundle browser evidence. If skipped, report it as `not_run` with residual risk.
 - Docker build/smoke is required only for container changes or explicit release validation; image push requires user confirmation.
 
 ## Unit Test Asset Plan

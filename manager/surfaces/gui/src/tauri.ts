@@ -3,6 +3,8 @@
 // sets `withGlobalTauri`) instead of the @tauri-apps npm packages, so the browser build needs
 // no Tauri dependencies.
 
+import { pickFolderViaServer } from "./api";
+
 export const isTauri = (): boolean =>
   typeof (globalThis as any).__TAURI__ !== "undefined";
 
@@ -61,7 +63,6 @@ export async function pickFolder(): Promise<string | null> {
  * owner report 2026-07-04: "Browse" was desktop-only and the browser had paste-a-path only). */
 export async function chooseFolder(): Promise<string | null> {
   if (isTauri()) return pickFolder();
-  const { pickFolderViaServer } = await import("./api");
   return pickFolderViaServer();
 }
 

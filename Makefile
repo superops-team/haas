@@ -14,7 +14,8 @@ HAAS_IMAGE_DEFAULT := haas:lite-local
 # HaaS 开发与提交门禁。
 .PHONY: help setup install-hooks pre-commit secret-scan agent-skills-check fmt lint type \
         test-fast test-affected test-integration test-e2e adk-compat \
-        coverage packaged-smoke docker-build docker-build-lite docker-build-aio docker-release-lite docker-check \
+        coverage gui-test gui-build gui-check gui-preview-smoke packaged-smoke \
+        docker-build docker-build-lite docker-build-aio docker-release-lite docker-check \
         docker-check-lite docker-check-aio full-check
 
 help:
@@ -27,6 +28,10 @@ help:
 	@echo "  make fmt              ruff format"
 	@echo "  make lint             ruff check"
 	@echo "  make type             mypy haas"
+	@echo "  make gui-test         GUI Vitest suite"
+	@echo "  make gui-build        GUI TypeScript + production Vite build"
+	@echo "  make gui-check        GUI unit + production build gate"
+	@echo "  make gui-preview-smoke production Vite preview Playwright smoke"
 	@echo "  make test-fast        pytest 快速离线测试（默认跳过 integration/e2e）"
 	@echo "  make test-affected    按 diff 影响面跑最小测试（当前等价 test-fast）"
 	@echo "  make test-integration API/SSE/session/adapter 集成测试（含 integration 标记）"
@@ -89,6 +94,17 @@ coverage:
 	$(UVRUN) coverage run -m pytest -q
 	$(UVRUN) coverage report
 
+gui-test:
+	cd manager/surfaces/gui && npm test -- --run
+
+gui-build:
+	cd manager/surfaces/gui && npm run build
+
+gui-check: gui-test gui-build
+
+gui-preview-smoke:
+	cd manager/surfaces/gui && npm run e2e:preview
+
 packaged-smoke:
 	manager/packaging/smoke_packaged_app.sh
 
@@ -136,16 +152,18 @@ docker-check-aio:
 	./scripts/quality/docker-check-aio.sh
 
 full-check:
-	@echo "==> full-check 1/6: lint"
+	@echo "==> full-check 1/7: lint"
 	@$(MAKE) lint
-	@echo "==> full-check 2/6: type"
+	@echo "==> full-check 2/7: type"
 	@$(MAKE) type
-	@echo "==> full-check 3/6: adk-compat"
+	@echo "==> full-check 3/7: adk-compat"
 	@$(MAKE) adk-compat
-	@echo "==> full-check 4/6: coverage (full suite)"
+	@echo "==> full-check 4/7: coverage (full suite)"
 	@$(MAKE) coverage
-	@echo "==> full-check 5/6: docker-check"
+	@echo "==> full-check 5/7: gui-check"
+	@$(MAKE) gui-check
+	@echo "==> full-check 6/7: docker-check"
 	@$(MAKE) docker-check
-	@echo "==> full-check 6/6: secret-scan"
+	@echo "==> full-check 7/7: secret-scan"
 	@$(MAKE) secret-scan
 	@echo "full-check: PASSED"

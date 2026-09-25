@@ -473,6 +473,14 @@ Manager preview size limit 内返回有界 `data_url`。Office、unknown、过�
 `{ok:false, code:"artifact_unavailable", preview_status:"unavailable", download_status:"unavailable"}`。
 这些 JSON response 是 Manager-local UI 合同，不是 HaaS public API 字段。
 
+同一个右侧 rail viewer 也承载 Manager 本地 Files explorer。Files 不是 artifact surface：它浏览
+session roots（workspace、scratch 与用户授权目录），不得要求选中的路径已经出现在 HaaS artifact
+list 中。因此 Manager 在本地 `/v1/sessions/{managerSessionId}/artifacts/read` 与 `/reveal`
+wrapper 上把 `origin=files` 识别为 roots-browser 请求。对 HaaS-bound session，`origin=files`
+只通过 Manager session roots 解析，并继续受 path traversal、root membership 和本地 reveal/open
+规则约束。默认 origin 仍是 `artifacts`，所以 transcript `artifact:` link 与 Artifacts section
+继续使用更严格的 HaaS artifact scope 校验。
+
 右侧 rail 的 Artifacts section 对 HaaS-backed session 始终可用。默认折叠；第一次成功
 list 后显示数量 chip。已 accepted 的 HaaS turn 到达终态后，Manager 刷新 artifact list。
 如果 native artifact registration fact 在终态前到达，Manager 可以发布 `artifacts_changed`
@@ -513,7 +521,11 @@ this runtime yet.” UI 主标签不得暴露 `FileRecord`、`artifactDelta`、`
    展示明确的不可预览/仅下载状态。
 4. HaaS turn 到达终态后，artifact 数量与右侧 rail 列表自动刷新，不需要手动刷新页面。
 5. 非 HaaS 本地 artifact 扫描行为保持不变。
-6. 测试覆盖 `HaasClient` list/download/archive 方法、Manager route 代理、GUI 映射、chip
+6. 打包验收创建 HaaS-bound Manager session，并通过带 `origin=files` 的 Files surface 读取其
+   workspace root。包内 sidecar smoke 必须证明该 origin 返回本地 folder/file view，而省略时仍
+   保持 artifact scope 并返回不可用。还必须启动新构建的 `.app`，证明打包 WebView 实际发送
+   `origin=files` 并渲染 workspace 列表，防止 fresh frontend build 被陈旧打包资源替换。
+7. 测试覆盖 `HaasClient` list/download/archive 方法、Manager route 代理、GUI 映射、chip
    行为、安全脱敏，以及远程 reveal/download 行为。
 
 Running indicator 来自 task/invocation state，不来自 WebSocket 是否连接。重连先恢复持久 activity projection 与 pending interaction，再续 live cursor。未知 event type 仅增加诊断计数并隐藏，不能转成 assistant text、success、approval UI 或猜测的 activity。

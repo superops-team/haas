@@ -152,6 +152,7 @@ Sandbox Runtime projects one policy contract into Lite Docker or OpenSandbox AIO
 | P1 | Observability | `specs/observability/README.md` | Logs, metrics, traces, diagnostics, and conformance evidence |
 | P1 | Implementation Roadmap | `specs/implementation-roadmap/README.md` | Subsequent implementation stages, dependencies, exit evidence, and risk convergence |
 | P1 | Agent Skills | `specs/agent-skills/README.md` | Repository-local `.agents/skills/` inventory, quality contract, provenance tracking, multi-tool compatibility, and Tauri/Rust + Python/FastAPI skill adoption |
+| P1 | Python Backend Optimization | `specs/python-backend-optimization/README.md` | Evidence-based optimization program from 4-shard code review: SSE hardening, async concurrency, persistence atomicity, secretless gaps, adapter honesty, resource bounds, type safety, and observability; P0/P1/P2 prioritized with Phase 0 measurement |
 
 ## 5. Standard Structure for a Component Spec
 

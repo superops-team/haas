@@ -2,8 +2,8 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: Reviewed; blockers resolved; baseline validated; implementation pending
-Last reviewed: 2026-09-22
+Status: Reviewed; blockers resolved; baseline validated; hardening delta added
+Last reviewed: 2026-09-23
 Change ID: manager-gui-performance-convergence
 Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Product Identity](../manager-product-identity/README.md)
 
@@ -69,6 +69,24 @@ Fallow entry traversal and an independent import search also reproduced the two-
 `ApprovalCard.tsx -> humanize.ts -> ApprovalCard.tsx` cycle and the five production reachability
 candidates. Reachability remains a deletion precondition, not proof that deletion is behaviorally
 safe; route and package regressions are still required during implementation.
+
+### 2.2 Review-driven hardening delta
+
+The 2026-09-23 skill-based project review added four confirmed follow-up gaps:
+
+- the root `make full-check` is the documented release gate, but it does not run GUI Vitest,
+  TypeScript/Vite build, or any production-preview browser check. A release can therefore pass the
+  authoritative gate while the desktop/web frontend is broken;
+- production-preview performance evidence currently depends on manual temporary Playwright
+  configuration. The spec requires this evidence, but the repository does not yet provide a stable
+  command that rebuilds `dist` before measuring it;
+- the artifact viewer has strong protocol and security tests, but the GUI read path needs an
+  explicit state contract for failed reads, quick artifact/session switches, and stale async
+  completions; and
+- Fallow reports no current circular dependency after the latest cleanup, but complexity remains
+  concentrated in session streaming, transcript replay, artifact viewing and top-level app state.
+  Refactors in these areas need a small-slice budget and tests rather than another unbounded
+  component growth cycle.
 
 ## 3. Upstream and Downstream Relationships
 
@@ -200,6 +218,68 @@ Manager local HTTP/WebSocket API
 - Exports used by tests or retained as a documented public module API are not dead merely because
   production traversal does not import them.
 
+### P0-3: GUI release gate coverage
+
+- The root release gate must cover the browser/desktop GUI when `manager/surfaces/gui` or
+  GUI-facing specs change. At minimum, `make full-check` runs the full GUI unit suite and a
+  production Vite build, or delegates to a root target that does so.
+- The Makefile exposes explicit, composable targets:
+  - `make gui-test`: runs `cd manager/surfaces/gui && npm test -- --run`;
+  - `make gui-build`: runs `cd manager/surfaces/gui && npm run build`;
+  - `make gui-check`: runs `gui-test` and `gui-build`;
+  - `make gui-preview-smoke`: runs the production-preview browser smoke described in P0-4.
+- `make full-check` includes `gui-check` by default. `gui-preview-smoke` may remain an explicit
+  release/performance gate if it is too slow for every local full-check, but skipped preview smoke
+  must be reported as `not_run` for GUI performance, routing or artifact-viewer changes.
+- README, local skills and final delivery notes must describe the same gate split. No document may
+  imply that Python-only `make full-check` is sufficient for GUI release readiness.
+
+### P0-4: Reusable production-preview and artifact-viewer resilience
+
+- Production-preview evidence is repository-owned, not an ad-hoc temporary script. The reusable
+  command must build or prove freshness of `dist`, start `vite preview` on a strict local port, run
+  focused Playwright specs, and clean up processes and temporary artifacts.
+- The preview smoke covers at least rail default, first-click artifact opening, Inbox, Connectors,
+  and lazy-route navigation. It records request counts, chunk names, console errors and long-task
+  summary without prompt, transcript, credential, signed URL or tool-argument content.
+- The artifact viewer uses an explicit state machine:
+
+```text
+idle -> loading(request_id, session_id, path)
+loading current success -> ready(content)
+loading current failure -> unavailable(error)
+loading stale completion -> ignored
+session/path switch -> cancelled -> loading(new_request)
+```
+
+- A failed `readArtifact` call must render a clear unavailable/download-only state instead of an
+  indefinite loading placeholder. The state must retain safe metadata (`name`, `path`,
+  `preview_status`, `download_status`) and must not fall back from a HaaS-bound artifact to local
+  workspace reads.
+- A slower read for a previous artifact, path or session must not overwrite the currently selected
+  artifact. The viewer may use `AbortController`, request ids, or an equivalent guard.
+- Remote HaaS artifacts continue to offer only protocol-safe actions: preview when readable,
+  download when allowed, and no local reveal/open shell-out.
+
+### P1-3: Complexity budget for session and artifact surfaces
+
+- Refactors must reduce risk in small, behavior-preserving slices. A change that touches
+  top-level session streaming, transcript replay, artifact viewing or API-client state must either
+  keep the touched unit within the current complexity budget or extract one named behavior boundary
+  with focused tests.
+- The target boundaries are:
+  - session WebSocket event reduction and terminal flush;
+  - transcript replay mapping from persisted messages;
+  - artifact viewer selection/read/download state;
+  - route shell/lazy surface ownership; and
+  - query refresh coordination.
+- Fallow complexity, duplication and dead-code output is triage evidence only. A refactor target is
+  accepted when the new boundary has stable observable tests and the old component no longer owns
+  unrelated state transitions.
+- No new feature may add another long-lived polling owner, top-level WebSocket branch, or artifact
+  action path without declaring its owner and acceptance case in this spec or a more specific
+  component spec.
+
 ## 6. Core Interfaces and Data Model
 
 No public wire interface changes are required for the first implementation. Internal concepts are:
@@ -291,6 +371,13 @@ Production logging remains content-free. No always-on telemetry is introduced.
   full application reload while persisted session identity remains recoverable. Tests inject an
   initial rejected import followed by success and assert both the error state and recovery.
 - A refresh coordinator failure falls back to bounded polling, never to duplicate intervals.
+- A GUI gate failure blocks release even when the Python sidecar gate passes. The failure is
+  reported under the exact sub-gate (`gui-test`, `gui-build`, or `gui-preview-smoke`) rather than
+  collapsed into a generic `full-check` failure.
+- A production-preview smoke timeout cleans up its preview server and browser processes before
+  returning failure.
+- An artifact viewer read failure is recoverable by retrying the same artifact or selecting another
+  artifact; it does not wedge the rail in a loading state.
 - If event-driven reconciliation misses a terminal during rollout, one GUI-internal, default-off
   switch may temporarily restore periodic readback while retaining single-flight protection. Its
   activation records only a content-free reason. It must be removed after FV-33, healthy-silence and
@@ -352,6 +439,13 @@ analysis, the runtime result still wins and this spec must be updated before imp
   each lazy surface opens successfully in browser and packaged-app smoke tests.
 - The production import graph has no `ApprovalCard`/`humanize` cycle and reports no confirmed
   unreachable source file retained by this change.
+- Root `make full-check` includes GUI unit and build gates. Focused production-preview Playwright is
+  available as a stable command and is either run for GUI-facing changes or reported as `not_run`
+  with residual risk.
+- Artifact viewer read failures and stale async completions render deterministic unavailable or
+  current-content states; no previous read overwrites a newer selection.
+- Complexity work leaves the session streaming, transcript replay and artifact viewer behavior
+  covered by focused tests before any large component extraction is accepted.
 - `npm test -- --run`, `npm run build`, focused Playwright tests, `make pre-commit`, and for final
   integration `make full-check` pass.
 
@@ -368,6 +462,10 @@ analysis, the runtime result still wins and this spec must be updated before imp
 | FV-GUI-PERF-05 | P1 | P1-1 route-level splitting | `npm run build` with Vite manifest enabled, then manifest traversal from the entry chunk | initial synchronous JS graph is <= 833.65 kB minified and <= 250 kB gzip; optional routes appear only under `dynamicImports`; PDF/XLSX remain async | build output and manifest budget script |
 | FV-GUI-PERF-06 | P1 | P1-1 lazy route runtime behavior | Playwright production preview opens Settings, Integrations, Scheduled, Audit, Inbox and Persona surfaces | first route open succeeds, retry boundary survives one injected chunk failure, session shell is not destroyed | Playwright route smoke output |
 | FV-GUI-PERF-07 | P2 | P2-1 import cycle cleanup | Fallow or repository import-graph check plus TypeScript build | no `ApprovalCard.tsx <-> humanize.ts` cycle; deleted candidates have no production or test import references | graph output, `npm run build`, `npm test -- --run` |
+| FV-GUI-PERF-08 | P0 | P0-3 GUI release gate coverage | From the repository root, run `make gui-check` and `make full-check`; inspect `make -n full-check` or equivalent shell output | GUI unit suite and `npm run build` are part of the root release gate; a GUI build/test failure fails the gate before release closeout | Make output plus intentional local dry-run/fixture failure evidence when feasible |
+| FV-GUI-PERF-09 | P0 | P0-4 reusable production-preview smoke | Remove or invalidate `manager/surfaces/gui/dist`, then run the stable preview smoke command | The command rebuilds or rejects stale `dist`, starts `vite preview`, runs focused Playwright, reports request/chunk/error metrics and cleans up the server | Command output, Playwright output and cleanup evidence |
+| FV-GUI-PERF-10 | P0 | P0-4 artifact viewer state resilience | Vitest renders `RightRail`, opens one artifact, delays its read, switches to another artifact/session, then resolves both success and failure paths | stale completions are ignored; failed current reads render an explicit unavailable/download-only state; remote HaaS artifacts never reveal/open locally | Vitest output and mocked API call assertions |
+| FV-GUI-PERF-11 | P1 | P1-3 complexity boundary budget | Fallow health plus focused tests for any extracted boundary touched by the change | no new large session/artifact owner is introduced without a named boundary and tests; extracted boundaries preserve observable behavior | Fallow summary, focused test output and changed-file review |
 
 Functional validation uses only count, timing, route label and component label evidence. It must not store prompt text, transcript content, tool arguments, credentials or signed URLs.
 
@@ -382,7 +480,11 @@ Functional validation uses only count, timing, route label and component label e
 | 5 | P1 | Split optional routes | Manifest budget, lazy boundaries and retryable loading state | Task 1; FV-GUI-PERF-05, FV-GUI-PERF-06 |
 | 6 | P2 | Break the import cycle | Pure helper module and acyclic graph | Task 1; FV-GUI-PERF-07 |
 | 7 | P2 | Remove only confirmed dead surfaces | Per-file reachability and route/package evidence | Tasks 5-6; FV-GUI-PERF-07 |
-| 8 | P0 | Regression and release review | Browser/package evidence and required reviews | Tasks 2-7; all FV-GUI-PERF cases |
+| 8 | P0 | Wire GUI release gates into root Makefile and docs | `gui-test`, `gui-build`, `gui-check`, full-check integration and README/skill alignment | FV-GUI-PERF-08 |
+| 9 | P0 | Add reusable production-preview smoke | Checked-in preview config/command with fresh-build guard and cleanup | FV-GUI-PERF-09 |
+| 10 | P0 | Harden artifact viewer read state | Request guard, explicit unavailable state and remote-action constraints | FV-GUI-PERF-10 |
+| 11 | P1 | Establish complexity-boundary refactor budget | Named session/transcript/artifact boundaries with tests for touched code | FV-GUI-PERF-11 |
+| 12 | P0 | Regression and release review | Browser/package evidence and required reviews | Tasks 2-11; all FV-GUI-PERF cases |
 
 Alignment review result: every P0/P1 requirement has at least one executable case, every task has
 an acceptance reference, and no task requires public API/schema changes. The first implementation
@@ -397,7 +499,12 @@ Run the cases in this order:
 2. Focused React profiler unit tests for FV-GUI-PERF-03 after the live boundary is introduced.
 3. `npm run build`, then production-preview Playwright counters for FV-GUI-PERF-04 through
    FV-GUI-PERF-06.
-4. Import graph, `npm test -- --run`, `npm run build`, `make pre-commit` and final
+4. `make gui-check` and `make full-check` for FV-GUI-PERF-08.
+5. Stable production-preview smoke for FV-GUI-PERF-09.
+6. Focused `RightRail`/artifact viewer tests for FV-GUI-PERF-10.
+7. Fallow health plus focused boundary tests for FV-GUI-PERF-11 when refactors touch the listed
+   surfaces.
+8. Import graph, `npm test -- --run`, `npm run build`, `make pre-commit` and final
    `make full-check` for FV-GUI-PERF-07 and release readiness.
 
 ## 13. Component Impact Analysis
@@ -409,6 +516,9 @@ Run the cases in this order:
 | ADK and `/v1/haas/*` | None | No route or schema work in phase one | Fully unchanged |
 | Session/event projection | Live React ownership moves, canonical event ordering does not | Preserve canonical refs, terminal flush and replay parity | Additive internal refactor only |
 | Artifact viewer | Optional route loading may change; artifact protocol does not | Retain PDF/XLSX on-demand loading and first-click artifact behavior | Artifact URLs, metadata and security headers are unchanged |
+| Root development gates | GUI evidence becomes part of root release readiness | Add GUI Makefile targets and align README/skills | No runtime compatibility impact; release signal becomes stricter |
+| Production preview automation | Temporary performance scripts become a stable repo command | Add checked-in preview config/command with fresh-build guard and cleanup | No shipped code path changes |
+| Frontend maintainability | Large session/artifact owners gain extraction budget | Refactor only behind focused tests and named boundaries | Behavior-preserving internal changes only |
 | Credentials and redaction | In-memory snapshots gain a shared owner | Dispose on API-client/WebView replacement and keep instrumentation content-free | No credential value is cached, logged or persisted |
 | Container, model proxy, MCP and skills | None | Run regression gates only | No runtime or protocol change |
 
@@ -422,8 +532,12 @@ Run the cases in this order:
 | S3 | 1.5-2 days | Query coordinator, visibility/focus and backoff | S0 | Request budgets, background and mutation tests pass |
 | S4 | 1-1.5 days | Route splitting, manifest budget and retry boundary | S0 | Bundle budget and browser/package route smoke pass |
 | S5 | 0.5-1 day | Break cycle and verify/delete dead candidates individually | S4 for deletion only | Acyclic graph and per-file evidence |
-| S6 | 1 day | Full regression and required review gates | S1-S5 | `code-review`, `brooks-review`, `brooks-test`, packaged smoke and `make full-check` pass |
+| S6 | 0.5-1 day | Root GUI release gates and preview smoke command | S0 | `gui-check` is included in `full-check`; preview smoke is reusable |
+| S7 | 0.5-1 day | Artifact viewer explicit error/race state | S0 | stale completions ignored; unavailable state renders |
+| S8 | 1-2 days | Complexity-boundary extractions for touched session/artifact code | S1-S7 as needed | Focused boundary tests pass; no new large owner added |
+| S9 | 1 day | Full regression and required review gates | S1-S8 | `code-review`, `brooks-review`, `brooks-test`, packaged smoke and `make full-check` pass |
 
-The expected engineering window is 7-9 days including approximately one day of risk buffer. P0
-reconciliation and live-render slices remain independently revertible. P1 work does not block P0
-delivery, and dead-file deletion must not delay a correctness fix.
+The expected engineering window is 8-11 days including approximately one day of risk buffer. P0
+reconciliation, GUI release-gate wiring and artifact-viewer resilience remain independently
+revertible. P1 complexity extraction does not block P0 correctness delivery, and dead-file deletion
+must not delay a correctness fix.

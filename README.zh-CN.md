@@ -177,6 +177,8 @@ make adk-compat         # ADK 2.0 协议兼容性测试
 make lint               # Ruff
 make type               # mypy --strict
 make coverage           # 覆盖率门禁
+make gui-check          # GUI Vitest + 生产 Vite 构建
+make gui-preview-smoke  # 生产 Vite preview Playwright smoke
 make docker-check       # 快速静态容器合同检查
 make full-check         # 最终本机准出
 ```
@@ -187,6 +189,9 @@ make full-check         # 最终本机准出
 ```bash
 HAAS_DOCKER_BUILD=1 make docker-check
 ```
+
+`make full-check` 已包含 `make gui-check`。GUI 性能、路由、artifact viewer 或 release
+candidate 变更需要生产 bundle 浏览器证据时，执行 `make gui-preview-smoke`。
 
 Lite 镜像发布 linux/arm64 与 linux/amd64，Mac Apple Silicon 用 Docker CLI 运行 arm64；AIO 仍只交付 linux/amd64。所有 release base/image manifest 必须 digest pin。
 镜像构建统一走 make docker-build，不要让主机架构隐式决定交付产物。

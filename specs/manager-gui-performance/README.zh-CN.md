@@ -2,8 +2,8 @@
 
 [English](README.md) | **简体中文**
 
-状态：已评审；阻塞项已清零；基线已验证；待实施
-最近评审：2026-09-22
+状态：已评审；阻塞项已清零；基线已验证；已补充加固 delta
+最近评审：2026-09-23
 Change ID：manager-gui-performance-convergence
 相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)
 
@@ -61,6 +61,20 @@ Fallow 入口遍历与独立 import search 还共同重现了
 `ApprovalCard.tsx -> humanize.ts -> ApprovalCard.tsx` 两文件依赖环，以及五个生产可达性
 候选。入口不可达只是删除前置条件，不代表删除已被证明行为安全；实施阶段仍须跑 route 与
 package 回归。
+
+### 2.2 Review 驱动的加固 delta
+
+2026-09-23 基于最新 skills 的项目 review 补充了四类已确认后续缺口：
+
+- 根目录 `make full-check` 是文档化 release gate，但当前不执行 GUI Vitest、TypeScript/Vite
+  构建或 production-preview 浏览器检查；因此前端/桌面已损坏时，权威门禁仍可能通过；
+- production-preview 性能证据仍依赖手写临时 Playwright 配置。规格要求该证据，但仓库还没有
+  稳定命令在测量前重建 `dist`；
+- artifact viewer 的协议与安全测试较完整，但 GUI 读取路径需要明确失败读取、快速切换
+  artifact/session、以及过期异步完成的状态合同；
+- 最新清理后 Fallow 未发现当前循环依赖，但 session streaming、transcript replay、artifact
+  viewing 和顶层 App state 仍是复杂度集中区。这些区域的重构必须按小切片和测试预算推进，
+  不能继续让组件无界增长。
 
 ## 3. 上下游关系
 
@@ -176,6 +190,63 @@ Manager 本地 HTTP/WebSocket API
 - 测试使用或文档明确保留为公共模块 API 的 export，不能只因 production traversal 未引用就
   认定为 dead code。
 
+### P0-3：GUI release gate 覆盖
+
+- 当 `manager/surfaces/gui` 或 GUI 相关规格发生变化时，根目录 release gate 必须覆盖
+  browser/desktop GUI。最低要求是 `make full-check` 执行完整 GUI 单测和生产 Vite 构建，或
+  委托一个根目录 target 执行这两项。
+- Makefile 暴露可组合 target：
+  - `make gui-test`：执行 `cd manager/surfaces/gui && npm test -- --run`；
+  - `make gui-build`：执行 `cd manager/surfaces/gui && npm run build`；
+  - `make gui-check`：执行 `gui-test` 与 `gui-build`；
+  - `make gui-preview-smoke`：执行 P0-4 定义的 production-preview browser smoke。
+- `make full-check` 默认包含 `gui-check`。若 `gui-preview-smoke` 对每次本机 full-check 过慢，
+  可以保持为显式 release/performance gate；但 GUI 性能、路由或 artifact-viewer 变更未执行
+  preview smoke 时，必须报告为 `not_run` 并说明残余风险。
+- README、本地 skills 与最终交付说明必须描述同一套门禁拆分。任何文档不得暗示只覆盖 Python
+  的 `make full-check` 足以证明 GUI release readiness。
+
+### P0-4：可复用 production-preview 与 artifact-viewer 韧性
+
+- production-preview 证据必须由仓库命令提供，而不是每次临时手写脚本。该命令必须构建或证明
+  `dist` 新鲜，在严格本地端口启动 `vite preview`，运行专项 Playwright，并清理进程与临时产物。
+- preview smoke 至少覆盖 rail default、artifact 首次点击打开、Inbox、Connectors 与 lazy-route
+  导航。它记录请求次数、chunk 名称、console error 与 long-task 摘要，不记录 prompt、
+  transcript、credential、signed URL 或工具参数内容。
+- artifact viewer 使用显式状态机：
+
+```text
+idle -> loading(request_id, session_id, path)
+loading current success -> ready(content)
+loading current failure -> unavailable(error)
+loading stale completion -> ignored
+session/path switch -> cancelled -> loading(new_request)
+```
+
+- `readArtifact` 失败时必须展示明确的 unavailable/download-only 状态，不能无限 loading。该状态
+  保留安全 metadata（`name`、`path`、`preview_status`、`download_status`），且 HaaS-bound
+  artifact 不得 fallback 到本地 workspace 读取。
+- 前一个 artifact、path 或 session 的慢读取结果不得覆盖当前选择。viewer 可以使用
+  `AbortController`、request id 或等价 guard。
+- Remote HaaS artifact 只保留协议安全动作：可读时预览、允许时下载，不执行本地 reveal/open
+  shell-out。
+
+### P1-3：session 与 artifact surface 复杂度预算
+
+- 重构必须以小的、行为保持的切片降低风险。触碰顶层 session streaming、transcript replay、
+  artifact viewing 或 API-client state 的变更，必须维持当前复杂度预算，或提取一个具名行为边界
+  并补聚焦测试。
+- 目标边界是：
+  - session WebSocket event reduction 与 terminal flush；
+  - persisted messages 到 transcript replay 的映射；
+  - artifact viewer selection/read/download 状态；
+  - route shell/lazy surface ownership；
+  - query refresh coordination。
+- Fallow complexity、duplication、dead-code 输出仅是 triage 证据。只有新边界具备稳定可观测
+  测试，且旧组件不再拥有无关状态迁移时，重构目标才算完成。
+- 新功能不得新增长期 polling owner、顶层 WebSocket 分支或 artifact action path，除非在本规格
+  或更具体的组件规格中声明 owner 与验收 case。
+
 ## 6. 核心接口与数据模型
 
 首期实现不要求修改 public wire interface。内部概念为：
@@ -263,6 +334,12 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
   重试入口。首次重试创建新的 lazy loader attempt；再次失败时提供完整应用 reload，且已持久化
   的 session identity 可恢复。测试注入一次 import reject 后成功，断言错误态与恢复路径。
 - refresh coordinator 失败时退回有界轮询，不得退回重复 interval。
+- GUI 门禁失败时，即使 Python sidecar 门禁通过，也必须阻塞 release。失败必须归因到具体
+  子门禁（`gui-test`、`gui-build` 或 `gui-preview-smoke`），不能折叠成泛化的 `full-check`
+  失败。
+- production-preview smoke 超时时必须先清理 preview server 与 browser 进程，再返回失败。
+- artifact viewer 读取失败后可通过重试同一 artifact 或选择其他 artifact 恢复；rail 不得卡在
+  loading 状态。
 - 若 rollout 中发现事件驱动对账漏终态，可通过 GUI 内部、默认关闭的单一开关临时恢复周期
   readback，同时保留 single-flight；启用时只记录不含内容的 reason。FV-33、健康静默和
   reconnect/missed-terminal packaged gate 在下一版本全部通过后必须删除该开关，不能保留为第二套
@@ -313,6 +390,12 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 - 生产初始 entry 满足 P1-1 预算；PDF/XLSX 仍按需加载；所有 lazy surface 在 browser 与打包
   app smoke 中可成功打开。
 - production import graph 不再有 `ApprovalCard`/`humanize` 环，本变更不保留已确认不可达源码。
+- 根目录 `make full-check` 包含 GUI 单测与构建门禁。专项 production-preview Playwright 具备
+  稳定命令；GUI 相关变更必须执行该命令，或明确报告为 `not_run` 并说明残余风险。
+- artifact viewer 读取失败与过期异步完成必须进入确定性的 unavailable 或当前内容状态；旧读取
+  不得覆盖新的选择。
+- 复杂度治理必须在接收大组件抽取前，为 session streaming、transcript replay 与 artifact
+  viewer 行为补聚焦测试。
 - `npm test -- --run`、`npm run build`、专项 Playwright、`make pre-commit`，以及最终集成时
   `make full-check` 全部通过。
 
@@ -329,6 +412,10 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 | FV-GUI-PERF-05 | P1 | P1-1 页面级拆包 | 启用 Vite manifest 执行 `npm run build`，从 entry chunk 遍历 manifest | 初始同步 JS graph 不超过 833.65 kB minified 与 250 kB gzip；可选页面只出现在 `dynamicImports`；PDF/XLSX 仍为 async | build 输出与 manifest budget 脚本 |
 | FV-GUI-PERF-06 | P1 | P1-1 lazy route 运行行为 | Playwright production preview 依次打开 Settings、Integrations、Scheduled、Audit、Inbox、Persona | 首次打开成功；注入一次 chunk reject 后 retry 可恢复；session shell 不被销毁 | Playwright route smoke 输出 |
 | FV-GUI-PERF-07 | P2 | P2-1 import cycle 清理 | Fallow 或仓库 import-graph 检查加 TypeScript 构建 | 不再存在 `ApprovalCard.tsx <-> humanize.ts` 环；删除候选没有 production 或 test import 引用 | graph 输出、`npm run build`、`npm test -- --run` |
+| FV-GUI-PERF-08 | P0 | P0-3 GUI release gate 覆盖 | 在仓库根目录运行 `make gui-check` 与 `make full-check`；检查 `make -n full-check` 或等价 shell 输出 | GUI 单测与 `npm run build` 是根 release gate 的一部分；GUI build/test 失败会在 release closeout 前阻塞门禁 | Make 输出，以及可行时的本地故障注入/fixture failure 证据 |
+| FV-GUI-PERF-09 | P0 | P0-4 可复用 production-preview smoke | 删除或失效 `manager/surfaces/gui/dist` 后执行稳定 preview smoke 命令 | 命令会重建或拒绝 stale `dist`，启动 `vite preview`，运行专项 Playwright，报告 request/chunk/error 指标并清理 server | 命令输出、Playwright 输出与清理证据 |
+| FV-GUI-PERF-10 | P0 | P0-4 artifact viewer 状态韧性 | Vitest 渲染 `RightRail`，打开一个 artifact，延迟读取，切换到另一 artifact/session，再分别 resolve 成功与失败路径 | 过期完成被忽略；当前读取失败展示明确 unavailable/download-only 状态；remote HaaS artifact 不执行本地 reveal/open | Vitest 输出与 mocked API 调用断言 |
+| FV-GUI-PERF-11 | P1 | P1-3 复杂度边界预算 | 对触碰的抽取边界运行 Fallow health 与聚焦测试 | 不新增无具名边界和测试的大型 session/artifact owner；抽取边界保持可观测行为 | Fallow summary、聚焦测试输出和 changed-file review |
 
 功能验证只记录 count、timing、route label 与 component label 证据，不记录 prompt、transcript
 内容、工具参数、credential 或 signed URL。
@@ -344,7 +431,11 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 | 5 | P1 | 拆分可选页面 | Manifest budget、lazy boundary 与可重试 loading 状态 | 任务 1；FV-GUI-PERF-05、FV-GUI-PERF-06 |
 | 6 | P2 | 拆除 import cycle | 纯 helper module 与无环 import graph | 任务 1；FV-GUI-PERF-07 |
 | 7 | P2 | 仅删除确认无效 surface | 逐文件可达性与 route/package 证据 | 任务 5-6；FV-GUI-PERF-07 |
-| 8 | P0 | 回归与发布审查 | browser/package 证据及强制 review | 任务 2-7；全部 FV-GUI-PERF case |
+| 8 | P0 | 将 GUI release gate 接入根 Makefile 与文档 | `gui-test`、`gui-build`、`gui-check`、full-check 集成与 README/skill 对齐 | FV-GUI-PERF-08 |
+| 9 | P0 | 增加可复用 production-preview smoke | 带 fresh-build guard 与清理逻辑的 checked-in preview config/command | FV-GUI-PERF-09 |
+| 10 | P0 | 加固 artifact viewer read state | Request guard、明确 unavailable state、remote action 约束 | FV-GUI-PERF-10 |
+| 11 | P1 | 建立复杂度边界重构预算 | 为具名 session/transcript/artifact 边界补测试 | FV-GUI-PERF-11 |
+| 12 | P0 | 回归与发布审查 | browser/package 证据及强制 review | 任务 2-11；全部 FV-GUI-PERF case |
 
 对齐复核结论：每个 P0/P1 需求至少有一个可执行 Case 覆盖，每个任务都有验收引用，且没有
 任务要求修改 public API/schema。第一段实施选择 S1 有界对账，因为它在保留 FV-33 正确性的
@@ -358,7 +449,11 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 2. 引入 live boundary 后执行聚焦 React Profiler 单测，覆盖 FV-GUI-PERF-03。
 3. `npm run build` 后跑 production-preview Playwright 计数，覆盖 FV-GUI-PERF-04 至
    FV-GUI-PERF-06。
-4. import graph、`npm test -- --run`、`npm run build`、`make pre-commit` 与最终
+4. `make gui-check` 与 `make full-check` 覆盖 FV-GUI-PERF-08。
+5. 稳定 production-preview smoke 覆盖 FV-GUI-PERF-09。
+6. 聚焦 `RightRail`/artifact viewer 测试覆盖 FV-GUI-PERF-10。
+7. 当重构触碰列出的 surface 时，运行 Fallow health 与聚焦边界测试覆盖 FV-GUI-PERF-11。
+8. import graph、`npm test -- --run`、`npm run build`、`make pre-commit` 与最终
    `make full-check` 覆盖 FV-GUI-PERF-07 与准出。
 
 ## 13. 组件影响分析
@@ -370,6 +465,9 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 | ADK 与 `/v1/haas/*` | 无 | 第一阶段不新增 route 或 schema | 完全不变 |
 | Session/event projection | live React owner 移动，canonical event 顺序不变 | 保留 canonical ref、terminal flush 与 replay parity | 仅内部加法式重构 |
 | Artifact viewer | 可选页面加载方式可能变化，artifact 协议不变 | 保留 PDF/XLSX 按需加载与 artifact 首次点击行为 | artifact URL、metadata、安全 header 不变 |
+| 根目录研发门禁 | GUI 证据纳入根 release readiness | 增加 GUI Makefile target，并对齐 README/skills | 无运行时兼容影响；release 信号更严格 |
+| Production preview 自动化 | 临时性能脚本沉淀为稳定仓库命令 | 增加带 fresh-build guard 与清理逻辑的 preview config/command | 不改变 shipped code path |
+| 前端可维护性 | 大型 session/artifact owner 增加抽取预算 | 仅在聚焦测试与具名边界下重构 | 仅行为保持的内部变更 |
 | Credential 与 redaction | 内存 snapshot 增加共享 owner | API-client/WebView 替换时销毁，并保持观测无内容 | 不缓存、记录或持久化 credential value |
 | Container、model proxy、MCP、skills | 无 | 只执行回归门禁 | 不修改 runtime 或协议 |
 
@@ -383,7 +481,11 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 | S3 | 1.5-2 天 | Query coordinator、visibility/focus、backoff | S0 | 请求预算、后台与 mutation 测试通过 |
 | S4 | 1-1.5 天 | 页面拆包、manifest budget、retry boundary | S0 | Bundle budget 与 browser/package route smoke 通过 |
 | S5 | 0.5-1 天 | 拆环，并逐文件核验/删除 dead candidate | 删除仅依赖 S4 | 无环 graph 与逐文件证据 |
-| S6 | 1 天 | 全量回归与强制 review 门禁 | S1-S5 | `code-review`、`brooks-review`、`brooks-test`、packaged smoke、`make full-check` 通过 |
+| S6 | 0.5-1 天 | 根目录 GUI release gate 与 preview smoke 命令 | S0 | `gui-check` 已包含在 `full-check`；preview smoke 可复用 |
+| S7 | 0.5-1 天 | artifact viewer 明确错误/竞态状态 | S0 | 过期完成被忽略；unavailable 状态可见 |
+| S8 | 1-2 天 | 对触碰的 session/artifact 代码做复杂度边界抽取 | 按需依赖 S1-S7 | 聚焦边界测试通过；未新增大型 owner |
+| S9 | 1 天 | 全量回归与强制 review 门禁 | S1-S8 | `code-review`、`brooks-review`、`brooks-test`、packaged smoke、`make full-check` 通过 |
 
-预计工程窗口为 7-9 天，其中包含约一天风险缓冲。P0 reconciliation 与 live-render 切片应可
-独立回滚；P1 不阻塞 P0 交付，dead-file 删除也不得拖延正确性修复。
+预计工程窗口为 8-11 天，其中包含约一天风险缓冲。P0 reconciliation、GUI release-gate 接线和
+artifact-viewer 韧性可独立回滚；P1 复杂度抽取不阻塞 P0 正确性交付，dead-file 删除也不得拖延
+正确性修复。

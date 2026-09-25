@@ -68,6 +68,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$STATE_DIR/logs" "$STATE_DIR/home"
+printf '%s\n' 'packaged files origin' > "$WORKSPACE_DIR/packaged-files-origin.txt"
 
 "$PYTHON_BIN" - "$STATE_DIR/haas.db" <<'PY'
 import json
@@ -268,6 +269,52 @@ if "turn_start" not in types and "error" not in types:
     raise SystemExit(f"task produced neither turn_start nor error; seen={seen!r}")
 if "turn_done" not in types:
     raise SystemExit(f"task did not produce turn_done; seen={seen!r}")
+PY
+
+"$PYTHON_BIN" - "$MANAGER_PORT" "$TOKEN" "$WORKSPACE_DIR" <<'PY'
+import json
+import sys
+import urllib.parse
+import urllib.request
+
+port, token, workspace = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def request(path: str):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        headers={"X-OpenWorker-Token": token},
+    )
+    with urllib.request.urlopen(req, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+encoded_root = urllib.parse.quote(workspace, safe="")
+artifact_scope = request(
+    f"/v1/sessions/packaged-smoke/artifacts/read?path={encoded_root}"
+)
+if artifact_scope.get("ok") is not False or artifact_scope.get("source") != "haas":
+    raise SystemExit(
+        f"packaged artifact scope unexpectedly read the local root: {artifact_scope!r}"
+    )
+
+files_scope = request(
+    f"/v1/sessions/packaged-smoke/artifacts/read?path={encoded_root}&origin=files"
+)
+if files_scope.get("ok") is not True or files_scope.get("kind") != "folder":
+    raise SystemExit(f"packaged Files root read failed: {files_scope!r}")
+if not any(
+    entry.get("name") == "packaged-files-origin.txt"
+    for entry in files_scope.get("entries", [])
+):
+    raise SystemExit(f"packaged Files root omitted fixture file: {files_scope!r}")
+
+encoded_file = urllib.parse.quote(
+    f"{workspace}/packaged-files-origin.txt", safe=""
+)
+file_scope = request(
+    f"/v1/sessions/packaged-smoke/artifacts/read?path={encoded_file}&origin=files"
+)
+if file_scope.get("ok") is not True or file_scope.get("content") != "packaged files origin\n":
+    raise SystemExit(f"packaged Files file read failed: {file_scope!r}")
 PY
 
 kill "$PID" >/dev/null 2>&1 || true

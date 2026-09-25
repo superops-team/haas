@@ -5,22 +5,19 @@ import type { TFunction } from "i18next";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   downloadArtifact,
-  getArtifacts,
   getJournalCases,
-  getRoots,
-  readArtifact,
   revealArtifact,
   type ArtifactContent,
   type ArtifactInfo,
   type Board,
   type JournalCase,
-  type RootInfo,
 } from "../api";
 import type { SessionInfo, TodoItem } from "../types";
 import { AccessSection } from "./AccessSection";
 import { BoardSection } from "./BoardPanel";
 import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
+import { useArtifactBrowser } from "./useArtifactBrowser";
 
 type Panel = "progress" | "artifacts" | "board" | "journal" | "team" | "files";
 
@@ -30,19 +27,6 @@ function kindIcon(kind: string): "file" | "fileCode" | "image" | "table" {
   if (kind === "html" || kind === "code") return "fileCode";
   if (kind === "csv" || kind === "sheet") return "table";
   return "file"; // markdown, text, pdf, everything else
-}
-
-// Fallback kind for an artifact: link whose path isn't in the list (yet) — mirrors the
-// server's extension mapping closely enough for the viewer to pick a renderer.
-function kindFromPath(path: string): string {
-  const ext = (path.split(".").pop() || "").toLowerCase();
-  if (["png", "jpg", "jpeg", "gif", "svg", "webp"].includes(ext)) return "image";
-  if (["html", "htm"].includes(ext)) return "html";
-  if (ext === "md") return "markdown";
-  if (ext === "csv") return "csv";
-  if (ext === "pdf") return "pdf";
-  if (["py", "js", "ts", "tsx", "jsx", "json", "sh", "css"].includes(ext)) return "code";
-  return "text";
 }
 
 interface Props {
@@ -140,26 +124,27 @@ export function RightRail({
     seenBoardKey.current = openBoardKey;
     setOpen((prev) => ({ ...prev, board: true }));
   }, [openBoardKey]);
-  const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
-  // UX-037 Files: the session's roots (workspace/scratch/grants) — the entry points of
-  // the file explorer.
-  const [rootDirs, setRootDirs] = useState<RootInfo[]>([]);
   const [journal, setJournal] = useState<JournalCase[]>([]);
-  const [selected, setSelected] = useState<ArtifactInfo | null>(null);
-  const [content, setContent] = useState<ArtifactContent | null>(null);
+  const {
+    artifacts,
+    rootDirs,
+    selected,
+    content,
+    selectArtifact,
+    closeArtifact,
+    openEntry,
+    refreshArtifacts,
+    reloadSelected,
+  } = useArtifactBrowser({
+    active,
+    sessionId,
+    refreshKey,
+    showArtifacts,
+    unavailableMessage: t("rail.preview_unavailable"),
+    artifactOpenRequest,
+    onArtifactOpenConsumed,
+  });
   const firstLocalArtifact = artifacts.find((artifact) => artifact.source !== "haas");
-
-  const refreshArtifacts = () => getArtifacts(sessionId).then(setArtifacts).catch(() => setArtifacts([]));
-
-  useEffect(() => {
-    if (!active) return;
-    if (showArtifacts) refreshArtifacts();
-  }, [active, sessionId, refreshKey, showArtifacts]);
-
-  useEffect(() => {
-    if (!active) return;
-    getRoots(sessionId).then(setRootDirs).catch(() => setRootDirs([]));
-  }, [active, sessionId, refreshKey]);
 
   // Journal cases surface only when a board exists — same visibility rule as the
   // Board section, so plain sessions carry zero team chrome.
@@ -170,19 +155,6 @@ export function RightRail({
     }
     getJournalCases().then(setJournal).catch(() => setJournal([]));
   }, [active, sessionId, refreshKey, board?.space]);
-
-  // Switching conversations closes any open artifact — it belongs to the previous session's
-  // workspace, which the new session can't (and shouldn't) read.
-  useEffect(() => {
-    setSelected(null);
-    setContent(null);
-  }, [sessionId]);
-
-  useEffect(() => {
-    setContent(null);
-    if (!selected) return;
-    readArtifact(sessionId, selected.path).then(setContent).catch(() => setContent(null));
-  }, [selected?.path, sessionId]);
 
   // Notify the app when a preview opens/closes (drives the left-nav auto-collapse).
   // Edge-triggered on the ACTUAL transition — a callback-identity change must never
@@ -197,48 +169,6 @@ export function RightRail({
     }
   }, [!!selected, onPreviewChange]);
 
-  const reloadSelected = () => {
-    if (!selected) return Promise.resolve();
-    setContent(null);
-    return readArtifact(sessionId, selected.path).then(setContent).catch(() => setContent(null));
-  };
-
-  // §34 (UX-016): [Title](artifact:path) chips in the transcript open the viewer directly.
-  // Resolve against the loaded list first; on a miss, refresh once (the file may be
-  // seconds old), then fall back to a minimal record — readArtifact validates the path.
-  const openArtifactPath = (path: string) => {
-    const minimal = (path: string): ArtifactInfo => ({
-      path,
-      name: path.split("/").pop() || path,
-      kind: kindFromPath(path),
-      size: 0,
-      modified_at: 0,
-    });
-    const match = (list: ArtifactInfo[], path: string) => {
-      const exact = list.find((a) => a.path === path);
-      if (exact) return exact;
-      const byBasename = list.filter((a) => a.name === path);
-      return byBasename.length === 1 ? byBasename[0] : undefined;
-    };
-    const found = match(artifacts, path);
-    if (found) {
-      setSelected(found);
-      return;
-    }
-    getArtifacts(sessionId)
-      .then((list) => {
-        setArtifacts(list);
-        setSelected(match(list, path) ?? minimal(path));
-      })
-      .catch(() => setSelected(minimal(path)));
-  };
-
-  useEffect(() => {
-    if (!artifactOpenRequest?.path) return;
-    openArtifactPath(artifactOpenRequest.path);
-    onArtifactOpenConsumed?.();
-  }, [artifactOpenRequest?.nonce, artifactOpenRequest?.path]);
-
   if (!active) return null;
 
   return (
@@ -249,17 +179,8 @@ export function RightRail({
           artifact={selected}
           content={content}
           onReload={reloadSelected}
-          onBack={() => setSelected(null)}
-          onOpenEntry={(path) =>
-            setSelected({
-              path,
-              name: path.split("/").pop() || path,
-              kind: kindFromPath(path),
-              size: 0,
-              modified_at: 0,
-              origin: selected?.origin,
-            })
-          }
+          onBack={closeArtifact}
+          onOpenEntry={openEntry}
         />
       ) : (
         <>
@@ -366,7 +287,7 @@ export function RightRail({
             ) : (
               <div className="artifact-list">
                 {artifacts.slice(0, 16).map((a) => (
-                  <button className="artifact-row" key={a.path} onClick={() => setSelected(a)}>
+                  <button className="artifact-row" key={a.path} onClick={() => selectArtifact(a)}>
                     <span className="artifact-ico" title={a.kind}>
                       <Icon name={kindIcon(a.kind)} size={17} />
                     </span>
@@ -420,7 +341,7 @@ export function RightRail({
                     key={r.path}
                     data-testid="files-root-row"
                     onClick={() =>
-                      setSelected({
+                      selectArtifact({
                         path: r.path,
                         abs_path: r.path,
                         name: r.label || r.path.split("/").pop() || r.path,
@@ -692,15 +613,15 @@ function ArtifactViewer({
                   )}
                 {!isRemote && isHtml &&
                   item("artifact-open-browser", "panelOpen", t("rail.open_in_browser"), () =>
-                    revealArtifact(sessionId, artifact.path, "open"),
+                    revealArtifact(sessionId, artifact.path, "open", artifact.origin),
                   )}
                 {!isRemote && isApp &&
                   item("artifact-open-app", "panelOpen", t("rail.open_in_default"), () =>
-                    revealArtifact(sessionId, artifact.path, "open"),
+                    revealArtifact(sessionId, artifact.path, "open", artifact.origin),
                   )}
                 {!isRemote &&
                   item("artifact-reveal", "folder", t("rail.reveal_in_finder"), () =>
-                    revealArtifact(sessionId, artifact.path, "reveal"),
+                    revealArtifact(sessionId, artifact.path, "reveal", artifact.origin),
                   )}
               </div>
             )}
@@ -719,8 +640,8 @@ function ArtifactViewer({
       <div className="artifact-preview">
         {!content ? (
           <div className="rail-muted">{t("rail.loading")}</div>
-        ) : content.error ? (
-          <div className="rail-error">{content.error}</div>
+        ) : content.error || content.ok === false ? (
+          <div className="rail-error">{content.error || t("rail.preview_unavailable")}</div>
         ) : downloadOnly ? (
           <div className="artifact-open-prompt">
             <Icon name="file" size={28} />
@@ -774,7 +695,7 @@ function ArtifactViewer({
           <div className="artifact-open-prompt">
             <Icon name="panelOpen" size={28} />
             <p>{t("rail.office_no_preview", { type: /\.pptx?$/i.test(artifact.name) ? "PowerPoint" : "Word" })}</p>
-            <button className="btn sm" onClick={() => revealArtifact(sessionId, artifact.path, "open")}>
+            <button className="btn sm" onClick={() => revealArtifact(sessionId, artifact.path, "open", artifact.origin)}>
               {t("rail.open_in_default")}
             </button>
           </div>

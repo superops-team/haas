@@ -5056,10 +5056,17 @@ class SessionManager:
             )
         return None, "path escapes workspace"
 
-    def read_artifact(self, session_id: str, path: str) -> dict[str, Any]:
+    def read_artifact(
+        self, session_id: str, path: str, *, origin: str = "artifacts"
+    ) -> dict[str, Any]:
+        if origin == "files":
+            return self._read_local_file_artifact(session_id, path)
         haas = self._read_haas_artifact(session_id, path)
         if haas is not None:
             return haas
+        return self._read_local_file_artifact(session_id, path)
+
+    def _read_local_file_artifact(self, session_id: str, path: str) -> dict[str, Any]:
         # Folders are readable too (a model sometimes links a whole package, e.g. a skill
         # build dir): return a listing the viewer can render instead of a dead end.
         target, err = self._artifact_target(session_id, path, allow_dir=True)
@@ -5292,12 +5299,19 @@ class SessionManager:
             }
         return content, media_type, info["name"]
 
-    def reveal_artifact(self, session_id: str, path: str, mode: str = "reveal") -> dict[str, Any]:
+    def reveal_artifact(
+        self,
+        session_id: str,
+        path: str,
+        mode: str = "reveal",
+        *,
+        origin: str = "artifacts",
+    ) -> dict[str, Any]:
         """Show the file in the OS file manager (`reveal`) or open it with its default app
         (`open`). The server runs on the user's machine in both desktop and browser builds, so
         this is local. Cross-platform: macOS `open`, Windows Explorer/ShellExecute, Linux
         `xdg-open`."""
-        if binding_from_record(self.session_store.load(session_id)) is not None:
+        if origin != "files" and binding_from_record(self.session_store.load(session_id)) is not None:
             return {
                 "ok": False,
                 "code": "remote_artifact_reveal_unavailable",

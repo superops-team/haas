@@ -307,17 +307,21 @@ HaaS 从同一份源代码构建两个稳定镜像变体，均为公开合同：
 | `make fmt` | 自动格式化 | 开发阶段 |
 | `make lint` | 静态检查 | pre-commit 阻塞 |
 | `make type` | 类型检查 | pre-commit 阻塞 |
+| `make gui-test` | Manager GUI Vitest 单元测试 | GUI 变更 |
+| `make gui-build` | Manager GUI TypeScript + production Vite build | GUI 变更 |
+| `make gui-check` | Manager GUI 单元测试 + production build | `full-check` 子门禁 |
+| `make gui-preview-smoke` | production Vite preview Playwright smoke | GUI 性能/路由/artifact 变更 |
 | `make test-affected` | 按 diff 运行最小充分测试 | pre-commit 阻塞 |
 | `make test-fast` | 快速离线测试 | 专项回归 |
 | `make test-integration` | API/SSE/session/adapter 集成测试 | 跨组件变更 |
 | `make test-e2e` | 本地 HaaS + harness E2E | 运行链路变更 |
 | `make docker-check` | Dockerfile/AIO/health/ready 检查 | 容器变更 |
 | `make adk-compat` | ADK 2.0 协议兼容性套件 | 协议变更 |
-| `make full-check` | 完整本机准出 | 最终合入/发布 |
+| `make full-check` | 完整本机准出，包含 GUI unit/build、后端、Docker 静态和 secret scan | 最终合入/发布 |
 
-当前仅提供 `pre-commit`、`secret-scan`、`install-hooks` 三个目标；其余
-lint/type/test 目标在 S1 运行时骨架初始化后补齐。文档初始化类变更仍以
-`git diff --check` 和链接/占位符自审作为最低验证。
+当前已提供上述常用本机门禁；容器真实 build/smoke 仍需显式
+`HAAS_DOCKER_BUILD=1`。文档初始化类变更仍以 `git diff --check` 和链接/占位符
+自审作为最低验证。
 
 ## 安全与日志
 
