@@ -1297,6 +1297,39 @@ async def test_adapter_turn_start_error_maps_to_terminal(runtime: SessionRuntime
     assert delta["retryable"] is True
 
 
+async def test_unmapped_start_exception_emits_structured_code(runtime: SessionRuntime) -> None:
+    """A non-AdapterTurnStartError escaping start_turn MUST converge on a terminal
+    event with a structured haas_* code (not the legacy bare code="failed")."""
+
+    class GenericStartError(Exception):
+        pass
+
+    class FailingStartAdapter(FakeAdapter):
+        async def start_turn(self, request: StartTurnRequest) -> TurnHandle:
+            raise GenericStartError("raw prompt or internal detail must not leak")
+
+    runtime.adapter = FailingStartAdapter()
+    stream = runtime.run_stream(
+        RunRequest(
+            app=runtime.registry.resolve_default_app(Principal("p")),
+            user_id="u_1",
+            message={"role": "user", "parts": [{"text": "hi"}]},
+        )
+    )
+    seen: list[CanonicalEventRecord] = []
+    with pytest.raises(AdapterTurnError):
+        async for event in stream:
+            seen.append(event)
+    assert seen, "expected a failure terminal event"
+    terminal = seen[-1]
+    delta = terminal.actions["stateDelta"]
+    assert delta["status"] == "failed"
+    assert delta["code"] == "haas_adapter_error"
+    # reason is the safe exception class name, not the raw message
+    assert delta["reason"] == "GenericStartError"
+    assert "raw prompt" not in str(terminal.actions)
+
+
 # --- __post_init__ validation / timeout normalization --------------------
 
 

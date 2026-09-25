@@ -512,6 +512,67 @@ async def test_rpc_send_failure_marks_disconnected() -> None:
     assert adapter._rpc.connected is False
 
 
+async def test_start_turn_maps_native_invalid_params_to_config_error() -> None:
+    """A native thread/start JSON-RPC error (-32602) MUST surface as a structured
+    non-retryable AdapterTurnStartError, not escape as a bare CodexConnectionError."""
+    from haas.harnesses.base import AdapterTurnStartError
+
+    transport = FakeTransport(
+        _default_results(),
+        errors={"thread/start": {"code": -32602, "message": "invalid params: leaked prompt secret"}},
+    )
+    adapter = _adapter_with(transport)
+    req = StartTurnRequest(
+        invocationId="inv_1",
+        sessionId="hsess_1",
+        turnId="turn_1",
+        appName="chrn_1",
+        input=[{"role": "user", "parts": [{"text": "hi"}]}],
+    )
+    with pytest.raises(AdapterTurnStartError) as ei:
+        await adapter.start_turn(req)
+    assert ei.value.code == "haas_adapter_config_error"
+    assert ei.value.retryable is False
+    # raw native message (which may echo prompts/params) must not leak to detail
+    assert "leaked" not in (ei.value.detail or "")
+
+
+async def test_start_turn_maps_native_internal_error_to_unavailable() -> None:
+    from haas.harnesses.base import AdapterTurnStartError
+
+    transport = FakeTransport(
+        _default_results(),
+        errors={"turn/start": {"code": -32603, "message": "internal boom"}},
+    )
+    adapter = _adapter_with(transport)
+    req = StartTurnRequest(
+        invocationId="inv_1",
+        sessionId="hsess_1",
+        turnId="turn_1",
+        appName="chrn_1",
+        input=[{"role": "user", "parts": [{"text": "hi"}]}],
+    )
+    with pytest.raises(AdapterTurnStartError) as ei:
+        await adapter.start_turn(req)
+    assert ei.value.code == "haas_adapter_unavailable"
+    assert ei.value.retryable is True
+    assert "boom" not in (ei.value.detail or "")
+
+
+async def test_jsonrpc_error_preserves_native_code() -> None:
+    from haas.harnesses.codex_app_server.rpc import CodexRPCError
+
+    transport = FakeTransport(
+        _default_results(),
+        errors={"thread/start": {"code": -32602, "message": "bad params"}},
+    )
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    with pytest.raises(CodexRPCError) as ei:
+        await adapter._rpc.request("thread/start", {})
+    assert ei.value.code == -32602
+
+
 async def test_rpc_notify_failure_marks_disconnected() -> None:
     transport = FakeTransport(_default_results())
     adapter = _adapter_with(transport)
@@ -838,10 +899,12 @@ async def test_cancel_falls_back_to_accepted_when_interrupt_fails() -> None:
 
 
 async def test_start_turn_fails_when_thread_start_returns_no_id() -> None:
+    from haas.harnesses.base import AdapterTurnStartError
+
     transport = FakeTransport({**_default_results(), "thread/start": {"thread": {}}})
     adapter = _adapter_with(transport)
     await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
-    with pytest.raises(CodexConnectionError, match="no thread id"):
+    with pytest.raises(AdapterTurnStartError) as ei:
         await adapter.start_turn(
             StartTurnRequest(
                 invocationId="inv_1",
@@ -851,6 +914,8 @@ async def test_start_turn_fails_when_thread_start_returns_no_id() -> None:
                 input=[{"text": "hi"}],
             )
         )
+    # thread/start returned no id is a connection/contract failure, not a leak
+    assert ei.value.code == "haas_adapter_unavailable"
 
 
 async def test_start_turn_recreates_thread_when_not_found() -> None:
@@ -874,11 +939,13 @@ async def test_start_turn_recreates_thread_when_not_found() -> None:
 
 
 async def test_start_turn_propagates_unexpected_resume_error() -> None:
+    from haas.harnesses.base import AdapterTurnStartError
+
     transport = FakeTransport(
         _default_results(), errors={"thread/resume": {"message": "internal explosion"}}
     )
     adapter, _ = await _started(transport)
-    with pytest.raises(CodexConnectionError, match="internal explosion"):
+    with pytest.raises(AdapterTurnStartError) as ei:
         await adapter.start_turn(
             StartTurnRequest(
                 invocationId="inv_2",
@@ -888,6 +955,10 @@ async def test_start_turn_propagates_unexpected_resume_error() -> None:
                 input=[{"text": "again"}],
             )
         )
+    # Non-thread-not-found resume errors surface as a structured rpc error, and
+    # the raw native message ("internal explosion") must not leak to the wire.
+    assert ei.value.code == "haas_codex_rpc_error"
+    assert "explosion" not in (ei.value.detail or "")
 
 
 async def test_start_turn_passes_model_and_sandbox_policy() -> None:

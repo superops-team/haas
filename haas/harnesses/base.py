@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError, field_validator
 
 __all__ = [
     "AdapterProbe",
@@ -136,12 +136,26 @@ class StartTurnRequest(BaseModel):
     instructions: str | None = None
     maxStep: int | None = None
     timeoutSeconds: float = 86_400
-    sandbox: SandboxSpec = Field(default_factory=lambda: SandboxSpec())
+    sandbox: SandboxSpec | dict[str, Any] = Field(default_factory=lambda: SandboxSpec())
     policy: dict[str, Any] = Field(default_factory=dict)
     credentials: dict[str, Any] = Field(default_factory=dict)
-    mcpServers: list[McpServerConfig] = Field(default_factory=list)
+    mcpServers: list[McpServerConfig | dict[str, Any]] = Field(default_factory=list)
     principalId: str = ""
     userId: str = ""
+
+    @field_validator("sandbox", mode="before")
+    @classmethod
+    def _coerce_sandbox(cls, v: Any) -> Any:
+        if isinstance(v, dict):
+            return SandboxSpec(**v)
+        return v
+
+    @field_validator("mcpServers", mode="before")
+    @classmethod
+    def _coerce_mcp_servers(cls, v: Any) -> Any:
+        if isinstance(v, list):
+            return [McpServerConfig(**item) if isinstance(item, dict) else item for item in v]
+        return v
 
 
 @dataclass

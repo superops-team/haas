@@ -630,8 +630,33 @@ class SessionRuntime:
             if streamed_terminal is not None:
                 completed_cleanly = True
             else:
+                # Residual start-path failures (adapter RPC errors not wrapped
+                # upstream, model-proxy/provider config errors, unexpected bugs).
+                # Never emit the legacy bare code="failed": surface a stable code
+                # and a safe reason (exception class name). The raw exception
+                # message may contain prompts/params/credentials, so it is not
+                # propagated to the wire.
+                code = getattr(exc, "code", None)
+                if not isinstance(code, str) or not code:
+                    if type(exc).__name__ in {
+                        "ModelRouteError",
+                        "SecretResolutionError",
+                        "RuntimeTokenError",
+                    }:
+                        code = "haas_provider_error"
+                    else:
+                        code = "haas_adapter_error"
                 event = self._persist_failure_terminal(
-                    app, invocation, turn, session, key, holder, token
+                    app,
+                    invocation,
+                    turn,
+                    session,
+                    key,
+                    holder,
+                    token,
+                    reason=type(exc).__name__,
+                    code=code,
+                    retryable=False,
                 )
                 session = self.get_session(app.id, req.user_id, session_id)
                 yield event

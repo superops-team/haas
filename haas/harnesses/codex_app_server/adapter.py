@@ -36,6 +36,7 @@ from haas.harnesses.base import (
     PreparedSession,
     PrepareSessionRequest,
     ResumeSessionRequest,
+    SandboxSpec,
     SessionInspection,
     StartTurnRequest,
     TurnHandle,
@@ -50,6 +51,7 @@ from haas.harnesses.codex_app_server.rpc import (
     CodexConnectionError,
     CodexJsonRpc,
     CodexRequestTimeout,
+    CodexRPCError,
     CodexSubscriberOverloaded,
 )
 from haas.harnesses.codex_app_server.sandbox import (
@@ -551,9 +553,29 @@ class CodexAdapter:
     # --- turn lifecycle -----------------------------------------------------
 
     async def start_turn(self, request: StartTurnRequest) -> TurnHandle:
-        await self._ensure_connected()
+        try:
+            await self._ensure_connected()
+        except CodexRequestTimeout as exc:
+            raise AdapterTurnStartError(
+                "haas_request_timeout",
+                retryable=True,
+                detail="codex connect timed out",
+            ) from exc
+        except CodexRPCError as exc:
+            code, retryable = self._map_native_rpc_error(exc)
+            raise AdapterTurnStartError(
+                code, retryable=retryable, detail=self._safe_rpc_detail(exc)
+            ) from exc
+        except CodexConnectionError as exc:
+            raise AdapterTurnStartError(
+                "haas_adapter_unavailable",
+                retryable=True,
+                detail="codex connect/transport failure",
+            ) from exc
 
         sandbox = request.sandbox
+        if isinstance(sandbox, dict):
+            sandbox = SandboxSpec(**sandbox)
         mode = sandbox.mode
         cwd = str(sandbox.workspaceRoot or DEFAULT_CWD)
         scope = (request.appName, request.userId, request.sessionId)
@@ -574,12 +596,30 @@ class CodexAdapter:
         )
 
         thread_id = self._session_threads.get(scope, "")
-        if thread_id:
-            thread_id = await self._resume_or_drop_thread(
-                thread_id, scope, cwd, request
-            )
-        if not thread_id:
-            thread_id = await self._start_thread(scope, cwd, mode, request)
+        try:
+            if thread_id:
+                thread_id = await self._resume_or_drop_thread(
+                    thread_id, scope, cwd, request
+                )
+            if not thread_id:
+                thread_id = await self._start_thread(scope, cwd, mode, request)
+        except CodexRequestTimeout as exc:
+            raise AdapterTurnStartError(
+                "haas_request_timeout",
+                retryable=True,
+                detail="thread lifecycle timed out",
+            ) from exc
+        except CodexRPCError as exc:
+            code, retryable = self._map_native_rpc_error(exc)
+            raise AdapterTurnStartError(
+                code, retryable=retryable, detail=self._safe_rpc_detail(exc)
+            ) from exc
+        except CodexConnectionError as exc:
+            raise AdapterTurnStartError(
+                "haas_adapter_unavailable",
+                retryable=True,
+                detail="thread lifecycle connection failure",
+            ) from exc
 
         instructions = request.instructions
         disabled_tools = _disabled_tools(request.policy)
@@ -611,6 +651,11 @@ class CodexAdapter:
                 "haas_request_timeout",
                 retryable=True,
                 detail="turn/start did not respond in time",
+            ) from exc
+        except CodexRPCError as exc:
+            code, retryable = self._map_native_rpc_error(exc)
+            raise AdapterTurnStartError(
+                code, retryable=retryable, detail=self._safe_rpc_detail(exc)
             ) from exc
         except CodexConnectionError as exc:
             raise AdapterTurnStartError(
@@ -993,6 +1038,27 @@ class CodexAdapter:
                 },
             },
         }
+
+    @staticmethod
+    def _map_native_rpc_error(exc: CodexRPCError) -> tuple[str, bool]:
+        """Map a native JSON-RPC error to a stable haas_* code + retryable flag.
+
+        Only the numeric JSON-RPC code drives the decision; the native message is
+        never used here (it may echo prompts/params/credentials).
+        """
+        code = exc.code
+        # JSON-RPC standard: -32601 method not found, -32602 invalid params.
+        if code in (-32601, -32602):
+            return "haas_adapter_config_error", False
+        # -32603 internal error and -32xxx server-side errors are transient.
+        if isinstance(code, int) and (code == -32603 or -32099 <= code <= -32000):
+            return "haas_adapter_unavailable", True
+        return "haas_codex_rpc_error", True
+
+    @staticmethod
+    def _safe_rpc_detail(exc: CodexRPCError) -> str:
+        """Wire-safe detail: native method + numeric code only, never message."""
+        return f"codex_rpc:{exc.method}:{exc.code}"
 
     @staticmethod
     def _mcp_server_overrides(request: StartTurnRequest) -> JsonObject:

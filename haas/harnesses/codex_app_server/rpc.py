@@ -42,6 +42,22 @@ class CodexRequestTimeout(CodexConnectionError):
     """Raised when a JSON-RPC request receives no response within its timeout."""
 
 
+class CodexRPCError(CodexConnectionError):
+    """A JSON-RPC *error response* from Codex app-server (transport is fine).
+
+    Carries the stable native ``error.code`` so the adapter can map it to a
+    ``haas_*`` code. The native message is redacted and retained only in
+    ``safe_message`` (and the legacy ``str()`` form, which existing thread-not-
+    found detection relies on) — never echoed to the wire verbatim.
+    """
+
+    def __init__(self, method: str, code: Any, message: str = "") -> None:
+        self.method = method
+        self.code = code
+        self.safe_message = safe_upstream_body(message)[:200]
+        super().__init__(f"jsonrpc_error:{method}:{self.safe_message}")
+
+
 class CodexSubscriberOverloaded(CodexConnectionError):
     """Raised only in the slow turn consumer whose bounded queue overflowed."""
 
@@ -223,15 +239,16 @@ class CodexJsonRpc:
 
         if "error" in response:
             error = response["error"]
+            code: Any = None
+            msg = ""
             if isinstance(error, dict):
-                msg = str(error.get("message", "unknown error"))
+                code = error.get("code")
+                msg = str(error.get("message", ""))
             else:
                 msg = str(error)
             # Native harness error text may echo credentials, raw prompts or
             # tool payloads; redact before it reaches any exception/log/event.
-            raise CodexConnectionError(
-                f"jsonrpc_error:{method}:{safe_upstream_body(msg)}"
-            )
+            raise CodexRPCError(method, code, msg)
         result = response.get("result", {})
         return result if isinstance(result, dict) else {}
 
