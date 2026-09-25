@@ -236,6 +236,52 @@ workspace changes follow this same path; they are not frontend-only state.
   Platform hard denies and an adapter/runtime inability cannot be overridden by approval.
 - Public error details use `safeReason`, not a raw denied path/header/URL when it is sensitive.
 
+### 8.1 Residual Risk: Network Egress Authorization and DNS
+
+`PolicyController.authorize_network` (`haas/policy/controller.py`) performs
+**hostname string matching plus an IP-literal private-range check**. It does
+**not** resolve DNS before admitting a request. This is a known residual risk
+from the Python backend optimization review (finding O-SSRF-1 / S3-009 +
+S4-003), recorded here rather than fixed in code for this wave:
+
+- **Attack surface**: a caller-controlled public hostname whose DNS record
+  resolves to a loopback, private/link-local, or cloud-metadata address passes
+  the string-based allowlist and the IP-literal private check, because the check
+  inspects the hostname text, not the resolved socket address. A DNS-rebinding
+  or "DNS pinning" attack could therefore make an in-process egress call target
+  an otherwise-blocked internal address.
+- **Hard boundary**: delegated (containerized) sessions run with
+  `--network none` (plus `--cap-drop ALL`, `no-new-privileges`, non-root). In
+  that posture the harness cannot make arbitrary outbound connections at all, so
+  the in-process check is defense-in-depth, not the primary control. The
+  residual risk applies only to the standalone in-process policy controller when
+  it is used to admit egress without a network-isolated container.
+- **Current mitigations**: (1) loopback/private/link-local/metadata hosts are
+  blocked unless independently allowlisted; (2) only `http`/`https` schemes and
+  an explicit/derived port are admitted; (3) allowlist entries and request URLs
+  are normalized and port-exact matched (see §8); (4) delegated containers add
+  the `--network none` hard isolation on top.
+- **Deferred hardening** (not done in this wave): resolved-IP validation at the
+  outbound transport layer — verify the connected socket address is outside the
+  private/metadata ranges after `connect()`, and reject DNS-rebinding by pinning
+  the resolved address for the request lifetime. This belongs with the model/MCP
+  proxy transport, not the policy controller.
+
+### 8.2 Sandbox Network Default Action (M-02 closed as false positive)
+
+The review flagged `SandboxNetwork.defaultAction = "allow"` as a potential
+fail-open default (finding S3-008 / measurement M-02). Verification
+(`grep -rn 'SandboxSpec(' haas/ tests/`, 2026-09-24) confirms the **only
+production construction** of the container `SandboxSpec` is
+`haas/runtime/compiler.py`, which always overrides `network.defaultAction` from
+the compiled `EffectivePolicy.network.defaultAction`. No production path
+relies on the `"allow"` dataclass default; direct `SandboxSpec(...)`
+constructions exist only in tests. M-02 is therefore closed as a
+**false_positive**: the default is unreachable in production and no deny-by-default
+change is required. A regression test should continue to assert that every
+production sandbox projection flows through the compiler rather than a bare
+default-constructed spec.
+
 ## 9. Observability
 
 - `haas.policy.compiled`

@@ -1,5 +1,7 @@
 """Contract tests for the in-memory Stores backend (specs/stores/README.md)."""
 
+import contextlib
+
 import pytest
 
 from haas.stores.memory import (
@@ -446,3 +448,63 @@ def test_workspace_lock_single_writer_allows_ro_sharing() -> None:
     store.release_workspace_lock("/repo", "dgsess_a")
     third = store.acquire_workspace_lock("/repo", "dgsess_b", "rw", ttl_ms=60_000)
     assert third.acquired is True
+
+
+# --- P1-2: delete_session cascade + idempotency sweep ----------------------
+
+
+def test_delete_session_cascades_invocations_turns_events_and_idempotency() -> None:
+    store = MemoryStore()
+    key = ("chrn_1", "u_1", "hsess_1")
+    store.put_session(SessionRecord(id="hsess_1", appName="chrn_1", userId="u_1"))
+    store.put_invocation(
+        InvocationRecord(id="inv_1", sessionId="hsess_1", appName="chrn_1", turnId="turn_1")
+    )
+    store.put_turn(TurnRecord(id="turn_1", invocationId="inv_1", sessionId="hsess_1"))
+    store.append(_event(eventId="evt_1", invocationId="inv_1", appName="chrn_1", userId="u_1"))
+    store.append(
+        _event(
+            eventId="evt_2", invocationId="inv_1", sequenceNumber=1,
+            appName="chrn_1", userId="u_1",
+        )
+    )
+    store.put_approval(
+        ApprovalRecord(
+            id="appr_1", sessionId="hsess_1", invocationId="inv_1", turnId="turn_1"
+        )
+    )
+    store.reserve("kh_1", "rh_1")
+    store.accept("kh_1", "inv_1")
+
+    store.delete_session(key)
+
+    assert store.get_session(key) is None
+    assert store.get_invocation("inv_1") is None
+    assert store.get_turn("turn_1") is None
+    assert store._events_by_session == {}
+    assert store._events_by_invocation == {}
+    assert store.get_approval("appr_1") is None
+    assert "kh_1" not in store._idempotency
+
+
+def test_idempotency_sweep_removes_expired_tombstones() -> None:
+    clock = [1_000]
+    store = MemoryStore(clock_ms=lambda: clock[0])
+    store.reserve("kh", "rh")
+    accepted = store.accept("kh", "inv_1", accepted_at_ms=clock[0])
+    store.complete("kh", {"events": []}, completed_at_ms=clock[0] + 10)
+
+    # Advance past TTL: the next reserve turns the result into a tombstone.
+    clock[0] = accepted.expiresAtMs + 1
+    with contextlib.suppress(IdempotencyExpiredError):
+        store.reserve("kh", "rh")
+    assert "kh" in store._idempotency
+
+    removed = store.sweep_expired()
+    assert removed == 1
+    assert "kh" not in store._idempotency
+
+
+def test_session_record_rejects_invalid_control_state() -> None:
+    with pytest.raises(ValueError):
+        SessionRecord(id="hsess_x", appName="a", userId="u", controlState="bogus")

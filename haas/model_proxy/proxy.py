@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,16 +22,45 @@ from haas.model_proxy.models import ModelRoute, RuntimeTokenScope, Usage
 from haas.model_proxy.route import normalize_usage
 from haas.model_proxy.secret import SecretResolver
 from haas.model_proxy.token import RuntimeTokenError, RuntimeTokenManager
+from haas.observability.logger import StructuredLogger
 from haas.policy import EffectivePolicy, PolicyController, PolicyDecision
 from haas.security.redact import safe_upstream_body
 
 _PROVIDER_ERROR_FIELDS = ("code", "type", "param", "message")
 _NAMESPACE_TOOL_CONFLICT = "namespace_tool_bridge_conflict"
 _RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
+# Audit events carry only these stable, non-sensitive identifiers (P1-4).
+_ALLOWED_AUDIT_FIELDS = frozenset(
+    {"sessionId", "harnessId", "providerCode", "statusCode", "latencyMs"}
+)
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((time.monotonic() - started) * 1000.0, 3)
 
 
 class ModelProxyError(Exception):
     """Raised when a model proxy request is rejected or fails."""
+
+
+def _redact_credential(obj: Any, credential: str) -> Any:
+    """Recursively replace ``credential`` in string values of a decoded object.
+
+    The old approach serialized the object to JSON then ran a plain
+    ``str.replace``. That leaks when the credential contains ``"`` or ``\\``:
+    ``json.dumps`` escapes them, so the raw credential substring no longer
+    appears in the serialized text and the replacement silently misses. Walking
+    the decoded object and replacing on the raw string values is escape-safe.
+    """
+    if not credential:
+        return obj
+    if isinstance(obj, str):
+        return obj.replace(credential, "[REDACTED]")
+    if isinstance(obj, dict):
+        return {key: _redact_credential(value, credential) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_credential(value, credential) for value in obj]
+    return obj
 
 
 @dataclass
@@ -84,6 +114,7 @@ class ModelProxy:
         policy: PolicyController,
         *,
         client: httpx.AsyncClient | None = None,
+        logger: StructuredLogger | None = None,
     ) -> None:
         self._resolver = resolver
         self._tokens = tokens
@@ -91,16 +122,44 @@ class ModelProxy:
         self._client = client
         self._owns_client = client is None
         self._active_client: httpx.AsyncClient | None = None
+        self._logger = logger or StructuredLogger()
+
+    def _audit(self, event: str, fields: dict[str, Any]) -> None:
+        """Emit an audit event, hard-whitelisting non-sensitive fields only.
+
+        Body, token, credential and raw request/response material must never
+        reach the audit surface (P1-4 / secretless hard boundary).
+        """
+        safe = {k: v for k, v in fields.items() if k in _ALLOWED_AUDIT_FIELDS}
+        self._logger.event(event, safe)
 
     async def authenticate(self, authorization: str) -> RuntimeTokenScope:
         token = authorization.removeprefix("Bearer ").strip() if authorization else ""
+        started = time.monotonic()
         try:
             scope = self._tokens.validate(token)
-            if scope.audience != "model_proxy":
-                raise ModelProxyError("invalid_credential")
-            return scope
         except RuntimeTokenError as exc:
+            self._audit(
+                "model_proxy_auth_failed",
+                {
+                    "sessionId": self._tokens.token_session_id(token),
+                    "statusCode": str(exc),
+                    "latencyMs": _elapsed_ms(started),
+                },
+            )
             raise ModelProxyError(str(exc)) from exc
+        if scope.audience != "model_proxy":
+            self._audit(
+                "model_proxy_auth_failed",
+                {
+                    "sessionId": scope.sessionId,
+                    "harnessId": scope.harnessId,
+                    "statusCode": "invalid_credential",
+                    "latencyMs": _elapsed_ms(started),
+                },
+            )
+            raise ModelProxyError("invalid_credential")
+        return scope
 
     def recover_expired_scope(self, token: str) -> RuntimeTokenScope:
         try:
@@ -134,7 +193,14 @@ class ModelProxy:
     ) -> tuple[dict[str, Any], Usage | None]:
         scope = await self.authenticate(authorization)
         self._authorize_model(scope, route.model)
-        self._authorize_url(policy, route.baseUrl)
+        try:
+            self._authorize_url(policy, route.baseUrl)
+        except ModelProxyError:
+            self._audit(
+                "model_proxy_url_denied",
+                {"sessionId": scope.sessionId, "harnessId": scope.harnessId},
+            )
+            raise
 
         credential = await self._credential(route, scope)
         headers = {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
@@ -143,8 +209,19 @@ class ModelProxy:
             json_body, bridge = self._responses_body(route, body)
         except ValueError as exc:
             raise ModelProxyError(str(exc)) from exc
+        started = time.monotonic()
         resp = await self._post_json_with_retry(route, json_body, headers)
         if resp.status_code >= 300:
+            self._audit(
+                "model_proxy_provider_error",
+                {
+                    "sessionId": scope.sessionId,
+                    "harnessId": scope.harnessId,
+                    "providerCode": route.provider,
+                    "statusCode": resp.status_code,
+                    "latencyMs": _elapsed_ms(started),
+                },
+            )
             raise _provider_http_error(resp, credential)
         try:
             data = resp.json()
@@ -153,7 +230,7 @@ class ModelProxy:
         if not isinstance(data, dict):
             raise ModelProxyError("provider returned invalid JSON object")
         data = _restore_namespace_tool_calls(data, bridge)
-        data = json.loads(json.dumps(data).replace(credential, "[REDACTED]"))
+        data = _redact_credential(data, credential)
         usage = normalize_usage(route.provider, data)
         return data, usage
 
@@ -240,7 +317,14 @@ class ModelProxy:
     ) -> httpx.Response:
         scope = await self.authenticate(authorization)
         self._authorize_model(scope, route.model)
-        self._authorize_url(policy, route.baseUrl)
+        try:
+            self._authorize_url(policy, route.baseUrl)
+        except ModelProxyError:
+            self._audit(
+                "model_proxy_url_denied",
+                {"sessionId": scope.sessionId, "harnessId": scope.harnessId},
+            )
+            raise
         credential = await self._credential(route, scope)
         client = await self._client_ctx()
         try:
@@ -260,9 +344,20 @@ class ModelProxy:
             )
         except ValueError as exc:
             raise ModelProxyError(str(exc)) from exc
+        started = time.monotonic()
         response = await self._send_stream_with_retry(client, route, request)
         if response.status_code >= 300:
             await response.aread()
+            self._audit(
+                "model_proxy_provider_error",
+                {
+                    "sessionId": scope.sessionId,
+                    "harnessId": scope.harnessId,
+                    "providerCode": route.provider,
+                    "statusCode": response.status_code,
+                    "latencyMs": _elapsed_ms(started),
+                },
+            )
             error = _provider_http_error(response, credential)
             await response.aclose()
             raise error
@@ -271,6 +366,11 @@ class ModelProxy:
             raise ModelProxyError("provider_stream_invalid")
         response.extensions["haas_credential"] = credential
         response.extensions["haas_namespace_bridge"] = bridge
+        response.extensions["haas_audit"] = {
+            "sessionId": scope.sessionId,
+            "harnessId": scope.harnessId,
+            "providerCode": route.provider,
+        }
         return response
 
     async def _send_stream_with_retry(
@@ -310,6 +410,7 @@ class ModelProxy:
     async def relay_stream(self, response: httpx.Response) -> AsyncIterator[str]:
         credential = response.extensions.pop("haas_credential", "")
         bridge = response.extensions.pop("haas_namespace_bridge", _NamespaceToolBridge())
+        audit = response.extensions.pop("haas_audit", {})
         try:
             async for line in response.aiter_lines():
                 if len(line) > 4 * 1024 * 1024:
@@ -337,11 +438,18 @@ class ModelProxy:
                         }
                     else:
                         payload = _restore_namespace_tool_calls(payload, bridge)
+                    # Redact on the decoded object so credentials containing
+                    # quotes/backslashes are not missed after json.dumps escapes.
+                    payload = _redact_credential(payload, credential)
                     line = "data: " + json.dumps(payload, separators=(",", ":"))
-                if credential:
+                elif credential:
                     line = line.replace(credential, "[REDACTED]")
                 yield line + "\n"
         except (httpx.HTTPError, ValueError):
+            self._audit(
+                "model_proxy_stream_interrupted",
+                {**audit, "statusCode": "stream_failed"},
+            )
             yield (
                 'data: {"type":"error","code":"haas_provider_error",'
                 '"message":"Provider stream failed"}\n\n'

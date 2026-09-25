@@ -86,5 +86,6 @@ class InMemorySecretResolver:
 
     async def resolve(self, credential_ref: str) -> str:
         if credential_ref not in self._secrets:
-            raise SecretResolutionError(f"credential ref not found: {credential_ref}")
+            # Stable error code only; do not echo the internal ref back (P2-14).
+            raise SecretResolutionError("credential ref not found")
         return self._secrets[credential_ref]

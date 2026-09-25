@@ -592,3 +592,145 @@ async def test_codex_adapter_timeout_fails_turn() -> None:
         }
         result = await adapter.finalize_turn(handle)
         assert result.status == "failed"
+
+
+# --- P0-4: capability honesty & start-turn errors -------------------------
+
+
+class _RecordingRpc:
+    """Minimal stand-in for CodexJsonRpc used by unit tests below."""
+
+    def __init__(self) -> None:
+        self.connected = True
+        self.initialized = True
+        self.notification_cursor = 0
+        self.server_request_cursor = 0
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+        self.fail_on: dict[str, Exception] = {}
+
+    async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.requests.append((method, params))
+        if method in self.fail_on:
+            raise self.fail_on[method]
+        if method == "thread/resume":
+            return {"thread": {"id": "thr_1"}}
+        if method == "turn/start":
+            return {"turn": {"id": "codex_turn_1"}}
+        return {}
+
+
+def _adapter_with_rpc(rpc: _RecordingRpc) -> CodexAdapter:
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    adapter._rpc = rpc  # type: ignore[assignment]
+    adapter._session_threads[("chrn_1", "", "hsess_1")] = "thr_1"
+    return adapter
+
+
+async def test_disabled_tools_appended_to_instructions() -> None:
+    rpc = _RecordingRpc()
+    adapter = _adapter_with_rpc(rpc)
+    await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_1",
+            sessionId="hsess_1",
+            turnId="turn_1",
+            appName="chrn_1",
+            input=[{"text": "hi"}],
+            instructions="Be helpful.",
+            policy={"tools": {"disabled": ["web_search", "custom_tool"]}},
+        )
+    )
+    turn_params = next(p for m, p in rpc.requests if m == "turn/start")
+    assert "web_search" in turn_params["instructions"]
+    assert "custom_tool" in turn_params["instructions"]
+    assert "disabled by policy" in turn_params["instructions"]
+    assert turn_params["instructions"].startswith("Be helpful.")
+
+
+async def test_disabled_tools_without_prior_instructions() -> None:
+    rpc = _RecordingRpc()
+    adapter = _adapter_with_rpc(rpc)
+    await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_1",
+            sessionId="hsess_1",
+            turnId="turn_1",
+            appName="chrn_1",
+            input=[{"text": "hi"}],
+            policy={"tools": {"disabled": ["web_search"]}},
+        )
+    )
+    turn_params = next(p for m, p in rpc.requests if m == "turn/start")
+    assert "web_search" in turn_params["instructions"]
+
+
+async def test_start_turn_timeout_maps_to_structured_error() -> None:
+    from haas.harnesses.base import AdapterTurnStartError
+    from haas.harnesses.codex_app_server.rpc import CodexRequestTimeout
+
+    rpc = _RecordingRpc()
+    rpc.fail_on["turn/start"] = CodexRequestTimeout("timed out")
+    adapter = _adapter_with_rpc(rpc)
+    try:
+        await adapter.start_turn(
+            StartTurnRequest(
+                invocationId="inv_1",
+                sessionId="hsess_1",
+                turnId="turn_1",
+                appName="chrn_1",
+                input=[{"text": "hi"}],
+            )
+        )
+        raise AssertionError("expected AdapterTurnStartError")
+    except AdapterTurnStartError as exc:
+        assert exc.code == "haas_request_timeout"
+        assert exc.retryable is True
+
+
+async def test_start_turn_connection_error_maps_to_structured_error() -> None:
+    from haas.harnesses.base import AdapterTurnStartError
+    from haas.harnesses.codex_app_server.rpc import CodexConnectionError
+
+    rpc = _RecordingRpc()
+    rpc.fail_on["turn/start"] = CodexConnectionError("boom")
+    adapter = _adapter_with_rpc(rpc)
+    try:
+        await adapter.start_turn(
+            StartTurnRequest(
+                invocationId="inv_1",
+                sessionId="hsess_1",
+                turnId="turn_1",
+                appName="chrn_1",
+                input=[{"text": "hi"}],
+            )
+        )
+        raise AssertionError("expected AdapterTurnStartError")
+    except AdapterTurnStartError as exc:
+        assert exc.code == "haas_adapter_unavailable"
+        assert exc.retryable is True
+
+
+# --- sandbox projection: dict / malformed network policy & root dedup -------
+
+
+def test_turn_sandbox_policy_dict_network_policy() -> None:
+    allow = to_turn_sandbox_policy(
+        "workspace-write", ["/workspace"], {"defaultAction": "allow"}
+    )
+    assert allow["networkAccess"] is True
+    deny = to_turn_sandbox_policy(
+        "workspace-write", ["/workspace"], {"defaultAction": "deny"}
+    )
+    assert deny["networkAccess"] is False
+
+
+def test_turn_sandbox_policy_malformed_network_policy_fails_closed() -> None:
+    policy = to_turn_sandbox_policy("workspace-write", ["/workspace"], "allow")  # type: ignore[arg-type]
+    assert policy["networkAccess"] is False
+
+
+def test_turn_sandbox_policy_skips_empty_and_dedupes_roots() -> None:
+    policy = to_turn_sandbox_policy(
+        "workspace-write", ["", "/workspace", "/workspace", "/data/worker/sub"]
+    )
+    assert policy["writableRoots"] == ["/workspace", "/data/worker/sub"]

@@ -24,6 +24,24 @@ from haas.policy import EffectivePolicy
 from haas.registry import HarnessRegistry
 from haas.stores import HarnessRecord
 
+# Closed set of internal ModelProxyError codes mapped to public haas_-prefixed
+# codes. Anything not on this list fails closed to a generic code (P2-12), so
+# an unexpected error string never escapes verbatim to the harness.
+_INTERNAL_ERROR_CODES: dict[str, str] = {
+    "invalid_token": "haas_model_proxy_token_invalid",
+    "token_expired": "haas_model_proxy_token_expired",
+    "invalid_credential": "haas_model_proxy_credential_invalid",
+    "harness_not_found": "haas_model_proxy_harness_not_found",
+    "model_not_allowed": "haas_model_proxy_model_not_allowed",
+    "provider_url_not_allowed": "haas_model_proxy_url_not_allowed",
+    "provider_api_unsupported": "haas_model_proxy_api_unsupported",
+    "invocation_route_unavailable": "haas_model_proxy_route_unavailable",
+    "invalid_input": "haas_model_proxy_invalid_input",
+    "provider_unavailable": "haas_model_proxy_provider_unavailable",
+    "provider_stream_invalid": "haas_model_proxy_stream_invalid",
+}
+_AUTH_ERROR_CODES = {"invalid_token", "token_expired"}
+
 
 class ProxyApp:
     """Wires the ModelProxy core into a FastAPI app for loopback serving."""
@@ -103,23 +121,31 @@ class ProxyApp:
             return data
         except ModelProxyError as exc:
             error = str(exc)
-            code = {
-                "invalid_token": "haas_model_proxy_token_invalid",
-                "token_expired": "haas_model_proxy_token_expired",
-            }.get(error, error)
-            if error not in {"invalid_token", "token_expired"}:
+            # Provider HTTP diagnostics are already bounded and redacted
+            # upstream; surface them as a human-readable 400 body.
+            if error.startswith("provider HTTP "):
                 return JSONResponse(status_code=400, content={"error": error})
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error": {
-                        "type": "authentication_error",
-                        "code": code,
-                        "safeReason": code.removeprefix("haas_"),
-                        "retryable": error in {"invalid_token", "token_expired"},
-                    }
-                },
-            )
+            # Bare internal code (strip any ": <safeReason>" suffix).
+            bare = error.split(":", 1)[0]
+            mapped = _INTERNAL_ERROR_CODES.get(bare)
+            if mapped is None:
+                # Unexpected error string: fail closed, never echo it verbatim.
+                return JSONResponse(
+                    status_code=502, content={"error": "haas_model_proxy_internal_error"}
+                )
+            if bare in _AUTH_ERROR_CODES:
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "error": {
+                            "type": "authentication_error",
+                            "code": mapped,
+                            "safeReason": mapped.removeprefix("haas_"),
+                            "retryable": True,
+                        }
+                    },
+                )
+            return JSONResponse(status_code=400, content={"error": mapped})
         except ModelRouteError:
             # No usable provider route: fail closed with a safe reason rather
             # than leaking a traceback as a bare 500 (spec §10).

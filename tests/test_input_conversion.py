@@ -29,9 +29,22 @@ def test_adk_message_multiple_parts() -> None:
 
 
 def test_codex_native_format_pass_through() -> None:
-    """Already-native Codex format: {"type": "text", "text": "..."}"""
-    result = _to_codex_input([{"type": "text", "text": "hi"}])
+    """Already-native Codex format: {"type": "text", "text": "..."} (internal path)."""
+    result = _to_codex_input(
+        [{"type": "text", "text": "hi"}], allow_native_passthrough=True
+    )
     assert result == [{"type": "text", "text": "hi"}]
+
+
+def test_native_format_rejected_on_northbound() -> None:
+    """Native items are rejected unless the internal passthrough flag is set."""
+    import pytest
+
+    from haas.harnesses.codex_app_server.adapter import HaaSTurnInputInvalid
+
+    with pytest.raises(HaaSTurnInputInvalid) as excinfo:
+        _to_codex_input([{"type": "text", "text": "x", "evil": 1}])
+    assert excinfo.value.code == "haas_input_invalid"
 
 
 def test_simplified_format() -> None:
@@ -41,17 +54,28 @@ def test_simplified_format() -> None:
 
 
 def test_mixed_formats() -> None:
-    """A mix of ADK and native formats."""
+    """A mix of ADK and native formats (native item uses internal passthrough)."""
     result = _to_codex_input(
         [
             {"role": "user", "parts": [{"text": "from adk"}]},
             {"type": "text", "text": "from native"},
-        ]
+        ],
+        allow_native_passthrough=True,
     )
     assert result == [
         {"type": "text", "text": "from adk"},
         {"type": "text", "text": "from native"},
     ]
+
+
+def test_adk_message_rejects_unknown_fields() -> None:
+    import pytest
+
+    from haas.harnesses.codex_app_server.adapter import HaaSTurnInputInvalid
+
+    with pytest.raises(HaaSTurnInputInvalid) as excinfo:
+        _to_codex_input([{"role": "user", "parts": [{"text": "hi"}], "evil": 1}])
+    assert excinfo.value.code == "haas_input_invalid"
 
 
 def test_adk_message_with_non_text_part() -> None:

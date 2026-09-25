@@ -439,3 +439,21 @@ def test_expired_and_invalid_tokens_remain_distinguishable() -> None:
     tokens.revoke(expired)
     with pytest.raises(RuntimeTokenError, match="invalid_token"):
         tokens.validate(expired)
+
+
+def test_invalid_listen_address_rejected_at_construction() -> None:
+    """P2-13: malformed listen config fails fast, not deep in lifespan."""
+    for bad in ("noport", "127.0.0.1:notaport", "0.0.0.0:18080", "127.0.0.1:70000"):
+        with pytest.raises(ValueError):
+            RuntimeModelProxy(
+                registry=object(),  # type: ignore[arg-type]
+                resolver=_Resolver(),  # type: ignore[arg-type]
+                listen=bad,
+            )
+    # valid loopback listen still constructs
+    runtime = RuntimeModelProxy(
+        registry=object(),  # type: ignore[arg-type]
+        resolver=_Resolver(),  # type: ignore[arg-type]
+        listen="127.0.0.1:0",
+    )
+    assert runtime.listen == "127.0.0.1:0"

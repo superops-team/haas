@@ -23,6 +23,7 @@ from haas.harnesses import (
     ResumeSessionRequest,
     StartTurnRequest,
 )
+from haas.harnesses.base import AdapterTurnStartError
 from haas.registry import HarnessRegistry
 from haas.stores import (
     CanonicalEventRecord,
@@ -293,6 +294,10 @@ class SessionRuntime:
 
     async def run(self, req: RunRequest) -> RunResult:
         events = [event async for event in self._drive(req)]
+        if not events:
+            raise RuntimeError(
+                "haas_empty_events: turn completed without producing any canonical event"
+            )
         session = self.get_session(req.app.id, req.user_id, req.session_id or events[0].sessionId)
         invocation_id = events[-1].invocationId
         if invocation_id is None:
@@ -598,14 +603,60 @@ class SessionRuntime:
                 session = self.get_session(app.id, req.user_id, session_id)
                 yield event
                 raise AdapterTurnTimeoutError(invocation.id) from exc
+        except AdapterTurnStartError as exc:
+            if streamed_terminal is not None:
+                completed_cleanly = True
+            else:
+                # Structured start-turn failure (P0-4 / S3-001): surface the
+                # adapter-supplied code and retryability instead of a bare failed.
+                event = self._persist_failure_terminal(
+                    app,
+                    invocation,
+                    turn,
+                    session,
+                    key,
+                    holder,
+                    token,
+                    reason=exc.detail or "adapter_turn_start_failed",
+                    code=exc.code,
+                    retryable=exc.retryable,
+                )
+                session = self.get_session(app.id, req.user_id, session_id)
+                yield event
+                raise AdapterTurnError(invocation.id) from exc
         except LeaseFencingError as exc:
             raise AdapterTurnError(invocation.id) from exc
         except Exception as exc:
             if streamed_terminal is not None:
                 completed_cleanly = True
             else:
+                # Residual start-path failures (adapter RPC errors not wrapped
+                # upstream, model-proxy/provider config errors, unexpected bugs).
+                # Never emit the legacy bare code="failed": surface a stable code
+                # and a safe reason (exception class name). The raw exception
+                # message may contain prompts/params/credentials, so it is not
+                # propagated to the wire.
+                code = getattr(exc, "code", None)
+                if not isinstance(code, str) or not code:
+                    if type(exc).__name__ in {
+                        "ModelRouteError",
+                        "SecretResolutionError",
+                        "RuntimeTokenError",
+                    }:
+                        code = "haas_provider_error"
+                    else:
+                        code = "haas_adapter_error"
                 event = self._persist_failure_terminal(
-                    app, invocation, turn, session, key, holder, token
+                    app,
+                    invocation,
+                    turn,
+                    session,
+                    key,
+                    holder,
+                    token,
+                    reason=type(exc).__name__,
+                    code=code,
+                    retryable=False,
                 )
                 session = self.get_session(app.id, req.user_id, session_id)
                 yield event
@@ -984,34 +1035,40 @@ class SessionRuntime:
         invocation.completedAtMs = terminal_at_ms
         turn.status = status
         turn.completedAtMs = terminal_at_ms
-        self.store.put_invocation(invocation)
-        self.store.put_turn(turn)
+
+        # Compute the final session state in memory before flushing so the whole
+        # terminal record set (invocation, turn, session, event) is written once,
+        # atomically, instead of across 7+ independent autocommit commits
+        # (P0-3 / S2-005). A crash mid-way used to leave a half-committed terminal.
         session = self._refresh_policy_state(session, key)
-        session = self.store.put_session(session)
         active = self._active.get(invocation.id)
         if status == "interrupted" and active is not None and active.control_intent == "pause":
             session.controlState = "paused"
             session.supportsResume = True
             session.resumableInvocationId = invocation.id
-            session = self.store.put_session(session)
         else:
             session.controlState = "idle"
             session.supportsResume = False
             session.resumableInvocationId = None
-            session = self.store.put_session(session)
         latest_session = self.store.get_session(key)
         if (
             latest_session is not None
             and latest_session.desiredRevision > latest_session.appliedRevision
         ):
             self._apply_desired_policy(latest_session)
-            session = self.store.put_session(latest_session)
+            session = latest_session
 
-        event = self._append_harness_event(terminal, app, invocation, turn, key, holder, token)
-        invocation.completedAtMs = event.observedAtMs
-        turn.completedAtMs = event.observedAtMs
-        self.store.put_invocation(invocation)
-        self.store.put_turn(turn)
+        with self.store.transaction():
+            self.store.put_invocation(invocation)
+            self.store.put_turn(turn)
+            session = self.store.put_session(session)
+            event = self._append_harness_event(
+                terminal, app, invocation, turn, key, holder, token
+            )
+            invocation.completedAtMs = event.observedAtMs
+            turn.completedAtMs = event.observedAtMs
+            self.store.put_invocation(invocation)
+            self.store.put_turn(turn)
         if active is not None and not active.terminal_status.done():
             active.terminal_status.set_result(status)
         return event, session

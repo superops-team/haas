@@ -81,3 +81,55 @@ def test_schema_fixture_matches_pinned_codex() -> None:
     fixture = load_fixture(version)
     current = generate_schema_files()
     assert schema_drift(fixture, current) == []
+
+
+# --- offline: codex CLI version parsing & generation -----------------------
+
+
+def test_codex_cli_version_parses_standard_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    class _Result:
+        stdout = "codex-cli 0.150.1\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result())
+    assert codex_cli_version("codex") == "0.150.1"
+
+
+def test_codex_cli_version_rejects_unexpected_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    class _Result:
+        stdout = "weird-single-token"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result())
+    with pytest.raises(RuntimeError, match="unexpected codex --version output"):
+        codex_cli_version("codex")
+
+
+def test_generate_schema_files_collects_nested_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    def _fake_run(cmd: list[str], **_kwargs: object) -> object:
+        out_dir = Path(cmd[-1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "root.json").write_text('{"a": 1}', encoding="utf-8")
+        nested = out_dir / "v2"
+        nested.mkdir()
+        (nested / "ThreadStartParams.json").write_text('{"b": 2}', encoding="utf-8")
+        return object()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    files = generate_schema_files("codex")
+    assert files == {
+        "root.json": {"a": 1},
+        "v2/ThreadStartParams.json": {"b": 2},
+    }
+
+
+def test_generate_schema_files_rejects_empty_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: object())
+    with pytest.raises(RuntimeError, match="produced no schema files"):
+        generate_schema_files("codex")

@@ -8,6 +8,9 @@ gate, and these are exactly the paths that run during an incident.
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import httpx
 import pytest
 
@@ -110,6 +113,75 @@ async def test_provider_error_body_does_not_leak_credentials() -> None:
     assert "provider HTTP 401" in message
 
 
+async def test_recursive_redaction_handles_credential_with_json_special_chars() -> None:
+    """Credential containing ``"`` and ``\\`` must not leak (S4-002).
+
+    The old implementation did ``json.dumps(data).replace(credential, ...)``.
+    When the credential contains a quote or backslash, ``json.dumps`` escapes
+    them (``"`` -> ``\\"``), so the raw credential substring no longer appears in
+    the serialized form and ``str.replace`` silently misses. Redacting the
+    deserialized object recursively on the raw string values closes the gap.
+    """
+    credential = 'sk-real"key\\backslash'  # haas-secret-ignore - synthetic
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_special",
+                "nested": {"note": f"server recorded {credential} here"},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    tokens = RuntimeTokenManager()
+    proxy = ModelProxy(
+        InMemorySecretResolver({"secret://tenant/provider": credential}),
+        tokens,
+        PolicyController(),
+        client=client,
+    )
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1"))
+    data, _usage = await proxy.proxy_responses(
+        _route(), {"input": "hi"}, authorization=f"Bearer {token}", policy=_policy()
+    )
+    rendered = json.dumps(data)
+    assert credential not in rendered
+    assert "[REDACTED]" in rendered
+
+
+async def test_stream_relay_redacts_credential_with_json_special_chars() -> None:
+    """Stream relay must redact before re-serializing, not string-replace after."""
+    credential = 'sk-real"key\\backslash'  # haas-secret-ignore - synthetic
+    payload = {
+        "type": "response.output_text.delta",
+        "delta": f"echoed {credential} back",
+    }
+    # Build a valid SSE frame via json.dumps so the quote/backslash are escaped
+    # on the wire (as a real provider would emit).
+    frame = "data: " + json.dumps(payload, separators=(",", ":")) + "\n\n"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=frame, headers={"content-type": "text/event-stream"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    tokens = RuntimeTokenManager()
+    proxy = ModelProxy(
+        InMemorySecretResolver({"secret://tenant/provider": credential}),
+        tokens,
+        PolicyController(),
+        client=client,
+    )
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1"))
+    response = await proxy.stream_responses(
+        _route(), {"input": "hi"}, authorization=f"Bearer {token}", policy=_policy()
+    )
+    chunks = [chunk async for chunk in proxy.relay_stream(response)]
+    rendered = "".join(chunks)
+    assert credential not in rendered
+    assert "[REDACTED]" in rendered
+
+
 async def test_empty_authorization_is_rejected() -> None:
     proxy, _ = _proxy(lambda _r: httpx.Response(200, json={}))
     with pytest.raises(ModelProxyError):
@@ -122,6 +194,147 @@ async def test_usage_absent_is_tolerated() -> None:
     data, usage = await _call(proxy, tokens)
     assert data == {"output": []}
     assert usage is None
+
+
+# --- audit events (P1-4) ----------------------------------------------------
+
+
+class _RecordingLogger:
+    """Captures StructuredLogger.event calls without writing to stdout."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    def event(self, name: str, fields: dict[str, Any]) -> dict[str, Any]:
+        self.events.append((name, dict(fields)))
+        return {"event": name, **fields}
+
+
+_ALLOWED_AUDIT_FIELDS = {
+    "sessionId",
+    "harnessId",
+    "providerCode",
+    "statusCode",
+    "latencyMs",
+}
+
+
+async def test_auth_failure_emits_audit_event_without_secrets() -> None:
+    """Invalid/expired token -> model_proxy_auth_failed, no credential/body."""
+    logger = _RecordingLogger()
+    tokens = RuntimeTokenManager()
+    proxy = ModelProxy(
+        InMemorySecretResolver({}),
+        tokens,
+        PolicyController(),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={}))
+        ),
+        logger=logger,  # type: ignore[arg-type]
+    )
+    with pytest.raises(ModelProxyError):
+        await proxy.authenticate("Bearer not-a-real-token")
+
+    assert logger.events, "expected an audit event on auth failure"
+    name, fields = logger.events[0]
+    assert name == "model_proxy_auth_failed"
+    # Whitelist: only stable, non-sensitive identifiers may appear.
+    assert set(fields) <= _ALLOWED_AUDIT_FIELDS
+    # Reverse assertions: nothing secret may ever be recorded.
+    for forbidden in (
+        "credential", "token", "authorization", "body", "apiKey", "api_key", "secret"
+    ):
+        assert forbidden not in fields
+
+
+async def test_url_denial_emits_audit_event() -> None:
+    logger = _RecordingLogger()
+    tokens = RuntimeTokenManager()
+    proxy = ModelProxy(
+        InMemorySecretResolver({"secret://tenant/provider": SECRET}),
+        tokens,
+        PolicyController(),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={}))
+        ),
+        logger=logger,  # type: ignore[arg-type]
+    )
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1"))
+    route = ModelRoute(
+        provider="openai-compatible",
+        baseUrl="http://evil.example.com/v1",
+        model="gpt-x",
+        credentialRef="secret://tenant/provider",
+    )
+    deny_policy = PolicyController().compile(
+        PolicyCompileInput(
+            scope=PolicyScope(tenantId="t1"),
+            layers=[
+                PolicyLayer(
+                    "tenant",
+                    network=NetworkPolicy(
+                        defaultAction="deny", allow=["http://127.0.0.1:18080"]
+                    ),
+                )
+            ],
+        )
+    )
+    with pytest.raises(ModelProxyError, match="provider_url_not_allowed"):
+        await proxy.proxy_responses(
+            route, {}, authorization=f"Bearer {token}", policy=deny_policy
+        )
+    assert any(name == "model_proxy_url_denied" for name, _ in logger.events)
+    for _name, fields in logger.events:
+        assert set(fields) <= _ALLOWED_AUDIT_FIELDS
+
+
+async def test_provider_error_emits_audit_event() -> None:
+    logger = _RecordingLogger()
+    tokens = RuntimeTokenManager()
+    proxy = ModelProxy(
+        InMemorySecretResolver({"secret://tenant/provider": SECRET}),
+        tokens,
+        PolicyController(),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(502, json={"error": "x"}))
+        ),
+        logger=logger,  # type: ignore[arg-type]
+    )
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1"))
+    with pytest.raises(ModelProxyError):
+        await proxy.proxy_responses(
+            _route(), {"input": "hi"}, authorization=f"Bearer {token}", policy=_policy()
+        )
+    provider_errors = [f for n, f in logger.events if n == "model_proxy_provider_error"]
+    assert provider_errors
+    assert provider_errors[0]["statusCode"] == 502
+    assert set(provider_errors[0]) <= _ALLOWED_AUDIT_FIELDS
+
+
+async def test_stream_interruption_emits_audit_event() -> None:
+    logger = _RecordingLogger()
+    tokens = RuntimeTokenManager()
+    # 200 + SSE headers, then a malformed (non-object) frame -> relay hits
+    # ValueError mid-stream -> stream-interruption audit event.
+    frame = 'data: []\n\n'
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=frame, headers={"content-type": "text/event-stream"})
+
+    proxy = ModelProxy(
+        InMemorySecretResolver({"secret://tenant/provider": SECRET}),
+        tokens,
+        PolicyController(),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        logger=logger,  # type: ignore[arg-type]
+    )
+    token = tokens.issue(RuntimeTokenScope(sessionId="s_1"))
+    response = await proxy.stream_responses(
+        _route(), {"input": "hi"}, authorization=f"Bearer {token}", policy=_policy()
+    )
+    chunks = [chunk async for chunk in proxy.relay_stream(response)]
+    assert any(name == "model_proxy_stream_interrupted" for name, _ in logger.events)
+    assert any(SECRET not in chunk for chunk in chunks)
 
 
 # --- client lifecycle -------------------------------------------------------

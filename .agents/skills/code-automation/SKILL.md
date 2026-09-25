@@ -84,3 +84,45 @@ Broader gates:
 - <command>: passed|failed|not_run, reason
 Residual risk: <none or explicit>
 ```
+
+## Cross-Layer Data Flow Check
+
+Trigger this check when the changed files span **3 or more HaaS layers**. The HaaS layers are: `api`, `protocol`, `harnesses`, `sessions`, `events`, `policy`, `model_proxy`, `mcp`, `artifacts`, `runtime`, `observability` (plus the GUI surface under `manager/surfaces/gui`).
+
+Identify the touched layers first:
+
+```bash
+git diff --name-only HEAD
+```
+
+Then trace data across layers rather than validating each file in isolation:
+
+- **Read flow** — storage / persistence → service → API → UI. Confirm the value that lands in the UI actually originates where you think, and that no layer silently drops, renames, or reinterprets a field.
+- **Write flow** — UI → API → service → storage. Confirm a user action persists through every layer, including idempotency and error paths.
+- **Type/schema continuity** — confirm the same type or schema passes between layers. A dict re-shapen in `api/` that no longer matches the `protocol/` model is a defect even if every file type-checks individually.
+- **Error propagation** — confirm errors reach the caller as structured objects (status, error code, message), not swallowed exceptions or generic 500s. A layer that catches and returns `None` without propagating breaks recovery semantics.
+
+If the change spans fewer than 3 layers, note that and skip the deep trace.
+
+## Spec Sync Check
+
+When a behavior contract changes, confirm the component contract does not drift from the implementation:
+
+- If the change alters an interface, event, error code, state transition, header, session/response ID, or artifact URL, confirm the matching `specs/<component>/README.md` is updated. Root `AGENTS.md` rule "文档不能漂移" makes this mandatory: README, OpenAPI/schema, implementation, and tests must not tell four different stories.
+- Compare the changed files against the relevant spec and confirm the spec's接口/事件/错误码/状态迁移 still match the code.
+- When you discover a non-obvious pattern, edge case, or hard-won lesson during the change, ask whether the relevant spec should capture it — surface the question rather than silently absorbing it into code comments.
+- This skill does not author specs (that is `requirement-spec` / `spec-coding`); it only verifies that existing specs stay in sync.
+
+## Code Reuse Check
+
+Before adding a new utility function, hook, or constant:
+
+- Search for existing similar code first:
+
+  ```bash
+  grep -rn "pattern" haas/ manager/
+  ```
+
+- If the same value or helper is defined in 2 or more places, extract it to a shared module/constant instead of adding a third copy.
+- After a batch change (renaming, moving, replacing a value), confirm every occurrence was updated: re-run the grep for the old pattern and confirm zero hits.
+- Prefer using an existing component, hook, helper, or state shape before introducing a new abstraction (see also `react-typescript-kit` rule 3).

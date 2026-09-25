@@ -151,6 +151,7 @@ Sandbox Runtime projects one policy contract into Lite Docker or OpenSandbox AIO
 | P1 | Startup | `specs/startup/README.md` | nginx front door, sidecar readiness, Codex Unix socket handshake probe, startup DAG, asynchronous warmup, and latency budget |
 | P1 | Observability | `specs/observability/README.md` | Logs, metrics, traces, diagnostics, and conformance evidence |
 | P1 | Implementation Roadmap | `specs/implementation-roadmap/README.md` | Subsequent implementation stages, dependencies, exit evidence, and risk convergence |
+| P1 | Agent Skills | `specs/agent-skills/README.md` | Repository-local `.agents/skills/` inventory, quality contract, provenance tracking, multi-tool compatibility, and Tauri/Rust + Python/FastAPI skill adoption |
 
 ## 5. Standard Structure for a Component Spec
 

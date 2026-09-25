@@ -512,6 +512,72 @@ async def test_rpc_send_failure_marks_disconnected() -> None:
     assert adapter._rpc.connected is False
 
 
+async def test_start_turn_maps_native_invalid_params_to_config_error() -> None:
+    """A native thread/start JSON-RPC error (-32602) MUST surface as a structured
+    non-retryable AdapterTurnStartError, not escape as a bare CodexConnectionError."""
+    from haas.harnesses.base import AdapterTurnStartError
+
+    transport = FakeTransport(
+        _default_results(),
+        errors={
+            "thread/start": {
+                "code": -32602,
+                "message": "invalid params: leaked prompt secret",
+            }
+        },
+    )
+    adapter = _adapter_with(transport)
+    req = StartTurnRequest(
+        invocationId="inv_1",
+        sessionId="hsess_1",
+        turnId="turn_1",
+        appName="chrn_1",
+        input=[{"role": "user", "parts": [{"text": "hi"}]}],
+    )
+    with pytest.raises(AdapterTurnStartError) as ei:
+        await adapter.start_turn(req)
+    assert ei.value.code == "haas_adapter_config_error"
+    assert ei.value.retryable is False
+    # raw native message (which may echo prompts/params) must not leak to detail
+    assert "leaked" not in (ei.value.detail or "")
+
+
+async def test_start_turn_maps_native_internal_error_to_unavailable() -> None:
+    from haas.harnesses.base import AdapterTurnStartError
+
+    transport = FakeTransport(
+        _default_results(),
+        errors={"turn/start": {"code": -32603, "message": "internal boom"}},
+    )
+    adapter = _adapter_with(transport)
+    req = StartTurnRequest(
+        invocationId="inv_1",
+        sessionId="hsess_1",
+        turnId="turn_1",
+        appName="chrn_1",
+        input=[{"role": "user", "parts": [{"text": "hi"}]}],
+    )
+    with pytest.raises(AdapterTurnStartError) as ei:
+        await adapter.start_turn(req)
+    assert ei.value.code == "haas_adapter_unavailable"
+    assert ei.value.retryable is True
+    assert "boom" not in (ei.value.detail or "")
+
+
+async def test_jsonrpc_error_preserves_native_code() -> None:
+    from haas.harnesses.codex_app_server.rpc import CodexRPCError
+
+    transport = FakeTransport(
+        _default_results(),
+        errors={"thread/start": {"code": -32602, "message": "bad params"}},
+    )
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    with pytest.raises(CodexRPCError) as ei:
+        await adapter._rpc.request("thread/start", {})
+    assert ei.value.code == -32602
+
+
 async def test_rpc_notify_failure_marks_disconnected() -> None:
     transport = FakeTransport(_default_results())
     adapter = _adapter_with(transport)
@@ -838,10 +904,12 @@ async def test_cancel_falls_back_to_accepted_when_interrupt_fails() -> None:
 
 
 async def test_start_turn_fails_when_thread_start_returns_no_id() -> None:
+    from haas.harnesses.base import AdapterTurnStartError
+
     transport = FakeTransport({**_default_results(), "thread/start": {"thread": {}}})
     adapter = _adapter_with(transport)
     await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
-    with pytest.raises(CodexConnectionError, match="no thread id"):
+    with pytest.raises(AdapterTurnStartError) as ei:
         await adapter.start_turn(
             StartTurnRequest(
                 invocationId="inv_1",
@@ -851,6 +919,8 @@ async def test_start_turn_fails_when_thread_start_returns_no_id() -> None:
                 input=[{"text": "hi"}],
             )
         )
+    # thread/start returned no id is a connection/contract failure, not a leak
+    assert ei.value.code == "haas_adapter_unavailable"
 
 
 async def test_start_turn_recreates_thread_when_not_found() -> None:
@@ -874,11 +944,13 @@ async def test_start_turn_recreates_thread_when_not_found() -> None:
 
 
 async def test_start_turn_propagates_unexpected_resume_error() -> None:
+    from haas.harnesses.base import AdapterTurnStartError
+
     transport = FakeTransport(
         _default_results(), errors={"thread/resume": {"message": "internal explosion"}}
     )
     adapter, _ = await _started(transport)
-    with pytest.raises(CodexConnectionError, match="internal explosion"):
+    with pytest.raises(AdapterTurnStartError) as ei:
         await adapter.start_turn(
             StartTurnRequest(
                 invocationId="inv_2",
@@ -888,6 +960,10 @@ async def test_start_turn_propagates_unexpected_resume_error() -> None:
                 input=[{"text": "again"}],
             )
         )
+    # Non-thread-not-found resume errors surface as a structured rpc error, and
+    # the raw native message ("internal explosion") must not leak to the wire.
+    assert ei.value.code == "haas_codex_rpc_error"
+    assert "explosion" not in (ei.value.detail or "")
 
 
 async def test_start_turn_passes_model_and_sandbox_policy() -> None:
@@ -1090,3 +1166,218 @@ def test_sandbox_declaration_and_capabilities_are_honest() -> None:
     # spec §4: advisory tool restriction must not be advertised as hard block.
     assert caps["toolRestriction"] == "advisory"
     assert caps["mcp"] == "builtin_recall_only"
+
+
+# --- rpc property / connect idempotency / handshake failure / respond -------
+
+
+async def test_rpc_request_timeout_property() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    assert adapter._rpc.request_timeout == 60.0
+
+
+async def test_rpc_connect_early_return_when_already_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+
+    import haas.harnesses.codex_app_server.rpc as rpc_mod
+
+    async def _boom(*_a: Any, **_kw: Any) -> FakeTransport:
+        raise AssertionError("must not reconnect when already connected")
+
+    monkeypatch.setattr(rpc_mod, "connect_endpoint", _boom)
+    await adapter._rpc.connect()  # early-return path, no exception
+
+
+async def test_rpc_handshake_failure_closes_transport() -> None:
+    class _BrokenSend(FakeTransport):
+        async def send(self, message: str) -> None:  # type: ignore[override]
+            raise OSError("send boom")
+
+    transport = _BrokenSend(_default_results())
+    adapter = _adapter_with(transport)
+    with pytest.raises(CodexConnectionError):
+        await adapter._rpc.connect()
+    assert transport.closed is True
+
+
+async def test_rpc_respond_requires_request_id() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    with pytest.raises(CodexConnectionError, match="id is required"):
+        await adapter._rpc.respond(None, {})
+
+
+async def test_rpc_respond_not_ready_before_connect() -> None:
+    rpc = CodexJsonRpc(CodexEndpoint(transport="loopback_websocket", listen_url="ws://127.0.0.1:1"))
+    with pytest.raises(CodexNotReadyError):
+        await rpc.respond(1, {"decision": "accept"})
+
+
+async def test_rpc_respond_send_failure_marks_disconnected() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    transport.send_error = BrokenPipeError("gone")
+    with pytest.raises(CodexConnectionError, match="send response failed"):
+        await adapter._rpc.respond(7, {"decision": "accept"})
+    assert adapter._rpc.connected is False
+
+
+async def test_subscription_replay_window_overflow_is_overloaded() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    rpc = adapter._rpc
+    rpc._notify_queue_size = 1
+    rpc._notification_history = deque([(1, {"n": 1}), (2, {"n": 2})], maxlen=10)
+    gen = rpc._subscription(rpc._notification_history, rpc._notification_subscribers, after=0)
+    with pytest.raises(CodexSubscriberOverloaded):
+        await anext(gen)
+
+
+async def test_reader_websocket_exception_sets_connection_closed_reason() -> None:
+    from websockets.exceptions import WebSocketException
+
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    # Unblock the pending recv once, then make the next recv raise a
+    # WebSocketException (which the inner recv guard does not catch).
+    await transport._inbox.put("{}")
+    transport.recv_error = WebSocketException("frame aborted")
+    async with asyncio.timeout(2):
+        while adapter._rpc.connected:
+            await asyncio.sleep(0)
+    assert (
+        adapter._rpc.connection_failure_reason
+        == "Codex app-server transport connection closed"
+    )
+
+
+# --- small adapter branch coverage -----------------------------------------
+
+
+async def test_disabled_tools_non_list_policy_is_ignored() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_1", sessionId="hsess_1", turnId="turn_1",
+            appName="chrn_1", input=[{"text": "hi"}],
+            instructions="Be helpful.",
+            policy={"tools": {"disabled": "not-a-list"}},
+        )
+    )
+    turn_params = next(m for m in transport.sent if m.get("method") == "turn/start")
+    assert turn_params["params"]["instructions"] == "Be helpful."
+
+
+async def test_inspect_non_resumable_session() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    scope = ("", "", "hsess_1")
+    adapter._non_resumable.add(scope)
+    inspection = await adapter.inspect_session(InspectSessionRequest(sessionId="hsess_1"))
+    assert inspection.status == "non_resumable"
+
+
+async def test_legacy_non_resumable_scope_migrates_on_start_turn() -> None:
+    transport = FakeTransport(_default_results())
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    legacy = ("", "", "hsess_1")
+    adapter._non_resumable.add(legacy)
+    await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_1", sessionId="hsess_1", turnId="turn_1",
+            appName="chrn_1", input=[{"text": "hi"}],
+        )
+    )
+    # legacy scope is migrated (line 564-565) then the fresh thread start
+    # discards it again; the observable effect is the legacy entry is gone.
+    assert legacy not in adapter._non_resumable
+
+
+async def test_turn_start_missing_turn_id_falls_back_to_request_id() -> None:
+    results = _default_results()
+    results["turn/start"] = {"turn": {"id": ""}}
+    transport = FakeTransport(results)
+    adapter = _adapter_with(transport)
+    await adapter.prepare_session(PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1"))
+    handle = await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_1", sessionId="hsess_1", turnId="turn_1",
+            appName="chrn_1", input=[{"text": "hi"}],
+        )
+    )
+    assert handle.opaque["codexTurnId"] == "turn_1"
+
+
+async def test_turn_failed_terminal_carries_provider_error_details() -> None:
+    transport = FakeTransport(_default_results())
+    adapter, handle = await _started(transport)
+    await transport.push(
+        {
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thr_1",
+                "turnId": "codex_turn_1",
+                "turn": {
+                    "id": "codex_turn_1",
+                    "status": "failed",
+                    "error": {
+                        "message": "rate limited api_key=secret",
+                        "codexErrorInfo": "rateLimitExceeded",
+                    },
+                },
+            },
+        }
+    )
+    events = [e async for e in adapter.stream_events(handle)]
+    terminal = events[-1]
+    assert terminal.type == "harness.turn.failed"
+    assert terminal.actions["stateDelta"]["code"] == "haas_rate_limited"
+    assert terminal.actions["stateDelta"]["retryable"] is True
+    result = await adapter.finalize_turn(handle)
+    assert result.status == "failed"
+
+
+def test_mcp_server_overrides_rejects_non_builtin_and_malformed() -> None:
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    base = dict(invocationId="i", sessionId="s", turnId="t", appName="a", input=[])
+
+    # External / wrong-shape servers are all ignored.
+    req = StartTurnRequest(
+        **base,
+        mcpServers=[
+            {"name": "external", "url": "https://x/y", "transport": "http", "haas_builtin": False},
+            {
+                "name": "manager-cowork-recall", "haas_builtin": True,
+                "transport": "stdio",  # not http
+            },
+            {
+                "name": "manager-cowork-recall", "haas_builtin": True,
+                "transport": "http", "url": "https://evil.example/mcp",
+            },
+            {
+                "name": "manager-cowork-recall", "haas_builtin": True,
+                "transport": "http", "url": "http://127.0.0.1:1/x",
+                "headers": "not-a-dict",
+            },
+            {
+                "name": "manager-cowork-recall", "haas_builtin": True,
+                "transport": "http", "url": "http://127.0.0.1:1/x",
+                "headers": {"X-HaaS-Session-ID": "s"},  # missing recall token
+            },
+        ],
+    )
+    assert adapter._mcp_server_overrides(req) == {}

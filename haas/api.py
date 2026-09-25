@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
@@ -16,8 +17,10 @@ from math import isfinite
 from typing import Annotated, Any, cast
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.sse import EventSourceResponse, format_sse_event
+from pydantic import BaseModel, Field
 
 from haas.admission import AdmissionControl, AdmissionInput
 from haas.artifacts import (
@@ -94,6 +97,16 @@ from haas.stores import (
 
 SSE_HEARTBEAT_SECONDS = 15.0
 
+# Bounded per-subscriber delivery queue (specs/event-log-sse §bounded queue).
+# Shrinkable in tests to exercise the backpressure path deterministically;
+# overridable via HAAS_SSE_QUEUE_MAXSIZE for benchmarks / high-throughput paths.
+SSE_QUEUE_MAXSIZE = int(os.getenv("HAAS_SSE_QUEUE_MAXSIZE", "256"))
+SSE_RETRY_MS = 15000
+
+
+def _sse_structured_frames_enabled() -> bool:
+    return os.getenv("HAAS_SSE_STRUCTURED_FRAMES", "1") != "0"
+
 DEFAULT_TOKEN = "dev-token"
 
 
@@ -155,6 +168,41 @@ def _hash(value: str) -> str:
 
 def _trace_id() -> str:
     return f"tr_{uuid.uuid4().hex[:16]}"
+
+
+def _adk_event_frame(adk_event: dict[str, Any], *, structured: bool) -> bytes:
+    """Serialize one ADK event to an SSE wire frame.
+
+    Structured frames (specs/event-log-sse) carry the session-scoped `eventId`
+    as an `id:` line so clients can track replay position and a `retry:` hint.
+    Legacy frames keep the historical `data:`-only shape for the off flag.
+    """
+    payload = json.dumps(adk_event, separators=(",", ":"))
+    if not structured:
+        return f"data: {payload}\n\n".encode()
+    return format_sse_event(
+        data_str=payload,
+        id=str(adk_event.get("id")),
+        retry=SSE_RETRY_MS,
+    )
+
+
+def _sse_heartbeat_frame(*, structured: bool) -> bytes:
+    frame = ": keep-alive\n\n"
+    if not structured:
+        return frame.encode("utf-8")
+    return format_sse_event(comment="keep-alive")
+
+
+def _sse_backpressure_frame(last_event_id: str | None) -> bytes:
+    return format_sse_event(
+        data_str=json.dumps(
+            {"code": "haas_sse_backpressure", "lastEventId": last_event_id},
+            separators=(",", ":"),
+        ),
+        event="error",
+        id=last_event_id,
+    )
 
 
 def _deep_merge(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
@@ -361,7 +409,7 @@ def _delegated_session_matches_body(record: DelegatedSessionRecord, body: dict[s
         and record.workspaceMode == body.get("workspaceMode", "bind_mount")
         and record.mountManifest == body.get("mountManifest")
         and record.delegationPolicySnapshot
-        == (body.get("delegationPolicySnapshot") or record.delegationPolicySnapshot)
+        == body.get("delegationPolicySnapshot", record.delegationPolicySnapshot)
     )
 
 
@@ -371,7 +419,7 @@ def _validate_profile_ref(profile_ref: Any) -> None:
     if (
         not isinstance(profile_ref.get("profileId"), str)
         or not profile_ref["profileId"]
-        or not isinstance(profile_ref.get("profileVersion"), int)
+        or type(profile_ref.get("profileVersion")) is not int
         or profile_ref["profileVersion"] < 1
         or not isinstance(profile_ref.get("profileFingerprint"), str)
         or not profile_ref["profileFingerprint"]
@@ -500,6 +548,53 @@ class _Runtime:
     execution_evidence: ExecutionEvidenceStore
 
 
+class _ProviderView(BaseModel):
+    """Public provider surface. credentialRef/fingerprint are references
+    (specs/harness-registry section 8); raw material (apiKey, secret, token) is
+    intentionally not declared and is stripped by the response_model filter."""
+
+    providerId: str
+    name: str
+    baseUrl: str
+    wireApi: str
+    apiType: str
+    credentialRef: str
+    credentialFingerprint: str | None = None
+    allowlistRuleId: str | None = None
+
+
+class HarnessView(BaseModel):
+    id: str
+    object: str = "harness"
+    name: str
+    base: str
+    baseLabel: str = ""
+    defaultModel: str = ""
+    systemPrompt: str | None = None
+    mcpServers: list[Any] = Field(default_factory=list)
+    skills: list[Any] = Field(default_factory=list)
+    disabledTools: list[Any] = Field(default_factory=list)
+    provider: _ProviderView | None = None
+    maxStep: int | None = None
+    timeoutSeconds: float | None = None
+    createdAtMs: int = 0
+    updatedAtMs: int = 0
+
+
+class HarnessEnvelope(BaseModel):
+    data: HarnessView
+    traceId: str
+
+
+class HarnessListData(BaseModel):
+    harnesses: list[HarnessView]
+
+
+class HarnessListEnvelope(BaseModel):
+    data: HarnessListData
+    traceId: str
+
+
 def build_app(
     config: AppConfig | None = None,
     *,
@@ -585,15 +680,29 @@ def build_app(
     app.state.haas_config = config
     app.state.runtime = runtime
 
+    @app.middleware("http")
+    async def _request_trace_id(request: Request, call_next):  # type: ignore[no-untyped-def]
+        # One traceId per request, shared by the response header, error body and
+        # internal logs (specs/observability request-scoped traceId).
+        request.state.trace_id = _trace_id()
+        response = await call_next(request)
+        response.headers["X-Trace-Id"] = request.state.trace_id
+        return response
+
     @app.exception_handler(HaasError)
     async def haas_error_handler(request: Request, exc: HaasError) -> JSONResponse:
         evidence_error = exc.code in {
             "haas_execution_evidence_not_found",
             "haas_execution_evidence_expired",
         }
+        content = _haas_error_content(exc)
+        # Correlate the error body with the request-scoped trace id.
+        content["haasError"]["traceId"] = (
+            getattr(request.state, "trace_id", None) or content["haasError"]["traceId"]
+        )
         return JSONResponse(
             status_code=exc.status_code,
-            content=_haas_error_content(exc),
+            content=content,
             headers=(
                 {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
                 if evidence_error else None
@@ -601,8 +710,11 @@ def build_app(
         )
 
     @app.get("/v1/haas/health")
-    async def health() -> dict[str, Any]:
-        return {"data": {"status": "ok"}, "traceId": "tr_local"}
+    async def health(request: Request) -> dict[str, Any]:
+        return {
+            "data": {"status": "ok"},
+            "traceId": getattr(request.state, "trace_id", _trace_id()),
+        }
 
     probe_cache: dict[str, Any] = {"result": None, "at": 0.0}
 
@@ -622,7 +734,11 @@ def build_app(
                 )
             except Exception as exc:  # noqa: BLE001 - readiness must not raise
                 probe_cache["result"] = None
-                return "not_ready", str(exc)
+                # secretless hard boundary: str(exc) may contain the provider
+                # baseUrl, socket path, or upstream connection details. It must
+                # only reach the internal (redacting) logger, never the 503 body.
+                runtime.logger.event("haas.adapter.probe_failed", {"error": str(exc)})
+                return "not_ready", "adapter_probe_failed"
             probe_cache["at"] = now
         probe = probe_cache["result"]
         if probe is not None and getattr(probe, "status", "") == "ready":
@@ -634,11 +750,12 @@ def build_app(
         return "not_ready", reason
 
     @app.get("/v1/haas/ready")
-    async def ready(scope: str = "control") -> dict[str, Any]:
+    async def ready(request: Request, scope: str = "control") -> dict[str, Any]:
+        trace_id = getattr(request.state, "trace_id", _trace_id())
         if scope == "control":
             return {
                 "data": {"status": "ready", "scope": scope},
-                "traceId": "tr_local",
+                "traceId": trace_id,
             }
         if scope == "execution":
             status, reason = await _execution_ready()
@@ -651,19 +768,18 @@ def build_app(
                     retryable=True,
                 )
             payload: dict[str, Any] = {"status": status, "scope": scope}
-            return {"data": payload, "traceId": "tr_local"}
+            return {"data": payload, "traceId": trace_id}
         return {
             "data": {"status": "not_ready", "scope": scope, "reason": "unknown_scope"},
-            "traceId": "tr_local",
+            "traceId": trace_id,
         }
 
     @app.get("/health")
-    async def health_alias() -> dict[str, Any]:
-        return await health()
+    async def health_alias(request: Request) -> dict[str, Any]:
+        return await health(request)
 
     @app.get("/v1/haas/capabilities")
-    async def capabilities(request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def capabilities(request: Request, principal: PrincipalDep) -> dict[str, Any]:
         records = runtime.registry.list_active(principal)
         await _execution_ready()
         probe = probe_cache["result"]
@@ -763,12 +879,11 @@ def build_app(
         }
 
     @app.get("/ready")
-    async def ready_alias(scope: str = "control") -> dict[str, Any]:
-        return await ready(scope)
+    async def ready_alias(request: Request, scope: str = "control") -> dict[str, Any]:
+        return await ready(request, scope)
 
     @app.get("/list-apps")
-    async def list_apps(request: Request) -> list[str]:
-        principal = await _authenticate(runtime.identity, request)
+    async def list_apps(request: Request, principal: PrincipalDep) -> list[str]:
         return runtime.registry.list_apps(principal)
 
     @app.post("/run")
@@ -781,18 +896,16 @@ def build_app(
 
     @app.get("/v1/haas/sessions/{session_id}/invocations/{invocation_id}")
     async def get_invocation(
-        session_id: str, invocation_id: str, request: Request
+        session_id: str, invocation_id: str, request: Request, principal: PrincipalDep
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         invocation = _resolve_visible_invocation(runtime, principal, session_id, invocation_id)
         invocation = runtime.sessions.reconcile_invocation_readback(session_id, invocation.id)
         return _invocation_envelope(runtime, invocation)
 
     @app.get("/apps/{app_name}/users/{user_id}/sessions/{session_id}")
     async def get_session(
-        app_name: str, user_id: str, session_id: str, request: Request
+        app_name: str, user_id: str, session_id: str, request: Request, principal: PrincipalDep
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         _ensure_owns(runtime.identity, principal, user_id)
         try:
             session = runtime.sessions.get_session(app_name, user_id, session_id)
@@ -802,9 +915,8 @@ def build_app(
 
     @app.patch("/apps/{app_name}/users/{user_id}/sessions/{session_id}")
     async def patch_session(
-        app_name: str, user_id: str, session_id: str, request: Request
+        app_name: str, user_id: str, session_id: str, request: Request, principal: PrincipalDep
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         _ensure_owns(runtime.identity, principal, user_id)
         body = await request.json()
         if not isinstance(body, dict):
@@ -826,9 +938,8 @@ def build_app(
 
     @app.delete("/apps/{app_name}/users/{user_id}/sessions/{session_id}")
     async def delete_session(
-        app_name: str, user_id: str, session_id: str, request: Request
+        app_name: str, user_id: str, session_id: str, request: Request, principal: PrincipalDep
     ) -> JSONResponse:
-        principal = await _authenticate(runtime.identity, request)
         _ensure_owns(runtime.identity, principal, user_id)
         try:
             delegated = runtime.store.get_delegated_session_by_haas_session(session_id)
@@ -850,9 +961,8 @@ def build_app(
 
     @app.post("/v1/haas/sessions/{session_id}/invocations/{invocation_id}/cancel")
     async def cancel_invocation(
-        session_id: str, invocation_id: str, request: Request
+        session_id: str, invocation_id: str, request: Request, principal: PrincipalDep
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         invocation = _resolve_visible_invocation(
             runtime, principal, session_id, invocation_id
         )
@@ -905,9 +1015,8 @@ def build_app(
 
     @app.post("/v1/haas/sessions/{session_id}/invocations/{invocation_id}/pause")
     async def pause_invocation(
-        session_id: str, invocation_id: str, request: Request
+        session_id: str, invocation_id: str, request: Request, principal: PrincipalDep
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         _resolve_visible_invocation(runtime, principal, session_id, invocation_id)
         key_hash, replay = await _reserve_mutation(runtime.store, request, {}, principal)
         if replay is not None:
@@ -941,9 +1050,8 @@ def build_app(
 
     @app.post("/v1/haas/sessions/{session_id}/invocations/{invocation_id}/continue")
     async def continue_invocation(
-        session_id: str, invocation_id: str, request: Request
+        session_id: str, invocation_id: str, request: Request, principal: PrincipalDep
     ) -> StreamingResponse:
-        principal = await _authenticate(runtime.identity, request)
         _resolve_visible_invocation(runtime, principal, session_id, invocation_id)
         body = await _json_object(request)
         instruction = body.get("additionalInstruction")
@@ -1019,8 +1127,9 @@ def build_app(
         return StreamingResponse(frames(), media_type="text/event-stream", headers=headers)
 
     @app.post("/v1/haas/sessions/{session_id}/policy")
-    async def update_session_policy(session_id: str, request: Request) -> Response:
-        principal = await _authenticate(runtime.identity, request)
+    async def update_session_policy(
+        session_id: str, request: Request, principal: PrincipalDep
+    ) -> Response:
         body = await _json_object(request)
         if not request.headers.get("Idempotency-Key"):
             raise HaasError(400, "invalid_request_error", "invalid_input")
@@ -1065,9 +1174,8 @@ def build_app(
 
     @app.post("/v1/haas/sessions/{session_id}/approvals/{approval_id}")
     async def resolve_approval(
-        session_id: str, approval_id: str, request: Request
+        session_id: str, approval_id: str, request: Request, principal: PrincipalDep
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         body = await _json_object(request)
         key_hash, replay = await _reserve_mutation(runtime.store, request, body, principal)
         if replay is not None:
@@ -1135,9 +1243,8 @@ def build_app(
 
     @app.get("/v1/haas/sessions/{session_id}/approvals")
     async def list_approvals(
-        session_id: str, request: Request, status: str = "waiting"
+        session_id: str, request: Request, principal: PrincipalDep, status: str = "waiting"
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         _resolve_visible_session(runtime, principal, session_id)
         runtime.store.reconcile_pending_interactions(session_id)
         return {
@@ -1150,9 +1257,8 @@ def build_app(
 
     @app.get("/v1/haas/sessions/{session_id}/input-requests")
     async def list_input_requests(
-        session_id: str, request: Request, status: str = "waiting"
+        session_id: str, request: Request, principal: PrincipalDep, status: str = "waiting"
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         _resolve_visible_session(runtime, principal, session_id)
         runtime.store.reconcile_pending_interactions(session_id)
         return {
@@ -1165,9 +1271,8 @@ def build_app(
 
     @app.post("/v1/haas/sessions/{session_id}/input-requests/{input_request_id}")
     async def answer_input_request(
-        session_id: str, input_request_id: str, request: Request
+        session_id: str, input_request_id: str, request: Request, principal: PrincipalDep
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         _resolve_visible_session(runtime, principal, session_id)
         body = await _json_object(request)
         key_hash, replay = await _reserve_mutation(runtime.store, request, body, principal)
@@ -1246,9 +1351,11 @@ def build_app(
 
     @app.get("/v1/haas/sessions/{session_id}/events")
     async def session_events(
-        session_id: str, request: Request, after_event_id: str | None = None
+        session_id: str,
+        request: Request,
+        principal: PrincipalDep,
+        after_event_id: str | None = None,
     ) -> StreamingResponse:
-        principal = await _authenticate(runtime.identity, request)
         session = _resolve_visible_session(runtime, principal, session_id)
         try:
             events = runtime.event_log.read_session(
@@ -1267,11 +1374,10 @@ def build_app(
     @app.get("/v1/haas/sessions/{session_id}/events-page")
     async def session_events_page(
         session_id: str,
-        request: Request,
+        request: Request, principal: PrincipalDep,
         after_event_id: str | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         if limit < 1 or limit > 1000:
             raise HaasError(400, "invalid_request_error", "invalid_input")
         session = _resolve_visible_session(runtime, principal, session_id)
@@ -1290,9 +1396,8 @@ def build_app(
 
     @app.get("/v1/haas/sessions/{session_id}/invocations/{invocation_id}/events")
     async def invocation_events(
-        session_id: str, invocation_id: str, request: Request
+        session_id: str, invocation_id: str, request: Request, principal: PrincipalDep
     ) -> StreamingResponse:
-        principal = await _authenticate(runtime.identity, request)
         invocation = _resolve_visible_invocation(runtime, principal, session_id, invocation_id)
         events = runtime.event_log.read_invocation(
             invocation.appName, invocation.userId, invocation.sessionId, invocation_id
@@ -1313,9 +1418,8 @@ def build_app(
         invocation_id: str,
         tool_call_id: str,
         evidence_ref: str,
-        request: Request,
+        request: Request, principal: PrincipalDep,
     ) -> JSONResponse:
-        principal = await _authenticate(runtime.identity, request)
         invocation = _resolve_visible_invocation(runtime, principal, session_id, invocation_id)
         record = runtime.execution_evidence.get(evidence_ref)
         if (
@@ -1347,8 +1451,7 @@ def build_app(
     started_at = time.monotonic()
 
     @app.get("/v1/haas/status")
-    async def status(request: Request) -> dict[str, Any]:
-        await _authenticate(runtime.identity, request)
+    async def status(request: Request, principal: PrincipalDep) -> dict[str, Any]:
         exec_status, exec_reason = await _execution_ready()
         snapshot = StatusSnapshot(
             status="ok" if exec_status == "ready" else "degraded",
@@ -1374,8 +1477,7 @@ def build_app(
         return {"data": data, "traceId": f"tr_{uuid.uuid4().hex[:16]}"}
 
     @app.get("/v1/haas/diagnostics")
-    async def diagnostics(request: Request) -> dict[str, Any]:
-        await _authenticate(runtime.identity, request)
+    async def diagnostics(request: Request, principal: PrincipalDep) -> dict[str, Any]:
         # Diagnostics are routed through the structured logger so the shared
         # redaction table applies before anything leaves the process.
         payload = runtime.logger.event(
@@ -1397,11 +1499,10 @@ def build_app(
 
     @app.post("/v1/haas/files")
     async def upload_file(
-        request: Request,
+        request: Request, principal: PrincipalDep,
         file: Annotated[UploadFile, File()],
         purpose: str = "user_data",
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         content = await file.read()
         policy = runtime.artifacts.policy
         if len(content) > policy.maxFileBytes:
@@ -1425,8 +1526,7 @@ def build_app(
         return {"data": record.to_dict(), "traceId": f"tr_{uuid.uuid4().hex[:16]}"}
 
     @app.get("/v1/haas/files/{file_id}/content")
-    async def download_file(file_id: str, request: Request) -> Response:
-        principal = await _authenticate(runtime.identity, request)
+    async def download_file(file_id: str, request: Request, principal: PrincipalDep) -> Response:
         try:
             record = runtime.artifacts.get(file_id, owner_principal_id=principal.principalId)
             content = runtime.artifacts.read_content(
@@ -1448,8 +1548,7 @@ def build_app(
         )
 
     @app.get("/v1/haas/files/{file_id}/pdf")
-    async def preview_file_pdf(file_id: str, request: Request) -> Response:
-        principal = await _authenticate(runtime.identity, request)
+    async def preview_file_pdf(file_id: str, request: Request, principal: PrincipalDep) -> Response:
         try:
             runtime.artifacts.get(file_id, owner_principal_id=principal.principalId)
         except ArtifactNotFoundError as exc:
@@ -1457,8 +1556,9 @@ def build_app(
         raise HaasError(501, "invalid_request_error", "haas_preview_unavailable")
 
     @app.get("/v1/haas/sessions/{session_id}/artifacts")
-    async def list_session_artifacts(session_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def list_session_artifacts(
+        session_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         session = _resolve_visible_session(runtime, principal, session_id)
         records = runtime.artifacts.list(
             session_id,
@@ -1472,8 +1572,9 @@ def build_app(
         }
 
     @app.get("/v1/haas/sessions/{session_id}/artifacts/archive")
-    async def download_session_archive(session_id: str, request: Request) -> Response:
-        principal = await _authenticate(runtime.identity, request)
+    async def download_session_archive(
+        session_id: str, request: Request, principal: PrincipalDep
+    ) -> Response:
         session = _resolve_visible_session(runtime, principal, session_id)
         records = runtime.artifacts.list(
             session_id,
@@ -1521,9 +1622,8 @@ def build_app(
     async def _harness_body(request: Request) -> dict[str, Any]:
         return await _json_object(request)
 
-    @app.get("/v1/haas/harnesses")
-    async def list_harnesses(request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    @app.get("/v1/haas/harnesses", response_model=HarnessListEnvelope)
+    async def list_harnesses(request: Request, principal: PrincipalDep) -> dict[str, Any]:
         records = runtime.registry.list_active(principal)
         return {
             "data": {"harnesses": [harness_to_dict(r) for r in records]},
@@ -1531,8 +1631,7 @@ def build_app(
         }
 
     @app.post("/v1/haas/harnesses")
-    async def create_harness(request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def create_harness(request: Request, principal: PrincipalDep) -> dict[str, Any]:
         body = await _harness_body(request)
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -1576,9 +1675,10 @@ def build_app(
             runtime.store.complete(key_hash, envelope)
         return envelope
 
-    @app.get("/v1/haas/harnesses/{harness_id}")
-    async def get_harness(harness_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    @app.get("/v1/haas/harnesses/{harness_id}", response_model=HarnessEnvelope)
+    async def get_harness(
+        harness_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         try:
             record = runtime.registry.get_scoped(principal, harness_id)
         except HarnessNotFoundError as exc:
@@ -1586,8 +1686,9 @@ def build_app(
         return _harness_envelope(record)
 
     @app.put("/v1/haas/harnesses/{harness_id}")
-    async def update_harness(harness_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def update_harness(
+        harness_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         body = await _harness_body(request)
         try:
             record = runtime.registry.update(principal, harness_id, body)
@@ -1607,8 +1708,9 @@ def build_app(
         return _harness_envelope(record)
 
     @app.delete("/v1/haas/harnesses/{harness_id}")
-    async def delete_harness(harness_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def delete_harness(
+        harness_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         try:
             runtime.registry.delete(principal, harness_id)
         except HarnessNotFoundError as exc:
@@ -1617,8 +1719,7 @@ def build_app(
         return {"data": {"deleted": True}, "traceId": f"tr_{uuid.uuid4().hex[:16]}"}
 
     @app.get("/v1/haas/models")
-    async def list_models(request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def list_models(request: Request, principal: PrincipalDep) -> dict[str, Any]:
         backends: dict[str, Any] = {}
         for record in runtime.registry.list_active(principal):
             entry = backends.setdefault(
@@ -1641,13 +1742,12 @@ def build_app(
 
     @app.get("/v1/haas/profiles")
     async def list_profiles(
-        request: Request,
+        request: Request, principal: PrincipalDep,
         harnessId: str | None = None,
         status: str | None = None,
         limit: int = 20,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         if limit < 1 or limit > 100 or cursor is not None:
             raise HaasError(400, "invalid_request_error", "invalid_input")
         try:
@@ -1661,8 +1761,7 @@ def build_app(
         }
 
     @app.post("/v1/haas/profiles")
-    async def create_profile(request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def create_profile(request: Request, principal: PrincipalDep) -> dict[str, Any]:
         body = await _json_object(request)
         idempotency_key = request.headers.get("Idempotency-Key")
         key_hash: str | None = None
@@ -1697,16 +1796,18 @@ def build_app(
         return envelope
 
     @app.get("/v1/haas/profiles/{profile_id}")
-    async def get_profile(profile_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def get_profile(
+        profile_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         try:
             return _profile_envelope(runtime.profiles.get(principal, profile_id))
         except ProfileNotFoundError as exc:
             raise HaasError(404, "invalid_request_error", "haas_profile_not_found") from exc
 
     @app.put("/v1/haas/profiles/{profile_id}")
-    async def update_profile(profile_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def update_profile(
+        profile_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         body = await _json_object(request)
         try:
             return _profile_envelope(runtime.profiles.update(principal, profile_id, body))
@@ -1718,8 +1819,9 @@ def build_app(
             raise HaasError(422, "invalid_request_error", "invalid_input") from exc
 
     @app.post("/v1/haas/profiles/{profile_id}/validate")
-    async def validate_profile(profile_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def validate_profile(
+        profile_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         try:
             validation = runtime.profiles.validate(principal, profile_id)
         except ProfileNotFoundError as exc:
@@ -1727,8 +1829,9 @@ def build_app(
         return {"data": validation, "traceId": _trace_id()}
 
     @app.post("/v1/haas/profiles/{profile_id}/activate")
-    async def activate_profile(profile_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def activate_profile(
+        profile_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         try:
             return _profile_envelope(runtime.profiles.activate(principal, profile_id))
         except ProfileNotFoundError as exc:
@@ -1737,8 +1840,7 @@ def build_app(
             raise HaasError(409, "invalid_request_error", "haas_profile_conflict") from exc
 
     @app.post("/v1/haas/delegated-sessions")
-    async def create_delegated_session(request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def create_delegated_session(request: Request, principal: PrincipalDep) -> dict[str, Any]:
         body = await _json_object(request)
         idempotency_key = request.headers.get("Idempotency-Key")
         key_hash: str | None = None
@@ -1825,8 +1927,9 @@ def build_app(
         return envelope
 
     @app.get("/v1/haas/delegated-sessions/{delegated_session_id}")
-    async def get_delegated_session(delegated_session_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def get_delegated_session(
+        delegated_session_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         record = runtime.store.get_delegated_session(delegated_session_id)
         if record is None:
             raise HaasError(404, "invalid_request_error", "haas_delegated_session_not_found")
@@ -1835,9 +1938,8 @@ def build_app(
 
     @app.post("/v1/haas/delegated-sessions/{delegated_session_id}/restore")
     async def restore_delegated_session(
-        delegated_session_id: str, request: Request
+        delegated_session_id: str, request: Request, principal: PrincipalDep
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         if request.headers.get("content-length") not in {None, "0"}:
             await _json_object(request)
         record = runtime.store.get_delegated_session(delegated_session_id)
@@ -1915,9 +2017,8 @@ def build_app(
 
     @app.post("/v1/haas/delegated-sessions/{delegated_session_id}/policy")
     async def update_delegated_session_policy(
-        delegated_session_id: str, request: Request
+        delegated_session_id: str, request: Request, principal: PrincipalDep
     ) -> Response:
-        principal = await _authenticate(runtime.identity, request)
         body = await _json_object(request)
         idempotency_key = request.headers.get("Idempotency-Key")
         key_hash: str | None = None
@@ -2075,8 +2176,9 @@ def build_app(
         return JSONResponse(status_code=status, content=envelope)
 
     @app.get("/v1/haas/sessions/{session_id}/profile")
-    async def get_session_profile(session_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def get_session_profile(
+        session_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         delegated = runtime.store.get_delegated_session_by_haas_session(session_id)
         if delegated is not None:
             try:
@@ -2111,8 +2213,9 @@ def build_app(
         }
 
     @app.post("/v1/haas/sessions/{session_id}/profile-rebind")
-    async def rebind_session_profile(session_id: str, request: Request) -> Response:
-        principal = await _authenticate(runtime.identity, request)
+    async def rebind_session_profile(
+        session_id: str, request: Request, principal: PrincipalDep
+    ) -> Response:
         delegated = runtime.store.get_delegated_session_by_haas_session(session_id)
         if delegated is not None:
             _ensure_delegated_access(runtime, principal, delegated)
@@ -2204,8 +2307,9 @@ def build_app(
             runtime.store.release_lease(key, holder, lease.token)
 
     @app.get("/v1/haas/harnesses/{harness_id}/skills/{skill_id}/files")
-    async def list_skill_files(harness_id: str, skill_id: str, request: Request) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
+    async def list_skill_files(
+        harness_id: str, skill_id: str, request: Request, principal: PrincipalDep
+    ) -> dict[str, Any]:
         try:
             record = runtime.registry.get_scoped(principal, harness_id)
         except HarnessNotFoundError as exc:
@@ -2224,12 +2328,11 @@ def build_app(
 
     @app.get("/v1/haas/sessions")
     async def list_sessions(
-        request: Request,
+        request: Request, principal: PrincipalDep,
         limit: int = 20,
         cursor: str | None = None,
         app: str | None = None,
     ) -> dict[str, Any]:
-        principal = await _authenticate(runtime.identity, request)
         if limit < 1 or limit > 100:
             raise HaasError(400, "invalid_request_error", "invalid_input")
 
@@ -2283,6 +2386,52 @@ async def _authenticate(identity: IdentityProvider, request: Request) -> Princip
 def _ensure_owns(identity: IdentityProvider, principal: Principal, user_id: str) -> None:
     if not identity.owns(principal, user_id=user_id):
         raise HaasError(404, "invalid_request_error", "session_not_found")
+
+
+_SESSION_BUSY_POLICY_PENDING = "configuration_update_pending"
+
+
+def _session_busy_reason(exc: SessionBusyError) -> str:
+    """Map a SessionBusyError to a stable safe_reason code.
+
+    The sessions layer raises ``SessionBusyError("configuration_update_pending")``
+    for a pending policy revision and ``SessionBusyError(session_id)`` for an
+    ordinary concurrent run. Prefer a structured ``.reason`` attribute when the
+    sessions layer provides one; fall back to the documented sentinel message
+    instead of scattering string-equality checks across the run paths.
+    """
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, str) and reason:
+        return reason
+    if str(exc) == _SESSION_BUSY_POLICY_PENDING:
+        return _SESSION_BUSY_POLICY_PENDING
+    return "session_busy"
+
+
+async def get_principal(request: Request) -> Principal:
+    # Dependency-injected authentication (P1-1 Stage 1). Module-level so the
+    # Annotated alias is resolvable under `from __future__ import annotations`
+    # (FastAPI resolves route annotations via module globals). The runtime is
+    # attached to `app.state` in build_app. Replaces the per- route
+    # `principal = await _authenticate(...)` boilerplate so a route cannot
+    # silently forget auth. The module-level `_authenticate` remains for the
+    # non-route shared helpers (`_run` / `_run_delegated`).
+    runtime: _Runtime = request.app.state.runtime
+    authorization = request.headers.get("Authorization")
+    try:
+        return await runtime.identity.authenticate(authorization)
+    except MissingCredentialError as exc:
+        raise HaasError(401, "invalid_request_error", "missing_credential") from exc
+    except InvalidCredentialError as exc:
+        raise HaasError(401, "invalid_request_error", "invalid_credential") from exc
+
+
+async def get_runtime(request: Request) -> _Runtime:
+    return cast(_Runtime, request.app.state.runtime)
+
+
+PrincipalDep = Annotated[Principal, Depends(get_principal)]
+RuntimeDep = Annotated[_Runtime, Depends(get_runtime)]
 
 
 def _resolve_visible_session(
@@ -2420,7 +2569,6 @@ def _validate_local_materialization(runtime: _Runtime, effective: dict[str, Any]
 
 
 async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
-    principal = await _authenticate(runtime.identity, request)
     body = await request.json()
     if not isinstance(body, dict):
         raise HaasError(400, "invalid_request_error", "invalid_input")
@@ -2453,6 +2601,7 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             safe_reason="invalid_timeout_seconds",
         ) from exc
 
+    principal = await _authenticate(runtime.identity, request)
     _ensure_owns(runtime.identity, principal, user_id)
 
     try:
@@ -2460,25 +2609,33 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
     except AppNotFoundError as exc:
         raise HaasError(404, "invalid_request_error", "app_not_found") from exc
 
-    last_event_id = request.headers.get("Last-Event-ID")
-    if last_event_id is not None:
+    after_event_id = request.headers.get("Last-Event-ID") or request.query_params.get(
+        "after_event_id"
+    )
+    if after_event_id is not None:
         if not streaming or not isinstance(session_id, str):
             raise HaasError(400, "invalid_request_error", "invalid_input")
+        structured = _sse_structured_frames_enabled()
         try:
-            remaining = runtime.event_log.read_session(app.id, user_id, session_id, last_event_id)
+            remaining = runtime.event_log.read_session(
+                app.id, user_id, session_id, after_event_id
+            )
         except CursorNotFoundError as exc:
             raise HaasError(410, "invalid_request_error", "haas_offset_expired") from exc
         all_events = runtime.event_log.read_session(app.id, user_id, session_id)
-        cursor = next(event for event in all_events if event.eventId == last_event_id)
+        cursor = next(event for event in all_events if event.eventId == after_event_id)
         invocation_id = cursor.invocationId
         replay = [event for event in remaining if event.invocationId == invocation_id]
 
         async def replay_frames() -> Any:
             for event in replay:
-                yield runtime.event_log.sse_frame(event)
-            yield HEARTBEAT_FRAME
+                if structured:
+                    yield _adk_event_frame(runtime.event_log.project_adk(event), structured=True)
+                else:
+                    yield runtime.event_log.sse_frame(event)
+            yield _sse_heartbeat_frame(structured=structured)
 
-        return StreamingResponse(replay_frames(), media_type="text/event-stream")
+        return EventSourceResponse(replay_frames())
 
     # Idempotency-Key reservation happens before admission (spec: haas-protocol §7).
     idempotency_key = request.headers.get("Idempotency-Key")
@@ -2609,11 +2766,7 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
                 runtime.store.release(key_hash)
             if lease_id:
                 runtime.admission.release_run(lease_id)
-            safe_reason = (
-                "configuration_update_pending"
-                if str(exc) == "configuration_update_pending"
-                else "session_busy"
-            )
+            safe_reason = _session_busy_reason(exc)
             raise HaasError(
                 409,
                 "invalid_request_error",
@@ -2668,20 +2821,35 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
             expires_at_ms=expires_at_ms,
         )
         adk_events.append(first_adk)
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        structured = _sse_structured_frames_enabled()
+        # Bounded per-subscriber queue: a slow consumer is disconnected with a
+        # terminal backpressure event instead of growing memory unboundedly
+        # (specs/event-log-sse). The legacy off-flag keeps the unbounded queue.
+        queue: asyncio.Queue[bytes | None] = asyncio.Queue(
+            maxsize=SSE_QUEUE_MAXSIZE if structured else 0
+        )
         disconnected = False
+        backpressure = False
+        last_id: str | None = first_adk.get("id")
 
         async def produce() -> None:
-            nonlocal disconnected
+            nonlocal disconnected, backpressure, last_id
             try:
                 try:
                     async for event in stream:
                         adk_event = runtime.event_log.project_adk(event)
                         adk_events.append(adk_event)
-                        if not disconnected:
-                            queue.put_nowait(
-                                f"data: {json.dumps(adk_event, separators=(',', ':'))}\n\n"
-                            )
+                        if not disconnected and not backpressure:
+                            last_id = adk_event.get("id") or last_id
+                            try:
+                                queue.put_nowait(
+                                    _adk_event_frame(adk_event, structured=structured)
+                                )
+                            except asyncio.QueueFull:
+                                # Subscriber cannot keep up: stop producing and
+                                # let the consumer emit the terminal error frame.
+                                backpressure = True
+                                break
                 except AdapterTurnError:
                     # SessionRuntime has already persisted and yielded the
                     # terminal failed event before raising; the SSE response
@@ -2701,21 +2869,35 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
                 if lease_id:
                     runtime.admission.release_run(lease_id)
                 if not disconnected:
-                    queue.put_nowait(HEARTBEAT_FRAME)
-                queue.put_nowait(None)
+                    if backpressure and structured:
+                        tail: bytes = _sse_backpressure_frame(last_id)
+                    else:
+                        tail = _sse_heartbeat_frame(structured=structured)
+                    # The bounded queue may be full; wait briefly for the
+                    # consumer to drain a slot, then enqueue the stop sentinel.
+                    try:
+                        await asyncio.wait_for(queue.put(tail), timeout=0.5)
+                        await asyncio.wait_for(queue.put(None), timeout=0.5)
+                    except TimeoutError:
+                        pass
+                else:
+                    with contextlib.suppress(asyncio.QueueFull):
+                        queue.put_nowait(None)
 
         producer = asyncio.create_task(produce())
 
         async def frames() -> Any:
             nonlocal disconnected
             try:
-                yield f"data: {json.dumps(first_adk, separators=(',', ':'))}\n\n"
+                yield _adk_event_frame(first_adk, structured=structured)
                 while True:
                     try:
                         async with asyncio.timeout(SSE_HEARTBEAT_SECONDS):
                             frame = await queue.get()
                     except TimeoutError:
-                        yield HEARTBEAT_FRAME
+                        if producer.done():
+                            break
+                        yield _sse_heartbeat_frame(structured=structured)
                         continue
                     if frame is None:
                         break
@@ -2725,9 +2907,8 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
                 if producer.done():
                     producer.result()
 
-        return StreamingResponse(
+        return EventSourceResponse(
             frames(),
-            media_type="text/event-stream",
             headers=accepted_headers,
         )
 
@@ -2737,11 +2918,7 @@ async def _run(runtime: _Runtime, request: Request, *, streaming: bool) -> Any:
         except SessionBusyError as exc:
             if key_hash:
                 runtime.store.release(key_hash)
-            safe_reason = (
-                "configuration_update_pending"
-                if str(exc) == "configuration_update_pending"
-                else "session_busy"
-            )
+            safe_reason = _session_busy_reason(exc)
             raise HaasError(
                 409,
                 "invalid_request_error",

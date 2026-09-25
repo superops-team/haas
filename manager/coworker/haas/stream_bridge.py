@@ -541,6 +541,13 @@ class StreamBridgeState:
                 BridgeAction("turn_end", outcome),
             ]
         )
+        # P1-2 S1-012: truncate per-invocation dedup state now that the turn is
+        # closed. Re-delivery after this point re-enters through _finish's
+        # ``completed`` guard and is dropped cheaply, so we never need to keep
+        # the seen/tool/content keys around for a finished invocation.
+        self._seen.clear()
+        self._tool_seen.clear()
+        self._content_seen.clear()
         return actions
 
     def to_dict(self) -> dict[str, Any]:

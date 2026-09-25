@@ -369,6 +369,24 @@ integrity-failure envelope with `accepted=true`, `invocationId`, HTTP 503, and t
 it MUST NOT be converted to `haas_adapter_error` or treated as permission to restart
 the harness.
 
+### 6.8 Atomic Terminal Persistence and Session Deletion Cascade
+
+Committing a terminal outcome flushes the whole terminal record set in one
+`Store.transaction()` boundary (SQLite: `BEGIN IMMEDIATE` ... `COMMIT`/`ROLLBACK`;
+memory backend: a no-op context). The invocation, turn, session, and terminal event are
+computed in memory first, then written together so a crash between writes cannot leave a
+half-committed state (e.g. a terminal event persisted while the session row still reads
+`running`). If any durable write fails, the transaction rolls back and the in-memory
+record mapping is restored to its pre-write checkpoint, so memory and the durable log
+never diverge silently. SQLite additionally sets `PRAGMA busy_timeout=5000` so a second
+connection's write lock makes a writer wait instead of failing immediately with
+`SQLITE_BUSY`.
+
+`delete_session(key)` is a hard delete of every record owned by the session: the session
+row, its invocations and turns, session- and invocation-scoped event indexes, waiting
+approvals/input requests, and idempotency reservations referencing its invocations. After
+deletion, none of these remain reachable; a deleted session's events are not replayed.
+
 ## 7. Runtime Model and State Machines
 
 Delegated configuration updates use Manager Delegation §5.1.1: accepted/running/cancelling invocations retain the applied snapshot, while later acceptance waits for desiredRevision to be verified and applied. The fenced reconciler runs independently of new turns. Native state and worker receipts survive TTL on the session volume (Container Runtime §6); a native id alone is insufficient. Execution replay expiry follows Protocol §6.8: nonterminal reservations stay protected, expired terminal keys return haas_idempotency_expired, and a new Manager attempt is a separate invocation in the same logical session.

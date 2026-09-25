@@ -150,7 +150,13 @@ class StdioTransport:
 
     async def recv(self) -> Any:
         assert self._proc.stdout is not None
-        line = await self._proc.stdout.readline()
+        try:
+            line = await self._proc.stdout.readline()
+        except asyncio.LimitOverrunError as exc:
+            # A frame larger than the bounded transport limit corrupts the
+            # NDJSON stream; surface a transport error rather than leaking the
+            # low-level asyncio exception into the reader loop.
+            raise CodexTransportError("codex stdio frame exceeded the read limit") from exc
         if not line:
             raise EOFError("codex app-server stdio closed")
         return line

@@ -124,7 +124,7 @@ def test_existing_session_run_cannot_bypass_applied_policy_with_request_override
 
     assert response.status_code == 200, response.text
     request = adapter.requests[-1]
-    assert request.sandbox == {
+    assert request.sandbox.model_dump(exclude_none=True) == {
         "mode": "workspace-write",
         "workspaceRoot": "/workspace",
         "writableRoots": ["/workspace"],

@@ -336,6 +336,38 @@ MUST NOT silently start a context-free replacement thread.
 | `turn/completed(status=interrupted)` | Emit one normalized `harness.turn.interrupted`; Session Runtime maps recorded Pause intent to canonical `haas.turn.interrupted` and Stop intent to `haas.turn.cancelled`; session-scoped model proxy capabilities remain usable until session revoke/delete or runtime shutdown |
 | Schema drift | Probe fails and blocks release; runtime returns `haas_adapter_incompatible` |
 
+### 10.2 Start-Path Error Mapping (delta)
+
+Every exception raised before `turn/start` returns (connect/initialize,
+`thread/start`, `thread/resume`, and the `turn/start` call itself) MUST converge on
+a structured `AdapterTurnStartError` carrying a stable `haas_*` code, a safe
+`detail` (native method + numeric JSON-RPC code only - never the native message,
+prompt, params, or credentials), and a `retryable` flag. Unmapped native
+failures previously escaped to the session runtime's generic handler and produced
+an undiagnosable terminal with `code="failed"` / `safeReason="failed"`.
+
+JSON-RPC error responses from Codex app-server are surfaced as
+`CodexRPCError(CodexConnectionError)` that preserves `error.code`; the message is
+redacted and retained only in `safe_message` (and the legacy `str()` form) for
+`thread not found` detection.
+
+| Start-path failure | Stable code | retryable | detail (safe) |
+|------|------|------|------|
+| `initialize`/connect/transport spawn fails | `haas_adapter_unavailable` | true | connect/transport |
+| `thread/start` or `thread/resume` transport send/recv failure | `haas_adapter_unavailable` | true | thread lifecycle |
+| Native JSON-RPC `-32601` method_not_found / `-32602` invalid_params | `haas_adapter_config_error` | false | native numeric code only |
+| Native JSON-RPC `-32603` internal_error / `-32xxx` server errors | `haas_adapter_unavailable` | true | native numeric code only |
+| `turn/start` request timeout | `haas_request_timeout` | true | turn/start timeout |
+| Any other native JSON-RPC error | `haas_codex_rpc_error` | true | native method + code |
+| `thread not found` on resume | (non-resumable, no error) | - | resume dropped |
+
+The session runtime generic fallback MUST map any residual exception: if it exposes
+a string `.code`, use it; model/provider configuration errors
+(`ModelRouteError`/`SecretResolutionError`/`RuntimeTokenError`) become
+`haas_provider_error`; everything else becomes `haas_adapter_error`. The terminal
+`reason` is the safe exception class name; the raw exception message is never
+emitted on the wire.
+
 ## 11. Test Plan and Acceptance Criteria
 
 - Unit: JSON-RPC request-id matching, server-request recognition, event normalizer, `itemId`/`modelCallId` correlation, nested `last`/`total` usage normalization, safe rollout reference, a single NDJSON notification larger than 64 KiB, and complete 100,001-byte command-evidence output.

@@ -32,9 +32,11 @@ from haas.sessions import (
     SessionBusyError,
     SessionNotFoundError,
     SessionRuntime,
+    _ActiveTurn,
 )
 from haas.stores import (
     ApprovalRecord,
+    CanonicalEventRecord,
     InputRequestRecord,
     InvocationRecord,
     LeaseFencingError,
@@ -1263,3 +1265,687 @@ async def test_stream_deadline_survives_consumer_task_handoff() -> None:
     assert events[0].haas["safeReason"] == "long_task_deadline_exceeded"
     assert events[0].haas["code"] == "haas_request_timeout"
     assert events[0].haas["retryable"] is True
+
+
+async def test_adapter_turn_start_error_maps_to_terminal(runtime: SessionRuntime) -> None:
+    from haas.harnesses.base import AdapterTurnStartError
+
+    class BoomStartAdapter(FakeAdapter):
+        async def start_turn(self, request: StartTurnRequest) -> TurnHandle:
+            raise AdapterTurnStartError(
+                code="haas_request_timeout", retryable=True, detail="boom"
+            )
+
+    runtime.adapter = BoomStartAdapter()
+    stream = runtime.run_stream(
+        RunRequest(
+            app=runtime.registry.resolve_default_app(Principal("p")),
+            user_id="u_1",
+            message={"role": "user", "parts": [{"text": "hi"}]},
+        )
+    )
+    seen: list[CanonicalEventRecord] = []
+    with pytest.raises(AdapterTurnError):
+        async for event in stream:
+            seen.append(event)
+
+    assert seen, "expected a failure terminal event before the raise"
+    terminal = seen[-1]
+    delta = terminal.actions["stateDelta"]
+    assert delta["status"] == "failed"
+    assert delta["code"] == "haas_request_timeout"
+    assert delta["retryable"] is True
+
+
+async def test_unmapped_start_exception_emits_structured_code(runtime: SessionRuntime) -> None:
+    """A non-AdapterTurnStartError escaping start_turn MUST converge on a terminal
+    event with a structured haas_* code (not the legacy bare code="failed")."""
+
+    class GenericStartError(Exception):
+        pass
+
+    class FailingStartAdapter(FakeAdapter):
+        async def start_turn(self, request: StartTurnRequest) -> TurnHandle:
+            raise GenericStartError("raw prompt or internal detail must not leak")
+
+    runtime.adapter = FailingStartAdapter()
+    stream = runtime.run_stream(
+        RunRequest(
+            app=runtime.registry.resolve_default_app(Principal("p")),
+            user_id="u_1",
+            message={"role": "user", "parts": [{"text": "hi"}]},
+        )
+    )
+    seen: list[CanonicalEventRecord] = []
+    with pytest.raises(AdapterTurnError):
+        async for event in stream:
+            seen.append(event)
+    assert seen, "expected a failure terminal event"
+    terminal = seen[-1]
+    delta = terminal.actions["stateDelta"]
+    assert delta["status"] == "failed"
+    assert delta["code"] == "haas_adapter_error"
+    # reason is the safe exception class name, not the raw message
+    assert delta["reason"] == "GenericStartError"
+    assert "raw prompt" not in str(terminal.actions)
+
+
+# --- __post_init__ validation / timeout normalization --------------------
+
+
+def test_post_init_rejects_nonpositive_lease_ttl() -> None:
+    store = MemoryStore()
+    with pytest.raises(ValueError, match="lease_ttl_ms must be positive"):
+        SessionRuntime(
+            store=store,
+            registry=HarnessRegistry(store=store),
+            adapter=FakeAdapter(),
+            event_log=EventLog(store=store),
+            lease_ttl_ms=0,
+        )
+
+
+def test_post_init_rejects_nonpositive_lease_renew_interval() -> None:
+    store = MemoryStore()
+    with pytest.raises(ValueError, match="lease_renew_interval_ms must be positive"):
+        SessionRuntime(
+            store=store,
+            registry=HarnessRegistry(store=store),
+            adapter=FakeAdapter(),
+            event_log=EventLog(store=store),
+            lease_renew_interval_ms=0,
+        )
+
+
+def test_post_init_rejects_renew_interval_too_close_to_ttl() -> None:
+    store = MemoryStore()
+    with pytest.raises(
+        ValueError, match="lease_renew_interval_ms must be less than half"
+    ):
+        SessionRuntime(
+            store=store,
+            registry=HarnessRegistry(store=store),
+            adapter=FakeAdapter(),
+            event_log=EventLog(store=store),
+            lease_ttl_ms=100,
+            lease_renew_interval_ms=60,
+        )
+
+
+def test_post_init_rejects_turn_timeout_shorter_than_lease() -> None:
+    store = MemoryStore()
+    with pytest.raises(ValueError, match="turn_timeout_s must be greater"):
+        SessionRuntime(
+            store=store,
+            registry=HarnessRegistry(store=store),
+            adapter=FakeAdapter(),
+            event_log=EventLog(store=store),
+            lease_ttl_ms=10_000,
+            lease_renew_interval_ms=1_000,
+            turn_timeout_s=5.0,
+        )
+
+
+def test_effective_timeout_rejects_non_finite_and_non_positive() -> None:
+    with pytest.raises(ValueError, match="must be finite"):
+        SessionRuntime._effective_timeout_seconds(float("nan"), 1.0)
+    with pytest.raises(ValueError, match="must be positive"):
+        SessionRuntime._effective_timeout_seconds(-3.0, 1.0)
+
+
+# --- update_policy / domain validation / apply_desired_policy -----------
+
+
+_WS = {"mode": "workspace-write", "root": "/workspace", "writableRoots": ["/workspace"]}
+_NET = {"defaultAction": "deny", "allow": ["example.com"]}
+_TOOLS = {"disabled": [], "approvalMode": "on-request"}
+
+
+def test_update_policy_rejects_revision_conflict(runtime: SessionRuntime) -> None:
+    from haas.sessions import PolicyRevisionConflictError
+
+    s = SessionRecord(id="hs", appName="chrn_codex_default", userId="u_1")
+    runtime.store.put_session(s)
+    with pytest.raises(PolicyRevisionConflictError):
+        runtime.update_policy(s, expected_revision=999, delta={"workspace": _WS})
+
+
+def test_update_policy_rejects_empty_or_unknown_domain(runtime: SessionRuntime) -> None:
+    from haas.sessions import PolicyUpdateInvalidError
+
+    s = SessionRecord(id="hs", appName="chrn_codex_default", userId="u_1")
+    runtime.store.put_session(s)
+    with pytest.raises(PolicyUpdateInvalidError):
+        runtime.update_policy(s, expected_revision=1, delta={})
+    with pytest.raises(PolicyUpdateInvalidError):
+        runtime.update_policy(s, expected_revision=1, delta={"hax": {}})
+
+
+def test_update_policy_idle_session_applies_instantly(runtime: SessionRuntime) -> None:
+    s = SessionRecord(id="hs", appName="chrn_codex_default", userId="u_1")
+    runtime.store.put_session(s)
+    out = runtime.update_policy(s, expected_revision=1, delta={"workspace": _WS})
+    assert out.desiredRevision == 2
+    assert out.appliedRevision == 2
+    assert out.policyStatus == "applied"
+    assert out.pendingPolicyUpdate is None
+    assert out.lastPolicyUpdateResult == {"revision": 2, "status": "applied"}
+
+
+def test_update_policy_running_session_marks_pending(runtime: SessionRuntime) -> None:
+    s = SessionRecord(id="hs", appName="chrn_codex_default", userId="u_1")
+    s.controlState = "running"
+    runtime.store.put_session(s)
+    out = runtime.update_policy(s, expected_revision=1, delta={"network": _NET})
+    assert out.desiredRevision == 2
+    assert out.appliedRevision == 1
+    assert out.policyStatus == "pending"
+    assert out.pendingPolicyUpdate is not None
+
+
+@pytest.mark.parametrize(
+    "domain, value",
+    [
+        ("workspace", "notadict"),
+        ("workspace", {"mode": "bogus", "root": "/x", "writableRoots": []}),
+        ("workspace", {"mode": "read-only", "root": "relative", "writableRoots": []}),
+        ("workspace", {"mode": "read-only", "root": "/x", "writableRoots": ["relative"]}),
+        ("network", {"defaultAction": "deny"}),
+        ("network", {"defaultAction": "bogus", "allow": []}),
+        ("tools", {"disabled": []}),
+        ("tools", {"disabled": [], "approvalMode": "bogus"}),
+    ],
+)
+def test_validate_policy_domain_rejects_bad_shapes(domain: str, value: Any) -> None:
+    from haas.sessions import PolicyUpdateInvalidError
+
+    with pytest.raises(PolicyUpdateInvalidError):
+        SessionRuntime._validate_policy_domain(domain, value)
+
+
+def test_validate_policy_domain_accepts_valid_network_and_tools() -> None:
+    SessionRuntime._validate_policy_domain("network", _NET)
+    SessionRuntime._validate_policy_domain("tools", _TOOLS)
+
+
+# --- _drive early validation paths --------------------------------------
+
+
+async def test_run_rejects_session_with_pending_config_update(runtime: SessionRuntime) -> None:
+    from haas.sessions import SessionBusyError
+
+    s = SessionRecord(id="hs_pending", appName="chrn_codex_default", userId="u_1")
+    s.appliedRevision = 1
+    s.desiredRevision = 2
+    runtime.store.put_session(s)
+    req = RunRequest(
+        app=runtime.registry.resolve_app(Principal("p"), "chrn_codex_default"),
+        user_id="u_1",
+        message={"role": "user", "parts": []},
+        session_id="hs_pending",
+    )
+    with pytest.raises(SessionBusyError, match="configuration_update_pending"):
+        await runtime.run(req)
+
+
+async def test_run_requires_resume_for_paused_session(runtime: SessionRuntime) -> None:
+    from haas.sessions import ResumeRequiredError
+
+    s = SessionRecord(id="hs_paused", appName="chrn_codex_default", userId="u_1")
+    s.controlState = "paused"
+    runtime.store.put_session(s)
+    req = RunRequest(
+        app=runtime.registry.resolve_app(Principal("p"), "chrn_codex_default"),
+        user_id="u_1",
+        message={"role": "user", "parts": []},
+        session_id="hs_paused",
+    )
+    with pytest.raises(ResumeRequiredError):
+        await runtime.run(req)
+
+
+async def test_run_rejects_continue_from_non_resumable(runtime: SessionRuntime) -> None:
+    from haas.sessions import InvocationNotResumableError
+
+    s = SessionRecord(id="hs_idle", appName="chrn_codex_default", userId="u_1")
+    runtime.store.put_session(s)
+    req = RunRequest(
+        app=runtime.registry.resolve_app(Principal("p"), "chrn_codex_default"),
+        user_id="u_1",
+        message={"role": "user", "parts": []},
+        session_id="hs_idle",
+        continued_from_invocation_id="inv_ghost",
+    )
+    with pytest.raises(InvocationNotResumableError):
+        await runtime.run(req)
+
+
+async def test_run_materials_effective_profile(runtime: SessionRuntime) -> None:
+    result = await runtime.run(
+        RunRequest(
+            app=runtime.registry.resolve_default_app(Principal("p")),
+            user_id="u_1",
+            message={"role": "user", "parts": []},
+            effective_profile={"provider": {"model": "gpt-x"}},
+        )
+    )
+    assert result.session.effectiveProfile == {"provider": {"model": "gpt-x"}}
+
+
+# --- model proxy begin/end -----------------------------------------------
+
+
+class _RecordingModelProxy:
+    def __init__(self) -> None:
+        self.began: list[str] = []
+        self.ended: list[str] = []
+
+    async def begin(self, app: Any, invocation: Any, effective: Any) -> dict[str, str]:
+        self.began.append(invocation.id)
+        return {"K": "v"}
+
+    def end(self, invocation: Any, credentials: dict[str, str]) -> None:
+        self.ended.append(invocation.id)
+
+
+async def test_model_proxy_begin_and_end_are_invoked(runtime: SessionRuntime) -> None:
+    proxy = _RecordingModelProxy()
+    runtime.model_proxy = proxy
+    result = await runtime.run(
+        RunRequest(
+            app=runtime.registry.resolve_default_app(Principal("p")),
+            user_id="u_1",
+            message={"role": "user", "parts": []},
+        )
+    )
+    assert proxy.began == [result.invocation.id]
+    assert proxy.ended == [result.invocation.id]
+
+
+# --- adapter error mapping ------------------------------------------------
+
+
+class _BoomStartTurnAdapter(FakeAdapter):
+    async def start_turn(self, request: StartTurnRequest) -> TurnHandle:
+        raise RuntimeError("start blew up")
+
+
+async def test_generic_start_turn_error_persists_failure_and_idles_session(
+    runtime: SessionRuntime,
+) -> None:
+    runtime.adapter = _BoomStartTurnAdapter()
+    stream = runtime.run_stream(
+        RunRequest(
+            app=runtime.registry.resolve_default_app(Principal("p")),
+            user_id="u_1",
+            session_id="hs_boom",
+            message={"role": "user", "parts": []},
+        )
+    )
+    seen: list[CanonicalEventRecord] = []
+    with pytest.raises(AdapterTurnError):
+        async for event in stream:
+            seen.append(event)
+    assert seen
+    session = runtime.get_session("chrn_codex_default", "u_1", "hs_boom")
+    assert session.controlState == "idle"
+    inv = runtime.store.get_invocation(seen[-1].invocationId)
+    assert inv is not None and inv.status == "failed"
+
+
+class _FencePrepareAdapter(FakeAdapter):
+    async def prepare_session(self, request):
+        raise LeaseFencingError()
+
+
+async def test_fencing_during_adapter_call_maps_to_adapter_error(
+    runtime: SessionRuntime,
+) -> None:
+    runtime.adapter = _FencePrepareAdapter()
+    stream = runtime.run_stream(
+        RunRequest(
+            app=runtime.registry.resolve_default_app(Principal("p")),
+            user_id="u_1",
+            session_id="hs_fence",
+            message={"role": "user", "parts": []},
+        )
+    )
+    with pytest.raises(AdapterTurnError):
+        async for _ in stream:
+            pass
+
+
+# --- finalize-returned terminal publishes artifacts (no streamed terminal)
+
+
+class _ArtifactListingAdapter(FakeAdapter):
+    async def list_artifacts(self, request: ListArtifactsRequest) -> list[ArtifactRef]:
+        return [
+            ArtifactRef(
+                name="report.md",
+                path="output/report.md",
+                content=b"# Report",
+                mediaType="text/markdown",
+            )
+        ]
+
+
+async def test_finalize_terminal_publishes_artifacts_when_no_streamed_terminal() -> None:
+    store = MemoryStore()
+    registry = HarnessRegistry(store=store)
+    app = seed_codex(registry)
+    rt = SessionRuntime(
+        store=store,
+        registry=registry,
+        adapter=_ArtifactListingAdapter(),
+        event_log=EventLog(store=store),
+        artifacts=ArtifactStore(),
+    )
+    result = await rt.run(
+        RunRequest(
+            app=app,
+            user_id="u_1",
+            session_id="hs_art",
+            message={"role": "user", "parts": []},
+        )
+    )
+    types = [e.type for e in result.events]
+    assert "haas.artifact.registered" in types
+    assert result.events[-1].type == "haas.turn.completed"
+
+
+# --- reconcile_invocation_readback ---------------------------------------
+
+
+def _seed_durable_running(runtime: SessionRuntime, app_id: str = "chrn_codex_default"):
+    session = SessionRecord(id="hs_durable", appName=app_id, userId="u_1")
+    runtime.store.put_session(session)
+    inv = runtime.store.put_invocation(
+        InvocationRecord(
+            id="inv_durable",
+            sessionId="hs_durable",
+            appName=app_id,
+            userId="u_1",
+            turnId="turn_durable",
+            status="running",
+        )
+    )
+    turn = runtime.store.put_turn(
+        TurnRecord(id="turn_durable", invocationId=inv.id, sessionId="hs_durable")
+    )
+    return session, inv, turn
+
+
+def test_reconcile_readback_unknown_invocation_raises(runtime: SessionRuntime) -> None:
+    from haas.sessions import InvocationNotFoundError
+
+    with pytest.raises(InvocationNotFoundError):
+        runtime.reconcile_invocation_readback("hs", "inv_missing")
+
+
+def test_reconcile_readback_terminal_invocation_is_returned(runtime: SessionRuntime) -> None:
+    session, inv, turn = _seed_durable_running(runtime)
+    inv.status = "completed"
+    runtime.store.put_invocation(inv)
+    out = runtime.reconcile_invocation_readback(session.id, inv.id)
+    assert out.status == "completed"
+
+
+async def test_reconcile_readback_active_invocation_is_untouched(runtime: SessionRuntime) -> None:
+    session, inv, turn = _seed_durable_running(runtime)
+    runtime._active[inv.id] = _make_active(inv.id, session.id)
+    out = runtime.reconcile_invocation_readback(session.id, inv.id)
+    assert out.status == "running"
+    del runtime._active[inv.id]
+
+
+def _make_active(invocation_id: str, session_id: str) -> "_ActiveTurn":
+    import asyncio
+
+    return _ActiveTurn(
+        turn_id="turn_durable",
+        session_id=session_id,
+        terminal_status=asyncio.get_running_loop().create_future(),
+    )
+
+
+def test_reconcile_readback_sidecar_restart_terminates_incomplete(runtime: SessionRuntime) -> None:
+    session, inv, turn = _seed_durable_running(runtime)
+    out = runtime.reconcile_invocation_readback(session.id, inv.id)
+    assert out.status == "incomplete"
+    refreshed = runtime.get_session(session.appName, "u_1", session.id)
+    assert refreshed.controlState == "idle"
+
+
+def test_reconcile_readback_lease_conflict_returns_running(runtime: SessionRuntime) -> None:
+    session, inv, turn = _seed_durable_running(runtime)
+    runtime.store.acquire_lease((session.appName, "u_1", session.id), holder="other")
+    out = runtime.reconcile_invocation_readback(session.id, inv.id)
+    assert out.status == "running"
+
+
+def test_reconcile_readback_completes_idempotency_from_history(runtime: SessionRuntime) -> None:
+    session, inv, turn = _seed_durable_running(runtime)
+    key_hash = "kh_test"
+    inv.idempotencyKeyHash = key_hash
+    inv.idempotencyExpiresAtMs = 9_999_999_999_999
+    runtime.store.put_invocation(inv)
+    runtime.store.reserve(key_hash, "reqhash")
+    out = runtime.reconcile_invocation_readback(session.id, inv.id)
+    assert out.status == "incomplete"
+    assert runtime.store.is_pending(key_hash) is False
+
+
+# --- pause_invocation edge cases -----------------------------------------
+
+
+async def test_pause_unknown_invocation_raises(runtime: SessionRuntime) -> None:
+    from haas.sessions import InvocationNotFoundError
+
+    with pytest.raises(InvocationNotFoundError):
+        await runtime.pause_invocation("hs", "inv_missing")
+
+
+async def test_pause_interrupted_invocation_is_idempotent(runtime: SessionRuntime) -> None:
+    session, inv, turn = _seed_durable_running(runtime)
+    inv.status = "interrupted"
+    runtime.store.put_invocation(inv)
+    out = await runtime.pause_invocation(session.id, inv.id)
+    assert out.status == "interrupted"
+
+
+async def test_pause_completed_invocation_not_running(runtime: SessionRuntime) -> None:
+    from haas.sessions import InvocationNotRunningError
+
+    session, inv, turn = _seed_durable_running(runtime)
+    inv.status = "completed"
+    runtime.store.put_invocation(inv)
+    with pytest.raises(InvocationNotRunningError):
+        await runtime.pause_invocation(session.id, inv.id)
+
+
+async def test_pause_running_invocation_without_active_turn_not_running(
+    runtime: SessionRuntime,
+) -> None:
+    from haas.sessions import InvocationNotRunningError
+
+    session, inv, turn = _seed_durable_running(runtime)
+    # invocation stays "running" but is not in _active
+    with pytest.raises(InvocationNotRunningError):
+        await runtime.pause_invocation(session.id, inv.id)
+
+
+async def test_pause_rejects_when_control_intent_already_cancel(
+    runtime: SessionRuntime,
+) -> None:
+    from haas.sessions import InvocationNotRunningError
+
+    session, inv, turn = _seed_durable_running(runtime)
+    active = _make_active(inv.id, session.id)
+    active.control_intent = "cancel"
+    runtime._active[inv.id] = active
+    try:
+        with pytest.raises(InvocationNotRunningError):
+            await runtime.pause_invocation(session.id, inv.id)
+    finally:
+        del runtime._active[inv.id]
+
+
+# --- continue_stream edge cases ------------------------------------------
+
+
+async def test_continue_unknown_source_raises(runtime: SessionRuntime) -> None:
+    from haas.sessions import InvocationNotFoundError
+
+    with pytest.raises(InvocationNotFoundError):
+        async for _ in runtime.continue_stream("hs", "inv_missing"):
+            pass
+
+
+async def test_continue_non_resumable_source_raises(runtime: SessionRuntime) -> None:
+    from haas.sessions import InvocationNotResumableError
+
+    session, inv, turn = _seed_durable_running(runtime)
+    # status running (not interrupted), session idle
+    with pytest.raises(InvocationNotResumableError):
+        async for _ in runtime.continue_stream(session.id, inv.id):
+            pass
+
+
+# --- cancel_invocation edge cases ----------------------------------------
+
+
+async def test_cancel_unknown_invocation_raises(runtime: SessionRuntime) -> None:
+    from haas.sessions import InvocationNotFoundError
+
+    with pytest.raises(InvocationNotFoundError):
+        await runtime.cancel_invocation("hs", "inv_missing")
+
+
+async def test_cancel_completed_invocation_returns_as_is(runtime: SessionRuntime) -> None:
+    session, inv, turn = _seed_durable_running(runtime)
+    inv.status = "completed"
+    runtime.store.put_invocation(inv)
+    out = await runtime.cancel_invocation(session.id, inv.id)
+    assert out.status == "completed"
+
+
+async def test_cancel_interrupted_resumable_session_marks_cancelled(
+    runtime: SessionRuntime,
+) -> None:
+    session, inv, turn = _seed_durable_running(runtime)
+    inv.status = "interrupted"
+    runtime.store.put_invocation(inv)
+    session.controlState = "paused"
+    session.supportsResume = True
+    session.resumableInvocationId = inv.id
+    runtime.store.put_session(session)
+    out = await runtime.cancel_invocation(session.id, inv.id)
+    assert out.status == "interrupted"
+    refreshed = runtime.get_session(session.appName, "u_1", session.id)
+    assert refreshed.controlState == "cancelled"
+    assert refreshed.supportsResume is False
+
+
+async def test_cancel_durable_running_invocation_terminalizes_without_active(
+    runtime: SessionRuntime,
+) -> None:
+    session, inv, turn = _seed_durable_running(runtime)
+    out = await runtime.cancel_invocation(session.id, inv.id)
+    assert out.status == "cancelled"
+    refreshed = runtime.get_session(session.appName, "u_1", session.id)
+    assert refreshed.controlState == "idle"
+
+
+# --- _read_invocation missing --------------------------------------------
+
+
+def test_read_invocation_missing_raises(runtime: SessionRuntime) -> None:
+    with pytest.raises(RuntimeError, match="invocation not found"):
+        runtime._read_invocation("inv_nope")
+
+
+# --- artifact publication resilience paths -------------------------------
+
+
+class _StreamingTerminalWithArtifacts(_StreamingTerminalAdapter):
+    def __init__(self, refs: list[ArtifactRef]) -> None:
+        self._refs = refs
+
+    async def list_artifacts(self, request: ListArtifactsRequest) -> list[ArtifactRef]:
+        return self._refs
+
+
+async def test_artifact_publication_skips_non_bytes_and_bad_paths(runtime: SessionRuntime) -> None:
+    runtime.artifacts = ArtifactStore()
+    runtime.adapter = _StreamingTerminalWithArtifacts(
+        [
+            ArtifactRef(name="no", path="output/none.bin", content=None),
+            ArtifactRef(name="bad", path="../etc/passwd", content=b"x"),
+            ArtifactRef(name="ok", path="output/a.md", content=b"# a"),
+            ArtifactRef(name="ok2", path="output/a.md", content=b"# a"),  # duplicate
+        ]
+    )
+    result = await runtime.run(
+        RunRequest(
+            app=runtime.registry.resolve_default_app(Principal("p")),
+            user_id="u_1",
+            session_id="hs_artresilient",
+            message={"role": "user", "parts": []},
+        )
+    )
+    assert result.invocation.status == "completed"
+    registered = [e for e in result.events if e.type == "haas.artifact.registered"]
+    assert len(registered) == 1
+
+
+async def test_artifact_listing_failure_is_best_effort(runtime: SessionRuntime) -> None:
+    runtime.artifacts = ArtifactStore()
+
+    class Boom(_StreamingTerminalAdapter):
+        async def list_artifacts(self, request: ListArtifactsRequest) -> list[ArtifactRef]:
+            raise RuntimeError("list failed")
+
+    runtime.adapter = Boom()
+    result = await runtime.run(
+        RunRequest(
+            app=runtime.registry.resolve_default_app(Principal("p")),
+            user_id="u_1",
+            session_id="hs_artboom",
+            message={"role": "user", "parts": []},
+        )
+    )
+    assert result.invocation.status == "completed"
+
+
+# --- unsupported native interrupt ----------------------------------------
+
+
+class _UnsupportedInterruptAdapter(_AcknowledgedInterruptAdapter):
+    async def cancel_turn(self, request: CancelTurnRequest) -> CancelResult:
+        self.interrupt_acknowledged.set()
+        return CancelResult(status="unsupported")
+
+
+async def test_pause_unsupported_native_interrupt_maps_to_adapter_error() -> None:
+    store = MemoryStore()
+    registry = HarnessRegistry(store=store)
+    app = seed_codex(registry)
+    adapter = _UnsupportedInterruptAdapter()
+    runtime = SessionRuntime(
+        store=store, registry=registry, adapter=adapter, event_log=EventLog(store=store)
+    )
+    session_id = "hs_unsupported"
+    run_task = asyncio.create_task(
+        runtime.run(
+            RunRequest(
+                app=app, user_id="u_1", session_id=session_id, message={"role": "user", "parts": []}
+            )
+        )
+    )
+    await asyncio.wait_for(adapter.started.wait(), timeout=0.5)
+    invocation_id = next(iter(runtime._active))
+    with pytest.raises(AdapterTurnError):
+        await runtime.pause_invocation(session_id, invocation_id)
+    adapter.release_terminal.set()
+    await asyncio.wait_for(run_task, timeout=0.5)

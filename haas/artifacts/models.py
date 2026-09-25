@@ -49,4 +49,9 @@ class ArtifactPolicy:
     maxFiles: int = 1000
     maxPublishFiles: int = 20
     maxFileBytes: int = 104857600
+    # Global in-process ceiling for held artifact bytes (uploads + accepted
+    # produced files). Superseded versions are freed eagerly; when the running
+    # total still exceeds this, least-recently-accessed non-current versions are
+    # evicted (P1-2 S2-002).
+    maxContentBytes: int = 512 * 1024 * 1024
     allowHidden: bool = False
