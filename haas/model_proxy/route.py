@@ -10,7 +10,19 @@ from haas.stores import HarnessRecord, ProviderConfig
 
 
 class ModelRouteError(Exception):
-    """Raised when no usable provider route exists for a harness/model."""
+    """Raised when no usable provider route exists for a harness/model.
+
+    ``code`` is the stable wire error code. It is set to
+    ``haas_provider_not_configured`` when the harness has no provider bound to
+    this session (the manager has not synced a delegated profile) — a
+    deterministic, non-retryable operator/config condition, distinct from a
+    generic credential/secret failure. It is left ``None`` for present-but-invalid
+    providers so the session layer falls back to ``haas_provider_error``.
+    """
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def resolve_model_route(
@@ -21,7 +33,10 @@ def resolve_model_route(
 ) -> ModelRoute:
     provider = _provider_from_frozen(frozen_route) if frozen_route is not None else harness.provider
     if provider is None or not provider.baseUrl:
-        raise ModelRouteError(f"no model provider configured for harness {harness.id}")
+        raise ModelRouteError(
+            f"no model provider configured for harness {harness.id}",
+            code="haas_provider_not_configured",
+        )
     try:
         validate_provider_config(provider)
     except ValueError as exc:

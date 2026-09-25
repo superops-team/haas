@@ -64,6 +64,31 @@ def test_route_with_blank_base_url_raises() -> None:
         resolve_model_route(_harness(_Provider(baseUrl="")))
 
 
+def test_route_without_provider_is_structured_not_configured() -> None:
+    """No provider bound to this session is a deterministic, non-retryable
+    operator/config condition (manager has not synced a delegated profile), not
+    a generic credential/secret failure. The wire code must distinguish it so
+    callers do not chase credential issues. (Step-4 fallback contract.)"""
+    with pytest.raises(ModelRouteError) as excinfo:
+        resolve_model_route(_harness(None))
+    assert excinfo.value.code == "haas_provider_not_configured"
+
+
+def test_route_with_blank_base_url_is_structured_not_configured() -> None:
+    with pytest.raises(ModelRouteError) as excinfo:
+        resolve_model_route(_harness(_Provider(baseUrl="")))
+    assert excinfo.value.code == "haas_provider_not_configured"
+
+
+def test_route_validation_failure_keeps_generic_provider_error_code() -> None:
+    """A present-but-invalid provider (e.g. bad wire api) must NOT be mislabeled
+    as 'not configured': it is configured, just invalid. No .code -> the
+    session layer falls back to haas_provider_error."""
+    with pytest.raises(ModelRouteError) as excinfo:
+        resolve_model_route(_harness(_Provider(wireApi="chat")))
+    assert getattr(excinfo.value, "code", None) in (None, "haas_provider_error")
+
+
 # --- usage normalization ----------------------------------------------------
 
 
