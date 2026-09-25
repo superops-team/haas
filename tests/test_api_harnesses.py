@@ -420,4 +420,5 @@ def test_harness_list_response_model_strips_raw_secret_material() -> None:
     _create(client, AUTH_A, name="listed-prot")
     resp = client.get("/v1/haas/harnesses", headers=AUTH_A)
     assert resp.status_code == 200
-    assert not _walk_forbidden(resp.json()), f"raw secret key leaked: {_walk_forbidden(resp.json())}"
+    body = resp.json()
+    assert not _walk_forbidden(body), f"raw secret key leaked: {_walk_forbidden(body)}"

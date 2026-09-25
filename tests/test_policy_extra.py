@@ -12,10 +12,10 @@ from haas.policy import (
     NetworkPolicy,
     PolicyCompileInput,
     PolicyController,
+    PolicyInvalid,
     PolicyLayer,
     PolicyScope,
     PolicyWideningRejected,
-    PolicyInvalid,
     ToolsPolicy,
     WorkspacePolicy,
 )
@@ -187,7 +187,7 @@ def test_allowlist_matches_rejects_when_entry_port_unparseable() -> None:
 def test_effective_port_returns_none_on_invalid_literal() -> None:
     parsed = urlparse("http://example.com:999999/")
     with pytest.raises(ValueError):
-        parsed.port  # sanity: stdlib raises
+        _ = parsed.port  # sanity: stdlib raises
     assert _effective_port(parsed) is None
 
 
@@ -200,7 +200,9 @@ def test_default_port_for_unknown_scheme_is_none() -> None:
 
 def test_compile_appends_writable_root_after_delegation() -> None:
     layers = [
-        PolicyLayer("tenant", workspace=WorkspacePolicy(root="/workspace", writableRoots=["/workspace"])),
+        PolicyLayer(
+            "tenant", workspace=WorkspacePolicy(root="/workspace", writableRoots=["/workspace"])
+        ),
         PolicyLayer("delegate", delegation=True),
         PolicyLayer("app", workspace=WorkspacePolicy(writableRoots=["/workspace", "/extra"])),
     ]

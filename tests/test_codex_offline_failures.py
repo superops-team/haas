@@ -519,7 +519,12 @@ async def test_start_turn_maps_native_invalid_params_to_config_error() -> None:
 
     transport = FakeTransport(
         _default_results(),
-        errors={"thread/start": {"code": -32602, "message": "invalid params: leaked prompt secret"}},
+        errors={
+            "thread/start": {
+                "code": -32602,
+                "message": "invalid params: leaked prompt secret",
+            }
+        },
     )
     adapter = _adapter_with(transport)
     req = StartTurnRequest(

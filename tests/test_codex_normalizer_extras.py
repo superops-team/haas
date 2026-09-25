@@ -6,9 +6,7 @@ golden-event suite does not exercise directly. Offline, no harness required.
 
 from __future__ import annotations
 
-from haas.harnesses.codex_app_server import normalizer as n
 from haas.harnesses.codex_app_server.normalizer import (
-    _activity_kind,
     _activity_kind_for_tool_name,
     _item_tool_name,
     _normalize_usage,

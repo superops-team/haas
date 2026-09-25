@@ -24,7 +24,6 @@ from haas.harnesses.codex_app_server.adapter import (
 )
 from haas.harnesses.codex_app_server.transport import CodexEndpoint
 from haas.stores import ApprovalRecord, InputRequestRecord
-from haas.stores.memory import MemoryStore
 
 
 def _make_adapter() -> CodexAdapter:

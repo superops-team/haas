@@ -13,7 +13,6 @@ from haas.harnesses.base import AdapterTurnStartError, HarnessEvent, TurnHandle
 from haas.harnesses.fake import FakeAdapter
 from haas.identity import Principal
 
-
 TOKEN = "test-token-b"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 APP = "chrn_codex_default"
@@ -324,7 +323,6 @@ def test_policy_revision_conflict_409() -> None:
 
 
 def test_upload_file_too_large_413(monkeypatch: pytest.MonkeyPatch) -> None:
-    import haas.api as api_mod
 
     # shrink the artifact policy max size via the app's artifact store
     client = make_client()

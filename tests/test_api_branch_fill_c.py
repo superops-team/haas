@@ -4,15 +4,12 @@ Targets specific missing branch conditions: helper function branches, Idempotenc
 cleanup paths, SSE backpressure/disconnect branches, and route error branches.
 """
 
-import pytest
 from fastapi.testclient import TestClient
 
 from haas.api import _configured_scopes, _session_to_adk, build_app
 from haas.harnesses import FakeAdapter
 from haas.harnesses.base import AdapterTurnStartError
 from haas.identity import Principal
-from haas.stores import MemoryStore
-
 
 TOKEN = "test-token"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -175,7 +172,7 @@ def test_run_sse_adapter_error() -> None:
     client = make_client(adapter=_ErrorAdapter())
     with client.stream("POST", "/run_sse", json=_run_body("s_sse_err"), headers=HEADERS) as resp:
         assert resp.status_code == 200
-        frames = [l for l in resp.iter_lines() if l]
+        frames = [line for line in resp.iter_lines() if line]
         assert any("failed" in f.lower() or "error" in f.lower() for f in frames)
 
 
@@ -187,7 +184,7 @@ def test_run_sse_normal() -> None:
     client = make_client()
     with client.stream("POST", "/run_sse", json=_run_body("s_sse_ok"), headers=HEADERS) as resp:
         assert resp.status_code == 200
-        frames = [l for l in resp.iter_lines() if l]
+        frames = [line for line in resp.iter_lines() if line]
         assert any("data:" in f for f in frames)
 
 
@@ -197,7 +194,7 @@ def test_run_sse_idempotency_key() -> None:
     h = {**HEADERS, "Idempotency-Key": "sse-key-c"}
     with client.stream("POST", "/run_sse", json=_run_body("s_sse_key"), headers=h) as resp:
         assert resp.status_code == 200
-        frames = [l for l in resp.iter_lines() if l]
+        frames = [line for line in resp.iter_lines() if line]
         assert len(frames) > 0
 
 

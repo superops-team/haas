@@ -7,6 +7,8 @@ from haas.harnesses.codex_app_server.normalizer import (
     normalize_notification,
     notification_method,
     notification_params,
+    reset_unparsed_notification_counts,
+    unparsed_notification_counts,
 )
 
 CTX = {
@@ -466,13 +468,6 @@ def test_empty_delta_is_dropped() -> None:
 
 
 # --- P1-4: unknown notification observability ------------------------------
-
-from haas.harnesses.codex_app_server import normalizer as _norm
-from haas.harnesses.codex_app_server.normalizer import (
-    normalize_notification,
-    reset_unparsed_notification_counts,
-    unparsed_notification_counts,
-)
 
 
 def test_unknown_notification_is_counted(caplog) -> None:

@@ -7,9 +7,17 @@ that only run once a layer granted delegation.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import pytest
 
-from haas.policy.controller import PolicyController
+from haas.policy import EffectivePolicy, PolicyInvalid, PolicyWideningRejected
+from haas.policy.controller import (
+    PolicyController,
+    _default_port_for_scheme,
+    _effective_port,
+    _is_same_or_within,
+)
 from haas.policy.models import (
     ModelPolicy,
     NetworkPolicy,
@@ -250,30 +258,6 @@ def test_authorize_read_includes_workspace_root(ws_policy) -> None:
 # === appended coverage ===
 
 
-from urllib.parse import urlparse
-
-import pytest
-
-from haas.policy import (
-    EffectivePolicy,
-    ModelPolicy,
-    NetworkPolicy,
-    PolicyCompileInput,
-    PolicyController,
-    PolicyLayer,
-    PolicyScope,
-    PolicyWideningRejected,
-    PolicyInvalid,
-    ToolsPolicy,
-    WorkspacePolicy,
-)
-from haas.policy.controller import (
-    _default_port_for_scheme,
-    _effective_port,
-    _is_same_or_within,
-)
-
-
 def _do_compile(layers: list[PolicyLayer]) -> EffectivePolicy:
     return PolicyController().compile(
         PolicyCompileInput(scope=PolicyScope(tenantId="t"), layers=layers)
@@ -435,7 +419,7 @@ def test_allowlist_matches_rejects_when_entry_port_unparseable() -> None:
 def test_effective_port_returns_none_on_invalid_literal() -> None:
     parsed = urlparse("http://example.com:999999/")
     with pytest.raises(ValueError):
-        parsed.port  # sanity: stdlib raises
+        _ = parsed.port  # sanity: stdlib raises
     assert _effective_port(parsed) is None
 
 
@@ -448,7 +432,10 @@ def test_default_port_for_unknown_scheme_is_none() -> None:
 
 def test_compile_appends_writable_root_after_delegation() -> None:
     layers = [
-        PolicyLayer("tenant", workspace=WorkspacePolicy(root="/workspace", writableRoots=["/workspace"])),
+        PolicyLayer(
+            "tenant",
+            workspace=WorkspacePolicy(root="/workspace", writableRoots=["/workspace"]),
+        ),
         PolicyLayer("delegate", delegation=True),
         PolicyLayer("app", workspace=WorkspacePolicy(writableRoots=["/workspace", "/extra"])),
     ]

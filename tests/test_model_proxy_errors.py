@@ -241,7 +241,9 @@ async def test_auth_failure_emits_audit_event_without_secrets() -> None:
     # Whitelist: only stable, non-sensitive identifiers may appear.
     assert set(fields) <= _ALLOWED_AUDIT_FIELDS
     # Reverse assertions: nothing secret may ever be recorded.
-    for forbidden in ("credential", "token", "authorization", "body", "apiKey", "api_key", "secret"):
+    for forbidden in (
+        "credential", "token", "authorization", "body", "apiKey", "api_key", "secret"
+    ):
         assert forbidden not in fields
 
 
@@ -282,7 +284,7 @@ async def test_url_denial_emits_audit_event() -> None:
             route, {}, authorization=f"Bearer {token}", policy=deny_policy
         )
     assert any(name == "model_proxy_url_denied" for name, _ in logger.events)
-    for name, fields in logger.events:
+    for _name, fields in logger.events:
         assert set(fields) <= _ALLOWED_AUDIT_FIELDS
 
 

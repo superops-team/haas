@@ -388,9 +388,10 @@ async def test_artifact_list_failure_is_best_effort() -> None:
 
 
 async def test_artifact_valid_bytes_is_registered_and_readable() -> None:
-    adapter = _ListingAdapter(
-        [ArtifactRef(name="report.md", path="output/report.md", content=b"# Report", mediaType="text/markdown")]
+    ref = ArtifactRef(
+        name="report.md", path="output/report.md", content=b"# Report", mediaType="text/markdown"
     )
+    adapter = _ListingAdapter([ref])
     runtime, app = _make_runtime(adapter, with_artifacts=True)
     result = await runtime.run(
         RunRequest(

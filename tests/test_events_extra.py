@@ -15,11 +15,12 @@ from haas.events import (
 from haas.harnesses.base import HarnessEvent
 from haas.stores import MemoryStore
 
-
 # --- event type inference ----------------------------------------------------
 
 
-@pytest.mark.parametrize("status", ["completed", "failed", "incomplete", "interrupted", "cancelled"])
+@pytest.mark.parametrize(
+    "status", ["completed", "failed", "incomplete", "interrupted", "cancelled"]
+)
 def test_infer_event_type_turn_status(status: str) -> None:
     assert _infer_event_type({}, {"stateDelta": {"status": status}}) == f"haas.turn.{status}"
 

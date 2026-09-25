@@ -86,7 +86,8 @@ def _build(
 
 
 def _token(tokens: RuntimeTokenManager, **kw) -> str:
-    return f"Bearer {tokens.issue(RuntimeTokenScope(sessionId='s_1', harnessId='chrn_codex_default', **kw))}"
+    scope = RuntimeTokenScope(sessionId="s_1", harnessId="chrn_codex_default", **kw)
+    return f"Bearer {tokens.issue(scope)}"
 
 
 def test_responses_rejects_non_object_body() -> None:

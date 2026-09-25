@@ -8,7 +8,6 @@ monkeypatched ``_put_record`` for fault injection; no real network or provider.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 
 import pytest
@@ -47,14 +46,13 @@ def _event(event_id: str, invocation_id: str = "inv_1") -> CanonicalEventRecord:
 def test_transaction_commits_multiple_records_atomically(tmp_path) -> None:
     path = tmp_path / "commit.db"
     key = ("chrn_1", "u_1", "hsess_1")
-    with SQLiteStore(path) as store:
-        with store.transaction():
-            store.put_session(SessionRecord(id=key[2], appName=key[0], userId=key[1]))
-            store.put_invocation(
-                InvocationRecord(
-                    id="inv_1", sessionId=key[2], appName=key[0], turnId="turn_1"
-                )
+    with SQLiteStore(path) as store, store.transaction():
+        store.put_session(SessionRecord(id=key[2], appName=key[0], userId=key[1]))
+        store.put_invocation(
+            InvocationRecord(
+                id="inv_1", sessionId=key[2], appName=key[0], turnId="turn_1"
             )
+        )
 
     with SQLiteStore(path) as reopened:
         assert reopened.get_session(key) is not None
@@ -68,13 +66,12 @@ def test_nested_transaction_joins_outer_atomic_unit(tmp_path) -> None:
     key = ("chrn_1", "u_1", "hsess_1")
     with SQLiteStore(path) as store:
         store.put_session(SessionRecord(id=key[2], appName=key[0], userId=key[1]))
-        with store.transaction():
-            with store.transaction():
-                store.put_invocation(
-                    InvocationRecord(
-                        id="inv_nested", sessionId=key[2], appName=key[0], turnId="turn_1"
-                    )
+        with store.transaction(), store.transaction():
+            store.put_invocation(
+                InvocationRecord(
+                    id="inv_nested", sessionId=key[2], appName=key[0], turnId="turn_1"
                 )
+            )
     with SQLiteStore(path) as reopened:
         assert reopened.get_invocation("inv_nested") is not None
 
@@ -279,11 +276,13 @@ def test_load_skips_corrupt_payload_without_crashing(tmp_path) -> None:
     connection = sqlite3.connect(path)
     # Payload that is valid JSON but not a dict -> _construct_record raises.
     connection.execute(
-        "INSERT INTO records(namespace, record_key, payload) VALUES('session','chrn_1|u_1|hsess_bad','[1,2,3]')"
+        "INSERT INTO records(namespace, record_key, payload) "
+        "VALUES('session','chrn_1|u_1|hsess_bad','[1,2,3]')"
     )
     # Missing required field -> _construct_record raises ValueError.
     connection.execute(
-        "INSERT INTO records(namespace, record_key, payload) VALUES('session','chrn_1|u_1|hsess_bad2','{}')"
+        "INSERT INTO records(namespace, record_key, payload) "
+        "VALUES('session','chrn_1|u_1|hsess_bad2','{}')"
     )
     connection.commit()
     connection.close()

@@ -28,7 +28,6 @@ from haas.stores.memory import (
 )
 from haas.stores.sqlite import SQLiteStore
 
-
 # --- helpers ---------------------------------------------------------------
 
 
@@ -88,10 +87,9 @@ def test_sqlite_transaction_rollback_restores_memory(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "haas.db")
     store.put_session(_session("hsess_keep"))
 
-    with pytest.raises(RuntimeError):
-        with store.transaction():
-            store.put_session(_session("hsess_rollback"))
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), store.transaction():
+        store.put_session(_session("hsess_rollback"))
+        raise RuntimeError("boom")
 
     assert store.get_session(("chrn_1", "u_1", "hsess_rollback")) is None
     assert store.get_session(("chrn_1", "u_1", "hsess_keep")) is not None

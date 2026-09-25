@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import pytest
 
 from haas.config import AppConfig, SessionRuntimeConfig, build_store, load_config
 from haas.events import EventLog
 from haas.stores import MemoryStore, SQLiteStore
-from haas.stores.memory import CanonicalEventRecord, MemoryStore as _MemoryStore
+from haas.stores.memory import CanonicalEventRecord
+from haas.stores.memory import MemoryStore as _MemoryStore
 
 
 def test_build_store_selects_explicit_memory_backend() -> None:
@@ -305,6 +306,7 @@ def test_file_overlay_skips_non_dict_sections(tmp_path) -> None:
 
 def test_identity_tokens_reads_token_file(tmp_path) -> None:
     from haas.config import _identity_tokens
+    from haas.identity import Principal
 
     cfg = AppConfig()
     cfg.identity.provider = "static"
@@ -312,7 +314,7 @@ def test_identity_tokens_reads_token_file(tmp_path) -> None:
     tok.write_text("secret-token\n", encoding="utf-8")
     cfg.identity.static_token_file = str(tok)
     tokens = _identity_tokens(cfg)
-    assert tokens == {"secret-token": __import__("haas.identity", fromlist=["Principal"]).Principal(principalId="p_local_manager")}
+    assert tokens == {"secret-token": Principal(principalId="p_local_manager")}
 
 
 def test_identity_tokens_missing_file_returns_empty(tmp_path) -> None:

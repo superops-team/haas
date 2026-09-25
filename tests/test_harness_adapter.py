@@ -1,9 +1,15 @@
 """Harness adapter interface and fake adapter tests (specs/harness-adapter/)."""
 
+import pytest
+from pydantic import ValidationError
+
 from haas.harnesses.base import (
     CancelTurnRequest,
+    CredentialHandle,
+    McpServerConfig,
     PrepareSessionRequest,
     StartTurnRequest,
+    TypedHarnessEvent,
 )
 from haas.harnesses.fake import FakeAdapter
 
@@ -58,16 +64,6 @@ async def test_fake_adapter_sandbox_declaration() -> None:
 
 
 # --- P1-3: typed request models & boundary event validation -----------------
-
-import pytest
-from pydantic import ValidationError
-
-from haas.harnesses.base import (
-    CredentialHandle,
-    McpServerConfig,
-    StartTurnRequest,
-    TypedHarnessEvent,
-)
 
 
 def _req(**kwargs) -> StartTurnRequest:

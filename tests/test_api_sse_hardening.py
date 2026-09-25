@@ -2,21 +2,13 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from fastapi.testclient import TestClient
 
 from haas.api import build_app
 from haas.harnesses.base import (
     AdapterProbe,
-    AdapterTurnResult,
-    ArtifactRef,
     HarnessEvent,
-    ListArtifactsRequest,
-    PreparedSession,
-    PrepareSessionRequest,
-    StartTurnRequest,
     TurnHandle,
 )
 from haas.harnesses.fake import FakeAdapter

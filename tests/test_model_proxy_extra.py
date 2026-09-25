@@ -9,7 +9,6 @@ rejections. Kept offline via httpx.MockTransport.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
@@ -24,12 +23,12 @@ from haas.model_proxy import (
 from haas.model_proxy.proxy import (
     ModelProxy,
     ModelProxyError,
+    _flatten_input_function_calls,
+    _flatten_namespace_tools,
     _NamespacedToolName,
     _NamespaceToolBridge,
     _provider_http_error,
     _redact_credential,
-    _flatten_input_function_calls,
-    _flatten_namespace_tools,
     _restore_namespace_tool_calls,
     model_proxy_retry_delay_seconds,
 )
@@ -387,7 +386,10 @@ async def test_stream_relay_rejects_oversized_frame() -> None:
 
 
 async def test_stream_relay_redacts_credential_on_non_data_lines() -> None:
-    frame = f": debug token={SECRET}\n\ndata: {{\"type\":\"output.text.delta\",\"delta\":\"hi\"}}\n\n"
+    frame = (
+        f": debug token={SECRET}\n\n"
+        f'data: {{"type":"output.text.delta","delta":"hi"}}\n\n'
+    )
 
     def handler(_r: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=frame, headers={"content-type": "text/event-stream"})

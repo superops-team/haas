@@ -74,7 +74,10 @@ def _make_profile(
 
 def test_execution_intent_fingerprint_strips_credentials() -> None:
     a = execution_intent_fingerprint(
-        {"provider": {"model": "gpt", "credentialRef": "secret://x"}, "list": [{"credentialRef": "y"}]}
+        {
+            "provider": {"model": "gpt", "credentialRef": "secret://x"},
+            "list": [{"credentialRef": "y"}],
+        }
     )
     b = execution_intent_fingerprint(
         {"provider": {"model": "gpt"}, "list": [{}]}
@@ -146,9 +149,16 @@ def test_execution_snapshot_rejects_unvalidated_profile() -> None:
 def test_findings_flag_openai_compatible_without_api_type() -> None:
     service = _service()
     findings = service._findings(
-        {"harnessId": "chrn_1", "base": "codex", "provider": _provider(apiType="", wireApi="openai-compatible")}
+        {
+            "harnessId": "chrn_1",
+            "base": "codex",
+            "provider": _provider(apiType="", wireApi="openai-compatible"),
+        }
     )
-    assert any(f["code"] == "haas_provider_invalid" and f["field"] == "provider.apiType" for f in findings)
+    assert any(
+        f["code"] == "haas_provider_invalid" and f["field"] == "provider.apiType"
+        for f in findings
+    )
 
 
 def test_findings_flag_unsupported_wire_api() -> None:

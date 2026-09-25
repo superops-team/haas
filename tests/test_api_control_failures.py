@@ -10,8 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from haas.api import build_app
-from haas.harnesses import FakeAdapter
-from haas.harnesses.base import HarnessEvent, TurnHandle
+from haas.harnesses.base import HarnessEvent
 from haas.identity import Principal
 from haas.sessions import (
     AdapterTurnError,

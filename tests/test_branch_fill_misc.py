@@ -21,18 +21,16 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from dataclasses import replace
-
 from haas.events import EventLog
-from haas.harnesses import FakeAdapter, HarnessEvent
-from haas.identity import Principal
+from haas.harnesses import FakeAdapter, HarnessEvent, TurnHandle
+from haas.mcp.runtime import enforce_disabled_tools
 from haas.model_proxy.models import RuntimeTokenScope
 from haas.model_proxy.token import RuntimeTokenManager
-from haas.mcp.runtime import enforce_disabled_tools
 from haas.profiles import HarnessProfileService
 from haas.registry import HarnessRegistry, seed_codex
 from haas.runtime.delegation import (
@@ -41,8 +39,6 @@ from haas.runtime.delegation import (
     FakeDelegatedContainerRuntime,
 )
 from haas.sessions import (
-    AdapterTurnError,
-    InvocationNotResumableError,
     InvocationNotFoundError,
     InvocationRecord,
     RunRequest,
@@ -56,7 +52,6 @@ from haas.stores import (
     ApprovalStateConflictError,
     CanonicalEventRecord,
     DelegatedSessionRecord,
-    HarnessRecord,
     InputRequestRecord,
     InputRequestStateConflictError,
     MemoryStore,
@@ -628,10 +623,9 @@ def test_transaction_rollback_restores_memory(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "r.db")
     try:
         store.put_session(SessionRecord(id="s", appName=APP, userId="u"))
-        with pytest.raises(RuntimeError):
-            with store.transaction():
-                store.put_session(SessionRecord(id="s2", appName=APP, userId="u"))
-                raise RuntimeError("boom")
+        with pytest.raises(RuntimeError), store.transaction():
+            store.put_session(SessionRecord(id="s2", appName=APP, userId="u"))
+            raise RuntimeError("boom")
         assert store.get_session((APP, "u", "s2")) is None
         assert store.get_session((APP, "u", "s")) is not None
     finally:
@@ -644,12 +638,11 @@ def test_nested_put_invocation_failure_rolls_back_memory(tmp_path) -> None:
         existing = InvocationRecord(id="inv", sessionId="s", appName=APP, turnId="t")
         with store.transaction():
             store.put_invocation(existing)
-            with pytest.raises(RuntimeError):
-                with store.transaction():
-                    store.put_invocation(
-                        InvocationRecord(id="inv2", sessionId="s", appName=APP, turnId="t")
-                    )
-                    raise RuntimeError("inner")
+            with pytest.raises(RuntimeError), store.transaction():
+                store.put_invocation(
+                    InvocationRecord(id="inv2", sessionId="s", appName=APP, turnId="t")
+                )
+                raise RuntimeError("inner")
         # rollback restores prior memory state; new record may remain in memory cache
         pass  # verified transaction did not commit to DB
         assert store.get_invocation("inv") is not None
@@ -701,7 +694,7 @@ def test_invalid_control_state_session_record_is_skipped(tmp_path) -> None:
         reopened.close()
 
 
-def test_append_event_without_invocation_id_rolls_back(tmp_path) -> None:
+def test_append_event_without_invocation_id_reads_back_sqlite(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "ev.db")
     try:
         ev = CanonicalEventRecord(
@@ -717,7 +710,9 @@ def test_append_event_without_invocation_id_rolls_back(tmp_path) -> None:
 def test_put_invocation_terminal_cascades_only_owned_interactions(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "own.db")
     try:
-        store.put_approval(ApprovalRecord(id="ap_other", sessionId="s", invocationId="other", turnId="t"))
+        store.put_approval(
+            ApprovalRecord(id="ap_other", sessionId="s", invocationId="other", turnId="t")
+        )
         store.put_input_request(
             InputRequestRecord(id="ir_other", sessionId="s", invocationId="other", turnId="t",
                                questions=[], nativeRequestId="n", adapterGeneration=1)

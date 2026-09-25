@@ -4,7 +4,14 @@ import json
 
 import pytest
 
-from haas.events import HEARTBEAT_FRAME, EventLog
+from haas.events import (
+    HEARTBEAT_FRAME,
+    EventLog,
+    _harness_event_metadata,
+    _infer_event_type,
+    _infer_haas_metadata,
+    _validate_typed_metadata,
+)
 from haas.harnesses.base import HarnessEvent
 from haas.stores import MemoryStore
 
@@ -405,23 +412,12 @@ def test_output_item_completion_requires_item_id_and_preserves_phase() -> None:
 # === appended coverage ===
 
 
-import pytest
-
-from haas.events import (
-    EventLog,
-    _harness_event_metadata,
-    _infer_event_type,
-    _infer_haas_metadata,
-    _validate_typed_metadata,
-)
-from haas.harnesses.base import HarnessEvent
-from haas.stores import MemoryStore
-
-
 # --- event type inference ----------------------------------------------------
 
 
-@pytest.mark.parametrize("status", ["completed", "failed", "incomplete", "interrupted", "cancelled"])
+@pytest.mark.parametrize(
+    "status", ["completed", "failed", "incomplete", "interrupted", "cancelled"]
+)
 def test_infer_event_type_turn_status(status: str) -> None:
     assert _infer_event_type({}, {"stateDelta": {"status": status}}) == f"haas.turn.{status}"
 

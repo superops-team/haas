@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from haas.model_proxy.models import RuntimeTokenScope
@@ -93,5 +91,5 @@ def test_token_session_id_rejects_whitespace_in_session() -> None:
     # base64 of "has space" (contains a space once decoded).
     import base64
 
-    encoded = base64.urlsafe_b64encode("has space".encode()).decode().rstrip("=")
+    encoded = base64.urlsafe_b64encode(b"has space").decode().rstrip("=")
     assert mgr.token_session_id(f"haas_mp_{encoded}.1.x") is None

@@ -14,10 +14,7 @@ Targets:
 from __future__ import annotations
 
 import asyncio
-import io
-import json
 from collections.abc import AsyncIterator
-from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -32,7 +29,6 @@ from haas.stores import (
     ApprovalRecord,
     InputRequestRecord,
     InvocationRecord,
-    MemoryStore,
     SessionRecord,
 )
 
@@ -42,6 +38,12 @@ TOKEN = "fill-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 TOKEN_B = "fill-token-b"
 AUTH_B = {"Authorization": f"Bearer {TOKEN_B}"}
+
+_TOKENS = {
+    TOKEN: Principal(
+        principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"})
+    )
+}
 
 
 def _app(**kwargs: Any) -> TestClient:
@@ -69,7 +71,9 @@ def _run_body(session_id: str = "hsess-fill", user_id: str = "u_fill") -> dict[s
     }
 
 
-def _seed_session(client: TestClient, session_id: str = "hsess-fill", user_id: str = "u_fill") -> None:
+def _seed_session(
+    client: TestClient, session_id: str = "hsess-fill", user_id: str = "u_fill"
+) -> None:
     client.app.state.runtime.store.put_session(
         SessionRecord(id=session_id, appName="chrn_codex_default", userId=user_id)
     )
@@ -262,7 +266,6 @@ def test_get_session_profile_cross_user_is_404() -> None:
 
 def test_rebind_session_profile_success_and_replay() -> None:
     client = _app()
-    store = client.app.state.runtime.store
     # Create a profile via the profiles API
     created = client.post(
         "/v1/haas/profiles",
@@ -291,7 +294,9 @@ def test_rebind_session_profile_success_and_replay() -> None:
     first = client.post("/v1/haas/sessions/hsess-rebind/profile-rebind", json=body, headers=headers)
     assert first.status_code == 200, first.text
 
-    replay = client.post("/v1/haas/sessions/hsess-rebind/profile-rebind", json=body, headers=headers)
+    replay = client.post(
+        "/v1/haas/sessions/hsess-rebind/profile-rebind", json=body, headers=headers
+    )
     assert replay.status_code == 200
     assert replay.json() == first.json()
 
@@ -444,7 +449,7 @@ class _FailingAdapter(FakeAdapter):
 
 
 def test_run_non_streaming_adapter_error_returns_502_with_idempotency() -> None:
-    client = TestClient(build_app(adapter=_FailingAdapter(), identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))}))
+    client = TestClient(build_app(adapter=_FailingAdapter(), identity_tokens=_TOKENS))
     body = _run_body("hsess-fail")
     headers = {**AUTH, "Idempotency-Key": "fail-key"}
     resp = client.post("/run", json=body, headers=headers)
@@ -457,11 +462,11 @@ def test_run_non_streaming_adapter_error_returns_502_with_idempotency() -> None:
 
 
 def test_run_sse_adapter_error_closes_terminal() -> None:
-    client = TestClient(build_app(adapter=_FailingAdapter(), identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))}))
+    client = TestClient(build_app(adapter=_FailingAdapter(), identity_tokens=_TOKENS))
     body = _run_body("hsess-fail-sse")
     with client.stream("POST", "/run_sse", json=body, headers=AUTH) as resp:
         assert resp.status_code == 200
-        lines = [l for l in resp.iter_lines() if l.startswith("data: ")]
+        lines = [line for line in resp.iter_lines() if line.startswith("data: ")]
     assert lines, "expected at least the partial event"
 
 
@@ -745,13 +750,12 @@ def test_run_for_delegated_session_uses_fake_container_runtime() -> None:
         build_app(
             adapter=FakeAdapter(),
             delegated_containers=fake_runtime,
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
-    created = client.post(
+    client.post(
         "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH
     )
-    did = created.json()["data"]["id"]
 
     # non-streaming run
     body = _run_body("hsess_deleg_fill")
@@ -769,7 +773,7 @@ def test_cancel_running_delegated_invocation() -> None:
         build_app(
             adapter=FakeAdapter(),
             delegated_containers=fake_runtime,
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH)
@@ -887,7 +891,7 @@ def test_run_sse_last_event_id_replay_structured_off(monkeypatch) -> None:
     ) as resp:
         assert resp.status_code == 200
         lines = list(resp.iter_lines())
-    assert any(l.startswith("data: ") for l in lines)
+    assert any(line.startswith("data: ") for line in lines)
 
 
 # ---------------------------------------------------------------------------
@@ -910,7 +914,7 @@ def test_admission_denied_returns_429() -> None:
     client = TestClient(
         build_app(
             adapter=FakeAdapter(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
             run_quota=0,
         )
     )
@@ -936,7 +940,9 @@ def test_run_non_streaming_session_busy_returns_409() -> None:
     client = _app()
     store = client.app.state.runtime.store
     key = ("chrn_codex_default", "u_fill", "hsess-busy2")
-    store.put_session(SessionRecord(id="hsess-busy2", appName="chrn_codex_default", userId="u_fill"))
+    store.put_session(
+        SessionRecord(id="hsess-busy2", appName="chrn_codex_default", userId="u_fill")
+    )
     store.acquire_lease(key, "holder-2", ttl_ms=30_000)
     resp = client.post("/run", json=_run_body("hsess-busy2"), headers=AUTH)
     assert resp.status_code == 409
@@ -970,7 +976,7 @@ def test_run_sse_stop_async_iteration_returns_empty_stream() -> None:
     client = TestClient(
         build_app(
             adapter=_EmptyAdapter(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     body = _run_body("hsess-empty")
@@ -983,7 +989,7 @@ def test_run_timeout_error_returns_502_with_idempotency_replay() -> None:
     client = TestClient(
         build_app(
             adapter=_FailingAdapter(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
             session_lease_ttl_ms=200,
             session_lease_renew_interval_ms=40,
             session_turn_timeout_s=0.5,
@@ -1066,7 +1072,7 @@ def test_approval_codex_connection_error_maps_to_409() -> None:
     client = TestClient(
         build_app(
             adapter=_CodexFlakyAdapter(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     store = client.app.state.runtime.store
@@ -1094,7 +1100,7 @@ def test_input_request_codex_connection_error_maps_to_409() -> None:
     client = TestClient(
         build_app(
             adapter=_CodexFlakyAdapter(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     store = client.app.state.runtime.store
@@ -1169,10 +1175,9 @@ def test_run_with_unknown_profile_returns_404() -> None:
 
 def test_cancel_delegated_invocation_disabled_runtime_503() -> None:
     client = _app()  # DisabledDelegatedContainerRuntime by default
-    created = client.post(
+    client.post(
         "/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH
     )
-    did = created.json()["data"]["id"]
     # Put a running invocation on the delegated session
     client.app.state.runtime.store.put_invocation(
         InvocationRecord(
@@ -1226,14 +1231,14 @@ def test_run_sse_start_turn_failure_502() -> None:
     client = TestClient(
         build_app(
             adapter=_StartTurnFailingAdapter(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     body = _run_body("hsess-startfail")
     with client.stream("POST", "/run_sse", json=body, headers=AUTH) as resp:
         # Streaming mode: headers already sent; terminal failure event is in-body.
         assert resp.status_code == 200
-        lines = [l for l in resp.iter_lines() if l.startswith("data: ")]
+        lines = [line for line in resp.iter_lines() if line.startswith("data: ")]
     assert lines
 
 
@@ -1241,7 +1246,7 @@ def test_run_non_streaming_start_turn_failure_502() -> None:
     client = TestClient(
         build_app(
             adapter=_StartTurnFailingAdapter(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     resp = client.post("/run", json=_run_body("hsess-startfail2"), headers=AUTH)
@@ -1281,11 +1286,10 @@ class _BlockingAdapter(FakeAdapter):
 
 
 def test_run_timeout_via_blocking_adapter() -> None:
-    import asyncio as _asyncio
     client = TestClient(
         build_app(
             adapter=_BlockingAdapter(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
             session_lease_ttl_ms=200,
             session_lease_renew_interval_ms=40,
             session_turn_timeout_s=0.3,
@@ -1312,7 +1316,7 @@ def test_codex_base_without_profile_or_proxy_returns_503() -> None:
     client = TestClient(
         build_app(
             adapter=_CodexBaseAdapter(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     # codex base with no active profile + no model proxy -> 503
@@ -1345,11 +1349,11 @@ def test_delegated_restore_unsupported_policy_maps_to_422() -> None:
         build_app(
             adapter=FakeAdapter(),
             delegated_containers=_FailingDelegatedRuntime(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     client.post("/v1/haas/delegated-sessions", json=_delegated_body(), headers=AUTH)
-    resp = client.post(
+    client.post(
         "/v1/haas/delegated-sessions/dgsess_fill_invalid/restore", headers=AUTH
     )
     # unknown id -> 404 first; create then restore
@@ -1399,7 +1403,7 @@ def test_delete_session_delegated_destroys_container() -> None:
         build_app(
             adapter=FakeAdapter(),
             delegated_containers=fake,
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     client.post(
@@ -1432,7 +1436,7 @@ def test_delegated_run_failure_maps_to_422() -> None:
         build_app(
             adapter=FakeAdapter(),
             delegated_containers=_FailingDelegatedRun(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     client.post(
@@ -1458,7 +1462,7 @@ def test_delegated_run_backend_unavailable_maps_to_503() -> None:
         build_app(
             adapter=FakeAdapter(),
             delegated_containers=_Down(),
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     client.post(
@@ -1819,7 +1823,7 @@ def test_reconciled_policy_event_after_delegated_run() -> None:
         build_app(
             adapter=FakeAdapter(),
             delegated_containers=fake,
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     client.post(
@@ -1870,7 +1874,9 @@ def test_idempotency_replay_of_error_response() -> None:
 def test_resolve_approval_replay_with_idempotency_key() -> None:
     client = _app()
     store = client.app.state.runtime.store
-    store.put_session(SessionRecord(id="hsess-appr-replay", appName="chrn_codex_default", userId="u_fill"))
+    store.put_session(
+        SessionRecord(id="hsess-appr-replay", appName="chrn_codex_default", userId="u_fill")
+    )
     store.put_approval(
         ApprovalRecord(
             id="appr_replay",
@@ -1902,7 +1908,9 @@ def test_resolve_approval_replay_with_idempotency_key() -> None:
 def test_answer_input_request_replay_with_idempotency_key() -> None:
     client = _app()
     store = client.app.state.runtime.store
-    store.put_session(SessionRecord(id="hsess-ir-replay", appName="chrn_codex_default", userId="u_fill"))
+    store.put_session(
+        SessionRecord(id="hsess-ir-replay", appName="chrn_codex_default", userId="u_fill")
+    )
     store.put_input_request(
         InputRequestRecord(
             id="inreq_replay",
@@ -1959,7 +1967,7 @@ def test_delegated_policy_successful_update_and_reconcile() -> None:
         build_app(
             adapter=FakeAdapter(),
             delegated_containers=fake,
-            identity_tokens={TOKEN: Principal(principalId="p_fill", tenantId="t_fill", userIds=frozenset({"u_fill"}))},
+            identity_tokens=_TOKENS,
         )
     )
     created = client.post(

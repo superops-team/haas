@@ -24,7 +24,9 @@ class _Resolver:
 
 
 def _harness() -> HarnessRecord:
-    return HarnessRecord(id="chrn_codex_default", name="codex", base="codex", defaultModel="gpt-test")
+    return HarnessRecord(
+        id="chrn_codex_default", name="codex", base="codex", defaultModel="gpt-test"
+    )
 
 
 def _profile() -> dict[str, Any]:

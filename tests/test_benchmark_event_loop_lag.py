@@ -135,12 +135,11 @@ async def test_m01_event_loop_sqlite_write_lag(tmp_path, monkeypatch) -> None:
         n_lines = 0
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://bench"
-        ) as client:
-            async with client.stream("POST", "/run_sse", json=body, headers=HEADERS) as resp:
-                assert resp.status_code == 200, resp.text
-                async for line in resp.aiter_lines():
-                    if line.startswith("data: "):
-                        n_lines += 1
+        ) as client, client.stream("POST", "/run_sse", json=body, headers=HEADERS) as resp:
+            assert resp.status_code == 200, resp.text
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    n_lines += 1
         return n_lines
 
     wall0 = asyncio.get_running_loop().time()
@@ -149,7 +148,7 @@ async def test_m01_event_loop_sqlite_write_lag(tmp_path, monkeypatch) -> None:
     store.close()
 
     total_events = sum(per_stream)
-    print(f"\n=== M-01 event-loop SQLite write block measurement ===")
+    print("\n=== M-01 event-loop SQLite write block measurement ===")
     print(f"streams={N_CONCURRENCY} events_per_stream={N_EVENTS} "
           f"data_frames={total_events} wall_s={wall:.2f}")
 

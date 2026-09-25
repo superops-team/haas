@@ -1,6 +1,7 @@
 """Branch-coverage fill-in tests (file E): api.py CRUD success paths."""
 
 from fastapi.testclient import TestClient
+
 from haas.api import build_app
 from haas.harnesses import FakeAdapter
 from haas.identity import Principal
@@ -26,7 +27,8 @@ def test_harness_crud_full_lifecycle() -> None:
     # Create
     r = client.post("/v1/haas/harnesses", json=body, headers=HEADERS)
     assert r.status_code in (200, 400, 404, 422)
-    if r.status_code != 200: return
+    if r.status_code != 200:
+        return
     hid = r.json()["data"]["id"]
     # Get
     r = client.get(f"/v1/haas/harnesses/{hid}", headers=HEADERS)
@@ -55,7 +57,8 @@ def test_profile_crud_full_lifecycle() -> None:
     # Create
     r = client.post("/v1/haas/profiles", json=body, headers=HEADERS)
     assert r.status_code in (200, 400, 404, 422)
-    if r.status_code != 200: return
+    if r.status_code != 200:
+        return
     pid = r.json()["data"]["id"]
     # Get
     r = client.get(f"/v1/haas/profiles/{pid}", headers=HEADERS)
@@ -84,7 +87,8 @@ def test_invocation_readback() -> None:
     }
     r = client.post("/run", json=body, headers=HEADERS)
     assert r.status_code in (200, 400, 404, 422)
-    if r.status_code != 200: return
+    if r.status_code != 200:
+        return
     iid = r.json()[0]["invocationId"]
     # Get invocation
     r = client.get(f"/v1/haas/sessions/s_inv/invocations/{iid}", headers=HEADERS)
@@ -105,7 +109,8 @@ def test_session_events_readback() -> None:
         "newMessage": {"role": "user", "parts": [{"text": "hi"}]},
     }
     cr = client.post("/run", json=body, headers=HEADERS)
-    if cr.status_code != 200: return
+    if cr.status_code != 200:
+        return
     r = client.get(f"/apps/{APP}/users/{USER}/sessions/s_ev_e/events", headers=HEADERS)
     assert r.status_code in (200, 400, 404, 422)
 

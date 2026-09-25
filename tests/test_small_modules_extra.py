@@ -11,7 +11,6 @@ from haas.observability.logger import StructuredLogger
 from haas.runtime.reconciler import reconcile_delegated_policy
 from haas.stores import DelegatedSessionRecord, MemoryStore
 
-
 # --- artifact paths ----------------------------------------------------------
 
 
@@ -84,7 +83,12 @@ def test_reconcile_returns_record_when_runtime_busy() -> None:
     store = MemoryStore()
     record = _delegated(
         pendingPolicyUpdate={"updateId": "u1", "revision": 2},
-        pendingPolicyTarget={"profileRef": {}, "delegationPolicySnapshot": {}, "mountManifest": {}, "image": {}},
+        pendingPolicyTarget={
+            "profileRef": {},
+            "delegationPolicySnapshot": {},
+            "mountManifest": {},
+            "image": {},
+        },
         desiredRevision=2,
     )
     from dataclasses import replace
@@ -97,7 +101,9 @@ def test_reconcile_returns_record_when_runtime_busy() -> None:
 
 def test_reconcile_fails_when_target_missing() -> None:
     store = MemoryStore()
-    record = _delegated(pendingPolicyUpdate={"updateId": "u1", "revision": 2}, pendingPolicyTarget=None)
+    record = _delegated(
+        pendingPolicyUpdate={"updateId": "u1", "revision": 2}, pendingPolicyTarget=None
+    )
     store.put_delegated_session(record)
     out = reconcile_delegated_policy(store, "ds_1")
     assert out.lastPolicyUpdateResult["status"] == "failed"
@@ -112,7 +118,9 @@ def test_reconcile_records_apply_failure() -> None:
         "mountManifest": {},
         "image": {},
     }
-    record = _delegated(pendingPolicyUpdate={"updateId": "u1", "revision": 2}, pendingPolicyTarget=target)
+    record = _delegated(
+        pendingPolicyUpdate={"updateId": "u1", "revision": 2}, pendingPolicyTarget=target
+    )
     store.put_delegated_session(record)
 
     def boom(_record, _target):

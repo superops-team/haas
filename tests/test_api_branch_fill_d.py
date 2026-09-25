@@ -1,6 +1,5 @@
 """Branch-coverage fill-in tests (file D): targeted api.py remaining branches."""
 
-import pytest
 from fastapi.testclient import TestClient
 
 from haas.api import build_app
@@ -85,7 +84,7 @@ def test_sse_backpressure_small_queue() -> None:
         client = make_client()
         with client.stream("POST", "/run_sse", json=_run_body("s_bp"), headers=HEADERS) as resp:
             assert resp.status_code == 200
-            frames = [l for l in resp.iter_lines() if l]
+            frames = [line for line in resp.iter_lines() if line]
             assert len(frames) > 0
     finally:
         _api.SSE_QUEUE_MAXSIZE = original
@@ -208,7 +207,14 @@ def test_delegated_create_unknown_harness() -> None:
             "appName": "no_such", "userId": USER, "sessionId": "ds1",
             "image": {"reference": "haas:local", "digest": "sha256:" + "a" * 64},
             "provider": {"providerId": "p", "model": "m", "credentialRef": "ref://p"},
-            "mountManifest": {"version": 1, "primaryWorkspace": {"hostPathCanonical": "/tmp", "containerPath": "/w", "access": "rw"}},
+            "mountManifest": {
+                "version": 1,
+                "primaryWorkspace": {
+                    "hostPathCanonical": "/tmp",
+                    "containerPath": "/w",
+                    "access": "rw",
+                },
+            },
         },
         headers=HEADERS,
     )
@@ -257,7 +263,7 @@ def test_run_sse_normal() -> None:
     client = make_client()
     with client.stream("POST", "/run_sse", json=_run_body("s_sse_norm"), headers=HEADERS) as resp:
         assert resp.status_code == 200
-        frames = [l for l in resp.iter_lines() if l]
+        frames = [line for line in resp.iter_lines() if line]
         assert any("data:" in f for f in frames)
 
 

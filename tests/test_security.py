@@ -2,6 +2,7 @@
 
 import pytest
 
+from haas.runtime.delegation import DelegatedContainerUnavailable
 from haas.security import (
     ArtifactPathTraversalError,
     RedactionContext,
@@ -13,7 +14,6 @@ from haas.security import (
     validate_url,
 )
 from haas.security.redact import bounded_redacted_preview
-from haas.runtime.delegation import DelegatedContainerUnavailable
 
 
 def test_redact_credential_field_and_token() -> None:
@@ -117,7 +117,9 @@ def test_validate_artifact_path_blocks_traversal() -> None:
         validate_artifact_path(root, "../etc/passwd")
 
 
-async def test_docker_subprocess_stderr_does_not_leak_host_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_docker_subprocess_stderr_does_not_leak_host_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Raw docker stderr may echo host bind-mount paths (S3-007).
 
     The subprocess runner must pass stderr through the redaction boundary before

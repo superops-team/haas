@@ -32,8 +32,8 @@ from haas.sessions import (
     SessionBusyError,
     SessionNotFoundError,
     SessionRuntime,
+    _ActiveTurn,
 )
-from haas.sessions import _ActiveTurn
 from haas.stores import (
     ApprovalRecord,
     CanonicalEventRecord,
@@ -1620,7 +1620,14 @@ async def test_fencing_during_adapter_call_maps_to_adapter_error(
 
 class _ArtifactListingAdapter(FakeAdapter):
     async def list_artifacts(self, request: ListArtifactsRequest) -> list[ArtifactRef]:
-        return [ArtifactRef(name="report.md", path="output/report.md", content=b"# Report", mediaType="text/markdown")]
+        return [
+            ArtifactRef(
+                name="report.md",
+                path="output/report.md",
+                content=b"# Report",
+                mediaType="text/markdown",
+            )
+        ]
 
 
 async def test_finalize_terminal_publishes_artifacts_when_no_streamed_terminal() -> None:
@@ -1823,7 +1830,9 @@ async def test_cancel_completed_invocation_returns_as_is(runtime: SessionRuntime
     assert out.status == "completed"
 
 
-async def test_cancel_interrupted_resumable_session_marks_cancelled(runtime: SessionRuntime) -> None:
+async def test_cancel_interrupted_resumable_session_marks_cancelled(
+    runtime: SessionRuntime,
+) -> None:
     session, inv, turn = _seed_durable_running(runtime)
     inv.status = "interrupted"
     runtime.store.put_invocation(inv)

@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 from haas.api import (
-    HaasError,
     MountManifestInvalid,
     _accepted_headers,
     _adk_event_frame,
@@ -204,6 +201,13 @@ def test_delegated_session_body_match_checks_every_contract_domain() -> None:
         "delegationPolicySnapshot": record.delegationPolicySnapshot,
     }
     assert _delegated_session_matches_body(record, body)
+    non_scalar_fields = {
+        "image",
+        "profileRef",
+        "provider",
+        "mountManifest",
+        "delegationPolicySnapshot",
+    }
     for field in (
         "haasSessionId",
         "haasUserId",
@@ -217,7 +221,7 @@ def test_delegated_session_body_match_checks_every_contract_domain() -> None:
         "delegationPolicySnapshot",
     ):
         changed = dict(body)
-        changed[field] = "different" if field not in {"image", "profileRef", "provider", "mountManifest", "delegationPolicySnapshot"} else {}
+        changed[field] = "different" if field not in non_scalar_fields else {}
         assert not _delegated_session_matches_body(record, changed), field
 
 

@@ -13,7 +13,6 @@ no real socket). Covers:
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -25,8 +24,8 @@ from haas.harnesses.base import (
     TurnHandle,
 )
 from haas.harnesses.codex_app_server.adapter import (
-    HaaSTurnInputInvalid,
     CodexAdapter,
+    HaaSTurnInputInvalid,
     _to_codex_input,
 )
 from haas.harnesses.codex_app_server.rpc import (
@@ -42,9 +41,6 @@ from haas.harnesses.codex_app_server.transport import (
     connect_endpoint,
     validate_loopback_websocket_url,
 )
-from haas.stores import MemoryStore
-from haas.stores.memory import ApprovalRecord, InputRequestRecord
-
 
 # --- helpers ---------------------------------------------------------------
 
@@ -102,7 +98,7 @@ async def test_prepare_session_handshake_failure_propagates(
 
     monkeypatch.setattr(rpc_mod, "connect_endpoint", _fake)
 
-    with pytest.raises(Exception):
+    with pytest.raises(CodexConnectionError):
         await adapter.prepare_session(
             PrepareSessionRequest(sessionId="hsess_1", appName="chrn_1")
         )
@@ -207,7 +203,9 @@ async def test_start_turn_empty_workspace_root_falls_back_to_default_cwd() -> No
     rpc = _FakeRpc()
     rpc.request_impl = AsyncMock(
         side_effect=lambda method, params: (
-            {"thread": {"id": "thr_1"}} if method == "thread/start" else {"turn": {"id": "codex_turn_1"}}
+            {"thread": {"id": "thr_1"}}
+            if method == "thread/start"
+            else {"turn": {"id": "codex_turn_1"}}
         )
     )
     adapter = _started_adapter(rpc)
@@ -230,7 +228,9 @@ async def test_start_turn_non_list_writable_roots_coerced_to_list() -> None:
     rpc = _FakeRpc()
     rpc.request_impl = AsyncMock(
         side_effect=lambda method, params: (
-            {"thread": {"id": "thr_1"}} if method == "thread/start" else {"turn": {"id": "codex_turn_1"}}
+            {"thread": {"id": "thr_1"}}
+            if method == "thread/start"
+            else {"turn": {"id": "codex_turn_1"}}
         )
     )
     adapter = _started_adapter(rpc)
@@ -255,7 +255,9 @@ async def test_start_turn_network_from_policy_when_sandbox_network_none() -> Non
     rpc = _FakeRpc()
     rpc.request_impl = AsyncMock(
         side_effect=lambda method, params: (
-            {"thread": {"id": "thr_1"}} if method == "thread/start" else {"turn": {"id": "codex_turn_1"}}
+            {"thread": {"id": "thr_1"}}
+            if method == "thread/start"
+            else {"turn": {"id": "codex_turn_1"}}
         )
     )
     adapter = _started_adapter(rpc)
@@ -411,7 +413,6 @@ async def test_stream_events_server_request_overloaded_terminal(
 
 
 async def test_stdio_transport_recv_limit_overrun_wraps_error() -> None:
-    import asyncio.subprocess as sp
 
     class _Frozen:
         async def readline(self) -> bytes:

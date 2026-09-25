@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from haas.api import build_app
 from haas.identity import Principal
-from haas.stores import SQLiteStore
+from haas.profiles import (
+    HarnessProfileService,
+    ProfileConflictError,
+    ProfileNotFoundError,
+    execution_intent_fingerprint,
+)
+from haas.registry import HarnessRegistry
+from haas.stores import HarnessRecord, MemoryStore, ProfileRecord, SQLiteStore
 
 TOKEN_A = "profile-a"
 TOKEN_B = "profile-b"
@@ -265,18 +273,6 @@ def test_profile_create_idempotency_and_sqlite_persistence(tmp_path: Any) -> Non
 # === appended coverage ===
 
 
-import pytest
-
-from haas.identity import Principal
-from haas.profiles import (
-    HarnessProfileService,
-    ProfileConflictError,
-    ProfileNotFoundError,
-    execution_intent_fingerprint,
-)
-from haas.registry import HarnessRegistry
-from haas.stores import HarnessRecord, MemoryStore, ProfileRecord
-
 PRINCIPAL = Principal(principalId="p", tenantId="t", workspaceId="w")
 
 
@@ -336,7 +332,10 @@ def _make_profile(
 
 def test_execution_intent_fingerprint_strips_credentials() -> None:
     a = execution_intent_fingerprint(
-        {"provider": {"model": "gpt", "credentialRef": "secret://x"}, "list": [{"credentialRef": "y"}]}
+        {
+            "provider": {"model": "gpt", "credentialRef": "secret://x"},
+            "list": [{"credentialRef": "y"}],
+        }
     )
     b = execution_intent_fingerprint(
         {"provider": {"model": "gpt"}, "list": [{}]}
@@ -408,9 +407,16 @@ def test_execution_snapshot_rejects_unvalidated_profile() -> None:
 def test_findings_flag_openai_compatible_without_api_type() -> None:
     service = _service()
     findings = service._findings(
-        {"harnessId": "chrn_1", "base": "codex", "provider": _provider(apiType="", wireApi="openai-compatible")}
+        {
+            "harnessId": "chrn_1",
+            "base": "codex",
+            "provider": _provider(apiType="", wireApi="openai-compatible"),
+        }
     )
-    assert any(f["code"] == "haas_provider_invalid" and f["field"] == "provider.apiType" for f in findings)
+    assert any(
+        f["code"] == "haas_provider_invalid" and f["field"] == "provider.apiType"
+        for f in findings
+    )
 
 
 def test_findings_flag_unsupported_wire_api() -> None:

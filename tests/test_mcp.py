@@ -114,16 +114,7 @@ def test_enforce_disabled_tools_never_lies_about_hard() -> None:
 # === appended coverage ===
 
 
-import pytest
 
-from haas.mcp import (
-    McpServerConfig,
-    SkillBundle,
-    SkillFile,
-    SkillMaterializationError,
-    materialize_skills,
-    validate_mcp_server,
-)
 
 
 def test_validate_mcp_server_requires_non_empty_name() -> None:

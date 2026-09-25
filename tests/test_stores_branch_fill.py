@@ -17,7 +17,6 @@ from haas.stores.memory import (
 )
 from haas.stores.sqlite import SQLiteStore
 
-
 # --- SQLite: put_session rollback -----------------------------------------
 
 

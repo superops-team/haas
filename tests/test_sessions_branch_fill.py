@@ -14,9 +14,9 @@ from haas.harnesses import FakeAdapter
 from haas.identity import Principal
 from haas.registry import HarnessRegistry, seed_codex
 from haas.sessions import (
+    InvocationNotFoundError,
     InvocationNotResumableError,
     InvocationNotRunningError,
-    InvocationNotFoundError,
     PolicyRevisionConflictError,
     PolicyUpdateInvalidError,
     RunRequest,

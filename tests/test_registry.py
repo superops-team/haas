@@ -5,8 +5,8 @@ import pytest
 from haas.identity import Principal
 from haas.registry import (
     AppNotFoundError,
-    HarnessRegistry,
     HarnessNotFoundError,
+    HarnessRegistry,
     ImmutableFieldError,
     SkillBundleInvalidError,
     UnsupportedBaseError,

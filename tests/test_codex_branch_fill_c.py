@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import stat
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -38,8 +37,8 @@ from haas.harnesses.codex_app_server.adapter import (
     _TurnContext,
 )
 from haas.harnesses.codex_app_server.normalizer import (
-    normalize_notification,
     _tool_name,
+    normalize_notification,
 )
 from haas.harnesses.codex_app_server.rpc import (
     CodexConnectionError,
@@ -48,8 +47,6 @@ from haas.harnesses.codex_app_server.rpc import (
 )
 from haas.harnesses.codex_app_server.transport import CodexEndpoint
 from haas.stores import MemoryStore
-from haas.stores.memory import ApprovalRecord, InputRequestRecord
-
 
 # --- helpers ---------------------------------------------------------------
 
@@ -370,7 +367,9 @@ async def test_start_thread_non_dict_config_skips_mcp_override(
         invocationId="i", sessionId="s", turnId="t", appName="a",
         input=[{"text": "x"}],
     )
-    monkeypatch.setattr(CodexAdapter, "_model_overrides", staticmethod(lambda r: {"config": "bogus"}))
+    monkeypatch.setattr(
+        CodexAdapter, "_model_overrides", staticmethod(lambda r: {"config": "bogus"})
+    )
     monkeypatch.setattr(CodexAdapter, "_mcp_server_overrides", staticmethod(lambda r: {"srv": {}}))
 
     tid = await adapter._start_thread(("a", "u", "s"), "/workspace", "workspace-write", req)
@@ -418,7 +417,9 @@ async def test_resume_thread_non_dict_config_skips_mcp(
         invocationId="i", sessionId="s", turnId="t", appName="a",
         input=[{"text": "x"}],
     )
-    monkeypatch.setattr(CodexAdapter, "_model_overrides", staticmethod(lambda r: {"config": "junk"}))
+    monkeypatch.setattr(
+        CodexAdapter, "_model_overrides", staticmethod(lambda r: {"config": "junk"})
+    )
     monkeypatch.setattr(CodexAdapter, "_mcp_server_overrides", staticmethod(lambda r: {"sv": {}}))
 
     tid = await adapter._resume_thread("thr_o2", ("a", "u", "s"), "/workspace", req)
@@ -636,7 +637,14 @@ def test_normalizer_working_dir_outside_workspace_is_previewed() -> None:
     event = normalize_notification(
         {
             "method": "item/started",
-            "params": {"item": {"type": "commandExecution", "id": "c1", "command": "ls", "cwd": "/tmp/data"}},
+            "params": {
+                "item": {
+                    "type": "commandExecution",
+                    "id": "c1",
+                    "command": "ls",
+                    "cwd": "/tmp/data",
+                }
+            },
         },
         invocation_id="i", session_id="s", turn_id="t", author="codex",
     )
@@ -677,7 +685,9 @@ def test_normalizer_tool_started_empty_command_has_no_preview() -> None:
     event = normalize_notification(
         {
             "method": "item/started",
-            "params": {"item": {"type": "commandExecution", "id": "c2", "command": "", "cwd": "/workspace"}},
+            "params": {
+                "item": {"type": "commandExecution", "id": "c2", "command": "", "cwd": "/workspace"}
+            },
         },
         invocation_id="i", session_id="s", turn_id="t", author="codex",
     )
@@ -691,7 +701,13 @@ def test_normalizer_tool_completed_empty_command_has_no_preview() -> None:
         {
             "method": "item/completed",
             "params": {
-                "item": {"type": "commandExecution", "id": "c3", "command": [], "status": "completed", "exitCode": 0},
+                "item": {
+                    "type": "commandExecution",
+                    "id": "c3",
+                    "command": [],
+                    "status": "completed",
+                    "exitCode": 0,
+                }
             },
         },
         invocation_id="i", session_id="s", turn_id="t", author="codex",

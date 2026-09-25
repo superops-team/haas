@@ -5,13 +5,11 @@ policy error branches that were previously unhit. Pure error-path assertions;
 does not modify source.
 """
 
-import pytest
 from fastapi.testclient import TestClient
 
 from haas.api import build_app
 from haas.harnesses import FakeAdapter
 from haas.identity import Principal
-
 
 TOKEN = "test-token"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -59,7 +57,11 @@ def test_create_harness_missing_base_400() -> None:
 
 def test_create_harness_non_object_body_400() -> None:
     client = make_client()
-    resp = client.post("/v1/haas/harnesses", content="[1,2,3]", headers={**HEADERS, "Content-Type": "application/json"})
+    resp = client.post(
+        "/v1/haas/harnesses",
+        content="[1,2,3]",
+        headers={**HEADERS, "Content-Type": "application/json"},
+    )
     assert resp.status_code == 400
     assert _code(resp) == "invalid_input"
 
