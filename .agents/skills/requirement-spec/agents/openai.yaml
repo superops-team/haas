@@ -1,0 +1,4 @@
+interface:
+  display_name: "HaaS Requirement Spec"
+  short_description: "Write implementation-ready bilingual HaaS specs"
+  default_prompt: "Use $requirement-spec to turn this request into an implementation-ready bilingual HaaS spec."

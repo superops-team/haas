@@ -1,0 +1,4 @@
+interface:
+  display_name: "Context Engineering Review"
+  short_description: "Audit and improve repository context engineering"
+  default_prompt: "Use $context-engineering-review to audit this HaaS repository context and recommend precise improvements."

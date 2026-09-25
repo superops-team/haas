@@ -1,0 +1,4 @@
+interface:
+  display_name: "HaaS Code Automation"
+  short_description: "Choose focused verification gates for HaaS changes"
+  default_prompt: "Use $code-automation to select and run the right verification gates for this HaaS change."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "HaaS Spec Coding"
+  short_description: "Run HaaS spec-driven development and closeout"
+  default_prompt: "Use $spec-coding to drive this HaaS change from contract through verified closeout."

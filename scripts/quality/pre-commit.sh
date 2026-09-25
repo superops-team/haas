@@ -1,10 +1,14 @@
 #!/bin/sh
 # HaaS pre-commit quality gates.
-# Runs whitespace/conflict checks first, then the secret scanner.
-# The secret scan must pass; a failure blocks the commit.
+# Runs skill, whitespace/conflict, and secret checks.
+# Every check must pass; a failure blocks the commit.
 set -eu
 
 repo_root="$(git rev-parse --show-toplevel)" || exit 1
+
+echo "==> HaaS pre-commit: repository-local agent skills"
+uv run --project "$repo_root" python "$repo_root/scripts/quality/check_agent_skills.py" \
+  "$repo_root/.agents/skills"
 
 echo "==> HaaS pre-commit: whitespace / conflict-marker check"
 git diff --cached --check

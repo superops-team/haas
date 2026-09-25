@@ -1,0 +1,4 @@
+interface:
+  display_name: "React Best Practices"
+  short_description: "Apply Vercel React performance best practices"
+  default_prompt: "Use $react-best-practices to review or improve this React code for performance."

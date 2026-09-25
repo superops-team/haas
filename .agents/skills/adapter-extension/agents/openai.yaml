@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adapter Extension"
+  short_description: "Design safe HaaS harness adapter extensions"
+  default_prompt: "Use $adapter-extension to design this harness adapter change against the shared HaaS contract."

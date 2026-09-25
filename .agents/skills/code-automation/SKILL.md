@@ -1,6 +1,6 @@
 ---
 name: code-automation
-description: HaaS changed-code verification guidance. Use after modifying Python, React/TypeScript, scripts, packaging, tests, or specs to choose focused unit tests, type checks, build checks, pre-commit, and full-check evidence. This skill selects verification commands; it does not replace UI/browser evidence or code review.
+description: HaaS changed-code verification guidance. Use when verifying modifications to Python, React/TypeScript, scripts, packaging, tests, or specs to choose focused unit tests, type checks, build checks, pre-commit, and full-check evidence. This skill selects verification commands; it does not replace UI/browser evidence or code review.
 ---
 
 # HaaS Code Automation

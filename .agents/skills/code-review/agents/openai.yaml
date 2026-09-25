@@ -1,0 +1,4 @@
+interface:
+  display_name: "Two-Round Code Review"
+  short_description: "Run a strict two-round review and fix findings"
+  default_prompt: "Use $code-review to perform two review rounds, fix confirmed findings, and report verification."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "HaaS Debug Workflow"
+  short_description: "Diagnose HaaS bugs across GUI, shell, and sidecar"
+  default_prompt: "Use $haas-debug-workflow to reproduce and diagnose this HaaS issue across the relevant runtimes."

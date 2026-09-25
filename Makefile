@@ -12,7 +12,7 @@ HAAS_AIO_BASE_DEFAULT := ghcr.io/agent-infra/sandbox@sha256:9a597aaa3716aca2fd42
 HAAS_IMAGE_DEFAULT := haas:lite-local
 
 # HaaS 开发与提交门禁。
-.PHONY: help setup install-hooks pre-commit secret-scan fmt lint type \
+.PHONY: help setup install-hooks pre-commit secret-scan agent-skills-check fmt lint type \
         test-fast test-affected test-integration test-e2e adk-compat \
         coverage packaged-smoke docker-build docker-build-lite docker-build-aio docker-release-lite docker-check \
         docker-check-lite docker-check-aio full-check
@@ -21,8 +21,9 @@ help:
 	@echo "HaaS 开发与提交门禁："
 	@echo "  make setup            用 uv 创建 .venv 并安装可编辑依赖（dev 组）"
 	@echo "  make install-hooks    安装 .git/hooks/pre-commit 拦截钩子"
-	@echo "  make pre-commit       whitespace + secret scan"
+	@echo "  make pre-commit       agent skills + whitespace + secret scan"
 	@echo "  make secret-scan      扫描暂存变更中的敏感信息"
+	@echo "  make agent-skills-check 校验仓库本地 agent skills"
 	@echo "  make fmt              ruff format"
 	@echo "  make lint             ruff check"
 	@echo "  make type             mypy haas"
@@ -52,6 +53,9 @@ pre-commit:
 
 secret-scan:
 	python3 scripts/quality/secret-scan.py
+
+agent-skills-check:
+	$(UV) run python scripts/quality/check_agent_skills.py
 
 fmt:
 	$(UVRUN) ruff format .

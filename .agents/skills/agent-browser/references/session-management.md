@@ -2,7 +2,7 @@
 Derived from vercel-labs/agent-browser (skills/agent-browser/references/session-management.md).
 Copyright 2025 Vercel Inc. Licensed under Apache-2.0.
 Modified by ZCode: local integration, formatting and adaptations.
-See THIRD-PARTY-NOTICES.md in the repository root for license and provenance.
+See the repository-local `.agents/skills/SOURCES.md` for license and provenance.
 -->
 
 # Session Management
@@ -193,9 +193,13 @@ echo "*.auth-state.json" >> .gitignore
 rm /tmp/auth-state.json
 ```
 
-### 4. Timeout Long Sessions
+### 4. Timeout Long Sessions Portably
 
 ```bash
-# Set timeout for automated scripts
-timeout 60 agent-browser --session long-task get text body
+# Perl is available on standard macOS and common Linux environments.
+perl -e '$seconds = shift; alarm $seconds; exec @ARGV' 60 \
+  agent-browser --session long-task get text body
 ```
+
+Still install an EXIT/HUP/INT/TERM trap that closes the named session; a timeout wrapper
+terminates the command but does not replace browser-session cleanup.

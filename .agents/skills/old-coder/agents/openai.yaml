@@ -1,0 +1,4 @@
+interface:
+  display_name: "Old Coder"
+  short_description: "Build high-assurance changes with executable evidence"
+  default_prompt: "Use $old-coder to deliver this high-assurance change with an executable specification and evidence."

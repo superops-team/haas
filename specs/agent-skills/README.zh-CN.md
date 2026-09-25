@@ -2,9 +2,9 @@
 
 [English](README.md) | **简体中文**
 
-状态：已实施；审查与 pre-commit 门禁通过
-最近评审：2026-09-24
-变更 ID：agent-skills-tauri-python-adoption
+状态：已实施；合规与审查门禁通过
+最近评审：2026-09-26
+变更 ID：agent-skills-compliance
 相关规格：[Manager GUI 性能](../manager-gui-performance/README.zh-CN.md)、[Manager HaaS Sidecar 后端](../manager-haas-sidecar-backend/README.zh-CN.md)、[上下文工程审查](../../.agents/skills/context-engineering-review/SKILL.md)
 
 ## 1. 组件角色
@@ -20,9 +20,9 @@ Agent Skills 负责仓库本地 `.agents/skills/` 目录：模块化、自包含
 
 ## 2. 来源与依据
 
-### 2.1 现有 skill 清单（引入前）
+### 2.1 历史 skill 清单（引入前）
 
-仓库在 `.agents/skills/` 下有 11 个 skill：agent-browser、beads、code-automation、context-engineering-review、dogfood、fallow、react-best-practices、react-typescript-kit、requirement-spec、spec-coding、ui-automation。
+在本文档描述的引入批次之前，仓库在 `.agents/skills/` 下有 11 个 skill：agent-browser、beads、code-automation、context-engineering-review、dogfood、fallow、react-best-practices、react-typescript-kit、requirement-spec、spec-coding、ui-automation。
 
 ### 2.2 已识别缺口
 
@@ -215,14 +215,21 @@ HaaS 空白维度（无任何开源 skill 覆盖）：sidecar 生命周期管理
 ```text
 .agents/skills/<skill-name>/
 ├── SKILL.md         （必需：YAML frontmatter + Markdown 正文）
+├── agents/
+│   └── openai.yaml  （必需：UI 元数据与调用策略）
 ├── scripts/         （可选：可执行代码）
 ├── references/      （可选：按需加载的文档）
 └── assets/          （可选：输出中使用的文件）
 ```
 
-SKILL.md frontmatter 恰好包含两个字段：`name` 和 `description`。`description` 是主要触发机制，必须同时包含 skill 做什么和何时使用。除非现有约定需要（如 vendored skill 使用的 `license`、`allowed-tools`），否则不添加额外 frontmatter 字段。
+SKILL.md frontmatter 恰好包含两个字段：`name` 和 `description`。`description` 是主要触发机制，必须同时包含 skill 做什么和何时使用。工具限制、license、版本、trigger 列表、mutation 标记和调用策略均不得放入 frontmatter。License/来源放入 `SOURCES.md`，运行约束放入正文，调用策略放入 `agents/openai.yaml`。
 
 SKILL.md 正文不超过 500 行。详细参考材料移至 `references/` 文件，从 SKILL.md 链接。
+
+`agents/openai.yaml` 必须包含带引号的 `interface.display_name`、
+`interface.short_description` 和 `interface.default_prompt`。短描述长度为 25-64 个字符，
+默认 prompt 必须显式包含 `$<skill-name>`。仅需要显式调用的 skill 才添加
+`policy.allow_implicit_invocation: false`。
 
 ### 6.2 命名约定
 
@@ -230,6 +237,7 @@ SKILL.md 正文不超过 500 行。详细参考材料移至 `references/` 文件
 - HaaS 专属且非技术特定的 skill 可使用 `haas-` 前缀（如 `haas-debug-workflow`）。
 - 技术特定的 skill 使用技术前缀（如 `tauri-react-render-perf`）。
 - 无 skill 名称与现有 skill 重复。
+- 目录 basename 必须与 frontmatter `name` 完全一致。
 
 ### 6.3 来源追踪
 
@@ -266,12 +274,15 @@ Skills 由编码 Agent 运行时根据 frontmatter `description` 匹配加载。
 ### 11.1 结构验证
 
 每个新的或修改的 skill：
-1. SKILL.md 存在，有有效 YAML frontmatter，恰好含 `name` 和 `description`（vendored skill 可加约定所需字段）。
+1. SKILL.md 存在，有有效 YAML frontmatter，且恰好含 `name` 和 `description`。
 2. `description` 非空，同时包含 skill 做什么和何时使用。
-3. SKILL.md 正文不超过 500 行。
-4. skill 目录中无多余文件（README.md、CHANGELOG.md、INSTALLATION.md）。
-5. 内部引用（指向其他 skill、spec、文件的链接）正确解析。
-6. skill 内容中无真实凭证或密钥。
+3. frontmatter `name` 与 skill 目录 basename 一致，并使用小写 kebab-case。
+4. SKILL.md 正文不超过 500 行。
+5. `agents/openai.yaml` 存在并满足第 6.1 节 UI 元数据合同。
+6. skill 目录中无多余文件（README.md、CHANGELOG.md、INSTALLATION.md、创作元数据或来源机器 manifest）。
+7. 内部引用（指向其他 skill、spec、文件的链接）正确解析。
+8. skill 内容中无真实凭证或密钥。
+9. 完整清单执行 `uv run python scripts/quality/check_agent_skills.py` 通过。
 
 ### 11.2 内容验证
 
@@ -349,3 +360,65 @@ Skills 由编码 Agent 运行时根据 frontmatter `description` 匹配加载。
 | S4 | 0.5 天 | 完整验证 + 审查 + pre-commit | 所有门禁通过；最终报告 |
 
 预期窗口：2.5-3 天（含风险缓冲）。Python/FastAPI 批次如发现多个高价值 skill，可能延长 0.5-1 天。
+
+## 15. 2026-09-26 合规加固 Delta
+
+### 15.1 证据与问题陈述
+
+`agent-skills-compliance` 审计覆盖 `.agents/skills/` 下每个包含 `SKILL.md` 的直接子目录。
+实现前运行官方 `skill-creator` 的 `quick_validate.py`，发现 5 个不合法 skill：
+
+- `code-review` 与 `review-spec`：frontmatter 含不支持的 `version`、`triggers`、
+  `tools` 和 `mutating`；
+- `dev-loop`：frontmatter 含不支持的 `version` 和 `platforms`；
+- `dogfood`：frontmatter 含不支持的 `disable-model-invocation`；
+- `context-engineering-review`：description 中未引用的冒号导致 YAML 非法。
+
+扩展质量审计还发现一处目录/name 不一致（`react-best-practices` 与
+`vercel-react-best-practices`）、一个超过 500 行渐进披露上限的 SKILL.md
+（`agent-browser`）、基线 22 个 skill 中有 20 个缺少 `agents/openai.yaml`、不应进入
+运行时 skill bundle 的辅助文件或来源机器 manifest，以及根 review 门禁要求
+`brooks-test` 但仓库本地清单并未提供它。
+
+### 15.2 P0 要求
+
+1. 将所有 SKILL.md 规范化为第 6.1 节的严格 frontmatter 合同，且不改变预期触发范围。
+2. 使用仓库目录名作为 canonical skill name。在 `SOURCES.md` 保留历史来源和别名，
+   不保留运行时 name 不一致。
+3. 通过删除重复命令参考、把可复用细节移到 `references/` 或 `assets/`，使每个
+   SKILL.md 低于 500 行。
+4. 为每个受跟踪的仓库 skill 添加有效 `agents/openai.yaml`；通过
+   `policy.allow_implicit_invocation: false` 保留 `dogfood` 仅显式调用语义。
+5. 删除或迁移根级辅助文件与机器特定 manifest；只保留直接支持执行、参考或输出生成的文件。
+6. 在 `SOURCES.md` 记录全部受跟踪 skill；有意 gitignore 的本地 `beads` 不进入受跟踪清单。
+7. 添加离线仓库 validator 并接入 `make pre-commit`，防止合同静默回归。
+8. 引入自包含的 `brooks-test`，确保全部强制 review 门禁均可从仓库本地清单获得。
+
+### 15.3 兼容、安全与回滚
+
+- ADK 与 `/v1/haas/*`：无影响；本变更仅涉及仓库开发者工具。
+- Runtime/session/events/artifacts/container：无影响。
+- 显式调用：`$react-best-practices` 成为 canonical name，与现有目录及组件 spec 一致；
+  不保留误配置的第二个 `$vercel-react-best-practices` 重复 skill。
+- 安全：validator 离线运行，只读取仓库 skill 文件，仅输出路径与结构错误，不打印可能含
+  secret 的文件内容。
+- 回滚：整体回退 skill 元数据/内容迁移、validator、Makefile/pre-commit 接线、来源条目和本 spec delta。
+
+### 15.4 验收用例
+
+| ID | 用例 | 命令 | 预期结果 |
+|---|---|---|---|
+| AS-C01 | 验证完整本地清单 | `uv run python scripts/quality/check_agent_skills.py` | 退出 0；全部 23 个本地 skill 通过 frontmatter、命名、行数、UI 元数据、根目录布局和相对链接检查 |
+| AS-C02 | 证明非法元数据被拒绝 | `uv run pytest -q tests/test_check_agent_skills.py` | 覆盖多余 key、类 YAML 非法 frontmatter、name 不一致、缺失 UI 元数据、正文超长及断链的 fixture 均给出可执行诊断 |
+| AS-C03 | 验证仓库门禁 | `make pre-commit` | skill 校验、空白/conflict 检查与 secret scan 全部通过 |
+| AS-C04 | 确认官方兼容性 | 使用项目 Python 对每个 skill 运行 `quick_validate.py` | 每个 skill 均输出 `Skill is valid!` |
+| AS-C05 | 保留无关工作 | `git diff --name-only` 与 `git status --short` | 本变更不修改既有 Manager GUI 或无关 spec 文件 |
+
+### 15.5 实现顺序
+
+1. 为 AS-C01/AS-C02 添加失败的 validator 测试。
+2. 实现离线 validator 并接入 `make pre-commit`。
+3. 规范化 frontmatter 与 canonical name。
+4. 添加 `agents/openai.yaml`、精简超长 SKILL.md，并迁移/删除辅助文件。
+5. 更新来源记录，执行全部验收用例，再完成 code-review、brooks-review 与
+   brooks-test，处置每项 finding。

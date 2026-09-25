@@ -1,0 +1,4 @@
+interface:
+  display_name: "HaaS Pydantic Modeling"
+  short_description: "Design safe HaaS Pydantic models and schemas"
+  default_prompt: "Use $pydantic-modeling to design or review these HaaS models and schema boundaries."

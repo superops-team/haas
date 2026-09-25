@@ -12,7 +12,7 @@ description: HaaS-local spec-driven development workflow. Use when a HaaS task n
 - Do not use `.agentnative`, `spec-coding` CLI, run ledgers, phase ledgers, or hidden current pointers in this repository.
 - Record temporary verification evidence in the final answer, commit message, PR text, or an existing long-lived spec section.
 
-## When To Use
+## Scope
 
 Use this skill for non-trivial HaaS feature work, refactors, bug fixes, GUI/runtime changes, packaging changes, and completion audits that need traceability from requirement to verification.
 

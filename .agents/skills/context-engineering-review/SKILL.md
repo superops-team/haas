@@ -1,6 +1,10 @@
 ---
 name: context-engineering-review
-description: Review and improve HaaS repository context engineering: AGENTS.md, specs index, README, local .agents/skills, verification evidence flow, memory/summary usage, and agent onboarding. Use when asked to assess or optimize how coding agents find HaaS context, avoid drift, recover long tasks, or choose the right workflow.
+description: >-
+  Review and improve HaaS repository context engineering, including AGENTS.md,
+  specs, README, local skills, verification evidence, memory, and onboarding.
+  Use when assessing how coding agents find context, avoid drift, recover long
+  tasks, or select the right workflow.
 ---
 
 # HaaS Context Engineering Review

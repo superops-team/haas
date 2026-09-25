@@ -1,0 +1,4 @@
+interface:
+  display_name: "Parallel Code Review"
+  short_description: "Review HaaS changes through six focused lenses"
+  default_prompt: "Use $parallel-code-review to review this HaaS changeset through the relevant independent lenses."

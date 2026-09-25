@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tauri React Render Performance"
+  short_description: "Diagnose React render churn in the HaaS WebView"
+  default_prompt: "Use $tauri-react-render-perf to diagnose and verify this HaaS WebView rendering issue."

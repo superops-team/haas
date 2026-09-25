@@ -1,6 +1,6 @@
 ---
 name: ui-automation
-description: HaaS GUI browser and desktop runtime verification. Use for production Vite preview, Playwright E2E, screenshots, request/performance observation, artifact viewer checks, packaged OpenHarness smoke tests, and browser/Tauri parity evidence. Not for ordinary component implementation.
+description: HaaS GUI browser and desktop runtime verification. Use when running production Vite preview, Playwright E2E, screenshots, request/performance observation, artifact viewer checks, packaged OpenHarness smoke tests, or browser/Tauri parity evidence. Not for ordinary component implementation.
 ---
 
 # HaaS UI Automation

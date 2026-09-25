@@ -1,0 +1,6 @@
+interface:
+  display_name: "Dogfood"
+  short_description: "Explore web apps and document reproducible issues"
+  default_prompt: "Use $dogfood to explore this web application and document reproducible issues with evidence."
+policy:
+  allow_implicit_invocation: false

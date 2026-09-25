@@ -1,0 +1,4 @@
+interface:
+  display_name: "HaaS Development Loop"
+  short_description: "Drive the complete HaaS spec-to-delivery loop"
+  default_prompt: "Use $dev-loop to carry this HaaS change from reviewed spec through implementation and verification."

@@ -2,7 +2,7 @@
 Derived from vercel-labs/agent-browser (skills/agent-browser/references/snapshot-refs.md).
 Copyright 2025 Vercel Inc. Licensed under Apache-2.0.
 Modified by ZCode: local integration, formatting and adaptations.
-See THIRD-PARTY-NOTICES.md in the repository root for license and provenance.
+See the repository-local `.agents/skills/SOURCES.md` for license and provenance.
 -->
 
 # Snapshot and Refs

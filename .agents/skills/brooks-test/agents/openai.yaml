@@ -1,0 +1,4 @@
+interface:
+  display_name: "Brooks Test Review"
+  short_description: "Review test suites for structural quality risks"
+  default_prompt: "Use $brooks-test to review this test suite for brittleness, mock abuse, coverage gaps, and architecture mismatch."

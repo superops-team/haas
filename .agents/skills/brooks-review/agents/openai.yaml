@@ -1,0 +1,4 @@
+interface:
+  display_name: "Brooks Review"
+  short_description: "Review code for architectural decay and design risks"
+  default_prompt: "Use $brooks-review to review this change for architectural decay and maintainability risks."

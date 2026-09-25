@@ -1,0 +1,4 @@
+interface:
+  display_name: "HaaS React TypeScript Kit"
+  short_description: "Build HaaS React and TypeScript interfaces safely"
+  default_prompt: "Use $react-typescript-kit to implement this HaaS React and TypeScript interface change."

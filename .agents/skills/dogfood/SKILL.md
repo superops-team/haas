@@ -1,15 +1,13 @@
 ---
 name: dogfood
 description: Systematically explore and test a web application to find bugs, UX issues, and other problems. Use when asked to "dogfood", "QA", "exploratory test", "find issues", "bug hunt", "test this app/site/platform", or review the quality of a web application. Produces a structured report with full reproduction evidence -- step-by-step screenshots, repro videos, and detailed repro steps for every issue -- so findings can be handed directly to the responsible teams.
-allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*)
-disable-model-invocation: true
 ---
 
 <!--
 Derived from vercel-labs/agent-browser (skills/dogfood/SKILL.md).
 Copyright 2025 Vercel Inc. Licensed under Apache-2.0.
 Modified by ZCode: local integration, formatting and adaptations.
-See THIRD-PARTY-NOTICES.md in the repository root for license and provenance.
+See the repository-local `.agents/skills/SOURCES.md` for license and provenance.
 -->
 
 # Dogfood
@@ -52,7 +50,7 @@ mkdir -p {OUTPUT_DIR}/screenshots {OUTPUT_DIR}/videos
 Copy the report template into the output directory and fill in the header fields:
 
 ```bash
-cp {SKILL_DIR}/templates/dogfood-report-template.md {OUTPUT_DIR}/report.md
+cp {SKILL_DIR}/assets/templates/dogfood-report-template.md {OUTPUT_DIR}/report.md
 ```
 
 Start a named session:
@@ -225,4 +223,4 @@ agent-browser --session {SESSION} close
 
 | Template                                                                     | Purpose                                       |
 | ---------------------------------------------------------------------------- | --------------------------------------------- |
-| [templates/dogfood-report-template.md](templates/dogfood-report-template.md) | Copy into output directory as the report file |
+| [assets/templates/dogfood-report-template.md](assets/templates/dogfood-report-template.md) | Copy into output directory as the report file |

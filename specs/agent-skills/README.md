@@ -2,9 +2,9 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: Implemented; review and pre-commit gates passed
-Last reviewed: 2026-09-24
-Change ID: agent-skills-tauri-python-adoption
+Status: Implemented; compliance and review gates passed
+Last reviewed: 2026-09-26
+Change ID: agent-skills-compliance
 Related specs: [Manager GUI Performance](../manager-gui-performance/README.md), [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Context Engineering Review](../../.agents/skills/context-engineering-review/SKILL.md)
 
 ## 1. Component Role
@@ -20,9 +20,10 @@ This component does not change runtime code, protocol schemas, or build configur
 
 ## 2. Sources and Rationale
 
-### 2.1 Existing skill inventory (pre-adoption)
+### 2.1 Historical skill inventory (pre-adoption)
 
-The repository ships 11 skills under `.agents/skills/`:
+Before the adoption waves described by this document, the repository shipped 11 skills under
+`.agents/skills/`:
 
 | Skill | Domain | Provenance |
 |---|---|---|
@@ -235,14 +236,21 @@ Every skill follows the structure defined by the `skill-creator-for-work` conven
 ```text
 .agents/skills/<skill-name>/
 ├── SKILL.md          (required: YAML frontmatter + Markdown body)
+├── agents/
+│   └── openai.yaml   (required: UI metadata and invocation policy)
 ├── scripts/          (optional: executable code)
 ├── references/       (optional: documentation loaded on demand)
 └── assets/           (optional: files used in output)
 ```
 
-SKILL.md frontmatter contains exactly two fields: `name` and `description`. The `description` is the primary trigger mechanism and must include both what the skill does and when to use it. No additional frontmatter fields unless required by an existing convention (e.g., `license`, `allowed-tools` used by vendored skills).
+SKILL.md frontmatter contains exactly two fields: `name` and `description`. The `description` is the primary trigger mechanism and must include both what the skill does and when to use it. Tool restrictions, licenses, versions, trigger lists, mutation flags, and invocation policy do not belong in frontmatter. Keep license/provenance in `SOURCES.md`, operational constraints in the body, and invocation policy in `agents/openai.yaml`.
 
 SKILL.md body must be under 500 lines. Detailed reference material moves to `references/` files linked from SKILL.md.
+
+`agents/openai.yaml` contains quoted `interface.display_name`,
+`interface.short_description`, and `interface.default_prompt` values. The short description is
+25-64 characters, and the default prompt explicitly names `$<skill-name>`. Add
+`policy.allow_implicit_invocation: false` only when a skill must be explicitly invoked.
 
 ### 6.2 Naming conventions
 
@@ -250,6 +258,7 @@ SKILL.md body must be under 500 lines. Detailed reference material moves to `ref
 - HaaS-specific skills may use the `haas-` prefix when the skill is not technology-specific (e.g., `haas-debug-workflow`).
 - Technology-specific skills use the technology prefix (e.g., `tauri-react-render-perf`).
 - No skill name duplicates an existing skill name.
+- The directory basename equals the frontmatter `name` exactly.
 
 ### 6.3 Provenance tracking
 
@@ -287,12 +296,15 @@ The `.claude/skills` symlink is a filesystem-level compatibility layer. It does 
 
 For each new or modified skill:
 
-1. SKILL.md exists and has valid YAML frontmatter with exactly `name` and `description` (plus any convention-required fields for vendored skills).
+1. SKILL.md exists and has valid YAML frontmatter with exactly `name` and `description`.
 2. `description` is non-empty and contains both what the skill does and when to use it.
-3. SKILL.md body is under 500 lines.
-4. No extraneous files (README.md, CHANGELOG.md, INSTALLATION.md) in the skill directory.
-5. Internal references (links to other skills, specs, files) resolve correctly.
-6. No real credentials or secrets in skill content.
+3. The frontmatter `name` equals the skill directory basename and uses lowercase kebab-case.
+4. SKILL.md body is under 500 lines.
+5. `agents/openai.yaml` exists and satisfies the UI metadata contract in section 6.1.
+6. No extraneous files (README.md, CHANGELOG.md, INSTALLATION.md, authoring metadata, or source-machine manifests) remain in the skill directory.
+7. Internal references (links to other skills, specs, files) resolve correctly.
+8. No real credentials or secrets exist in skill content.
+9. `uv run python scripts/quality/check_agent_skills.py` passes for the complete inventory.
 
 ### 11.2 Content validation
 
@@ -370,3 +382,76 @@ For each new or modified skill:
 | S4 | 0.5 day | Full validation + reviews + pre-commit | All gates pass; final report |
 
 Expected window: 2.5-3 days including risk buffer. Python/FastAPI wave may extend by 0.5-1 day if multiple high-value skills are found.
+
+## 15. 2026-09-26 Compliance Hardening Delta
+
+### 15.1 Evidence and problem statement
+
+The `agent-skills-compliance` audit runs against every immediate child of
+`.agents/skills/` that contains `SKILL.md`. The official `skill-creator`
+`quick_validate.py` baseline found five invalid skills before implementation:
+
+- `code-review` and `review-spec`: unsupported `version`, `triggers`, `tools`, and
+  `mutating` frontmatter keys;
+- `dev-loop`: unsupported `version` and `platforms` frontmatter keys;
+- `dogfood`: unsupported `disable-model-invocation` frontmatter key;
+- `context-engineering-review`: invalid YAML caused by an unquoted colon in the
+  description.
+
+The broader quality audit also found one directory/name mismatch
+(`react-best-practices` versus `vercel-react-best-practices`), one SKILL.md over the
+500-line progressive-disclosure limit (`agent-browser`), missing `agents/openai.yaml`
+metadata in 20 of 22 baseline skills, auxiliary/source-machine files that do not belong
+in a runtime skill bundle, and no repository-local `brooks-test` despite the root review
+gate requiring it.
+
+### 15.2 P0 requirements
+
+1. Normalize every SKILL.md to the exact frontmatter contract in section 6.1 without
+   changing the intended trigger scope.
+2. Use the repository directory name as the canonical skill name. Preserve historical
+   provenance and aliases in `SOURCES.md`; do not keep a mismatched runtime name.
+3. Reduce every SKILL.md below 500 lines by removing duplicated command reference and
+   moving reusable detail to `references/` or `assets/`.
+4. Add valid `agents/openai.yaml` metadata for every tracked repository skill. Preserve
+   explicit-only behavior for `dogfood` through `policy.allow_implicit_invocation: false`.
+5. Remove or relocate root-level auxiliary files and machine-specific manifests. Keep
+   only files that directly support execution, references, or output generation.
+6. Record all tracked skills in `SOURCES.md`; the intentionally gitignored local
+   `beads` skill remains outside the tracked inventory.
+7. Add an offline repository validator and execute it from `make pre-commit` so the
+   contract cannot silently regress.
+8. Vendor a self-contained `brooks-test` skill so all mandatory review gates remain
+   available from the repository-local inventory.
+
+### 15.3 Compatibility, security, and rollback
+
+- ADK and `/v1/haas/*`: no impact; this change is repository developer tooling only.
+- Runtime/session/events/artifacts/container: no impact.
+- Explicit invocation: `$react-best-practices` becomes canonical, matching the existing
+  directory and component spec. The accidental `$vercel-react-best-practices` runtime
+  name is not retained as a second duplicate skill.
+- Security: the validator is offline, reads only repository skill files, emits paths and
+  structural errors, and never prints secret-bearing file contents.
+- Rollback: revert the skill metadata/content moves, validator, Makefile/pre-commit hook,
+  provenance entries, and this spec delta together.
+
+### 15.4 Acceptance cases
+
+| ID | Case | Command | Expected result |
+|---|---|---|---|
+| AS-C01 | Validate the complete local inventory | `uv run python scripts/quality/check_agent_skills.py` | Exit 0; all 23 local skills pass frontmatter, naming, line-count, UI metadata, root-layout, and relative-link checks |
+| AS-C02 | Prove invalid metadata is rejected | `uv run pytest -q tests/test_check_agent_skills.py` | Fixtures covering extra keys, malformed YAML-like frontmatter, name mismatch, missing UI metadata, oversized body, and broken links fail with actionable diagnostics |
+| AS-C03 | Verify the repository gate | `make pre-commit` | Skill validation, whitespace/conflict check, and secret scan all pass |
+| AS-C04 | Confirm official compatibility | Run `quick_validate.py` for every skill with project Python | Every skill prints `Skill is valid!` |
+| AS-C05 | Preserve unrelated work | `git diff --name-only` and `git status --short` | No existing Manager GUI or unrelated spec file is modified by this change |
+
+### 15.5 Implementation order
+
+1. Add failing validator tests for AS-C01/AS-C02.
+2. Implement the offline validator and wire it into `make pre-commit`.
+3. Normalize frontmatter and canonical names.
+4. Add `agents/openai.yaml`, reduce oversized SKILL.md files, and relocate/remove
+   auxiliary files.
+5. Update provenance, run all acceptance cases, then complete code-review,
+   brooks-review, and brooks-test with every finding dispositioned.

@@ -2,7 +2,7 @@
 Derived from vercel-labs/agent-browser (skills/agent-browser/references/commands.md).
 Copyright 2025 Vercel Inc. Licensed under Apache-2.0.
 Modified by ZCode: local integration, formatting and adaptations.
-See THIRD-PARTY-NOTICES.md in the repository root for license and provenance.
+See the repository-local `.agents/skills/SOURCES.md` for license and provenance.
 -->
 
 # Command Reference
@@ -170,6 +170,25 @@ agent-browser network requests                 # View tracked requests
 agent-browser network requests --filter api    # Filter requests
 ```
 
+Treat request output as potentially sensitive. Redact authorization headers, cookies,
+tokens, and secret-bearing query parameters before including it in reports. Do not assume
+the installed version exposes stable status or failed-request fields without checking its
+local help or output schema.
+
+## Diff
+
+Use diff commands only when the installed version lists them in `agent-browser --help`:
+
+```bash
+agent-browser diff snapshot
+agent-browser diff snapshot --baseline before.txt
+agent-browser diff screenshot --baseline before.png
+agent-browser diff url https://staging.example.com https://production.example.com
+```
+
+If `diff` is unavailable, capture explicit before/after snapshots or screenshots and
+compare them with the repository's approved test tooling.
+
 ## Tabs and Windows
 
 ```bash
@@ -291,6 +310,9 @@ agent-browser profiler stop trace.json    # Stop and save profile
 ## Environment Variables
 
 ```bash
+AGENT_BROWSER_CONTENT_BOUNDARIES=1              # Mark untrusted page-sourced output
+AGENT_BROWSER_ALLOWED_DOMAINS="example.com"     # Comma-separated reviewed hosts
+AGENT_BROWSER_MAX_OUTPUT=20000                  # Bound page output size
 AGENT_BROWSER_SESSION="mysession"            # Default session name
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
@@ -298,3 +320,7 @@ AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
 AGENT_BROWSER_STREAM_PORT="9223"             # WebSocket streaming port
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location
 ```
+
+`AGENT_BROWSER_ALLOWED_DOMAINS` is host-oriented; do not treat it as proof of loopback
+port isolation. Add only reviewed API/CDN hosts. Consult the installed version's policy
+schema before setting `AGENT_BROWSER_ACTION_POLICY`.

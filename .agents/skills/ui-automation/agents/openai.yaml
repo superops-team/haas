@@ -1,0 +1,4 @@
+interface:
+  display_name: "HaaS UI Automation"
+  short_description: "Verify HaaS GUI behavior in browser and desktop"
+  default_prompt: "Use $ui-automation to verify this HaaS GUI behavior with browser or desktop evidence."

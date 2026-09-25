@@ -3,8 +3,9 @@
 These skills are vendored for repository-local agent workflows. Keep their upstream
 copyright and attribution headers intact when updating them. Project instructions in
 the repository `AGENTS.md` remain authoritative when a vendored skill differs.
-The React guidance copy only normalizes Markdown trailing whitespace to satisfy the
-repository commit gate; its instructional content is otherwise unchanged.
+The React guidance preserves the upstream individual rule content. Repository packaging
+moves those rules under `references/`, removes duplicate compiled/authoring documents,
+and normalizes runtime metadata without changing the rule instructions.
 
 | Skill | Installed from | Revision | License |
 |---|---|---|---|
@@ -25,6 +26,12 @@ repository commit gate; its instructional content is otherwise unchanged.
 | `fastapi-backend` | adapted from `fastapi/fastapi/.agents/skills/fastapi` | `50113da16fec53b66b80d75e80a89296de4fa5a5`; HaaS-specific rewrite: Annotated/Depends aliases, yield-dependency lifecycle, async-vs-def rules, `response_model` as secretless filter, router layout; SSE details moved to `references/streaming.md`; HaaS commands and scope boundaries added | MIT (upstream `fastapi/fastapi`); instructional content rewritten, no external code retained |
 | `pydantic-modeling` | adapted from `pydantic/pydantic/.agents/skills/pydantic` | `0384c970e37a59b344e75161eb106ea9996378ba`; HaaS-specific rewrite: field-vs-type metadata, union-metadata-position trap, discriminated-uniform event hierarchy, UTC-aware datetimes, parse/dump redaction; scoped to the model layer only | MIT (upstream `pydantic/pydantic`); instructional content rewritten, no external code retained |
 | `adapter-extension` | adapted from `pydantic/pydantic-ai/.agents/skills` (adding-a-provider-api-feature + complete-partial-pr) | `a48606989919b0ce3f655fa7ffff8e23853d3989`; HaaS-specific rewrite: "find the existing abstraction first" decision framework (reuse / promote-after-3 / typed Literal, no `extra_body`/`**kwargs`, default-on vs opt-in), adapter-change parity checklist, harness-adapter + codex-app-server-adapter spec references | MIT (upstream `pydantic/pydantic-ai`); methodology rewritten, no external code retained |
+| `brooks-review` | adapted from local `~/.trae/skills/brooks-review` | local snapshot; repository-local reference paths normalized | Local workflow text; no external executable code retained |
+| `brooks-test` | adapted from local `~/.trae/skills/brooks-test` and its shared references | local snapshot; repository-local references made self-contained and history-ledger writes removed | Local workflow text; no external executable code retained |
+| `code-review` | adapted from local `~/.trae/skills/code-review` | local snapshot; frontmatter normalized to the repository skill contract | Local workflow text; no external executable code retained |
+| `dev-loop` | adapted from local `~/.agents/skills/dev-loop` | local snapshot; rewritten for HaaS spec, review, and verification gates; source-machine manifest removed | Local workflow text; no external executable code retained |
+| `old-coder` | adapted from local `~/.trae/skills/old-coder` | local snapshot; bundled verifier references retained | Local workflow text; no external executable code retained |
+| `review-spec` | adapted from local `~/.trae/skills/review-spec` | local snapshot; frontmatter normalized to the repository skill contract | Local workflow text; no external executable code retained |
 
 The repository root `LICENSE` contains the Apache-2.0 license text used by the first
 two skills. The Fallow MIT permission notice is reproduced below because it differs

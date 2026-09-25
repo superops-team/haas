@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Spec"
+  short_description: "Review specs for completeness, risk, and execution"
+  default_prompt: "Use $review-spec to review this specification, resolve blockers, and produce an executable plan."

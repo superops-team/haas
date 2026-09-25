@@ -1,0 +1,4 @@
+interface:
+  display_name: "HaaS FastAPI Backend"
+  short_description: "Apply HaaS FastAPI API and streaming conventions"
+  default_prompt: "Use $fastapi-backend to implement this HaaS API or streaming change with repository conventions."
