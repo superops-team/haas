@@ -227,9 +227,14 @@ Cancel request 发出后 Manager 继续消费/回放权威事件，task 保持 `
 
 Manager conversation surface 遵循 Manager Conversation Experience 中的产品与 React 合同。GUI `user_message` 携带稳定 `clientCommandId`、operation-scoped idempotency key 与显式 delivery intent。Manager 在确认 `running` 或 `queued` 前先持久化 accepted/duplicate command receipt；拒绝返回结构化安全错误，不伪造 turn。Send 后传输结果不确定时，通过 receipt 与 session projection 对账，绝不自动重发。
 
-Manager 拥有持久化的 per-session follow-up queue。Queue mutation 必须 revisioned 且 idempotent；只有 queued item 可编辑、删除、排序或提升为 send-now。Configuration barrier、workspace lock、running turn 或 recovering binding 可让 item 继续排队，但不得改变用户意图。HaaS deployment admission 与 workspace-lock queue 继续作为独立 backend fact，绝不投影成用户 follow-up item。
+不含内容的 Manager 读回接口
+`GET /v1/sessions/{sessionId}/conversation-commands/{idempotencyKey}` 返回原持久 receipt，
+或返回 `404 command_not_found`；它绝不返回 queued prompt 或 attachment payload。
+
+Manager 拥有持久化的 per-session follow-up queue。Queue mutation 必须 revisioned 且 idempotent；只有 queued item 可编辑、删除、排序或提升为 send-now。`queue_move` 携带 `targetPosition`；send-now 停止失败返回 `queue_send_now_failed`，同时保持 item queued 与 drain paused。Configuration barrier、workspace lock、running turn 或 recovering binding 可让 item 继续排队，但不得改变用户意图。HaaS deployment admission 与 workspace-lock queue 继续作为独立 backend fact，绝不投影成用户 follow-up item。
 
 GUI 接收一个 normalized conversation snapshot 与有序 change，其中 Manager row、interaction、queue 与 command identity 保持稳定，并关联 canonical HaaS event、turn、invocation 与 tool identity。Local execution 投影等价 identity。UI component 不解析 HaaS 或 harness-native payload，也不根据相邻 display item 推断 turn 边界。
+Snapshot 必须以 product turn 为中心：一个 turn 只拥有一个 work projection 与最多一个 assistant response。Model-call identity 与 usage boundary 只作为 evidence correlation，绝不得生成 GUI row、progress phase、card、heading 或 count。
 
 ### 5.6 双流桥接与完成屏障
 
@@ -241,9 +246,9 @@ Native type 判定结果，stream close 不代表成功。Native terminal 到达
 
 完成屏障由权威 readback 有界收敛，不能永久依赖两个 transport 同时确认。若 ADK 关闭、停滞或遗漏 terminal projection，Manager 必须把 canonical page 消费到 terminal event，并尝试与 invocation GET 对账。此前 canonical pages 全部消费后，已持久化的 canonical terminal 本身就是足够的权威证据，即使 invocation GET 暂时不可用也必须完成；readback 可用时，其 terminal status 以及若暴露的 terminal event id 必须一致后才能完成。随后 Manager 投影匹配的错误/task outcome 与唯一 `turn_end`，并把本地 binding 移出 `running`；不得无限等待 ADK 对同一 event id 的 claim。若 invocation readback 已终态但 canonical terminal 缺失，必须显示可恢复的完整性错误，绝不能永久显示执行中。
 
-非 thought 的 ADK text → `assistant_delta`；`haas.output.reasoning.delta` → 类型化 `reasoning_delta`；`haas.usage.updated` → 实测 model-call usage；native tool fact → `tool_proposed/tool_started/tool_output_delta/tool_finished`；`haas.approval.required` → `permission_required`；`haas.input.required` → `question_requested`；delegated lifecycle → status；accepted header → 单次 `turn_start`；对账后 terminal → 单次 `turn_end`。Heartbeat 不创建 transcript。Native sequence 有序，不把最终聚合文本再当第二份 delta。过程事件必须 checkpoint，使重连后还原相同的有序 model-call stage、item 边界、tool card、usage、pending interaction、partial answer 与终态。Reasoning 绝不追加到 commentary 或 final-answer 文本。
+非 thought 的 ADK text → `assistant_delta`；`haas.output.reasoning.delta` → 类型化 `reasoning_delta`；`haas.usage.updated` → 实测 model-call usage；native tool fact → `tool_proposed/tool_started/tool_output_delta/tool_finished`；`haas.approval.required` → `permission_required`；`haas.input.required` → `question_requested`；delegated lifecycle → status；accepted header → 单次 `turn_start`；对账后 terminal → 单次 `turn_end`。Heartbeat 不创建 transcript。Native sequence 有序，不把最终聚合文本再当第二份 delta。过程事件必须 checkpoint，使重连后还原相同 product turn、work segment、evidence correlation、usage、pending interaction、partial answer 与终态。Reasoning 绝不追加到 commentary 或 final-answer 文本。第一段被分类为 user-visible 的 assistant delta 创建稳定 response row；后续 delta、tool arrival、usage update 与 terminal sealing 只更新该 row，不得在 GUI container 间移动。
 
-Manager 还将已关联 native fact 折叠为有序 `ModelCallStageProjection`：
+Manager 可把已关联 native fact 保存在内部 `ModelCallEvidenceProjection`，用于 replay、usage accounting 与 Inspector lookup。它是 evidence data，不是 GUI layout contract：
 
 ```json
 {
@@ -270,11 +275,11 @@ Manager 还将已关联 native fact 折叠为有序 `ModelCallStageProjection`�
 }
 ```
 
-`kind` 为 `output_pending|commentary|reasoning_summary|tool|result`；`output_pending` 只是实时临时状态，权威 phase 到达后不得继续保留。Step 保留 canonical event 顺序。只有 `itemId`（reasoning 还包括 `summaryIndex`）相同的连续 delta 才合并；不同 item 或 model call 绝不合并。Agent-message delta 没有权威 phase 时先成为 `output_pending`，等对应 item lifecycle 提供 `commentary|final_answer` 后原地分类；Manager 不得从自然语言猜测。若 legacy provider 缺少 item phase，对账完成的成功 invocation terminal 可作为最后 model-call stage 剩余输出的权威信号：Manager 必须在发布或持久化终态 assistant message 前，将其 `output_pending` step 重分类为 `result`。Failed、incomplete 或 cancelled terminal 不得使用这个成功结果 fallback。Model-call usage event 为该 stage 计量，但关联 tool 尚未终态时不能单独结束 stage。具有相同 `modelCallId` 的 tool lifecycle 即使在 usage event 后才 start，仍保留在触发它的 stage；全部已知关联 tool 终态或 model output 开启下一 stage 后，当前 stage 才完成；tool 完成后的新 model output 开启下一 stage。缺少关联字段时只创建明确的 `legacy` stage；缺 usage 表示 unavailable，绝不补零。
+`kind` 为 `output_pending|commentary|reasoning_summary|tool|result`；`output_pending` 只是临时 evidence 状态，权威 phase 到达后不得继续保留。Step 保留 canonical event 顺序。只有 `itemId`（reasoning 还包括 `summaryIndex`）相同的连续 delta 才在 evidence 内合并；不同 item 或 model call 绝不合并。Agent-message delta 没有权威 phase 时先成为 `output_pending`，等对应 item lifecycle 提供 `commentary|final_answer` 后原地分类；Manager 不得从自然语言猜测。若 legacy provider 缺少 item phase，对账完成的 successful invocation terminal 对剩余 user-visible output 具有权威性，并封存唯一 assistant response；failed、incomplete 或 cancelled terminal 不得使用该成功 fallback。Model-call usage 与 tool correlation 保持实测 evidence fact。缺少 correlation 时进入明确 unknown evidence bucket；缺失 usage 表示 unavailable，绝不是零。这些 boundary 都不得决定主 timeline grouping。
 
-Reasoning-summary step 以 `(modelCallId, itemId, summaryIndex)` 为身份。`text` 为可展开详情保留 provider 提供的完整 canonical summary，`previewText` 则是有界的首屏投影。该 step 仍是当前尾部时，`previewText` 最多增长到 240 个 Unicode 字符，并在视觉上最多展示两行；达到字符上限即冻结。插入不同的后续 step、收到相同 `itemId` 的 item-completed event（冻结该 item 的全部 summary index），或 stage 进入终态后，预览也必须冻结（`previewFrozen=true`）。同一 reasoning identity 的迟到 delta 仍可补全 `text`，但不得改变已冻结预览。Canonical summary 仍受安全内容边界约束，不是 raw reasoning 或隐藏 chain-of-thought。Manager 不按标点拆分 summary，也不伪造中间推导步骤。Replay 与持久恢复必须重建完全相同的 preview 和冻结状态。旧持久记录若没有 `previewText`，GUI 从 `text` 派生前 240 个 Unicode 字符即可，不回写历史。
+Reasoning-summary evidence item 以 `(modelCallId, itemId, summaryIndex)` 为身份。`text` 为有界 Inspector detail 保留 provider 提供的完整 canonical summary，`previewText` 是最多 240 个 Unicode 字符的脱敏投影。Canonical summary 仍受安全内容边界约束，不是 raw reasoning 或隐藏 chain-of-thought。Manager 不按标点拆分 summary，也不伪造中间推导步骤。Replay 与持久恢复必须重建相同 evidence。Product-turn projector 可把一个或多个 evidence item 折叠成一个 reasoning `WorkSegment`，但绝不得把其中 prose 用作 work title，也不得在主 timeline 暴露 model-call boundary。
 
-Stage usage 是 step 区域唯一的 token 声明位置，展示 `scope=model_call` 的实测 `inputTokens`、`outputTokens`、可选 `reasoningOutputTokens` 与 cache counter。Cache-read 作为 input 子集、reasoning-output 作为 output 子集展示，不能再次计入 stage total。Commentary、reasoning-summary、tool、result 子行只说明其计入该 stage，不得分摊或估算 token。Tool 执行自身没有模型 token，除非 HaaS 提供另一个带 scope 的实测 record。`cumulativeUsage` 只更新 task/session total，不能再次与 model-call usage 相加。
+实测 per-model-call `inputTokens`、`outputTokens`、可选 `reasoningOutputTokens` 与 cache counter 只属于 evidence/Inspector。Cache-read 是 input 子集，reasoning-output 是 output 子集，都不能再次计入 aggregate total。Commentary、reasoning-summary、tool 与 result fact 不得分摊或估算 token。Tool 执行自身没有模型 token，除非 HaaS 提供另一个带 scope 的实测 record。`cumulativeUsage` 只更新 task/session total，不能再次与 model-call usage 相加。只有权威 aggregate 可进入安静的 turn completion footer；missing/pending usage 不产生主 timeline warning。
 
 发布 GUI 状态前，Manager 将上述 transport action 折叠为内部 `ActivityProjection`。它不是 HaaS 公共 API，也不得回传 HaaS：
 
@@ -357,9 +362,9 @@ Task transition 必须先持久化，再发布对应 GUI event。`waiting_for_in
 Transcript 是每个 task 有序 activity stream 的唯一 owner。右侧 Activity Inspector 仅显示选中 activity 的详情，不是第二条时间线，也不得重复完整 activity 列表。交互遵循 Codex 将可变运行中工作与已提交 transcript history 分离的原则：
 
 - task 活动期间，一个紧凑 activity 区域展示有界进度与 running/waiting activity，并原地更新生命周期；
-- reasoning 只展示有界脱敏进度摘要，绝不展示 chain-of-thought；活动行最多展示两行预览，出现后续 step 后停止变化，完整 provider summary 只能通过该行的显式详情展开查看；
-- commentary、provider reasoning summary、tool action 与 stage result 是不同的有序 row kind；reasoning 绝不拼接在 commentary 或 answer 文本之后；
-- model-call stage header（而非每个子 row）展示真实 input/output/reasoning/cache token；native 未报告 usage 时显示“Token 未报告”，不估算；
+- 每个 product turn 只有一个有界脱敏 reasoning disclosure，绝不展示 chain-of-thought；默认收起，仅在用户显式操作后展示 canonical safe detail；
+- commentary/progress、reasoning summary 与 tool action 投影为 typed work segment；任何一项都不得挤走稳定 assistant response 或与其拼接；
+- per-model-call input/output/reasoning/cache usage 只在 Inspector；权威 aggregate turn usage 可在 completion 出现一次，missing/pending usage 直接省略，不显示 warning；
 - 每个 tool call 只有一个语义 activity，不为 started/output/completed 分别建行；
 - approval 与 structured question 保持 inline blocking card，是用户决策/回答的唯一入口；Inspector 只读；
 - 成功使用安静且不只依赖颜色的标记；红色只表示真实失败；失败展示安全原因，并在可用时展示 exit code 与 duration；
@@ -368,13 +373,11 @@ Transcript 是每个 task 有序 activity stream 的唯一 owner。右侧 Activi
 - turn-level provider/adapter/transport error 保持为独立失败提示，不得挂在 tool detail 标题下伪装成该 tool 返回的错误；
 - 非成功 task outcome 的 partial output 与恢复说明保持独立。
 
-Task phase 进入 `completed` 后，turn 默认收敛为 final answer、仅由结构化事实形成的
-结果摘要，以及实际 tool activity 的紧凑行。每条紧凑行保留具体动作、有界关键结果和
-状态，但不展开完整参数或输出。“查看活动”展开 reasoning 与完整有序 model-stage stream，
-不显示原始协议 event dump。失败/恢复尝试、跳过的验证、未解决风险及任何非成功事实在
-两种状态下都应保持醒目。用户展开状态仅属于本地展示状态，不改变 task/session。
+Task phase 进入 `completed` 后，product turn 保持 final answer 为主，并把唯一 work summary 切换为安静 completed 状态。成功 work detail 默认折叠；第一个可操作 failure、跳过的验证、未解决风险与非成功事实无需打开 model-call evidence 即可到达。用户 disclosure 是本地展示状态，不被 reasoning、model-call、usage、tool 或 terminal update 重置。
 
-运行时 activity projection 必须避免 `Waiting for agent` 到首个 model/tool stage 之间出现空白或生硬切换；同一个紧凑 activity 容器承载 waiting 到 active stage 的过渡。Model-call stage 默认折叠，包括 running stage。折叠标题应使用该 stage 的任务名称：优先取有意义的 tool/activity summary、command preview、action summary、reasoning/output preview，最后才回退到 `Stage N`。用户可展开任意 stage，且不改变 task state。失败 stage 保持醒目，并让失败 action 易于检查。Running stage 使用轻量 active 视觉，例如 accent 渐变边框或背景，同时保持文字可读和明确状态文案；reduced-motion 模式下该 active 视觉保持静态。等待 usage event 时显示“Token 尚未报告”；若 stage 终止仍未收到则变为“Token 未报告”。Turn footer 对 model-call usage 只求和一次，并可把最新 cumulative snapshot 作为单独标注值展示。只有 turn-level usage 的旧历史只在 turn scope 展示该总量，绝不补造 stage 数值。
+Runtime projection 必须避免 `Working` 到第一段 assistant delta 之间出现空白。第一段 answer 前可使用一个紧凑 16 px status slot；第一段 user-visible delta 在下一次合并 publication 后挂载稳定 assistant-response row，并移除重复 loading。Response row 不得被 word threshold 延迟，也不得移入或移出 activity container。默认 work surface 只渲染一个安全 summary；仅在需要立即关注时展示 active tool 或可操作 failure。Model-call stage、reasoning chunk 与 usage arrival 不能成为 card、heading、progress count 或自动展开项。
+
+Activity title 依次使用显式本地化 product action、安全 tool/object summary、有界 command preview 与中性本地化 fallback。禁止把 raw/internal commentary、reasoning prose、provider/model text 或 model-call ordinal 当作 fallback。Missing/pending usage 在普通 conversation UI 中省略。Running state 使用一个持久文字标签和最多一个 motion owner；禁止 gradient、animated card border/background、重复 spinner 与 streaming motion 并存。
 
 桌面 viewport 宽度至少 1100 CSS pixel 时，选择 activity 后打开右侧 Inspector，宽度为 `clamp(320px, 30vw, 400px)`。较窄 viewport 使用 chat 工作区内部、composer 上方的非模态底部抽屉，最多占可用 chat 高度的一半，不得覆盖 composer 或 active approval/input card。Inspector/抽屉展示语义标题与状态、时间、duration、安全操作摘要、适用时的 exit code、最多五行持久 preview、省略行数、安全 artifact 和完整 transcript 入口。存在未过期 `evidenceRef` 时，打开 Inspector 按 scope 即时读取，并补充实际命令、工作目录与有界 command output。普通 HTTP(S) URL 可复制、可点击；signed 用户授权 URL 在 evidence 过期前也保持完整可点击，打开时使用 `noopener,noreferrer`，且 URL 不经过 analytics、telemetry 或 Manager redirect log。完整 URL 以外的 credential value 仍脱敏。Codex 0.152.1 的合并输出标为“命令输出”；只有 adapter 提供权威 stream label 时才显示 stdout/stderr 分栏。
 
@@ -386,7 +389,7 @@ Activity row 和 control 必须支持键盘访问。在 row 上按 Enter 或 Spa
 
 用户提交新的前台 prompt 时显式开始一个新的 transcript 跟随周期。React 提交本地
 用户消息后，即使用户此前停留在较早历史位置，视口也必须移动到最新内容；随后必须
-持续跟随 turn start、waiting、reasoning、model stage、tool activity 与流式回答造成的
+持续跟随 turn start、waiting、reasoning/work evidence、tool activity 与流式回答造成的
 高度变化，让用户立即看到任务已被接受且正在推进。只有提交之后用户再次明确向上滚动
 才退出该轮跟随；后台或 replay 更新不得抢走用户主动固定的阅读位置。程序化滚动必须在
 布局提交后发生，且自身产生的中间 scroll event 不得被误判为用户操作。
@@ -395,7 +398,7 @@ Activity row 和 control 必须支持键盘访问。在 row 上按 Enter 或 Spa
 的 session。完成这次初始对齐后，普通的 reader-pinned 行为继续生效，直到用户再次切换
 session 或显式点击“跳到最新”。
 
-assistant text delta、reasoning delta 与 model-stage update 等高频 GUI 投影更新在发布
+assistant text delta、reasoning delta 与 work/evidence update 等高频 GUI 投影更新在发布
 React state 前必须合并。一次 live render tick 可以合并多个 transport frame，但必须保留
 追加顺序、terminal flush 语义和 canonical 持久 transcript。流式合并只属于 GUI
 背压规则，不得改变 ADK/HaaS event ordering、response id、task status、durable cursor、
@@ -541,13 +544,13 @@ this runtime yet.” UI 主标签不得暴露 `FileRecord`、`artifactDelta`、`
 Running indicator 来自 task/invocation state，不来自 WebSocket 是否连接。重连先恢复持久 activity projection 与 pending interaction，再续 live cursor。未知 event type 仅增加诊断计数并隐藏，不能转成 assistant text、success、approval UI 或猜测的 activity。
 
 首屏加载、历史恢复、replay 或 live event 对账期间，同一个 keyed turn 的 Transcript
-投影变化不得改变 React Hook 调用顺序。legacy 与 HaaS turn renderer 必须由 Hook
-顺序稳定的 wrapper 路由，分支专用 state 归属于对应 child renderer。Turn 即使新增或
-失去 `modelStages` 或 HaaS activity metadata，也不得卸载 transcript root、产生白屏或
-丢失剩余会话。回归测试必须以同一 turn identity 覆盖 legacy → HaaS 与 HaaS →
-legacy 两种 rerender。
+投影变化不得改变 React Hook 调用顺序。所有来源使用同一个 product-turn renderer，
+source-specific state 归属于 transport/projector adapter。Turn 即使新增或失去 model-call
+evidence 或 HaaS activity metadata，也不得卸载 turn、assistant response 或 transcript root，
+不得产生白屏或丢失剩余会话。回归测试必须以同一 turn identity 覆盖 missing、partial 与
+complete evidence，且不得引入 legacy renderer branch。
 
-兼容策略仅做加法。ADK `/run` 与 `/run_sse` 不变；HaaS native tool event 保留已有 required 字段，只增加可选语义事实；output/usage event 同样只增加可选 correlation/scope fact。因此旧 server 或旧存储 event 形成单个 `legacy` stage，使用通用 `tool` activity，并且只展示其实际报告的 usage scope；旧 consumer 继续忽略新增字段。本 UI 投影不要求 stored-event migration、替换 session 或协议版本协商。
+兼容策略仅做加法。ADK `/run` 与 `/run_sse` 不变；HaaS native tool event 保留已有 required 字段，只增加可选语义事实；output/usage event 同样只增加可选 correlation/scope fact。因此旧 server 或旧存储 event 投影为一个 product turn、一个中性 work summary、通用 `tool` activity，并且只展示其实际报告的 aggregate usage；绝不创建 `legacy` stage card。旧 consumer 继续忽略新增字段。本 UI 投影不要求 stored-event migration 或替换 session；packaged Manager GUI asset 与 internal snapshot version 原子升级。
 
 Transport disconnect 不取消执行。ADK 用原 key/Last-Event-ID 重连，native 用独立 after_event_id；exponential backoff+jitter 受 attempt/turn budget 限制。Cursor 过期查 invocation/page，本身不触发新工作。ADK Session 413 转有界 native page，不静默截断历史。GUI 慢/断线不阻塞 HaaS 消费，重连恢复持久 transcript/状态；本地远程相同向量产生等价 Manager 投影。
 
@@ -751,21 +754,22 @@ Retry 与恢复场景的 recall 必须在过滤前合并已持久化 transcript 
 user message、终态 notice 和 bridge state，但由于 Manager 进程、浏览器连接或 stream
 loop 提前结束，assistant 投影尚未提交进 transcript。合成的 recall 行仍是 transcript
 fact，不是新的 user prompt：它可以包含 assistant text、task outcome、reasoning
-summary、model-stage summary，以及来自 `_haas_activity` 的有界 activity facts，但只能
+summary、product work summary，以及来自 `_haas_activity` 的有界 activity facts，但只能
 使用已经脱敏的投影字段，例如 status、safeSummary/summary、commandPreview、
 outputPreview/preview、exitCode、safeReason 和 durationMs。Query filtering 必须同时
 搜索这些安全字段和 assistant text，确保 agent retry 能 recall 已经尝试过的步骤，
 避免盲目重复 side effect。
 
-### 流式阶段状态与性能增量
+### Product-turn 投影纠偏
 
-Change ID: stream-stage-status-performance。阶段标题必须以本地化可见文字展示运行中、
-已完成、失败、未完成、已取消，且写入无障碍名称。渐变仅辅助文字。历史分组按 items
-身份和 running 边界缓存；实时文本、reasoning、阶段快照不使缓存失效。复用未变化的
-Markdown 渲染，同时保留正文更新、本地化、展开状态与终态语义。仅影响 GUI：ADK/native
-API、持久化、usage、事件顺序及其他组件合同不变。虚拟列表不在本补丁内。验收：测试证明
-状态迁移、展开状态保留、实时更新不重扫/重解析历史、历史变化及时刷新。任务：回归测试、
-实现、GUI 构建/浏览器检查、正确性/可维护性/测试质量审查。
+Change ID: `manager-conversation-interaction-v2`。Manager 必须按 product turn 发布 work、
+assistant response 与 canonical presentation state；model-call stage 只保留 evidence
+correlation。运行/完成/失败/未完成/取消状态用本地化可见文字与无障碍名称表达。历史分组按
+turn/row identity 缓存；实时 text、reasoning、evidence 与 usage update 不得重建历史或重置
+disclosure。ADK/native API、持久 event ordering、usage fact 与其他 HaaS 公共合同不变。
+验收必须证明第一段 delta 可见且 owner 稳定、一个 turn 只有一个 work summary、running 与
+Composer action 不矛盾、主 timeline 无 stage card/usage warning，并完成 GUI build、浏览器与
+packaged desktop 检查及强制三轮 review。
 
 ### 自动化与桌面可靠性（automation-desktop-reliability）
 
@@ -786,7 +790,7 @@ EOF 不能表示成功。通知前持久化结果，finally 释放占用。
 5. 桌面检测自己拥有的 Manager 子进程退出，复用参数和鉴权身份，有界退避重启。保持凭据
 通道归属规则；退出停止监督，不杀未知端口进程。耗尽重试提供可见重启说明；进程重启不等于任务重跑。
 6. 窄屏面板在可用区域内覆盖呈现，保留关闭和 composer 操作路径。waiting、reasoning、工具、
-收尾期间始终有状态，不同时显示 Waiting 与活动阶段。
+收尾期间始终有状态，不同时显示 Waiting 与 active work 或可见 tool。
 
 兼容：Manager event 加法，保留 run status 和 session 身份；ADK/native schema、容器、proxy、
 MCP、policy、凭据不变。存储增加恢复操作，不删历史。测试覆盖错误/EOF/终态、路由、重启不重复、

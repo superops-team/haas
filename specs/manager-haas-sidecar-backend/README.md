@@ -247,8 +247,14 @@ acknowledging `running` or `queued`; rejection returns a structured safe error w
 turn. An unknown post-send transport result is reconciled by receipt and session projection and is
 never resolved by automatic resubmission.
 
+The content-free Manager readback
+`GET /v1/sessions/{sessionId}/conversation-commands/{idempotencyKey}` returns the original durable
+receipt or `404 command_not_found`; it never returns the queued prompt or attachment payload.
+
 Manager owns the durable per-session follow-up queue. Queue mutations are revisioned and
-idempotent; only queued items can be edited, deleted, reordered, or promoted to send-now. A
+idempotent; only queued items can be edited, deleted, reordered, or promoted to send-now.
+`queue_move` carries `targetPosition`; send-now stop failure returns `queue_send_now_failed` while
+preserving the queued item and paused drain policy. A
 configuration barrier, workspace lock, running turn, or recovering binding may keep an item queued
 without changing its user intent. HaaS deployment admission and workspace-lock queues remain
 separate backend facts and are never projected as user follow-up items.
@@ -257,6 +263,9 @@ The GUI receives one normalized conversation snapshot plus ordered changes with 
 interaction, queue, and command identities correlated to canonical HaaS event, turn, invocation,
 and tool identities. Local execution projects equivalent identities. UI components do not parse
 HaaS or harness-native payloads and do not infer turn boundaries from adjacent display items.
+The snapshot is product-turn-first: one turn owns one work projection and at most one assistant
+response. Model-call identities and usage boundaries remain evidence correlation only; they never
+create GUI rows, progress phases, cards, headings, or counts.
 
 ### 5.6 Streaming Bridge and Completion Barrier
 
@@ -268,9 +277,10 @@ Native type determines outcome, not stream closure. Receiving native terminal do
 
 The completion barrier is bounded by authoritative readback, not by permanent agreement between two transports. If ADK closes, stalls, or omits its terminal projection, Manager drains canonical pages through the terminal event and attempts to reconcile the invocation GET. Once every preceding canonical page has been consumed, the persisted canonical terminal is sufficient authoritative evidence to finish even when invocation GET is temporarily unavailable. When invocation readback is available, its terminal status and any exposed terminal event id MUST agree before completion. Manager then emits the matching error/task outcome and exactly one `turn_end`, and moves the local binding out of `running`; it MUST NOT wait forever for an ADK claim of the same event id. A terminal invocation readback without a canonical terminal is an explicit recoverable integrity error, never a perpetual running state.
 
-Map non-thought ADK text to `assistant_delta`; `haas.output.reasoning.delta` to a typed `reasoning_delta`; `haas.usage.updated` to measured model-call usage; native tool facts to `tool_proposed/tool_started/tool_output_delta/tool_finished`; `haas.approval.required` to `permission_required`; `haas.input.required` to `question_requested`; delegated lifecycle to status; accepted headers to one `turn_start`; reconciled terminal to one `turn_end`. Heartbeat comments produce no transcript items. Preserve native sequence order; do not append final accumulated text as a second delta. Process events are checkpointed so reconnect reconstructs the same ordered model-call stages, item boundaries, tool cards, usage, pending interaction, partial answer, and terminal status. Reasoning is never appended to commentary or final answer text.
+Map non-thought ADK text to `assistant_delta`; `haas.output.reasoning.delta` to a typed `reasoning_delta`; `haas.usage.updated` to measured model-call usage; native tool facts to `tool_proposed/tool_started/tool_output_delta/tool_finished`; `haas.approval.required` to `permission_required`; `haas.input.required` to `question_requested`; delegated lifecycle to status; accepted headers to one `turn_start`; reconciled terminal to one `turn_end`. Heartbeat comments produce no transcript items. Preserve native sequence order; do not append final accumulated text as a second delta. Process events are checkpointed so reconnect reconstructs the same product turn, work segments, evidence correlation, usage, pending interaction, partial answer, and terminal status. Reasoning is never appended to commentary or final answer text. The first classified user-visible assistant delta creates the stable response row; later deltas, tool arrival, usage updates, and terminal sealing update that row without moving it between GUI containers.
 
-Manager additionally folds correlated native facts into an ordered `ModelCallStageProjection`:
+Manager may retain correlated native facts in an internal `ModelCallEvidenceProjection` for replay,
+usage accounting, and Inspector lookup. This is evidence data, not a GUI layout contract:
 
 ```json
 {
@@ -297,11 +307,25 @@ Manager additionally folds correlated native facts into an ordered `ModelCallSta
 }
 ```
 
-`kind` is `output_pending|commentary|reasoning_summary|tool|result`; `output_pending` is a transient live state and MUST NOT remain after an authoritative phase arrives. Steps retain canonical event order. Consecutive deltas merge only when their `itemId` (and reasoning `summaryIndex`) match; different items or model calls never merge. An agent-message delta without an authoritative phase starts as `output_pending` and is reclassified in place when the matching item lifecycle supplies `commentary|final_answer`; Manager never guesses from prose. When a legacy provider omits that item phase, a reconciled successful invocation terminal is authoritative for the remaining output of the final model-call stage: Manager reclassifies its `output_pending` steps to `result` before publishing or persisting the terminal assistant message. A failed, incomplete, or cancelled terminal MUST NOT use this successful-result fallback. A model-call usage event meters that stage but does not complete it while correlated tools remain non-terminal. Tool lifecycle carrying the same `modelCallId` remains in the triggering stage even when its start follows the usage event. A stage completes after all known correlated tools are terminal, or when model output opens the next stage; model output after tool completion opens the next stage. Missing correlation creates one explicitly `legacy` stage and missing usage is represented as unavailable, never zero.
+`kind` is `output_pending|commentary|reasoning_summary|tool|result`; `output_pending` is a transient evidence state and MUST NOT remain after an authoritative phase arrives. Steps retain canonical event order. Consecutive deltas merge only when their `itemId` (and reasoning `summaryIndex`) match; different items or model calls never merge in evidence. An agent-message delta without an authoritative phase starts as `output_pending` and is reclassified in place when the matching item lifecycle supplies `commentary|final_answer`; Manager never guesses from prose. When a legacy provider omits that item phase, a reconciled successful invocation terminal is authoritative for remaining user-visible output and seals the one assistant response. A failed, incomplete, or cancelled terminal MUST NOT use this successful-result fallback. Model-call usage and tool correlation remain measured evidence facts. Missing correlation uses an explicit unknown evidence bucket and missing usage is represented as unavailable, never zero. None of these boundaries may determine primary timeline grouping.
 
-A reasoning-summary step is identified by `(modelCallId, itemId, summaryIndex)`. Its `text` retains the complete canonical provider-supplied summary for the expandable detail surface, while `previewText` is a bounded first-screen projection. While that step is the active tail, `previewText` may grow only to 240 Unicode characters and is visually clamped to two lines; reaching the character bound freezes it. It also becomes immutable (`previewFrozen=true`) when a distinct later step is inserted, an item-completed event with the same `itemId` arrives (covering every summary index for that item), or the stage reaches a terminal state. Later deltas for the same reasoning identity may still complete `text` but MUST NOT mutate a frozen preview. The canonical summary remains subject to the normal safe-content boundary: it is not raw reasoning or hidden chain-of-thought. Manager does not split summaries at punctuation or invent intermediate reasoning steps. Replay and persistence MUST reconstruct the same preview and frozen state. Existing persisted steps without `previewText` remain compatible: the GUI derives the first 240 Unicode characters from `text` without rewriting history.
+A reasoning-summary evidence item is identified by `(modelCallId, itemId, summaryIndex)`. Its `text`
+retains the complete canonical provider-supplied summary for bounded Inspector detail, while
+`previewText` is a sanitized projection capped at 240 Unicode characters. The canonical summary
+remains subject to the normal safe-content boundary: it is not raw reasoning or hidden
+chain-of-thought. Manager does not split summaries at punctuation or invent intermediate reasoning
+steps. Replay and persistence reconstruct the same evidence. The product-turn projector may fold
+one or more evidence items into one reasoning `WorkSegment`, but it MUST NOT use their prose as a
+work title or expose model-call boundaries in the primary timeline.
 
-Stage usage is the only per-step-area token claim. It displays measured `inputTokens`, `outputTokens`, optional `reasoningOutputTokens`, and cache counters from `scope=model_call`. Cache-read is shown as an input subset and reasoning-output as an output subset; neither is added again to the stage total. Child commentary, reasoning-summary, tool and result rows say they are included in the stage; they MUST NOT receive allocated or estimated token numbers. Tool execution itself has no model token usage unless HaaS supplies a separately scoped measured record. `cumulativeUsage` updates the task/session total but is not summed with model-call usage.
+Measured per-model-call `inputTokens`, `outputTokens`, optional `reasoningOutputTokens`, and cache
+counters remain evidence/Inspector data. Cache-read is an input subset and reasoning-output is an
+output subset; neither is added again to aggregate totals. Child commentary, reasoning-summary,
+tool, and result facts never receive allocated or estimated token numbers. Tool execution itself
+has no model token usage unless HaaS supplies a separately scoped measured record.
+`cumulativeUsage` updates the task/session total but is not summed with model-call usage. Only an
+authoritative aggregate may enter the quiet turn completion footer; missing or pending usage emits
+no primary-timeline warning.
 
 Before publishing GUI state, Manager folds those transport actions into an internal
 `ActivityProjection`. This is not a HaaS public API and MUST NOT be sent back to HaaS:
@@ -420,13 +444,12 @@ principle of separating mutable in-flight work from committed transcript history
 
 - while a task is active, one compact activity region shows bounded progress plus
   running/waiting activities, updating each lifecycle in place;
-- reasoning is a bounded redacted progress summary, never chain-of-thought; an active row shows
-  at most two preview lines, stops changing once a later step appears, and exposes the complete
-  provider summary only through that row's explicit detail disclosure;
-- commentary, provider reasoning summary, tool action, and stage result are distinct ordered
-  row kinds; reasoning is never concatenated after commentary or answer text;
-- the model-call stage header, not each child row, shows actual input/output/reasoning/cache
-  token usage; missing native usage reads `Token usage not reported` rather than an estimate;
+- reasoning is one bounded redacted disclosure per product turn, never chain-of-thought; it defaults
+  collapsed and exposes canonical safe detail only through explicit user action;
+- commentary/progress, reasoning summary, and tool action become typed work segments; none may
+  displace or concatenate with the stable assistant response;
+- per-model-call input/output/reasoning/cache usage is Inspector-only; authoritative aggregate turn
+  usage may appear once in completion, while missing/pending usage is omitted rather than warned;
 - each tool call is one semantic activity, not separate started/output/completed rows;
 - approval and structured questions remain inline blocking cards and are the only place
   where the user decides or answers; the Inspector is read-only;
@@ -440,38 +463,26 @@ principle of separating mutable in-flight work from committed transcript history
   presented under a tool-detail heading as though the tool itself returned that error;
 - partial output and recovery guidance remain distinct for non-success task outcomes.
 
-When task phase becomes `completed`, the turn collapses by default to the final answer,
-a result summary made only from structured facts, and compact rows for the actual tool
-activities. Each compact row keeps its concrete action, bounded key result and status visible;
-it does not expose full arguments or output. `Show activity` expands reasoning and the complete
-ordered model-stage stream, not raw protocol events. Failed/recovered attempts, skipped
-verification, unresolved risk, and any non-success fact remain visually prominent in either
-state. User expansion is local presentation state and does not change task/session state.
+When task phase becomes `completed`, the product turn keeps the final answer primary and changes its
+single work summary to a quiet completed state. Successful work detail defaults collapsed. The
+first actionable failure, skipped verification, unresolved risk, and non-success facts remain
+reachable without opening model-call evidence. User disclosure is local presentation state and is
+not reset by reasoning, model-call, usage, tool, or terminal updates.
 
-Runtime activity projection MUST avoid a blank handoff between `Waiting for agent` and the
-first model/tool stage. The same compact activity container carries the transition from
-waiting to active stage. Model-call stages default to collapsed, including the running stage,
-and the collapsed title SHOULD use the stage's task name: first meaningful tool/activity
-summary, command preview, action summary, reasoning/output preview, then only as a fallback
-`Stage N`. The user can expand any stage without changing task state. Failed stages remain
-visually prominent and keep the failed action easy to inspect. A running stage uses a subtle
-active treatment, such as an accent gradient border or background, while preserving readable
-text and explicit status copy; reduced-motion mode keeps that active treatment static. A
-stage waiting for its usage event shows `Token usage not reported yet`; if it terminates
-without one, the copy becomes `Token usage not reported`. The turn footer sums model-call
-usage once and may show the latest cumulative snapshot as a separately labelled value.
-Legacy history with only turn-level usage shows that total at turn scope and never
-synthesizes stage numbers.
+Runtime projection MUST avoid a blank handoff between `Working` and the first assistant delta. A
+single compact 16 px status slot may represent pre-answer work; the first user-visible delta mounts
+the stable assistant-response row after the next coalesced publication and removes redundant
+loading. The response row is never delayed by a word threshold and never moved into or out of an
+activity container. The default work surface renders one safe summary and, only when immediately
+relevant, the active tool or actionable failure. Model-call stages, reasoning chunks, and usage
+arrival are not cards, headings, progress counts, or automatic disclosures.
 
-For change ID stream-stage-status-performance, headers MUST expose localized visible status
-for running/completed/failed/incomplete/cancelled, also in accessible names. Gradients supplement
-text. Cache historical grouping by items identity and running boundary; live text, reasoning
-and stage snapshots must not invalidate it. Reuse unchanged Markdown rendering while preserving
-text updates, localization, disclosure and terminal semantics. GUI-only: ADK/native API,
-persistence, usage, event ordering and other component contracts are unaffected. Virtualization
-is outside this patch. Acceptance: tests prove status transitions, disclosure preservation,
-no historical regrouping/reparsing on live updates, and refresh on history changes. Tasks:
-tests, implementation, GUI build/browser checks, correctness/maintainability/test-quality reviews.
+Activity titles use an explicit localized product action, safe tool/object summary, bounded command
+preview, then a neutral localized fallback. Raw/internal commentary, reasoning prose,
+provider/model text, and model-call ordinals are prohibited fallbacks. Missing or pending usage is
+omitted from ordinary conversation UI. Running state uses one persistent text label and at most one
+motion owner; gradients, animated card borders/backgrounds, repeated spinners, and simultaneous
+streaming motion are prohibited.
 
 On desktop viewports at least 1100 CSS pixels wide, selecting an activity opens a
 right-side Inspector sized `clamp(320px, 30vw, 400px)`. On narrower viewports the same
@@ -516,7 +527,7 @@ otherwise selection clears without opening a different activity.
 Submitting a new foreground prompt explicitly starts a new transcript-follow epoch. After
 React commits the local user message, the viewport MUST move to the latest content even if
 the reader was previously inspecting older history. It MUST then follow height changes from
-turn start, waiting state, reasoning, model stages, tool activity and streamed answer text so
+turn start, waiting state, reasoning/work evidence, tool activity and streamed answer text so
 the user can immediately see that the accepted task is making progress. Only a new explicit
 upward scroll after submission disengages that epoch; background/replayed updates MUST NOT
 take over a reader-pinned viewport. Programmatic scrolling MUST occur after layout and MUST
@@ -528,7 +539,7 @@ the newly opened session. After that initial alignment, the normal reader-pinned
 applies until the user switches sessions again or explicitly jumps to latest.
 
 High-frequency GUI projection updates from assistant text deltas, reasoning deltas, and
-model-stage updates MUST be coalesced before publishing React state. A live render tick may
+work/evidence updates MUST be coalesced before publishing React state. A live render tick may
 combine multiple transport frames but MUST preserve append order, terminal flush semantics,
 and the canonical persisted transcript. Stream coalescing is a GUI back-pressure rule only; it
 MUST NOT alter ADK/HaaS event ordering, response ids, task status, durable cursors, usage, or
@@ -686,18 +697,19 @@ do not become assistant text, success, approval UI, or guessed activities.
 
 Transcript projection changes during initial load, history restore, replay, or live event
 reconciliation MUST NOT change the React hook order of an existing keyed turn. Routing
-between legacy and HaaS turn renderers therefore occurs in a hook-stable wrapper, while
-branch-specific state belongs to the selected child renderer. A turn may gain or lose
-`modelStages` or HaaS activity metadata without unmounting the transcript root, producing a
-blank window, or losing the remaining conversation. A regression test MUST rerender the same
-turn identity across both legacy-to-HaaS and HaaS-to-legacy projection changes.
+uses one product-turn renderer; source-specific state belongs to transport/projector adapters. A
+turn may gain or lose model-call evidence or HaaS activity metadata without unmounting the turn,
+assistant response, or transcript root, producing a blank window, or losing the remaining
+conversation. A regression test MUST rerender the same turn identity across missing, partial, and
+complete evidence without introducing a legacy renderer branch.
 
-Compatibility is additive. ADK `/run` and `/run_sse` are unchanged. HaaS native tool
-events retain their existing required fields and add only optional semantic facts. Output and
-usage events likewise add optional correlation/scope facts. An older server or stored event
-therefore renders as one `legacy` stage with generic tool activities and only the usage scope it
-actually reported; an older consumer continues to ignore the added fields. No stored-event
-migration, session replacement, or protocol-version negotiation is required for this UI projection.
+Compatibility is additive. ADK `/run` and `/run_sse` are unchanged. HaaS native tool events retain
+their existing required fields and add only optional semantic facts. Output and usage events
+likewise add optional correlation/scope facts. An older server or stored event therefore projects
+one product turn with a neutral work summary, generic tool activities, and only the aggregate usage
+it actually reported; it never creates a `legacy` stage card. Older consumers continue to ignore
+added fields. No stored-event migration or session replacement is required; packaged Manager GUI
+assets and the internal snapshot version change atomically.
 
 Transport disconnect never cancels execution. Reconnect ADK with the same key and Last-Event-ID, native with its own after_event_id; bounded exponential backoff with jitter respects attempt/turn limits. Cursor expiry requires invocation/page readback and never by itself triggers new work. ADK Session 413 falls back to bounded native pages without silent history truncation. Slow/disconnected GUI clients do not block HaaS consumption; reconnect receives persisted transcript and reconciled state. The same vectors must produce equivalent Manager projections locally and remotely.
 
@@ -934,7 +946,7 @@ interrupted HaaS turn has persisted its visible user message, terminal notice, a
 state, but the assistant projection has not yet been committed to the transcript because
 the Manager process, browser connection, or stream loop ended early. The synthesized recall
 row is still a transcript fact, not a new user prompt: it may include assistant text,
-task outcome, reasoning summary, model-stage summaries, and bounded activity facts from
+task outcome, reasoning summary, product work summaries, and bounded activity facts from
 `_haas_activity`, but only from already-sanitized projection fields such as status,
 safeSummary/summary, commandPreview, outputPreview/preview, exitCode, safeReason and
 durationMs. Query filtering MUST search those safe fields as well as assistant text so an
@@ -968,7 +980,7 @@ rules. Quit cancels supervision; unknown listeners are never killed. Exhausted r
 visible with restart guidance; no execution replay is implied by process restart.
 6. Narrow conversation layouts overlay panels within the available area, with an accessible
 close path and usable composer. Active task status remains visible throughout waiting,
-reasoning, tools and finalization; never show Waiting alongside an active stage.
+reasoning, tools and finalization; never show Waiting alongside active work or a visible tool.
 
 Compatibility: additive Manager events, retained run statuses and session identities. HaaS
 ADK/native schemas, container images, provider proxy, MCP, policies and credentials unchanged.

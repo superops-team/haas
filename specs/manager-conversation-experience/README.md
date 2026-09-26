@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: Reviewed; blockers resolved; approved direction recorded
+Status: Reviewed; post-implementation UI correction defined; implementation pending
 Last reviewed: 2026-09-26
 Change ID: `manager-conversation-interaction-v2`
 Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager GUI Performance](../manager-gui-performance/README.md), [Event Log & SSE](../event-log-sse/README.md), [Session Runtime](../session-runtime/README.md), [Manager Product Identity](../manager-product-identity/README.md), [Security Boundary](../security-boundary/README.md)
@@ -85,6 +85,35 @@ The approved direction is **Focused Workbench**:
   and
 - narrow layouts progressively collapse secondary controls instead of shrinking every element.
 
+### 2.4 Post-implementation product evidence and corrective decision
+
+A 2026-09-26 packaged-desktop run exposed a design failure that functional, accessibility, and
+performance gates did not catch. The running turn filled the primary viewport with eight peer
+model-call cards. Each card repeated status, step count, command or internal commentary, and token
+accounting; completed calls remained expanded while the next call ran. The user request and final
+answer were displaced, an unavailable usage value was more visually prominent than current work,
+and the timeline reported running while the Composer simultaneously offered Continue and Stop.
+The assistant stream also changed containers after a word-count threshold, producing delayed text
+appearance and layout movement.
+
+The corrective product decision is normative:
+
+- the primary projection unit is a **product turn**, never a model call;
+- model-call boundaries and identifiers are correlation/evidence data and MUST NOT create peer
+  timeline cards, headings, counts, or user-facing workflow phases;
+- one turn owns one work summary, zero or more progressively disclosed work segments, at most one
+  active interaction, and one stable assistant-response surface;
+- assistant content occupies that response surface from its first classified user-visible delta
+  until terminal sealing; word count, elapsed time, adjacency, or tool arrival MUST NOT relocate it;
+- timeline state, header state, loading treatment, and Composer controls consume one canonical
+  presentation selector; and
+- internal reasoning/commentary and absent accounting data are never promoted to titles, warnings,
+  or primary status.
+
+This is a projection correction, not a new conversation mode. The existing stage-card hierarchy,
+word-threshold stream gate, and independent lifecycle selectors are transitional implementation
+defects to remove, not compatibility behavior to preserve.
+
 ## 3. Goals, Non-goals, and Success Measures
 
 ### 3.1 Goals
@@ -103,6 +132,9 @@ The approved direction is **Focused Workbench**:
 10. Ship complete light and dark themes through one semantic token contract.
 11. End migration with no permanent compatibility renderer, duplicate state owner, legacy CSS path,
     or long-lived feature flag.
+12. Preserve the user's reading context by keeping work telemetry subordinate to intent and answer.
+13. Keep the assistant response in one stable DOM and visual owner from first visible delta through
+    completion.
 
 ### 3.2 Non-goals
 
@@ -128,6 +160,14 @@ The approved direction is **Focused Workbench**:
 - one live publication is committed at most once per animation frame; and
 - the final legacy-removal gate finds no imports, selectors, CSS hooks, tests, or flags owned only by
   the previous conversation path.
+- a running turn renders no model-call card in the primary timeline and no internal
+  reasoning/commentary text as an activity title;
+- a first assistant delta becomes visible within one coalesced publication and remains in the same
+  semantic response element through terminal sealing;
+- one rendered frame never offers mutually exclusive lifecycle actions such as Continue and Stop;
+  and
+- expanding work is an explicit user action, remains stable during streaming, and never displaces
+  the live answer above the reading anchor.
 
 ### 3.4 User and system scenarios
 
@@ -178,6 +218,11 @@ P0, P1, and P2 define implementation order, not optional scope.
 | MCX-R11 Conversation navigation | P2 | Search, turn navigation, and Jump-to-latest use stable row/turn identities |
 | MCX-R12 Semantic context display | P2 | Skills, files, sessions, and other supported context render as typed chips instead of raw syntax |
 | MCX-R13 Legacy zero | P0 final gate | Old writers/renderers/styles/tests/flags are deleted after parity; no permanent dual path remains |
+| MCX-R14 Product-turn projection | P0 | Model calls remain evidence metadata; one product turn owns one work summary and one assistant response |
+| MCX-R15 Stable assistant stream | P0 | First user-visible delta mounts the final response owner; heuristics never hide or relocate content |
+| MCX-R16 Canonical lifecycle presentation | P0 | Timeline, header, loading, interaction dock, and Composer actions use one selector and cannot contradict |
+| MCX-R17 Safe work disclosure | P0 | Work is compact by default; reasoning, tools, and telemetry use bounded semantic disclosures with safe copy |
+| MCX-R18 Motion and density discipline | P1 | One animation owner per state, stable geometry, semantic tokens, and measured information density govern the surface |
 
 ## 5. Information Architecture and Responsive Layout
 
@@ -227,14 +272,29 @@ interrupt the timeline's semantic heading order.
 | running | One compact activity summary and live tail | Stop; Pause only when capability is available | Expand current work or open evidence |
 | waiting for user | Interaction Dock replaces the active composer control surface | Decision-specific action | Bounded details and queued-request count |
 | queued follow-up | Queue tray attached above Composer | Edit or leave queued | Reorder, delete, interrupt-and-send |
-| paused | Persistent paused label with retained partial result | Continue | Stop permanently |
+| paused | Persistent paused label with retained partial result | Continue | End task |
 | recovering | Stable recovery banner; existing content remains readable | Retry readback/reconnect | Safe diagnostic reference |
 | failed/incomplete | First actionable failure expanded near its turn | Retry/resume only when allowed | Evidence Inspector |
 | completed | Final assistant result plus quiet completion footer | Continue conversation | Usage, artifacts, activity details |
 
-Each state has at most one filled/accent primary action. Destructive actions use danger semantics and
-never become primary merely because they are time-sensitive. No critical recovery action is hidden
-behind a disclosure.
+Each state has at most one lifecycle command in the primary control slot. The slot is not
+necessarily accent-filled: destructive commands use danger semantics and never borrow accent fill
+merely because they are time-sensitive. No critical recovery action is hidden behind a disclosure.
+
+### 5.5 Conversation measure and alignment
+
+- User and assistant prose share one leading alignment edge and a readable maximum measure of
+  72ch; code, tables, and evidence may scroll within their own bounded container rather than widen
+  the transcript.
+- Work summary, response, completion footer, notices, and errors align to that same conversation
+  measure. Inspector and Status Panel use separate landmarks and do not create stray text edges in
+  the timeline.
+- Group spacing is at least twice item spacing. Space establishes hierarchy before a border or
+  tinted surface is added.
+- Text containers use minimum height and wrapping rather than fixed height. Pseudo-localized action
+  labels and long safe summaries must wrap without moving the primary action beyond the viewport.
+- Direction-dependent spacing uses logical properties. Mixed-direction paths, ids, commands, and
+  counts preserve order through explicit `dir`/`bdi` handling where needed.
 
 ## 6. Authoritative State and Projection Model
 
@@ -264,12 +324,16 @@ The GUI consumes a typed `ConversationSnapshot` rather than mutable `Item[]` plu
 buffers. The internal TypeScript contract is:
 
 ```ts
+type ConversationRunState =
+  | "idle" | "submitting" | "running" | "pausing" | "paused"
+  | "resuming" | "stopping" | "waiting" | "recovering"
+  | "completed" | "failed" | "cancelled";
+
 interface ConversationSnapshot {
   sessionId: string;
   revision: number;
   lastEventId: string | null;
-  phase: "idle" | "submitting" | "running" | "waiting" | "paused" |
-    "recovering" | "completed" | "failed" | "cancelled";
+  phase: ConversationRunState;
   turns: ConversationTurn[];
   activeTurnId: string | null;
   activeWork: WorkSummary[];
@@ -286,6 +350,59 @@ Every `ConversationTurn` has a stable `turnId`, ordered stable `rowId` values, a
 `toolCallId`; interaction rows by `interactionId`; queued submissions by `queueItemId` and
 `clientCommandId`. The renderer MUST NOT infer these identities from adjacent content, timestamps,
 tool names, or display strings.
+
+The product-facing turn shape is explicit:
+
+```ts
+interface ConversationTurn {
+  turnId: string;
+  invocationId: string | null;
+  phase: ConversationRunState;
+  userRows: ConversationRow[];
+  work: TurnWorkProjection;
+  assistantResponse: AssistantResponseProjection | null;
+  interactionIds: string[];
+  outcome: ConversationOutcome | null;
+}
+
+interface TurnWorkProjection {
+  state: "idle" | "working" | "waiting" | "succeeded" |
+    "failed" | "cancelled";
+  safeSummary: string;
+  startedAtMs: number | null;
+  completedAtMs: number | null;
+  segments: WorkSegment[];
+  aggregate: {
+    activityCount: number;
+    durationMs?: number;
+    usage?: AuthoritativeUsage;
+    artifactCount?: number;
+  };
+}
+
+interface WorkSegment {
+  segmentId: string;
+  kind: "reasoning" | "tool" | "progress" | "recovery";
+  state: "pending" | "running" | "succeeded" | "failed" | "cancelled";
+  safeTitle: string;
+  safeSummary?: string;
+  activityRefs: string[];
+  evidenceRef?: string;
+}
+
+interface AssistantResponseProjection {
+  rowId: string;
+  text: string;
+  state: "streaming" | "sealed" | "interrupted";
+  firstVisibleDeltaAtMs: number;
+}
+```
+
+`segmentId` is a Manager product identity. A segment may correlate to one or many model calls or
+tool calls, but `modelCallId`, provider request id, native reasoning item id, and token-usage
+arrival boundaries are never display identities. They remain private correlation metadata behind
+the evidence adapter. Splitting or combining model calls therefore cannot change the primary
+timeline shape.
 
 The remaining persisted Manager records are explicit and versioned:
 
@@ -332,11 +449,56 @@ they never become assistant output or guessed success.
 - A lower revision cannot replace a higher revision.
 - Text deltas append once in sequence order; final text seals the live row and does not create a
   second answer.
+- The first canonical user-visible assistant delta creates `assistantResponse`; later deltas mutate
+  only its text/state. It is never held behind a word, time, activity, or adjacency threshold and
+  never moves between work, narration, and answer containers.
+- User-visible answer, user-visible progress, internal reasoning, and tool evidence are classified
+  by typed transport facts. When the source cannot prove a subtype, safe assistant text is treated
+  as answer content; the GUI does not infer a subtype from prose.
+- Model-call start/finish and usage updates may update evidence correlation and aggregate facts but
+  MUST NOT append primary timeline rows or toggle disclosure.
 - One started work item receives at most one terminal state.
 - Terminal state cannot return to running without a new `turnId`/`invocationId`.
 - Pending interactions are restored before Composer enables conflicting commands.
 - Reconciliation replaces uncertain derived state only with an authoritative snapshot or event
   page; it never resubmits the original user command automatically.
+
+### 6.4 Canonical presentation selector
+
+One pure selector derives `ConversationPresentation` from the authoritative snapshot and pending
+command receipt. Conversation header, Turn status, loading slot, Interaction Dock, and Composer
+MUST consume this result rather than independently interpreting `running`, `taskPhase`, model
+stages, socket state, or local button state.
+
+```ts
+interface ConversationPresentation {
+  phase: ConversationRunState;
+  statusLabel: string;
+  primaryAction: "send" | "stop" | "continue" | "resolve" | "retry" | null;
+  secondaryActions: Array<"pause" | "end_task" | "discard" | "open_evidence">;
+  composerMode: "compose" | "queue" | "blocked";
+  showWorkingIndicator: boolean;
+}
+```
+
+The selector enforces these invariants:
+
+- exactly zero or one primary action is visible;
+- `continue` is available only in authoritative `paused` state;
+- `stop` is available only while submitting, running, pausing, resuming, or stopping remains
+  cancellable. In paused state, `continue` is primary and permanent termination is a separately
+  labelled secondary danger action, never a peer `Stop` button;
+- an active interaction owns the primary action and suppresses ordinary loading duplication;
+- socket disconnection alone cannot change a terminal turn back to running; and
+- phase changes update all consuming surfaces in the same React commit.
+
+### 6.5 Live-tail lifecycle
+
+The last active product turn is rendered as one non-virtual live tail. Historical turns remain in
+the bounded virtual list. On terminal sealing, the whole turn projection is atomically transferred
+to history without changing its `turnId`, row identities, disclosure preference, or assistant
+response element semantics. A new turn creates a new live tail; it never reuses the previous
+turn's response node.
 
 ## 7. Submission, Draft, and Follow-up Queue Contracts
 
@@ -408,6 +570,12 @@ turn or queue identity. Acceptance is persisted before ACK. HaaS-backed executio
 operation-scoped `Idempotency-Key`; the GUI never generates a second HaaS attempt to resolve an
 uncertain Manager transport result.
 
+Receipt reconciliation uses the Manager-internal, content-free readback
+`GET /v1/sessions/{sessionId}/conversation-commands/{idempotencyKey}`. A found receipt returns the
+original command/turn/queue/outcome identities with `status=duplicate`; `404 command_not_found` is
+the only readback that proves the command was not accepted. The readback never returns prompt or
+attachment content.
+
 The initial client/server handshake advertises `conversationProtocolVersion: 2`. A mismatched
 cached browser client receives a structured `client_upgrade_required` response and reload action;
 the server does not silently downgrade to the unacknowledged sender. Hashed production assets and
@@ -416,8 +584,11 @@ protocol.
 
 `error`, when present, is `{code, safeMessage, retryable, recoveryAction?}`. It never contains raw
 prompt, full tool arguments, credential material, signed URLs, or backend stack traces. Queue
-mutation commands carry `queueItemId`, `expectedQueueRevision`, and their own idempotency key;
+mutation commands carry `queueItemId`, `expectedRevision`, and their own idempotency key;
 stale revision returns a structured conflict plus the latest queue snapshot.
+The command set is `queue_edit`, `queue_delete`, `queue_move(targetPosition)`, and
+`queue_send_now`. A failed stop during send-now returns `queue_send_now_failed` and leaves the
+item queued without enabling automatic drain.
 
 Submission state transitions are:
 
@@ -480,12 +651,30 @@ Normal completed work defaults collapsed. Running work shows one compact active 
 interrupted, or incomplete work defaults expanded to the first actionable failure. User selection
 and disclosure remain stable during live updates.
 
+The default running Turn has a strict visual budget:
+
+- one user-intent block;
+- one single-line work summary with state text and optional disclosure control;
+- at most one currently relevant tool or first actionable failure when immediate awareness/action
+  is required; and
+- one assistant-response block that appears with the first visible delta.
+
+Completed model calls, provider rounds, reasoning chunks, usage arrival, and cache accounting do
+not consume peer cards in this default flow. Expanding work adds detail below the work summary and
+above the answer without replacing either. A live update cannot automatically reopen a disclosure
+that the user closed or close one the user opened. The completed state may auto-collapse only a
+never-touched disclosure.
+
 ### 8.2 Activity summaries and evidence
 
-- The summary title prioritizes safe task/tool summary, command preview, action summary, then a
-  localized neutral fallback.
-- One count covers all visible work kinds; a visible running stage can never coexist with a zero-
-  activity summary.
+- The summary title prioritizes an explicit localized product action, safe tool/object summary,
+  bounded command preview, then a localized neutral fallback.
+- Raw reasoning, raw commentary, model/provider prose, prompts, arguments, stack traces, transport
+  names, and model-call ordinals MUST NOT be used as a title fallback.
+- One count covers product work segments or activities. Model-call count and reasoning-chunk count
+  are diagnostics and never appear as task progress.
+- The running summary does not lead with a numeric count. An optional completed aggregate belongs
+  in the quiet completion footer or expanded detail.
 - Running state includes a persistent text label. Motion is optional and disabled under reduced
   motion.
 - Activity rows show status, safe title, optional key result, and duration. Raw arguments never
@@ -493,7 +682,34 @@ and disclosure remain stable during live updates.
 - Selecting a row opens the existing secure evidence path in an Inspector. Narrow layouts use a
   non-modal bottom drawer that does not cover Composer or Interaction Dock.
 
-### 8.3 Pending interaction dock
+Reasoning is one semantic disclosure per turn, not one surface per model call. While collapsed and
+streaming, it may show one sanitized single-line summary. User expansion takes precedence over
+automatic behavior. On completion it auto-collapses only if the user never changed it. Heavy
+reasoning detail may remain mounted for at most 300 ms to complete a height transition, then
+unmounts; reduced-motion mode unmounts immediately.
+
+Tool work uses a shared `ToolActivity` contract with header, safe input summary, bounded result,
+status, duration, and evidence action. Only the active tool or first actionable failure may default
+open. Completed successful tools default collapsed. Tool input/output and evidence are not nested
+inside model-call cards.
+
+### 8.3 Stable assistant response
+
+- The assistant response has one `rowId`, one semantic article/container, and one insertion point
+  for its entire lifecycle.
+- The first user-visible text delta renders in that container after the next coalesced publication;
+  there is no minimum word count or intentional 1-2 second hold.
+- The work summary may update beside/above it, but answer text never moves from a loading area or
+  activity area into a separate bubble.
+- Terminal text seals the same node. Replayed/restored text produces the same semantic DOM and
+  ordering as a live turn.
+- When no answer delta exists, one compact 16 px status slot may show `Working`; when the first
+  answer delta arrives, that redundant loading indicator is removed without adding a second status
+  announcement.
+- Streaming cursor treatment is optional decoration. It cannot be the only indication of streaming
+  and is disabled when reduced motion is requested.
+
+### 8.4 Pending interaction dock
 
 Approval, input request, directory permission, tool installation, plan/team/item proposal, policy
 conflict, and recoverable execution failure use one `PendingInteractionDock` shell.
@@ -510,12 +726,38 @@ conflict, and recoverable execution failure use one `PendingInteractionDock` she
 - An error names a recovery action when one exists. Terminal non-retryable errors say that the task
   cannot continue rather than presenting a dead Retry button.
 
-### 8.4 Completion summary
+### 8.5 Persistent mode context and durable notices
+
+Execution modes such as bypass approvals, sandbox/runtime identity, and policy posture belong to a
+persistent header or Composer context chip. They do not render as large timeline notices on every
+turn. A timeline notice is reserved for a durable state transition that changes the interpretation
+of prior or later work; it is compact, left-aligned with the conversation measure, and never
+becomes the primary visual block.
+
+### 8.6 Completion summary
 
 A completed turn may show one quiet footer containing duration, activity count, token usage when
 authoritative, changed/produced artifact count, and a direct artifact action. Missing usage is
 omitted in the footer; it is not rendered as a persistent warning. The final assistant result
 remains the dominant content.
+
+Per-model-call input/output/reasoning/cache usage belongs to Evidence Inspector only. Aggregate
+turn usage may appear in the completion footer when authoritative. `Pending`, `unreported`, zero,
+and missing are distinct facts; missing or pending accounting is silently omitted from ordinary
+conversation layout unless it blocks billing, policy, or task completion.
+
+### 8.7 Lifecycle vocabulary and product copy
+
+Lifecycle copy uses one sentence-case vocabulary across timeline, header, Composer, notifications,
+and accessibility names: `Working`, `Waiting for approval`, `Waiting for input`, `Pausing`,
+`Paused`, `Continuing`, `Stopping`, `Completed`, `Failed`, and `Cancelled`. Localized strings convey
+the same distinction; labels are not assembled from fragments around counts.
+
+Action labels are verb-first and unambiguous: `Send`, `Stop`, `Pause`, `Continue`, `End task`,
+`Retry`, `Reconnect`, `Show work`, `Hide work`, and `Open evidence`. `Continue` means resume an
+authoritatively paused task only. Consequential confirmation repeats the consequence. Errors state
+the safe cause and next available action; no actionable error ends with only `Something went
+wrong`. Missing telemetry never uses warning language.
 
 ## 9. Standard React AI Component Architecture
 
@@ -531,8 +773,11 @@ manager/surfaces/gui/src/conversation/
     ConversationShell.tsx
     ConversationTimeline.tsx
     TurnGroup.tsx
-    ActivitySummary.tsx
-    ActivityRow.tsx
+    TurnWorkSummary.tsx
+    WorkDisclosure.tsx
+    ReasoningDisclosure.tsx
+    ToolActivity.tsx
+    AssistantResponse.tsx
     PendingInteractionDock.tsx
     FollowUpQueue.tsx
     ConversationComposer.tsx
@@ -556,6 +801,15 @@ Component rules:
 - component names describe product semantics, not one harness or current visual treatment;
 - tool-specific rendering uses a registry keyed by canonical activity kind, with a safe generic
   fallback;
+- `TurnGroup` owns ordering only. `TurnWorkSummary`, `WorkDisclosure`, `ReasoningDisclosure`,
+  `ToolActivity`, and `AssistantResponse` each receive already projected product props and never
+  inspect model-call arrays;
+- no exported or internal primary-timeline component is keyed, named, or visually grouped by
+  `modelCallId`; model-call correlation is restricted to the evidence adapter/Inspector;
+- `AssistantResponse` stays mounted from first visible delta through sealing and preserves the
+  same accessible name, semantic role, and row identity;
+- disclosure preference is keyed by `turnId + disclosureKind`, is not reset by token/stage updates,
+  and is discarded only with the owning turn/session lifecycle;
 - `React.memo` is used only with stable inputs and measured benefit; callbacks and collection props
   crossing live boundaries remain referentially stable;
 - context providers are split by update rate. Token-level/live projection state never shares a
@@ -619,6 +873,36 @@ Typography roles are equally fixed at the initial baseline: title 20/25 px weigh
 and caption 11/15 px weight 600. Mobile editable input text remains 16 px. Font families remain the
 bundled Inter and JetBrains Mono assets; the product wordmark remains the only Manrope use.
 
+Conversation density follows these additional rules:
+
+- primary assistant and user content uses `body`; controls/status use `ui`; `caption` is limited to
+  genuinely secondary metadata and never carries required recovery or lifecycle information;
+- one semantic level does not combine more than one enclosing border and one nested divider;
+- successful/completed work does not receive a tinted full-card background;
+- metadata wraps below content on constrained widths rather than reserving a competing fixed
+  column; and
+- raw hex/RGB colors, arbitrary `text-[Npx]`, and one-off shadows/radii are release-blocking in
+  migrated conversation components.
+- changing duration, count, and usage values use tabular numerals; primary prose and evidence text
+  remain selectable; truncation always exposes the full safe value through disclosure or Inspector.
+- hover-only treatment is gated by pointer capability, transitions name exact properties rather
+  than `all`, and theme switching suppresses color/background/border/shadow transitions for the
+  swap frame.
+
+Motion has one owner per state:
+
+| State/change | Allowed motion owner | Prohibited competing motion |
+|---|---|---|
+| Waiting before first answer delta | Compact working indicator | Pulsing card, animated border, and background gradient |
+| Streaming answer | Optional terminal cursor/fade | Relocating answer container or animating layout above it |
+| Tool running | Tool status glyph when expanded | Whole-card shimmer or multiple stage spinners |
+| Disclosure open/close | Height/opacity transition up to 180 ms | Spring/bounce and scroll-anchor movement |
+| Turn completion | One status cross-fade up to 150 ms | Persistent glow or completed-item animation |
+| Reduced motion | No nonessential motion | State that is understandable only through animation |
+
+Adding a second simultaneous animation for the same state is a spec violation even when each
+animation individually uses a valid token.
+
 Visual-regression fixtures cover empty/idle, running with tools, waiting for approval, queued
 follow-up, recoverable failure, completed-with-artifacts, and long-content states at 390 and 1440 px
 in both themes. A 320 px / 200% zoom functional pass supplements the screenshot set. Review rejects
@@ -674,6 +958,8 @@ tokens, or a layout shift that changes the reading anchor.
 | HaaS/backend restart during turn | Restore accepted invocation and cursor; do not create a replacement turn unless the lifecycle contract explicitly requires one |
 | Stop fails | Keep current state and queued item, show retry/readback action |
 | Projection invariant violation | Fail the affected conversation surface closed, preserve raw durable facts, expose content-free diagnostics |
+| Unclassified assistant text | Render as the stable assistant response after redaction; do not hide, promote by word count, or expose it as reasoning |
+| Usage absent or delayed | Omit usage from ordinary conversation UI; update aggregate completion metadata when authoritative data arrives without changing layout ownership |
 | Component chunk fails | Keep session and draft alive; show retryable surface loading error |
 
 ### 12.2 Compatibility
@@ -681,6 +967,9 @@ tokens, or a layout shift that changes the reading anchor.
 - ADK routes, ADK Event semantics, and existing `/v1/haas/*` routes remain unchanged.
 - Existing canonical HaaS event ids and correlation fields are reused. Any missing Manager-local
   identity is added to the Manager projection or internal WebSocket envelope, not inferred by UI.
+- Existing model-call/stage payloads may remain an internal evidence input while the projection is
+  corrected, but they are not a GUI compatibility surface. They are consumed only by the evidence
+  adapter and may be removed once product work segments have canonical inputs.
 - Internal Manager command fields are additive during migration. The final GUI uses only the
   acknowledged command path; the old unacknowledged sender is then deleted.
 - Browser and Tauri share the same component, projection, queue, and draft contracts. Platform
@@ -691,10 +980,11 @@ tokens, or a layout shift that changes the reading anchor.
 
 ### 12.3 Rollback
 
-Each migration wave has one temporary internal flag and a documented rollback commit. A wave may
-roll back to the previous implementation only before its parity and cutover gate. After a wave is
-accepted, its flag and superseded code are removed in the next wave. The final release has no user-
-visible old/new toggle and no permanent dual-write path.
+Each migration wave has a documented rollback commit. The initial migration may use one temporary
+internal flag before its cutover gate. The post-evidence C0-C4 correction changes the existing v2
+path in place and MUST NOT add a second renderer flag: rollback reverts the complete slice. After a
+slice is accepted, superseded code is deleted in the same or immediately following slice. The
+final release has no user-visible old/new toggle and no permanent dual-write path.
 
 ## 13. Progressive Delivery and Legacy Removal
 
@@ -715,6 +1005,24 @@ W6 explicitly removes or replaces the current `WsEvent.data: any`, transcript `I
 grouping, top-level `streamingRef`/`reasoningRef`/`modelStagesRef` ownership, `resetKey` draft
 clearing, old `Transcript`/`Composer` render paths, their exclusive CSS hooks, and the temporary
 conversation-v2 migration flag. The gate is based on import/usage evidence, not filenames alone.
+
+### 13.1 Corrective evolution after packaged-product evidence
+
+The first implementation passed the original technical gates but failed the product hierarchy in
+Section 2.4. Correction proceeds in vertical slices on the existing v2 path; it MUST NOT introduce
+a v3 renderer, a second transcript, or a long-lived UI flag.
+
+| Slice | Scope | Failing evidence required first | Exit gate |
+|---|---|---|---|
+| C0 Projection contract | Product-turn/work/answer models and canonical presentation selector | Fixture currently produces peer model-stage cards and contradictory actions | Selector/invariant tests prove one turn, one response owner, and one valid primary action |
+| C1 Stable live answer | Remove word-count gate and bind first delta to `AssistantResponse` | Test proves short response is hidden or relocates | Short/long/tool-interleaved streams keep one row and semantic node |
+| C2 Calm work disclosure | Replace stage timeline with summary, reasoning/tool disclosures, and evidence correlation | Eight-call fixture dominates the viewport | Default view renders one work summary, no stage cards, and only actionable open detail |
+| C3 Hierarchy and motion | Move persistent mode context, remove token warnings/raw colors, unify type/layout/motion | Paired screenshot reproduces dense cards and competing animation | Both themes and target widths pass visual, motion, contrast, and reading-anchor review |
+| C4 Legacy correction | Delete `streamGate`, stage-card UI/CSS/copy, independent lifecycle selectors, and obsolete tests | Grep/import inventory identifies every old owner | No old heuristic, component, style, translation key, selector, or dual projection remains |
+
+Each slice updates the same typed projection and component tree. C1 and C2 may land separately only
+when the intermediate state still renders a single stable response owner and no model-call card in
+the primary timeline.
 
 ## 14. Test Plan and Acceptance Cases
 
@@ -744,7 +1052,7 @@ conversation-v2 migration flag. The gate is based on import/usage evidence, not 
 | MCX-009 | P0 | Live/replay parity | Same canonical fixture produces equal typed turns and terminal result |
 | MCX-010 | P0 | Reconnect mid-turn | Existing turn resumes from cursor; no duplicate user row or tool |
 | MCX-011 | P0 | Pending interaction restore | Dock appears before conflicting Composer action is enabled |
-| MCX-012 | P0 | Status accuracy | Visible stage/tool count and summary cannot contradict |
+| MCX-012 | P0 | Status accuracy | Visible work/tool state, summary, and canonical lifecycle actions cannot contradict |
 | MCX-013 | P0 | Failure recovery | Retry only appears when permitted and creates/reuses the contractually correct identity |
 | MCX-014 | P0 | Keyboard flow | Compose, send, stop, queue, approval, disclosure, inspector, recovery work without pointer |
 | MCX-015 | P0 | Focus | Every focusable control has visible focus; modal/dock focus returns correctly |
@@ -761,6 +1069,17 @@ conversation-v2 migration flag. The gate is based on import/usage evidence, not 
 | MCX-026 | P0 | Legacy-zero gate | Old symbols, CSS hooks, renderer imports, dual writes and migration flag are absent |
 | MCX-027 | P2 | Search and turn navigation | Matches remain reachable across virtualized history and navigation preserves the reading anchor |
 | MCX-028 | P2 | Semantic context chips | Skill/file/session/context refs render, copy and open correctly without exposing raw transport syntax |
+| MCX-029 | P0 | Product-turn hierarchy | Fixture with eight model calls renders one Turn, one work summary, one assistant response, and zero model-call cards in the primary timeline |
+| MCX-030 | P0 | First-delta stability | A 1-39 word answer is visible after one coalesced publication; its `rowId` and semantic DOM owner remain unchanged past 40 words, tool arrival, and terminal sealing |
+| MCX-031 | P0 | Lifecycle action matrix | Every phase/receipt/interaction combination renders at most one primary action; running never shows Continue and paused never presents Stop as a peer primary action |
+| MCX-032 | P0 | Work disclosure ownership | Running and completed multi-call work defaults to one summary; user disclosure choice survives all live updates and completion rules |
+| MCX-033 | P0 | Safe activity copy | Raw reasoning/commentary/provider prose and seeded secret-like arguments never appear in title, summary, status, notification, or accessible name |
+| MCX-034 | P0 | Usage hierarchy | Missing/pending usage produces no warning; authoritative aggregate appears once in completion; per-call usage is Inspector-only |
+| MCX-035 | P1 | Motion ownership | Each state has at most one allowed animation owner; no token update animates layout; transitions avoid `all`; theme swap does not smear; reduced-motion screenshots and behavior remain complete |
+| MCX-036 | P1 | Persistent mode context | Bypass/policy/runtime mode renders once in header/Composer context and does not create a repeated or dominant timeline notice |
+| MCX-037 | P1 | Narrow work layout | Long and pseudo-localized command/title/metadata at 320/390 px and 200% zoom wraps within the 72ch conversation measure without a fixed metadata column, clipped action, or card-height explosion |
+| MCX-038 | P0 | Live-tail geometry | Reading older content during 100 deltas, tool updates, and completion moves the semantic anchor by at most 2 CSS px until Jump to latest |
+| MCX-039 | P0 | Dynamic accessibility owner | One polite live region announces meaningful phase changes; token, usage, stage, and timer updates cause no duplicate announcement |
 
 ### 14.3 Requirement-to-case traceability
 
@@ -779,6 +1098,11 @@ conversation-v2 migration flag. The gate is based on import/usage evidence, not 
 | MCX-R11 | MCX-020, MCX-027 |
 | MCX-R12 | MCX-025, MCX-028 |
 | MCX-R13 | MCX-026 |
+| MCX-R14 | MCX-009, MCX-029, MCX-032, MCX-038 |
+| MCX-R15 | MCX-022, MCX-030, MCX-038 |
+| MCX-R16 | MCX-011, MCX-012, MCX-031, MCX-039 |
+| MCX-R17 | MCX-023, MCX-029, MCX-032, MCX-033, MCX-034 |
+| MCX-R18 | MCX-016, MCX-018, MCX-019, MCX-035, MCX-036, MCX-037 |
 
 ### 14.4 Commands
 
@@ -792,6 +1116,8 @@ npx playwright test \
   e2e/conversation-submission.spec.ts \
   e2e/conversation-queue.spec.ts \
   e2e/conversation-projection.spec.ts \
+  e2e/conversation-product-turn.spec.ts \
+  e2e/conversation-stream-stability.spec.ts \
   e2e/conversation-accessibility.spec.ts \
   e2e/conversation-visual.spec.ts \
   e2e/conversation-performance.spec.ts
@@ -819,11 +1145,11 @@ content only.
 | 7 | Add DraftStore | Per-session revisioned draft and attachment refs | MCX-004 | 6 |
 | 8 | Add FollowUpQueue | Persisted queue commands and policy | MCX-005-008 | 6-7 |
 | 9 | Cut over interaction dock/composer | Unified pending state and stable input | MCX-011/014/015 | 5-8 |
-| 10 | Cut over timeline components | Turn/activity/result/completion/inspector | MCX-009/012/013/023 | 3,5 |
-| 11 | Add virtualization/live tail | Bounded list and scroll anchoring | MCX-020-022 | 10 |
+| 10 | Cut over product-turn components | Turn/work/reasoning/tool/response/completion/inspector; no model-call cards | MCX-009/012/013/023/029-034 | 3,5 |
+| 11 | Add virtualization/stable live tail | Bounded history, first-delta response owner and scroll anchoring | MCX-020-022/030/038 | 10 |
 | 12 | Add conversation navigation and semantic context | Search/turn navigation plus typed context chips | MCX-027/028 | 10-11 |
-| 13 | Responsive and theme polish | Focused Workbench at all target widths/themes | MCX-016/018/019/024 | 9-12 |
-| 14 | Delete legacy | Remove old owners, CSS, tests and migration flag | MCX-026 | 2-13 |
+| 13 | Responsive, hierarchy, and motion polish | Focused Workbench at all target widths/themes | MCX-016/018/019/024/035-037/039 | 9-12 |
+| 14 | Delete legacy | Remove old owners, stream heuristic, model-stage UI/CSS/copy, obsolete tests and migration flag | MCX-026/030/031 | 2-13 |
 | 15 | Release review | Required reviews and full gates | all cases | 14 |
 
 Every implementation task starts with a failing unit, contract, or E2E assertion mapped above,
@@ -845,14 +1171,32 @@ The expected engineering window is 19-24 working days for one engineer, includin
 buffer across W2-W4. Waves remain separately reviewable, but W6 is part of completion rather than
 optional cleanup.
 
+### 15.2 Corrective implementation plan for the current worktree
+
+Existing ACK, draft, queue, theme, virtualization, and performance work is retained only where it
+passes the corrected product-turn contract. The remaining correction is estimated at 5-8 working
+days for one engineer:
+
+| Order | Work item | TDD red case | Deliverable | Estimate |
+|---:|---|---|---|---:|
+| 1 | Add product-turn projection invariants and presentation selector | MCX-029/031 fail against current stage/action output | Projector/selectors plus golden fixtures | 1-2 days |
+| 2 | Replace heuristic stream ownership | MCX-030 fails for short/tool-interleaved streams | Stable `AssistantResponse` and deletion of word gate | 1 day |
+| 3 | Replace model-stage timeline | MCX-032-034 fail against eight-call fixture | Work summary, reasoning/tool disclosures, Inspector-only telemetry | 1-2 days |
+| 4 | Correct hierarchy, mode context, narrow layout, and motion | MCX-035-037/039 visual and semantic failures | Tokenized EN/ZH UI at both themes and target widths | 1-2 days |
+| 5 | Remove superseded code and run release reviews | MCX-026 plus grep/import failures | No legacy stage UI/selectors/styles/copy; full gate evidence | 1 day |
+
+Tasks 2-4 may be implemented as small commits after Task 1. Task 5 is mandatory before this change
+is described as complete. There is no compatibility promise for the current model-stage visual
+hierarchy or word-threshold stream behavior.
+
 ## 16. Component Impact Analysis
 
 | Component | Impact | Required action | Compatibility conclusion |
 |---|---|---|---|
 | Manager GUI Performance | New projection/selectors, virtual history and component boundaries | Extend profiler, DOM, scroll and bundle gates | Existing budgets remain; requirements become stricter |
-| Manager HaaS Sidecar Backend | Acknowledged Manager commands, queue persistence and normalized projection | Add internal command receipts and reuse canonical HaaS ids/cursors | HaaS public protocol unchanged |
+| Manager HaaS Sidecar Backend | Acknowledged commands, queue persistence, normalized projection, and evidence-only model-call correlation | Add internal command receipts; project product turns/work; stop treating model stages as GUI rows | HaaS public protocol unchanged; internal GUI snapshot may change atomically with packaged assets |
 | Manager Delegation | Durable local send queue becomes visible and operable | Keep policy-application gate and accepted invocation semantics | Existing delegation contract clarified, not weakened |
-| Event Log & SSE | Supplies canonical correlation and replay facts | Reuse existing event/turn/invocation/tool ids | No new public event required for initial cutover |
+| Event Log & SSE | Supplies canonical correlation and replay facts | Reuse existing event/turn/invocation/tool ids; classify user-visible assistant text before GUI projection | No new public event required for initial cutover; no model-native event leaks northbound |
 | Session Runtime | Source of terminal and idempotency truth | Preserve acceptance and terminal convergence | No lifecycle semantic change |
 | Manager Product Identity | Focused Workbench becomes the primary OpenHarness conversation character | Preserve local-first/no-login and desktop-native behavior | No identity or cloud dependency change |
 | Security Boundary | Draft/queue and evidence contain sensitive user context | Local-only draft storage; content-free diagnostics; existing evidence scope | Secretless guarantees preserved |
@@ -870,6 +1214,10 @@ optional cleanup.
 | Component abstraction becomes a generic framework | Export only components required by current OpenHarness surfaces; no plugin API in this change |
 | Token migration creates broad visual churn | Migrate component by component with paired light/dark screenshots |
 | Legacy removal breaks old persisted history | Keep one data migration adapter only where durable old records require it; delete old renderer |
+| Harnesses differ in answer/reasoning classification | Normalize at transport/projection boundary; unknown safe assistant text becomes answer, never guessed from content |
+| Collapsing work hides actionable failure | Keep the active interaction and first actionable failure outside default-collapsed successful detail |
+| Removing stage UI reduces diagnostics | Preserve model-call correlation, per-call usage, and raw bounded evidence in Inspector/diagnostics, not the primary timeline |
+| Stable answer DOM conflicts with virtualization | Keep active turn in the non-virtual live tail and atomically seal it into history |
 
 Deferred until a separate approved spec:
 

@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-状态：已评审；阻塞项已清零；已记录批准方向
+状态：已评审；已定义实现后 UI 纠偏方案；待实现
 最近评审：2026-09-26
 Change ID：`manager-conversation-interaction-v2`
 相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Manager GUI Performance](../manager-gui-performance/README.zh-CN.md)、[Event Log & SSE](../event-log-sse/README.zh-CN.md)、[Session Runtime](../session-runtime/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
@@ -65,6 +65,21 @@ HaaS 不采纳 ZCode 的仓库结构、workflow graph、产品专属命令体系
 - 执行证据详情在 inspector 中打开，不替换或重复 timeline；以及
 - 窄屏按优先级逐步收起次要控制，而不是等比例压缩所有元素。
 
+### 2.4 实现后产品证据与纠偏决策
+
+2026-09-26 的 packaged-desktop 真机运行暴露出功能、无障碍与性能门禁未捕获的设计失败：运行中的一个 turn 用八张同级 model-call 卡片填满主视口；每张卡片重复 status、step count、command 或内部 commentary 及 token accounting；已完成调用在下一次调用运行时继续展开。用户需求与最终回答被挤出首屏，usage 缺失比当前工作更醒目，timeline 显示 running 的同时 Composer 出现 Continue 与 Stop。Assistant stream 还会在达到词数阈值后切换容器，造成文本延迟出现与布局跳动。
+
+以下纠偏决策具有规范性：
+
+- 主投影单位必须是 **product turn**，绝不能是 model call；
+- model-call boundary 与 identifier 只用于 correlation/evidence，不得生成同级 timeline card、heading、count 或用户可见 workflow phase；
+- 一个 turn 只拥有一个 work summary、零到多个渐进披露 work segment、最多一个 active interaction，以及一个稳定 assistant-response surface；
+- assistant content 从第一段被分类为用户可见的 delta 起到 terminal sealing 始终位于同一 response surface；不得按 word count、elapsed time、adjacency 或 tool arrival 迁移；
+- timeline state、header state、loading treatment 与 Composer control 必须消费同一个 canonical presentation selector；以及
+- internal reasoning/commentary 与缺失 accounting 数据不得升级为标题、warning 或 primary status。
+
+这是 projection 纠偏，不是新 conversation mode。现有 stage-card hierarchy、word-threshold stream gate 与独立 lifecycle selector 属于必须删除的过渡实现缺陷，不是需要保留的兼容行为。
+
 ## 3. 目标、非目标与成功度量
 
 ### 3.1 目标
@@ -80,6 +95,8 @@ HaaS 不采纳 ZCode 的仓库结构、workflow graph、产品专属命令体系
 9. browser production preview 与 Tauri desktop 安装包行为等价。
 10. 通过同一语义 token 合同完整交付浅色与深色主题。
 11. 迁移结束时不保留永久 compatibility renderer、重复状态 owner、legacy CSS 路径或长期 feature flag。
+12. 将 work telemetry 置于用户意图与回答之下，保持用户阅读上下文。
+13. 从第一段可见 delta 到完成，让 assistant response 始终由同一个 DOM 与视觉 owner 承载。
 
 ### 3.2 非目标
 
@@ -102,6 +119,10 @@ HaaS 不采纳 ZCode 的仓库结构、workflow graph、产品专属命令体系
 - Profiler 计数清零后，30 次 live publication 对 Sidebar、inactive route、Composer、关闭的 Status/Inspector 分支产生零次 React commit；
 - 每个 animation frame 最多提交一次 live publication；以及
 - 最终 legacy removal 门禁找不到任何仅由旧 conversation 路径使用的 import、selector、CSS hook、测试或 flag。
+- running turn 在主 timeline 中不渲染 model-call card，也不使用 internal reasoning/commentary 作为 activity title；
+- 第一段 assistant delta 在一次合并 publication 内可见，并在 terminal sealing 前保持同一 semantic response element；
+- 任一渲染帧不出现互相冲突的 lifecycle action，例如 running 时同时出现 Continue 与 Stop；以及
+- 展开 work 必须由用户明确触发，在 streaming 期间保持选择，并且不在阅读锚点上方挤动 live answer。
 
 ### 3.4 用户与系统场景
 
@@ -144,6 +165,11 @@ P0、P1、P2 表示实现顺序，不表示可选范围。
 | MCX-R11 Conversation navigation | P2 | Search、turn navigation 与 Jump-to-latest 使用稳定 row/turn identity |
 | MCX-R12 语义 context 展示 | P2 | Skill、file、session 与其他受支持 context 渲染为 typed chip，而不是 raw syntax |
 | MCX-R13 Legacy zero | P0 最终门禁 | Parity 后删除旧 writer/renderer/style/test/flag，不保留永久 dual path |
+| MCX-R14 Product-turn projection | P0 | Model call 只保留为 evidence metadata；一个 product turn 只拥有一个 work summary 与一个 assistant response |
+| MCX-R15 稳定 assistant stream | P0 | 第一段用户可见 delta 挂载最终 response owner；任何 heuristic 都不得隐藏或迁移内容 |
+| MCX-R16 Canonical lifecycle presentation | P0 | Timeline、header、loading、interaction dock 与 Composer action 使用同一 selector，不能互相矛盾 |
+| MCX-R17 安全 work disclosure | P0 | Work 默认紧凑；reasoning、tool 与 telemetry 使用有界语义 disclosure 与安全文案 |
+| MCX-R18 动效与密度纪律 | P1 | 每个状态只有一个动画 owner；稳定几何、semantic token 与可度量信息密度共同约束页面 |
 
 ## 5. 信息架构与响应式布局
 
@@ -183,12 +209,20 @@ DOM 与视觉顺序为：header context、durable timeline、current live tail�
 | running | 一个紧凑 activity summary 与 live tail | Stop；仅 capability 可用时展示 Pause | 展开当前工作或打开 evidence |
 | waiting for user | Interaction Dock 替代活动 composer control surface | 与决策对应的动作 | 有界详情与后续 request 数量 |
 | queued follow-up | Queue tray 附着在 Composer 上方 | 编辑或保持排队 | 排序、删除、interrupt-and-send |
-| paused | 持久 paused 标签与已保留 partial result | Continue | 永久 Stop |
+| paused | 持久 paused 标签与已保留 partial result | Continue | End task |
 | recovering | 稳定 recovery banner；现有内容仍可读 | Retry readback/reconnect | 安全 diagnostic reference |
 | failed/incomplete | 在所属 turn 附近展开第一个可操作失败 | 仅允许时 Retry/resume | Evidence Inspector |
 | completed | 最终 assistant result 与安静 completion footer | 继续对话 | Usage、artifact、activity detail |
 
-每个状态最多只有一个 filled/accent primary action。Destructive action 使用 danger semantics，不能仅因为时效性而成为 primary。任何关键 recovery action 都不得藏在 disclosure 后。
+每个状态的 primary control slot 最多只有一个 lifecycle command。该 slot 不一定使用 accent fill：destructive command 使用 danger semantics，不能仅因为时效性借用 accent fill。任何关键 recovery action 都不得藏在 disclosure 后。
+
+### 5.5 Conversation Measure 与对齐
+
+- User/assistant prose 共用一个 leading alignment edge，最大可读 measure 为 72ch；code、table 与 evidence 在各自有界容器内滚动，不能撑宽 transcript。
+- Work summary、response、completion footer、notice 与 error 对齐到同一 conversation measure。Inspector 与 Status Panel 使用独立 landmark，不能在 timeline 中制造零散文字边线。
+- Group spacing 至少为 item spacing 的两倍；先用空间表达层级，再考虑 border 或 tinted surface。
+- Text container 使用 min-height 与 wrapping，不使用 fixed height。Pseudo-localized action label 与长 safe summary 换行后，primary action 仍在 viewport 内。
+- 方向相关 spacing 使用 logical property；mixed-direction path、id、command 与 count 在需要时通过显式 `dir`/`bdi` 保持顺序。
 
 ## 6. 权威状态与投影模型
 
@@ -211,12 +245,16 @@ Manager 在现有本地 state database 中事务性持久化 command receipt 与
 GUI 消费强类型 `ConversationSnapshot`，不再消费可变 `Item[]` 加多组独立 live buffer。内部 TypeScript 合同为：
 
 ```ts
+type ConversationRunState =
+  | "idle" | "submitting" | "running" | "pausing" | "paused"
+  | "resuming" | "stopping" | "waiting" | "recovering"
+  | "completed" | "failed" | "cancelled";
+
 interface ConversationSnapshot {
   sessionId: string;
   revision: number;
   lastEventId: string | null;
-  phase: "idle" | "submitting" | "running" | "waiting" | "paused" |
-    "recovering" | "completed" | "failed" | "cancelled";
+  phase: ConversationRunState;
   turns: ConversationTurn[];
   activeTurnId: string | null;
   activeWork: WorkSummary[];
@@ -229,6 +267,55 @@ interface ConversationSnapshot {
 ```
 
 每个 `ConversationTurn` 都有稳定 `turnId`、有序稳定 `rowId`、可选 `invocationId`、显式 work segment，且最多只有一个 terminal outcome。Tool row 通过 `toolCallId` 关联；interaction row 通过 `interactionId` 关联；queued submission 通过 `queueItemId` 和 `clientCommandId` 关联。Renderer 不得通过相邻内容、时间戳、tool name 或展示文本推断这些 identity。
+
+面向产品的 turn shape 必须显式定义：
+
+```ts
+interface ConversationTurn {
+  turnId: string;
+  invocationId: string | null;
+  phase: ConversationRunState;
+  userRows: ConversationRow[];
+  work: TurnWorkProjection;
+  assistantResponse: AssistantResponseProjection | null;
+  interactionIds: string[];
+  outcome: ConversationOutcome | null;
+}
+
+interface TurnWorkProjection {
+  state: "idle" | "working" | "waiting" | "succeeded" |
+    "failed" | "cancelled";
+  safeSummary: string;
+  startedAtMs: number | null;
+  completedAtMs: number | null;
+  segments: WorkSegment[];
+  aggregate: {
+    activityCount: number;
+    durationMs?: number;
+    usage?: AuthoritativeUsage;
+    artifactCount?: number;
+  };
+}
+
+interface WorkSegment {
+  segmentId: string;
+  kind: "reasoning" | "tool" | "progress" | "recovery";
+  state: "pending" | "running" | "succeeded" | "failed" | "cancelled";
+  safeTitle: string;
+  safeSummary?: string;
+  activityRefs: string[];
+  evidenceRef?: string;
+}
+
+interface AssistantResponseProjection {
+  rowId: string;
+  text: string;
+  state: "streaming" | "sealed" | "interrupted";
+  firstVisibleDeltaAtMs: number;
+}
+```
+
+`segmentId` 是 Manager 产品 identity。一个 segment 可以关联一个或多个 model call 或 tool call，但 `modelCallId`、provider request id、native reasoning item id 与 token-usage arrival boundary 绝不是 display identity，只作为 evidence adapter 背后的私有 correlation metadata。拆分或合并 model call 不得改变主 timeline 结构。
 
 其余持久 Manager record 必须显式且带版本：
 
@@ -269,10 +356,41 @@ HaaS canonical `eventId`、`sequenceNumber`、`sessionId`、`turnId`、`invocati
 - 已按 `eventId` 应用的 event 为 no-op。
 - 低 revision 不得覆盖高 revision。
 - 文本 delta 按 sequence 只追加一次；final text 封存 live row，不创建第二份回答。
+- 第一段 canonical user-visible assistant delta 创建 `assistantResponse`；后续 delta 只能更新其 text/state。不得以 word、time、activity 或 adjacency threshold 暂存，也不得在 work、narration 与 answer 容器之间移动。
+- User-visible answer、user-visible progress、internal reasoning 与 tool evidence 必须由 typed transport fact 分类。来源不能证明 subtype 时，安全 assistant text 按 answer content 处理；GUI 不得从 prose 猜 subtype。
+- Model-call start/finish 与 usage update 只能更新 evidence correlation 和 aggregate fact，不得追加主 timeline row 或切换 disclosure。
 - 每个 started work item 最多接收一个 terminal state。
 - 没有新 `turnId`/`invocationId` 时，terminal state 不得回到 running。
 - 在 Composer 启用冲突命令前恢复 pending interaction。
 - Reconciliation 只能用权威 snapshot 或 event page 替换不确定 derived state；不得自动重发原用户命令。
+
+### 6.4 Canonical presentation selector
+
+一个 pure selector 从权威 snapshot 与 pending command receipt 派生 `ConversationPresentation`。Conversation header、Turn status、loading slot、Interaction Dock 与 Composer 必须消费该结果，不能各自解释 `running`、`taskPhase`、model stage、socket state 或 local button state。
+
+```ts
+interface ConversationPresentation {
+  phase: ConversationRunState;
+  statusLabel: string;
+  primaryAction: "send" | "stop" | "continue" | "resolve" | "retry" | null;
+  secondaryActions: Array<"pause" | "end_task" | "discard" | "open_evidence">;
+  composerMode: "compose" | "queue" | "blocked";
+  showWorkingIndicator: boolean;
+}
+```
+
+Selector 强制满足：
+
+- 可见 primary action 恰好为零或一个；
+- `continue` 只允许出现在权威 `paused` 状态；
+- `stop` 只在 submitting、running、pausing、resuming 或 stopping 仍可取消时出现。Paused 状态以 `continue` 为 primary，永久终止是单独命名的 secondary danger action，绝不作为同级 `Stop` 按钮；
+- active interaction 独占 primary action，并抑制重复 ordinary loading；
+- socket disconnect 本身不能把 terminal turn 改回 running；以及
+- phase change 在同一个 React commit 中更新所有消费 surface。
+
+### 6.5 Live-tail 生命周期
+
+最后一个 active product turn 作为唯一非虚拟 live tail 渲染；historical turn 留在有界 virtual list。Terminal sealing 时，完整 turn projection 原子移入 history，且不改变 `turnId`、row identity、disclosure preference 或 assistant response element 语义。新 turn 创建新 live tail，绝不复用上一 turn 的 response node。
 
 ## 7. 提交、草稿与追问队列合同
 
@@ -326,9 +444,16 @@ Manager 返回：
 
 `status` 为 `accepted`、`duplicate` 或 `rejected`。accepted/duplicate submission 的 `disposition` 为 `running`、`queued` 或 `terminal`；已完成工作的 duplicate 返回原 turn identity 与 terminal `outcomeRef`。rejected response 包含结构化安全错误，不带 turn 或 queue identity。ACK 前先持久化 acceptance。HaaS-backed execution 复用现有 operation-scoped `Idempotency-Key`；GUI 不得为解决不确定 Manager 传输结果而生成第二次 HaaS attempt。
 
+Receipt 对账使用 Manager 内部且不含内容的读回接口
+`GET /v1/sessions/{sessionId}/conversation-commands/{idempotencyKey}`。命中时以
+`status=duplicate` 返回原 command/turn/queue/outcome identity；只有
+`404 command_not_found` 能证明 command 未被接受。该接口绝不返回 prompt 或 attachment 内容。
+
 初始 client/server handshake 声明 `conversationProtocolVersion: 2`。版本不匹配的缓存 browser client 接收结构化 `client_upgrade_required` response 与 reload action；server 不得静默降级到无 ACK sender。Production hashed asset 与 packaged-app 原子替换使其成为有界部署迁移，而非永久 legacy 协议。
 
-`error` 存在时结构为 `{code, safeMessage, retryable, recoveryAction?}`，绝不包含 raw prompt、完整 tool argument、credential material、signed URL 或 backend stack trace。Queue mutation command 携带 `queueItemId`、`expectedQueueRevision` 与独立 idempotency key；stale revision 返回结构化 conflict 与最新 queue snapshot。
+`error` 存在时结构为 `{code, safeMessage, retryable, recoveryAction?}`，绝不包含 raw prompt、完整 tool argument、credential material、signed URL 或 backend stack trace。Queue mutation command 携带 `queueItemId`、`expectedRevision` 与独立 idempotency key；stale revision 返回结构化 conflict 与最新 queue snapshot。
+Command 集合为 `queue_edit`、`queue_delete`、`queue_move(targetPosition)` 与
+`queue_send_now`。send-now 停止失败时返回 `queue_send_now_failed`，item 保持 queued，且不得开启自动 drain。
 
 Submission 状态迁移为：
 
@@ -379,15 +504,39 @@ queued -> dispatching -> running -> terminal
 
 正常已完成工作默认折叠。运行中工作展示一个紧凑 active summary。failed、interrupted 或 incomplete work 默认展开到第一个可操作失败点。用户 selection 和 disclosure 在 live update 期间保持稳定。
 
+默认 running Turn 有严格视觉预算：
+
+- 一个 user-intent block；
+- 一行 work summary，包含状态文字与可选 disclosure control；
+- 仅当需要用户立即感知或操作时，最多展示一个当前相关 tool 或第一个可操作 failure；以及
+- 一块从第一段可见 delta 起出现的 assistant-response block。
+
+Completed model call、provider round、reasoning chunk、usage arrival 与 cache accounting 不得作为同级卡片占用默认 flow。展开 work 时，detail 位于 work summary 下、answer 上，且不替换两者。Live update 不得自动重新打开用户关闭的 disclosure，也不得关闭用户已展开的 disclosure。Completed 状态只可自动收起用户从未操作过的 disclosure。
+
 ### 8.2 Activity summary 与 evidence
 
-- Summary title 依次优先采用安全 task/tool summary、command preview、action summary，最后使用本地化中性 fallback。
-- 一个 count 覆盖所有可见 work kind；绝不允许可见 running stage 与 zero-activity summary 同时出现。
+- Summary title 依次优先采用显式本地化 product action、安全 tool/object summary、有界 command preview，最后使用本地化中性 fallback。
+- Raw reasoning、raw commentary、model/provider prose、prompt、argument、stack trace、transport name 与 model-call ordinal 绝不得用作 title fallback。
+- 一个 count 覆盖 product work segment 或 activity。Model-call count 与 reasoning-chunk count 属于 diagnostic，绝不表示任务进度。
+- Running summary 不以数字 count 作为主要内容；可选 completed aggregate 只进入安静 completion footer 或展开详情。
 - Running state 必须包含持久文字标签。动画可选，并在 reduced motion 下关闭。
 - Activity row 展示 status、安全标题、可选 key result 和 duration；默认不展示 raw argument。
 - 选择 row 后，通过现有安全 evidence path 打开 Inspector。窄屏使用不覆盖 Composer 或 Interaction Dock 的非模态 bottom drawer。
 
-### 8.3 Pending interaction dock
+每个 turn 只有一个语义 reasoning disclosure，而不是每个 model call 一块 surface。折叠且 streaming 时可展示一行脱敏 summary；用户手动展开/收起优先于自动行为。完成后只在用户从未操作时自动收起。Heavy reasoning detail 可为高度动画继续挂载最多 300 ms，之后卸载；reduced-motion 下立即卸载。
+
+Tool work 使用统一 `ToolActivity` 合同，包含 header、安全 input summary、有界 result、status、duration 与 evidence action。只有 active tool 或第一个可操作 failure 可默认展开；成功完成的 tool 默认收起。Tool input/output 与 evidence 不得嵌套在 model-call card 中。
+
+### 8.3 稳定 Assistant Response
+
+- Assistant response 在完整生命周期内只有一个 `rowId`、一个 semantic article/container 和一个插入位置。
+- 第一段用户可见 text delta 在下一次合并 publication 后进入该容器；不存在最少词数或人为 1–2 秒 hold。
+- Work summary 可以在其上方更新，但 answer text 绝不从 loading/activity area 迁移到另一 bubble。
+- Terminal text 封存同一 node；replay/restore 与 live turn 产生相同 semantic DOM 与顺序。
+- 没有 answer delta 时，只允许一个紧凑 16 px status slot 展示 `Working`；第一段 delta 到达后移除重复 loading indicator，且不产生第二次状态播报。
+- Streaming cursor 只是可选装饰，不能成为 streaming 的唯一提示，并在 reduced motion 下关闭。
+
+### 8.4 Pending interaction dock
 
 Approval、input request、directory permission、tool installation、plan/team/item proposal、policy conflict 与 recoverable execution failure 共用一个 `PendingInteractionDock` shell。
 
@@ -399,9 +548,21 @@ Approval、input request、directory permission、tool installation、plan/team/
 - 合适时 request 到达会把 focus 移到 dock heading；解决后 focus 返回触发控件或 Composer。
 - 存在恢复动作的 error 必须说明该动作；不可重试的终态 error 应明确任务无法继续，不展示无效 Retry。
 
-### 8.4 Completion summary
+### 8.5 持久 Mode Context 与 Durable Notice
+
+Bypass approvals、sandbox/runtime identity、policy posture 等执行模式属于持久 header 或 Composer context chip，不得在每个 turn 生成大块 timeline notice。Timeline notice 只用于会改变前后工作解释方式的持久状态迁移；它必须紧凑、与 conversation measure 左对齐，且不能成为主要视觉 block。
+
+### 8.6 Completion summary
 
 完成的 turn 可展示一个安静 footer，包含 duration、activity count、权威时才显示的 token usage、changed/produced artifact count 与直接 artifact action。缺失 usage 时 footer 直接省略，不渲染成持续 warning。最终 assistant result 始终是主要内容。
+
+Per-model-call input/output/reasoning/cache usage 只属于 Evidence Inspector。权威 aggregate turn usage 可出现在 completion footer。`Pending`、`unreported`、零值与缺失是不同事实；缺失或 pending accounting 在普通 conversation layout 中静默省略，除非它阻塞 billing、policy 或 task completion。
+
+### 8.7 Lifecycle 词表与产品文案
+
+Timeline、header、Composer、notification 与 accessibility name 共用一套 sentence-case lifecycle 词表：`Working`、`Waiting for approval`、`Waiting for input`、`Pausing`、`Paused`、`Continuing`、`Stopping`、`Completed`、`Failed`、`Cancelled`。本地化字符串保持相同语义区分，不能围绕 count 拼接句子片段。
+
+Action label 必须 verb-first 且无歧义：`Send`、`Stop`、`Pause`、`Continue`、`End task`、`Retry`、`Reconnect`、`Show work`、`Hide work`、`Open evidence`。`Continue` 只表示恢复权威 paused task。重大 confirmation 重复其后果。Error 必须给出安全原因与下一步动作；可操作错误不能只显示 `Something went wrong`。缺失 telemetry 不使用 warning 文案。
 
 ## 9. 标准 React AI 组件架构
 
@@ -417,8 +578,11 @@ manager/surfaces/gui/src/conversation/
     ConversationShell.tsx
     ConversationTimeline.tsx
     TurnGroup.tsx
-    ActivitySummary.tsx
-    ActivityRow.tsx
+    TurnWorkSummary.tsx
+    WorkDisclosure.tsx
+    ReasoningDisclosure.tsx
+    ToolActivity.tsx
+    AssistantResponse.tsx
     PendingInteractionDock.tsx
     FollowUpQueue.tsx
     ConversationComposer.tsx
@@ -438,6 +602,10 @@ manager/surfaces/gui/src/conversation/
 - 每个 export component 都有明确 props、loading/empty/error/disabled state、键盘行为、accessible name 和聚焦测试；
 - 组件名描述产品语义，而非某个 harness 或当前视觉样式；
 - tool-specific rendering 使用由 canonical activity kind 索引的 registry，并提供安全 generic fallback；
+- `TurnGroup` 只负责排序；`TurnWorkSummary`、`WorkDisclosure`、`ReasoningDisclosure`、`ToolActivity` 与 `AssistantResponse` 只接收已投影的 product prop，绝不检查 model-call array；
+- 主 timeline 内任何 export/internal component 都不得按 `modelCallId` 建 key、命名或视觉分组；model-call correlation 仅限 evidence adapter/Inspector；
+- `AssistantResponse` 从第一段可见 delta 到 sealing 始终 mounted，并保留同一 accessible name、semantic role 与 row identity；
+- disclosure preference 按 `turnId + disclosureKind` 标识，不被 token/stage update 重置，只随所属 turn/session 生命周期清理；
 - 只有输入稳定且实测有收益时才使用 `React.memo`；跨 live boundary 的 callback 与 collection prop 保持 referentially stable；
 - Context provider 按更新频率拆分。token-level/live projection state 不得与 shell navigation、Composer draft 或关闭的 panel 共用 provider value；
 - `ConversationTimeline` 通过仓库自有 adapter 使用 `@tanstack/react-virtual`，把 row measurement、selection anchor 和未来替换 library 的影响限制在局部；
@@ -484,6 +652,29 @@ Conversation surface 必须克制、紧凑、可操作且具有桌面原生感�
 
 Typography role 的初始 baseline 同样固定：title 20/25 px weight 600、heading 16/22 px weight 600、body 14/22 px weight 400、UI 13/18 px weight 400、mono 12/19 px weight 400、caption 11/15 px weight 600。Mobile editable input text 保持 16 px。Font family 继续使用仓库内置 Inter 与 JetBrains Mono；Manrope 仅用于产品 wordmark。
 
+Conversation 密度还必须满足：
+
+- User/assistant 主内容使用 `body`；control/status 使用 `ui`；`caption` 仅用于真正次级 metadata，不能承载必需 recovery 或 lifecycle 信息；
+- 一个语义层级最多组合一层 enclosing border 与一层 nested divider；
+- succeeded/completed work 不使用整卡 tinted background；
+- 窄宽度下 metadata 换行到内容下方，不预留与正文竞争的 fixed column；以及
+- migrated conversation component 中 raw hex/RGB color、任意 `text-[Npx]` 与一次性 shadow/radius 均阻塞 release。
+- 变化中的 duration、count 与 usage 使用 tabular numeral；主 prose 与 evidence text 保持可选择；truncation 必须可通过 disclosure 或 Inspector 访问完整安全值。
+- Hover-only treatment 按 pointer capability 启用；transition 明确列出 property 而非使用 `all`；theme switching 在切换 frame 抑制 color/background/border/shadow transition。
+
+每个状态只能有一个 motion owner：
+
+| 状态/变化 | 允许的 motion owner | 禁止的竞争 motion |
+|---|---|---|
+| 第一段 answer delta 前等待 | 紧凑 working indicator | Pulsing card、animated border 与 background gradient |
+| Streaming answer | 可选 terminal cursor/fade | 移动 answer container 或动画其上方 layout |
+| Tool running | 展开时的 tool status glyph | Whole-card shimmer 或多个 stage spinner |
+| Disclosure 开合 | 最多 180 ms 的 height/opacity transition | Spring/bounce 与 scroll-anchor movement |
+| Turn completion | 最多 150 ms 的一次 status cross-fade | 持续 glow 或 completed-item animation |
+| Reduced motion | 无非必要 motion | 只能依靠动画理解的状态 |
+
+即使每项动画单独使用合法 token，同一状态同时新增第二个动画也违反本规格。
+
 Visual-regression fixture 覆盖 empty/idle、running with tools、waiting for approval、queued follow-up、recoverable failure、completed-with-artifacts 与 long-content，并在两种主题的 390 和 1440 px 下执行。另以 320 px / 200% zoom 做功能验证。出现重复事实、一个状态超过一个 filled primary action、不可访问的 truncation、任意 token，或改变 reading anchor 的 layout shift 时，评审必须拒绝。
 
 ### 10.3 主题与无障碍
@@ -522,19 +713,22 @@ Visual-regression fixture 覆盖 empty/idle、running with tools、waiting for a
 | Turn 中 HaaS/backend 重启 | 恢复 accepted invocation 与 cursor；除非生命周期合同明确要求，不创建 replacement turn |
 | Stop 失败 | 保持当前状态与 queued item，展示 retry/readback 动作 |
 | Projection invariant 违规 | 对受影响 conversation surface fail closed，保留原始 durable fact，暴露不含内容的诊断 |
+| Assistant text 无法分类 | 脱敏后进入稳定 assistant response；不得隐藏、按词数提升或作为 reasoning 暴露 |
+| Usage 缺失或延迟 | 普通 conversation UI 省略 usage；权威数据到达后只更新 aggregate completion metadata，不改变 layout owner |
 | Component chunk 失败 | 保持 session 与 draft，展示可重试 surface loading error |
 
 ### 12.2 兼容性
 
 - ADK route、ADK Event 语义与现有 `/v1/haas/*` route 不变。
 - 复用现有 canonical HaaS event id 与 correlation field。缺失的 Manager-local identity 增加到 Manager projection 或内部 WebSocket envelope，UI 不得自行推断。
+- 纠偏期间，现有 model-call/stage payload 可继续作为内部 evidence input，但它不是 GUI compatibility surface。它只能由 evidence adapter 消费，并可在 product work segment 获得 canonical input 后删除。
 - 迁移期间 Manager 内部 command field 做加法扩展。最终 GUI 只使用带 ACK 的 command path，随后删除旧的无 ACK sender。
 - Browser 与 Tauri 共用 component、projection、queue 与 draft contract。平台 wrapper 只增加 native file picking、notification 和 window lifecycle。
 - 旧持久 transcript 通过 versioned persistence decoder 或一次性 migration 转换为新 typed model。该兼容代码隔离在 React 之外，并有明确 retained-data sunset。旧 renderer、UI item model、dual writer 与旧 CSS 均不得保留。
 
 ### 12.3 回滚
 
-每个 migration wave 只有一个临时 internal flag 和一个有记录的 rollback commit。Wave 只能在 parity/cutover gate 之前回滚到上一实现；wave 验收后，其 flag 与被替代代码必须在下一 wave 删除。最终 release 不存在用户可见 old/new toggle 或永久 dual-write path。
+每个 migration wave 都有明确 rollback commit。初始 migration 可在 cutover gate 前使用一个临时 internal flag。实现后 C0-C4 纠偏直接修改现有 v2 path，不得增加第二套 renderer flag；rollback 以完整 slice 为单位回退。Slice 验收后，被替代代码必须在同一或紧随其后的 slice 删除。最终 release 不存在用户可见 old/new toggle 或永久 dual-write path。
 
 ## 13. 渐进交付与 Legacy 删除
 
@@ -551,6 +745,20 @@ Visual-regression fixture 覆盖 empty/idle、running with tools、waiting for a
 只要同一事实仍由新旧 writer 同时修改，任何 wave 都不得标记完成。临时 shadow projector 只能只读并产生 comparison diagnostic。
 
 W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency grouping、顶层 `streamingRef`/`reasoningRef`/`modelStagesRef` ownership、`resetKey` draft clearing、旧 `Transcript`/`Composer` render path、其专属 CSS hook，以及临时 conversation-v2 migration flag。门禁基于 import/usage 证据，而不是只看文件名。
+
+### 13.1 Packaged-product 证据后的纠偏演进
+
+第一版实现通过了原技术门禁，但不满足 2.4 节的产品信息层级。纠偏在现有 v2 path 上按 vertical slice 推进；禁止新增 v3 renderer、第二份 transcript 或长期 UI flag。
+
+| Slice | 范围 | 必须先建立的失败证据 | 准出门禁 |
+|---|---|---|---|
+| C0 Projection contract | Product-turn/work/answer model 与 canonical presentation selector | 当前 fixture 产生同级 model-stage card 与矛盾 action | Selector/invariant test 证明一个 turn、一个 response owner、一个合法 primary action |
+| C1 Stable live answer | 删除 word-count gate，把第一段 delta 绑定到 `AssistantResponse` | 测试证明短 response 被隐藏或迁移 | 短/长/tool-interleaved stream 保持同一 row 与 semantic node |
+| C2 Calm work disclosure | 用 summary、reasoning/tool disclosure 与 evidence correlation 替换 stage timeline | 八次调用 fixture 占满主视口 | 默认只渲染一个 work summary、零 stage card，且只展开可操作 detail |
+| C3 Hierarchy and motion | 移动 persistent mode context，删除 token warning/raw color，统一 type/layout/motion | 成对截图复现密集卡片与竞争动画 | 双主题及所有目标宽度通过 visual、motion、contrast 与 reading-anchor review |
+| C4 Legacy correction | 删除 `streamGate`、stage-card UI/CSS/copy、独立 lifecycle selector 与过时测试 | Grep/import inventory 找到每个旧 owner | 不保留旧 heuristic、component、style、translation key、selector 或 dual projection |
+
+每个 slice 都更新同一 typed projection 与 component tree。C1、C2 仅在中间态仍保证单一稳定 response owner，且主 timeline 无 model-call card 时才能分开落地。
 
 ## 14. 测试计划与验收用例
 
@@ -577,7 +785,7 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-009 | P0 | Live/replay parity | 相同 canonical fixture 产生相同 typed turn 与 terminal result |
 | MCX-010 | P0 | Mid-turn reconnect | 从 cursor 恢复原 turn；不重复 user row 或 tool |
 | MCX-011 | P0 | Pending interaction restore | 启用冲突 Composer action 前先出现 Dock |
-| MCX-012 | P0 | Status accuracy | 可见 stage/tool count 与 summary 不矛盾 |
+| MCX-012 | P0 | Status accuracy | 可见 work/tool state、summary 与 canonical lifecycle action 不矛盾 |
 | MCX-013 | P0 | Failure recovery | 仅在允许时展示 Retry，并创建/复用合同规定的 identity |
 | MCX-014 | P0 | Keyboard flow | Compose、send、stop、queue、approval、disclosure、inspector、recovery 无需 pointer |
 | MCX-015 | P0 | Focus | 每个 focusable control 有可见 focus；modal/dock 正确归还 focus |
@@ -594,6 +802,17 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-026 | P0 | Legacy-zero gate | 旧 symbol、CSS hook、renderer import、dual write 与 migration flag 均不存在 |
 | MCX-027 | P2 | Search 与 turn navigation | Virtualized history 中所有匹配项可达，导航保持 reading anchor |
 | MCX-028 | P2 | Semantic context chip | Skill/file/session/context ref 正确渲染、复制和打开，不暴露 raw transport syntax |
+| MCX-029 | P0 | Product-turn hierarchy | 含八次 model call 的 fixture 在主 timeline 只渲染一个 Turn、一个 work summary、一个 assistant response、零 model-call card |
+| MCX-030 | P0 | First-delta stability | 1-39 词 answer 在一次合并 publication 后可见；经过 40 词、tool arrival 与 terminal sealing 时 `rowId` 和 semantic DOM owner 不变 |
+| MCX-031 | P0 | Lifecycle action matrix | 每种 phase/receipt/interaction 组合最多一个 primary action；running 不显示 Continue，paused 不把 Stop 作为同级 primary action |
+| MCX-032 | P0 | Work disclosure ownership | Running/completed multi-call work 默认只有一个 summary；用户 disclosure 选择经受所有 live update 与 completion rule |
+| MCX-033 | P0 | 安全 activity copy | Raw reasoning/commentary/provider prose 与注入的类 secret argument 不进入 title、summary、status、notification 或 accessible name |
+| MCX-034 | P0 | Usage hierarchy | Missing/pending usage 不产生 warning；权威 aggregate 只在 completion 出现一次；per-call usage 只在 Inspector |
+| MCX-035 | P1 | Motion ownership | 每个状态最多一个允许动画 owner；token update 不动画 layout；transition 不使用 `all`；theme swap 无拖影；reduced-motion 截图与行为保持完整 |
+| MCX-036 | P1 | Persistent mode context | Bypass/policy/runtime mode 在 header/Composer context 只渲染一次，不产生重复或强势 timeline notice |
+| MCX-037 | P1 | Narrow work layout | 320/390 px 与 200% zoom 下，长及 pseudo-localized command/title/metadata 在 72ch conversation measure 内换行，不出现 fixed metadata column、action 裁切或 card 高度爆炸 |
+| MCX-038 | P0 | Live-tail geometry | 阅读旧内容期间经过 100 次 delta、tool update 与 completion，semantic anchor 偏移不超过 2 CSS px，直到 Jump to latest |
+| MCX-039 | P0 | Dynamic accessibility owner | 一个 polite live region 只播报有意义 phase change；token、usage、stage 与 timer update 不产生重复播报 |
 
 ### 14.3 需求到用例追溯
 
@@ -612,6 +831,11 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-R11 | MCX-020、MCX-027 |
 | MCX-R12 | MCX-025、MCX-028 |
 | MCX-R13 | MCX-026 |
+| MCX-R14 | MCX-009、MCX-029、MCX-032、MCX-038 |
+| MCX-R15 | MCX-022、MCX-030、MCX-038 |
+| MCX-R16 | MCX-011、MCX-012、MCX-031、MCX-039 |
+| MCX-R17 | MCX-023、MCX-029、MCX-032、MCX-033、MCX-034 |
+| MCX-R18 | MCX-016、MCX-018、MCX-019、MCX-035、MCX-036、MCX-037 |
 
 ### 14.4 命令
 
@@ -625,6 +849,8 @@ npx playwright test \
   e2e/conversation-submission.spec.ts \
   e2e/conversation-queue.spec.ts \
   e2e/conversation-projection.spec.ts \
+  e2e/conversation-product-turn.spec.ts \
+  e2e/conversation-stream-stability.spec.ts \
   e2e/conversation-accessibility.spec.ts \
   e2e/conversation-visual.spec.ts \
   e2e/conversation-performance.spec.ts
@@ -650,11 +876,11 @@ Packaged desktop 证据使用 `manager/packaging/build_dmg.sh` 与 `manager/pack
 | 7 | 增加 DraftStore | Per-session revisioned draft 与 attachment ref | MCX-004 | 6 |
 | 8 | 增加 FollowUpQueue | 持久 queue command 与 policy | MCX-005-008 | 6-7 |
 | 9 | 切换 interaction dock/composer | 统一 pending state 与稳定输入 | MCX-011/014/015 | 5-8 |
-| 10 | 切换 timeline component | Turn/activity/result/completion/inspector | MCX-009/012/013/023 | 3,5 |
-| 11 | 增加 virtualization/live tail | 有界列表与 scroll anchoring | MCX-020-022 | 10 |
+| 10 | 切换 product-turn component | Turn/work/reasoning/tool/response/completion/inspector；无 model-call card | MCX-009/012/013/023/029-034 | 3,5 |
+| 11 | 增加 virtualization/稳定 live tail | 有界 history、first-delta response owner 与 scroll anchoring | MCX-020-022/030/038 | 10 |
 | 12 | 增加 conversation navigation 与 semantic context | Search/turn navigation 与 typed context chip | MCX-027/028 | 10-11 |
-| 13 | Responsive 与 theme polish | 全目标宽度/主题的 Focused Workbench | MCX-016/018/019/024 | 9-12 |
-| 14 | 删除 legacy | 移除旧 owner、CSS、test 与 migration flag | MCX-026 | 2-13 |
+| 13 | Responsive、hierarchy 与 motion polish | 全目标宽度/主题的 Focused Workbench | MCX-016/018/019/024/035-037/039 | 9-12 |
+| 14 | 删除 legacy | 移除旧 owner、stream heuristic、model-stage UI/CSS/copy、过时 test 与 migration flag | MCX-026/030/031 | 2-13 |
 | 15 | Release review | 必需 review 与完整 gate | 全部用例 | 14 |
 
 每个实现任务必须先编写映射到上表的失败 unit、contract 或 E2E assertion，再实现最小行为，最后在命名组件边界内重构。
@@ -673,14 +899,28 @@ Packaged desktop 证据使用 `manager/packaging/build_dmg.sh` 与 `manager/pack
 
 单人预期工程周期为 19-24 个工作日，其中 W2-W4 预留两天风险缓冲。各 wave 可独立评审，但 W6 属于完成条件，不是可选清理。
 
+### 15.2 当前 worktree 的纠偏实施计划
+
+现有 ACK、draft、queue、theme、virtualization 与 performance 工作只在符合纠偏后的 product-turn 合同时保留。剩余纠偏按单人 5-8 个工作日估算：
+
+| 顺序 | 工作项 | TDD 红灯用例 | 交付物 | 预估 |
+|---:|---|---|---|---:|
+| 1 | 增加 product-turn projection invariant 与 presentation selector | MCX-029/031 对当前 stage/action output 失败 | Projector/selector 与 golden fixture | 1-2 天 |
+| 2 | 替换 heuristic stream ownership | MCX-030 对短流/tool-interleaved stream 失败 | 稳定 `AssistantResponse` 并删除 word gate | 1 天 |
+| 3 | 替换 model-stage timeline | MCX-032-034 对八调用 fixture 失败 | Work summary、reasoning/tool disclosure、Inspector-only telemetry | 1-2 天 |
+| 4 | 修正 hierarchy、mode context、窄屏 layout 与 motion | MCX-035-037/039 出现 visual/semantic failure | 双主题、所有目标宽度的 tokenized EN/ZH UI | 1-2 天 |
+| 5 | 删除被替代代码并执行 release review | MCX-026 与 grep/import 失败 | 不保留 legacy stage UI/selector/style/copy；完整 gate 证据 | 1 天 |
+
+Task 1 完成后，Task 2-4 可拆成小提交。Task 5 是完成的必要条件。当前 model-stage 视觉层级与 word-threshold stream 行为不构成兼容承诺。
+
 ## 16. 组件影响分析
 
 | 组件 | 影响 | 必须动作 | 兼容结论 |
 |---|---|---|---|
 | Manager GUI Performance | 新 projection/selector、virtual history 与 component boundary | 扩展 profiler、DOM、scroll 与 bundle gate | 保留现有 budget，要求更严格 |
-| Manager HaaS Sidecar Backend | 带 ACK 的 Manager command、queue persistence 与 normalized projection | 增加内部 command receipt，复用 canonical HaaS id/cursor | HaaS public protocol 不变 |
+| Manager HaaS Sidecar Backend | 带 ACK command、queue persistence、normalized projection 与仅供 evidence 的 model-call correlation | 增加内部 command receipt；投影 product turn/work；停止把 model stage 当作 GUI row | HaaS public protocol 不变；内部 GUI snapshot 可随 packaged asset 原子升级 |
 | Manager Delegation | Durable local send queue 变为可见可操作 | 保留 policy-application gate 与 accepted invocation 语义 | 澄清现有 delegation 合同，不削弱 |
-| Event Log & SSE | 提供 canonical correlation 与 replay fact | 复用现有 event/turn/invocation/tool id | 初始 cutover 不需要新 public event |
+| Event Log & SSE | 提供 canonical correlation 与 replay fact | 复用现有 event/turn/invocation/tool id；进入 GUI projection 前分类 user-visible assistant text | 初始 cutover 不需要新 public event；不向 northbound 泄漏 model-native event |
 | Session Runtime | Terminal 与 idempotency 事实源 | 保留 acceptance 与 terminal convergence | lifecycle 语义不变 |
 | Manager Product Identity | Focused Workbench 成为 OpenHarness 主要 conversation 气质 | 保留 local-first/no-login 与 desktop-native 行为 | 不增加 identity 或 cloud 依赖 |
 | Security Boundary | Draft/queue 与 evidence 包含敏感用户上下文 | local-only draft storage、不含内容的诊断、现有 evidence scope | 保持 Secretless 保证 |
@@ -698,6 +938,10 @@ Packaged desktop 证据使用 `manager/packaging/build_dmg.sh` 与 `manager/pack
 | Component 抽象膨胀成通用框架 | 只导出当前 OpenHarness surface 必需组件；本变更不设计 plugin API |
 | Token 迁移产生大面积视觉抖动 | 逐 component 迁移并成对保留 light/dark screenshot |
 | 删除 legacy 破坏旧持久历史 | 只在旧 durable record 仍需要时保留一个 data migration adapter；旧 renderer 必须删除 |
+| 不同 harness 的 answer/reasoning 分类不同 | 在 transport/projection boundary 归一化；未知安全 assistant text 归入 answer，不从内容猜测 |
+| 折叠 work 隐藏可操作 failure | Active interaction 与第一个可操作 failure 保持在默认折叠的成功详情之外 |
+| 删除 stage UI 降低诊断能力 | Model-call correlation、per-call usage 与有界原始 evidence 保留在 Inspector/diagnostics，不进入主 timeline |
+| Stable answer DOM 与 virtualization 冲突 | Active turn 留在非虚拟 live tail，完成时原子封存进 history |
 
 以下事项推迟到独立批准的 spec：
 
