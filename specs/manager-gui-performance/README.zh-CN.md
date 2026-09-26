@@ -5,7 +5,7 @@
 状态：已评审；阻塞项已清零；基线已验证；已补充加固 delta
 最近评审：2026-09-23
 Change ID：manager-gui-performance-convergence
-相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)
+相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)
 
 ## 1. 组件角色
 

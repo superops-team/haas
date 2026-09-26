@@ -3,9 +3,9 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-14
-Change ID: manager-haas-delegation, unified-runtime-approval-policy
-Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Sandbox Runtime](../sandbox-runtime/README.md), [Policy Controller](../policy-controller/README.md), [Model Proxy](../model-proxy/README.md), [Container Runtime](../container-runtime/README.md), [Stores](../stores/README.md)
+Last reviewed: 2026-09-26
+Change ID: manager-haas-delegation, unified-runtime-approval-policy, manager-conversation-interaction-v2
+Related specs: [HaaS Protocol](../haas-protocol/README.md), [Session Runtime](../session-runtime/README.md), [Manager Conversation Experience](../manager-conversation-experience/README.md), [Sandbox Runtime](../sandbox-runtime/README.md), [Policy Controller](../policy-controller/README.md), [Model Proxy](../model-proxy/README.md), [Container Runtime](../container-runtime/README.md), [Stores](../stores/README.md)
 
 ## 1. Component Role
 
@@ -105,7 +105,7 @@ A fenced per-session reconciler starts immediately after commit, independently o
 
 Concurrent desired snapshots are serialized, coalescing complete domains by latest arrival and revalidating the whole result. A waiter for N completes at appliedRevision >= N (latest authoritative configuration covering N), not proof that each intermediate value executed. Keep update id/revision/hash receipts through session retention; old HTTP retries cannot reapply stale configuration after 24h cache expiry.
 
-New sends wait for desiredRevision to be applied before acceptance/native execution. Manager keeps a durable local send queue; racing direct requests use bounded admission. Reconciliation is not triggered by the next turn, avoiding wait deadlock. Default application wait is 300 seconds. Failure/timeout retains old applied configuration, records a stable existing HaaS error, and gates future turns; corrected/retried intent creates a higher revision, never rolls back profile versions or creates a new chat. Null pending alone does not mean success: compare revisions/result. Delete cancels pending work. Restart inspects persisted runtime generation/receipts, not an in-memory flag.
+New sends wait for desiredRevision to be applied before acceptance/native execution. Manager keeps a durable local send queue; racing direct requests use bounded admission. Its user-visible command receipt, draft recovery, queue controls, and separation from deployment admission follow [Manager Conversation Experience](../manager-conversation-experience/README.md). Reconciliation is not triggered by the next turn, avoiding wait deadlock. Default application wait is 300 seconds. Failure/timeout retains old applied configuration, records a stable existing HaaS error, and gates future turns; corrected/retried intent creates a higher revision, never rolls back profile versions or creates a new chat. Null pending alone does not mean success: compare revisions/result. Delete cancels pending work. Restart inspects persisted runtime generation/receipts, not an in-memory flag.
 
 ### 5.2 Manager Provider Configuration
 

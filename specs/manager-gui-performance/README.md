@@ -5,7 +5,7 @@
 Status: Reviewed; blockers resolved; baseline validated; hardening delta added
 Last reviewed: 2026-09-23
 Change ID: manager-gui-performance-convergence
-Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Product Identity](../manager-product-identity/README.md)
+Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Conversation Experience](../manager-conversation-experience/README.md), [Manager Product Identity](../manager-product-identity/README.md)
 
 ## 1. Component Role
 

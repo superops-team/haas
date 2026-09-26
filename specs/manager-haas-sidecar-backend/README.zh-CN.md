@@ -3,13 +3,15 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-15
-Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface
-Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Config](../config/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
+Last reviewed: 2026-09-26
+Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface, manager-conversation-interaction-v2
+Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Config](../config/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
 
 OpenHarness 默认内置非容器化 HaaS `local_managed`，且 autostart 开启。打包 App 启动本地 HaaS sidecar，并通过 HaaS `/run_sse` 执行普通桌面 turn（`execution_mode=local_api`）。Remote HaaS 与 delegated container session 是可选产品能力，但不是默认桌面执行路径。所有 HaaS-backed 模式共用只走 HTTP/SSE 的 `HaasClient`；Manager 不允许 import HaaS service object 或直接调用 Codex/provider/MCP。
+
+本规格负责 transport、binding、persistence 与 normalized Manager fact。[Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md) 负责这些事实的用户可见位置、交互层级、React component boundary 与视觉行为，且不得重新解释本规格定义的事实。
 
 ```text
 GUI -> Manager local API/session owner -> HaasClient -> HaaS control sidecar
@@ -220,6 +222,14 @@ Cancel request 发出后 Manager 继续消费/回放权威事件，task 保持 `
 `turn/completed(status=interrupted)` 由 HaaS 归一化为 `haas.turn.cancelled`，这才是停止成功
 条件。若 cancel 无法确认，Manager 显示安全的 `cancel_failed`/recovery 状态和 readback 动作，
 不能伪造 `interrupted`。Partial reasoning、output 与 tool evidence 继续归属于 cancelled turn。
+
+### 5.5.1 带确认的对话命令与追问队列
+
+Manager conversation surface 遵循 Manager Conversation Experience 中的产品与 React 合同。GUI `user_message` 携带稳定 `clientCommandId`、operation-scoped idempotency key 与显式 delivery intent。Manager 在确认 `running` 或 `queued` 前先持久化 accepted/duplicate command receipt；拒绝返回结构化安全错误，不伪造 turn。Send 后传输结果不确定时，通过 receipt 与 session projection 对账，绝不自动重发。
+
+Manager 拥有持久化的 per-session follow-up queue。Queue mutation 必须 revisioned 且 idempotent；只有 queued item 可编辑、删除、排序或提升为 send-now。Configuration barrier、workspace lock、running turn 或 recovering binding 可让 item 继续排队，但不得改变用户意图。HaaS deployment admission 与 workspace-lock queue 继续作为独立 backend fact，绝不投影成用户 follow-up item。
+
+GUI 接收一个 normalized conversation snapshot 与有序 change，其中 Manager row、interaction、queue 与 command identity 保持稳定，并关联 canonical HaaS event、turn、invocation 与 tool identity。Local execution 投影等价 identity。UI component 不解析 HaaS 或 harness-native payload，也不根据相邻 display item 推断 turn 边界。
 
 ### 5.6 双流桥接与完成屏障
 

@@ -3,13 +3,15 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-15
-Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface
-Related specs: [HaaS Protocol](../haas-protocol/README.md), [Manager Delegation](../manager-delegation/README.md), [Harness Profile](../harness-profile/README.md), [Container Runtime](../container-runtime/README.md), [Config](../config/README.md), [Security Boundary](../security-boundary/README.md)
+Last reviewed: 2026-09-26
+Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface, manager-conversation-interaction-v2
+Related specs: [HaaS Protocol](../haas-protocol/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager Conversation Experience](../manager-conversation-experience/README.md), [Harness Profile](../harness-profile/README.md), [Container Runtime](../container-runtime/README.md), [Config](../config/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
 
 OpenHarness defaults to embedded, non-containerized HaaS `local_managed` with autostart enabled. The packaged app launches the local HaaS sidecar and executes ordinary desktop turns through HaaS `/run_sse` (`execution_mode=local_api`). Remote HaaS and delegated container sessions are selectable product capabilities, but they are not the default desktop execution path. One `HaasClient` uses only HaaS HTTP/SSE in all HaaS-backed modes; Manager must not import HaaS service objects or call Codex/providers/MCP directly for HaaS-backed sessions.
+
+This specification owns transport, binding, persistence, and normalized Manager facts. [Manager Conversation Experience](../manager-conversation-experience/README.md) owns their user-visible placement, interaction hierarchy, React component boundaries, and visual behavior; it cannot reinterpret the facts defined here.
 
 ```text
 GUI -> Manager local API/session owner -> HaasClient -> HaaS control sidecar
@@ -235,6 +237,26 @@ normalized by HaaS to `haas.turn.cancelled`, which is the success condition for 
 cancel request cannot be confirmed, Manager exposes a safe `cancel_failed`/recovery state and
 readback action instead of fabricating `interrupted`. Partial reasoning, output and tool evidence
 remain attached to the cancelled turn.
+
+### 5.5.1 Acknowledged Conversation Commands and Follow-up Queue
+
+The Manager conversation surface follows the product and React contracts in Manager Conversation
+Experience. A GUI `user_message` carries a stable `clientCommandId`, operation-scoped idempotency
+key, and explicit delivery intent. Manager persists an accepted or duplicate command receipt before
+acknowledging `running` or `queued`; rejection returns a structured safe error without fabricating a
+turn. An unknown post-send transport result is reconciled by receipt and session projection and is
+never resolved by automatic resubmission.
+
+Manager owns the durable per-session follow-up queue. Queue mutations are revisioned and
+idempotent; only queued items can be edited, deleted, reordered, or promoted to send-now. A
+configuration barrier, workspace lock, running turn, or recovering binding may keep an item queued
+without changing its user intent. HaaS deployment admission and workspace-lock queues remain
+separate backend facts and are never projected as user follow-up items.
+
+The GUI receives one normalized conversation snapshot plus ordered changes with stable Manager row,
+interaction, queue, and command identities correlated to canonical HaaS event, turn, invocation,
+and tool identities. Local execution projects equivalent identities. UI components do not parse
+HaaS or harness-native payloads and do not infer turn boundaries from adjacent display items.
 
 ### 5.6 Streaming Bridge and Completion Barrier
 

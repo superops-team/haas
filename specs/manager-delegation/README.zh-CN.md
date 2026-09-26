@@ -3,9 +3,9 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-14
-Change ID: manager-haas-delegation, unified-runtime-approval-policy
-Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md), [Sandbox Runtime](../sandbox-runtime/README.zh-CN.md), [Policy Controller](../policy-controller/README.zh-CN.md), [Model Proxy](../model-proxy/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Stores](../stores/README.zh-CN.md)
+Last reviewed: 2026-09-26
+Change ID: manager-haas-delegation, unified-runtime-approval-policy, manager-conversation-interaction-v2
+Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md), [Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md), [Sandbox Runtime](../sandbox-runtime/README.zh-CN.md), [Policy Controller](../policy-controller/README.zh-CN.md), [Model Proxy](../model-proxy/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Stores](../stores/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -105,7 +105,7 @@ delegated session 的运行配置由 manager 授权的 mount manifest、delegati
 
 并发目标串行接受，完整域按最后到达覆盖，合并后整体验证。等待 N 的条件是 appliedRevision >= N，表示包含 N 的最新管控配置生效，不表示每个中间值执行过。Update id/revision/hash receipt 保留至 session retention，24h HTTP cache 过期后旧重试不能重施旧配置。
 
-新发送在 acceptance/native execution 前等待 desiredRevision 应用。Manager 使用持久本地 send queue；直接请求竞态走有界 admission。Reconciliation 不等下一 turn 触发，避免死锁。应用默认最多等待 300 秒；失败/超时保留旧 applied 配置、记录现有稳定 HaaS 错误并阻止未来 turn。修正/重试意图产生更高 revision，不回滚 profile version、不新建 chat。Pending 为 null 不代表成功，应比较 revision/result；delete 取消 pending；restart 检查持久 runtime generation/receipt，不靠内存标记。
+新发送在 acceptance/native execution 前等待 desiredRevision 应用。Manager 使用持久本地 send queue；直接请求竞态走有界 admission。其面向用户的 command receipt、draft recovery、queue control，以及与 deployment admission 的区分遵循 [Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md)。Reconciliation 不等下一 turn 触发，避免死锁。应用默认最多等待 300 秒；失败/超时保留旧 applied 配置、记录现有稳定 HaaS 错误并阻止未来 turn。修正/重试意图产生更高 revision，不回滚 profile version、不新建 chat。Pending 为 null 不代表成功，应比较 revision/result；delete 取消 pending；restart 检查持久 runtime generation/receipt，不靠内存标记。
 
 ### 5.2 Manager Provider 配置
 
