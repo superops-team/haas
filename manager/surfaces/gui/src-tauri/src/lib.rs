@@ -36,8 +36,11 @@ struct ServerProcess {
 }
 
 fn server_restart_delay(attempts: u32, stopping: bool) -> Option<std::time::Duration> {
-    if stopping || attempts >= 3 { None }
-    else { Some(std::time::Duration::from_secs(1 << attempts)) }
+    if stopping || attempts >= 3 {
+        None
+    } else {
+        Some(std::time::Duration::from_secs(1 << attempts))
+    }
 }
 
 fn supervise_server(app: tauri::AppHandle, mut command: Command) {
@@ -46,13 +49,17 @@ fn supervise_server(app: tauri::AppHandle, mut command: Command) {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
             let state = app.state::<ServerProcess>();
-            if state.stopping.load(Ordering::SeqCst) { return; }
+            if state.stopping.load(Ordering::SeqCst) {
+                return;
+            }
             let mut child = state.child.lock().unwrap();
             let exited = match child.as_mut() {
                 Some(process) => matches!(process.try_wait(), Ok(Some(_))),
                 None => true,
             };
-            if !exited { continue; }
+            if !exited {
+                continue;
+            }
             let Some(delay) = server_restart_delay(attempts, false) else {
                 let _ = app.emit("coworker:server-status", "failed");
                 return;
@@ -62,7 +69,9 @@ fn supervise_server(app: tauri::AppHandle, mut command: Command) {
             let _ = app.emit("coworker:server-status", "restarting");
             std::thread::sleep(delay);
             let mut child = state.child.lock().unwrap();
-            if state.stopping.load(Ordering::SeqCst) { return; }
+            if state.stopping.load(Ordering::SeqCst) {
+                return;
+            }
             attempts += 1;
             *child = command.spawn().ok();
             // Connection readiness is established by the authenticated GUI handshake.
@@ -441,6 +450,16 @@ fn start_window_drag(window: tauri::WebviewWindow) -> bool {
     window.start_dragging().is_ok()
 }
 
+#[tauri::command]
+fn toggle_window_maximize(window: tauri::WebviewWindow) -> Result<bool, String> {
+    if window.is_maximized().map_err(|error| error.to_string())? {
+        window.unmaximize().map_err(|error| error.to_string())?;
+    } else {
+        window.maximize().map_err(|error| error.to_string())?;
+    }
+    window.is_maximized().map_err(|error| error.to_string())
+}
+
 // -- local dictation ---------------------------------------------------------------------------
 // The actual microphone/model code lives in the Tauri-free `ocw-stt` crate. This shell owns the
 // macOS permission prompt and translates the reusable API into React-friendly Tauri commands.
@@ -754,7 +773,11 @@ fn notify_automation_result(app: tauri::AppHandle, status: String) -> Result<(),
         "error" => "Automation needs attention. Open Inbox before retrying.",
         _ => return Err("invalid automation status".into()),
     };
-    app.notification().builder().title("OpenHarness").body(body).show()
+    app.notification()
+        .builder()
+        .title("OpenHarness")
+        .body(body)
+        .show()
         .map_err(|_| "Desktop notification unavailable; result is in Inbox".into())
 }
 
@@ -791,6 +814,7 @@ pub fn run() {
             get_keep_awake,
             set_keep_awake,
             start_window_drag,
+            toggle_window_maximize,
             get_dictation_status,
             start_dictation,
             stop_dictation,
@@ -866,7 +890,10 @@ pub fn run() {
                     None
                 }
             };
-            app.manage(ServerProcess { child: Mutex::new(child), stopping: AtomicBool::new(false) });
+            app.manage(ServerProcess {
+                child: Mutex::new(child),
+                stopping: AtomicBool::new(false),
+            });
             supervise_server(app.handle().clone(), server_cmd);
 
             // Restore keep-awake from the last session.
@@ -998,7 +1025,10 @@ mod supervisor_tests {
     #[test]
     fn restart_backoff_is_bounded_and_quit_suppresses_restart() {
         for (attempt, seconds) in [(0, 1), (1, 2), (2, 4)] {
-            assert_eq!(server_restart_delay(attempt, false).unwrap().as_secs(), seconds);
+            assert_eq!(
+                server_restart_delay(attempt, false).unwrap().as_secs(),
+                seconds
+            );
             assert!(server_restart_delay(attempt, true).is_none());
         }
         assert!(server_restart_delay(3, false).is_none());

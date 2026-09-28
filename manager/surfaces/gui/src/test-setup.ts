@@ -1,3 +1,4 @@
+import "fake-indexeddb/auto";
 // Vitest global setup: initialize i18n synchronously so t() resolves inside
 // components under test. Uses the English resources so existing English
 // assertions keep working; without this, t("key") renders the key literal.

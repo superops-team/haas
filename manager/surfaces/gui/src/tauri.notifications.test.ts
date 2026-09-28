@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { notifyAutomationResult } from "./tauri";
+import { notifyAutomationResult, toggleWindowMaximize } from "./tauri";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -15,5 +15,16 @@ describe("automation notifications", () => {
   it("leaves result handling usable when OS notification delivery fails", async () => {
     vi.stubGlobal("__TAURI__", { core: { invoke: vi.fn().mockRejectedValue(new Error("denied")) } });
     await expect(notifyAutomationResult("ok")).resolves.toBeUndefined();
+  });
+});
+
+describe("native window chrome", () => {
+  it("delegates a titlebar double click to one native maximize toggle", async () => {
+    const invoke = vi.fn().mockResolvedValue(true);
+    vi.stubGlobal("__TAURI__", { core: { invoke } });
+
+    await expect(toggleWindowMaximize()).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith("toggle_window_maximize", undefined);
   });
 });

@@ -9,6 +9,7 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -26,18 +27,47 @@ from coworker.delegation import (
     is_text_only_content,
     make_delegated_session_body,
 )
-from coworker.haas import AcceptedInvocationHeaders, HaasClientError, HaasEnvelope
+from coworker.haas import (
+    AcceptedInvocationHeaders,
+    EndpointMode,
+    HaasClientError,
+    HaasEndpoint,
+    HaasEnvelope,
+)
 from coworker.haas.attempts import AttemptLedger
 from coworker.haas.stream_bridge import SessionKey, StreamBridgeState
 from coworker.memory import Scope
 from coworker.permissions import Mode
 from coworker.providers import AssistantTurn, ModelCapabilities, ProviderClient
+from coworker.secrets import SecretStore
 from coworker.server import SessionManager, create_app
 from fastapi.testclient import TestClient
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+_COMMAND_IDS = count(1)
+
+
+def _user_message(text: str, **extra: Any) -> dict[str, Any]:
+    sequence = next(_COMMAND_IDS)
+    return {
+        "type": "user_message",
+        "text": text,
+        "clientCommandId": f"cmd-test-{sequence}",
+        "idempotencyKey": f"idem-test-{sequence}",
+        "draftRevision": sequence,
+        "delivery": "start_now",
+        **extra,
+    }
+
+
+def _receive_until(ws: Any, event_type: str) -> dict[str, Any]:
+    while True:
+        event = ws.receive_json()
+        if event["type"] == event_type:
+            return event
 
 
 class ScriptedProvider(ProviderClient):
@@ -411,6 +441,10 @@ class FakeDirectHaasClient:
             trace_id="tr_caps",
         )
 
+    async def ready(self, *, scope: str = "control") -> HaasEnvelope[dict[str, Any]]:
+        assert scope == "execution"
+        return HaasEnvelope({"status": "ready"}, trace_id="tr_ready")
+
     async def update_session_policy(
         self,
         session_id: str,
@@ -470,6 +504,12 @@ class CapturingDirectHaasClient(FakeDirectHaasClient):
     def run_sse(self, body: dict[str, Any], *, idempotency_key: str, last_event_id=None):
         self.submitted_messages.append(body["newMessage"])
         return super().run_sse(body, idempotency_key=idempotency_key, last_event_id=last_event_id)
+
+
+class UnavailableRemoteDirectHaasClient(FakeDirectHaasClient):
+    async def ready(self, *, scope: str = "control") -> HaasEnvelope[dict[str, Any]]:
+        del scope
+        raise HaasClientError("remote endpoint unavailable")
 
 
 class TerminalReconciliationRunStream:
@@ -1450,7 +1490,7 @@ def test_local_api_default_skips_delegated_agent_allowlist(tmp_path):
     assert decision.reason == "local_api_default"
 
 
-def test_remote_local_api_is_blocked_before_workspace_leak(tmp_path):
+def test_remote_direct_api_accepts_only_the_explicit_remote_workspace_scope(tmp_path):
     cfg = _local_api_config()
     cfg.mode = "remote"
     cfg.base_url = "https://haas.example.com"
@@ -1464,8 +1504,8 @@ def test_remote_local_api_is_blocked_before_workspace_leak(tmp_path):
         content="hello",
     )
 
-    assert decision.backend == "blocked"
-    assert decision.reason == "remote_local_api_unsupported"
+    assert decision.use_haas
+    assert decision.reason == "remote_api_default"
 
 
 def test_deterministic_delegation_honors_explicit_local_choice(tmp_path):
@@ -1585,7 +1625,7 @@ def test_ws_delegates_first_matching_turn_and_persists_binding(tmp_path, monkeyp
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         events = []
         while True:
             event = ws.receive_json()
@@ -1594,7 +1634,15 @@ def test_ws_delegates_first_matching_turn_and_persists_binding(tmp_path, monkeyp
                 break
 
     assert provider.calls == 0
-    assert [event["type"] for event in events] == [
+    ack = events[0]
+    assert ack["type"] == "command_ack"
+    assert ack["data"]["status"] == "accepted"
+    domain_events = [
+        event["type"]
+        for event in events
+        if event["type"] not in {"command_ack", "queue_updated"}
+    ]
+    assert domain_events == [
         "turn_start",
         "execution_control",
         "assistant_delta",
@@ -1604,9 +1652,10 @@ def test_ws_delegates_first_matching_turn_and_persists_binding(tmp_path, monkeyp
         "execution_control",
         "turn_done",
     ]
-    assert events[1]["data"]["controlState"] == "running"
-    assert events[1]["data"]["pauseSupported"] is True
-    assert events[-2]["data"]["controlState"] == "idle"
+    control_events = [event for event in events if event["type"] == "execution_control"]
+    assert control_events[0]["data"]["controlState"] == "running"
+    assert control_events[0]["data"]["pauseSupported"] is True
+    assert control_events[-1]["data"]["controlState"] == "idle"
     assert clients[0].created[0]["managerSessionId"] == "s1"
     assert clients[0].created[0]["mountManifest"]["primaryWorkspace"]["access"] == "rw"
     assert clients[0].restored == ["dgsess_1"]
@@ -1688,7 +1737,7 @@ def test_ws_default_uses_local_haas_api_without_delegated_agent_gate(
 
     with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hello from packaged app"})
+        ws.send_json(_user_message("hello from packaged app"))
         events = []
         while True:
             event = ws.receive_json()
@@ -1700,7 +1749,14 @@ def test_ws_default_uses_local_haas_api_without_delegated_agent_gate(
         assert any(event["type"] == "error" for event in events)
         assert not any(event["type"] == "turn_end" for event in events)
         return
-    assert [event["type"] for event in events] == [
+    assert events[0]["type"] == "command_ack"
+    assert events[0]["data"]["status"] == "accepted"
+    domain_events = [
+        event
+        for event in events
+        if event["type"] not in {"command_ack", "queue_updated"}
+    ]
+    assert [event["type"] for event in domain_events] == [
         "turn_start",
         "execution_control",
         "assistant_delta",
@@ -1714,9 +1770,9 @@ def test_ws_default_uses_local_haas_api_without_delegated_agent_gate(
         "execution_control",
         "turn_done",
     ]
-    assert events[1]["data"]["controlState"] == "running"
-    assert events[1]["data"]["pauseSupported"] is True
-    assert events[-2]["data"]["controlState"] == "idle"
+    assert domain_events[1]["data"]["controlState"] == "running"
+    assert domain_events[1]["data"]["pauseSupported"] is True
+    assert domain_events[-2]["data"]["controlState"] == "idle"
     process_events = [
         event
         for event in events
@@ -1754,6 +1810,196 @@ def test_ws_default_uses_local_haas_api_without_delegated_agent_gate(
     assert messages[-1]["content"] == "local haas done"
 
 
+@pytest.mark.asyncio
+async def test_remote_project_routes_to_frozen_endpoint_without_local_fallback(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(SessionManager, "_maybe_autotitle", lambda self, session_id: None)
+    manager = SessionManager(data_dir=tmp_path / "state", provider=ScriptedProvider())
+    manager.secrets = SecretStore(tmp_path / "secrets.json")
+    endpoint = HaasEndpoint.create(
+        endpoint_id="hep_remote_team",
+        mode=EndpointMode.REMOTE,
+        base_url="https://haas.example.invalid",
+        token_ref="secret://manager/haas/remote-team",
+        server_identity="team-dev",
+    )
+    manager.endpoint_store.put(endpoint)
+    manager.secrets.put(endpoint.token_ref, {"api_token": "test-remote-token"})
+    project = manager.project_store.create_remote_project(
+        name="Remote HaaS",
+        endpoint_id=endpoint.endpoint_id,
+        remote_workspace_ref="/srv/workspaces/haas",
+        display_path="~/workspaces/haas",
+        idempotency_key="create-remote-project",
+    )
+    supervisor = FakeLocalHaasSupervisor()
+    manager._haas_supervisor = supervisor
+    direct_clients: list[FakeDirectHaasClient] = []
+
+    def direct_factory(config: HaasDelegationConfig) -> FakeDirectHaasClient:
+        client = FakeDirectHaasClient(config)
+        direct_clients.append(client)
+        return client
+
+    manager._haas_direct_client_factory = direct_factory
+    manager.bind_session_project_context(
+        "s-remote",
+        workspace=None,
+        project_id=project.project.project_id,
+        workspace_binding_id=project.workspace.workspace_binding_id,
+        endpoint_id=endpoint.endpoint_id,
+        remote_workspace_ref="/srv/workspaces/haas",
+    )
+    engine = manager.get_engine("s-remote", agent="cowork")
+    assert engine is not None
+
+    async def collect_events():
+        return [
+            event
+            async for event in manager.run_turn_events(
+                "s-remote",
+                engine,
+                "inspect the remote repository",
+                agent="cowork",
+            )
+        ]
+
+    events = await asyncio.wait_for(collect_events(), timeout=5)
+
+    assert not [event for event in events if event.type.value == "error"]
+    assert direct_clients
+    remote = direct_clients[0]
+    assert remote.config.endpoint_id == endpoint.endpoint_id
+    assert remote.config.mode == "remote"
+    assert remote.config.base_url == endpoint.base_url
+    assert remote.config.api_token == "test-remote-token"
+    assert remote.runs[0]["body"]["sandbox"] == {
+        "mode": remote.config.workspace_mode,
+        "workspaceRoot": "/srv/workspaces/haas",
+        "writableRoots": ["/srv/workspaces/haas"],
+    }
+    assert "haas" not in remote.runs[0]["body"]
+    assert supervisor.ensured == []
+    binding = manager.session_store.load("s-remote").bindings["haas_delegation"]
+    assert binding["endpoint_id"] == endpoint.endpoint_id
+    assert binding["endpoint_fingerprint"] == endpoint.url_fingerprint
+    assert binding["remote_workspace_ref"] == "/srv/workspaces/haas"
+    assert str(manager.scratch_base()) not in str(remote.runs[0]["body"])
+
+
+@pytest.mark.asyncio
+async def test_unavailable_remote_endpoint_stops_before_task_submission(tmp_path):
+    provider = ScriptedProvider()
+    manager = SessionManager(data_dir=tmp_path / "state", provider=provider)
+    manager.secrets = SecretStore(tmp_path / "secrets.json")
+    endpoint = HaasEndpoint.create(
+        endpoint_id="hep_remote_offline",
+        mode=EndpointMode.REMOTE,
+        base_url="https://offline.example.invalid",
+        token_ref="secret://manager/haas/offline",
+        server_identity="offline",
+    )
+    manager.endpoint_store.put(endpoint)
+    manager.secrets.put(endpoint.token_ref, {"api_token": "test-remote-token"})
+    project = manager.project_store.create_remote_project(
+        name="Offline",
+        endpoint_id=endpoint.endpoint_id,
+        remote_workspace_ref="/srv/offline",
+        display_path="offline",
+        idempotency_key="create-offline-project",
+    )
+    manager.bind_session_project_context(
+        "s-offline",
+        workspace=None,
+        project_id=project.project.project_id,
+        workspace_binding_id=project.workspace.workspace_binding_id,
+        endpoint_id=endpoint.endpoint_id,
+        remote_workspace_ref=project.workspace.remote_workspace_ref,
+    )
+    remote = UnavailableRemoteDirectHaasClient(
+        HaasDelegationConfig(mode="remote")
+    )
+    manager._haas_direct_client_factory = lambda _config: remote
+    engine = manager.get_engine("s-offline", agent="cowork")
+    assert engine is not None
+
+    events = [
+        event
+        async for event in manager.run_turn_events(
+            "s-offline", engine, "do not run locally", agent="cowork"
+        )
+    ]
+
+    assert [event.type.value for event in events] == ["error"]
+    assert "remote endpoint unavailable" in events[0].data["error"]
+    assert remote.runs == []
+    assert provider.calls == 0
+
+
+def test_missing_frozen_remote_endpoint_blocks_instead_of_using_local_provider(tmp_path):
+    provider = ScriptedProvider()
+    manager = SessionManager(data_dir=tmp_path / "state", provider=provider)
+    manager.project_store.ensure_session_binding(
+        "s-missing-remote",
+        workspace=None,
+        endpoint_id="hep_missing_remote",
+    )
+
+    decision = manager.delegation_decision(
+        "s-missing-remote",
+        agent="cowork",
+        content="do not run this locally",
+    )
+
+    assert decision.backend == "blocked"
+    assert decision.reason == "endpoint_unavailable"
+    assert provider.calls == 0
+
+    client = TestClient(create_app(manager))
+    with client.websocket_connect("/ws/session/s-missing-remote?agent=cowork") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json(_user_message("do not run this locally"))
+        rejected = ws.receive_json()
+
+    assert rejected["type"] == "command_ack"
+    assert rejected["data"]["status"] == "rejected"
+    assert rejected["data"]["error"]["code"] == "endpoint_unavailable"
+    assert provider.calls == 0
+
+
+def test_local_project_binding_overrides_a_remote_global_default(tmp_path, monkeypatch):
+    workspace = tmp_path / "local-project"
+    workspace.mkdir()
+    manager = SessionManager(data_dir=tmp_path / "state", provider=ScriptedProvider())
+    project = manager.project_store.ensure_local_project(workspace)
+    manager.project_store.ensure_session_binding(
+        "s-local",
+        workspace=str(workspace),
+        explicit_project_id=project.project.project_id,
+        explicit_workspace_binding_id=project.workspace.workspace_binding_id,
+        endpoint_id="hep_local_managed",
+    )
+    remote_default = HaasDelegationConfig(
+        mode="remote",
+        execution_mode="local_api",
+        base_url="https://old-default.example.invalid",
+        api_token="must-not-cross",
+    )
+    monkeypatch.setattr(manager, "_haas_config", lambda _workspace: remote_default)
+
+    decision = manager.delegation_decision(
+        "s-local", agent="cowork", content="run locally"
+    )
+
+    assert decision.use_haas
+    assert decision.config is not None
+    assert decision.config.endpoint_id == "hep_local_managed"
+    assert decision.config.mode == "local_managed"
+    assert decision.config.base_url == "http://127.0.0.1:8092"
+    assert decision.config.api_token != "must-not-cross"
+
+
 def test_ws_reports_local_haas_startup_error_without_background_task_crash(
     tmp_path, monkeypatch
 ):
@@ -1771,7 +2017,7 @@ def test_ws_reports_local_haas_startup_error_without_background_task_crash(
 
     with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hello from packaged app"})
+        ws.send_json(_user_message("hello from packaged app"))
         events = []
         while True:
             event = ws.receive_json()
@@ -1779,8 +2025,13 @@ def test_ws_reports_local_haas_startup_error_without_background_task_crash(
             if event["type"] == "turn_done":
                 break
 
-    assert [event["type"] for event in events] == ["error", "turn_done"]
-    assert events[0]["data"] == {
+    domain_events = [
+        event
+        for event in events
+        if event["type"] not in {"command_ack", "queue_updated"}
+    ]
+    assert [event["type"] for event in domain_events] == ["error", "turn_done"]
+    assert domain_events[0]["data"] == {
         "error": "local HaaS sidecar unavailable: local_haas_exited",
         "error_type": "HaasDelegationError",
     }
@@ -1891,7 +2142,7 @@ def test_local_haas_network_setting_projects_allow_policy(tmp_path, monkeypatch)
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fetch example"})
+        ws.send_json(_user_message("fetch example"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -1922,8 +2173,8 @@ def test_ws_stop_cancels_active_local_haas_invocation_and_waits_for_terminal(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until stopped"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until stopped"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "interrupt"})
         events = []
         while True:
@@ -1965,8 +2216,8 @@ def test_ws_rejected_active_stop_restores_running_control_state(tmp_path, monkey
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until stop fails"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until stop fails"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "interrupt"})
         restored = ws.receive_json()
 
@@ -1996,8 +2247,8 @@ def test_ws_pause_interrupts_active_local_haas_invocation_and_restores_paused_st
     with TestClient(app).websocket_connect("/ws/session/s1?agent=cowork") as ws:
         ready = ws.receive_json()
         assert ready["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "pause"})
         events = []
         while True:
@@ -2046,8 +2297,8 @@ def test_ws_stop_supersedes_inflight_pause_without_blocking_receive_loop(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until stopped"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until stopped"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         assert ws.receive_json()["type"] == "execution_control"
         ws.send_json({"type": "pause"})
         pausing = ws.receive_json()
@@ -2087,8 +2338,8 @@ def test_ws_rejected_pause_restores_running_control_state(tmp_path, monkeypatch)
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until pause fails"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until pause fails"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         running = ws.receive_json()
         assert running["type"] == "execution_control"
         assert running["data"] == {
@@ -2128,8 +2379,8 @@ def test_ws_stop_while_paused_revokes_resume_without_reopening_source_turn(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "pause"})
         while ws.receive_json()["type"] != "turn_done":
             pass
@@ -2167,8 +2418,8 @@ def test_ws_stop_after_paused_readback_before_turn_done_publishes_idle(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         assert ws.receive_json()["data"]["controlState"] == "running"
         ws.send_json({"type": "pause"})
         assert ws.receive_json()["data"]["controlState"] == "pausing"
@@ -2219,8 +2470,8 @@ def test_ws_continue_resumes_same_haas_session_with_a_new_invocation(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "pause"})
         while ws.receive_json()["type"] != "turn_done":
             pass
@@ -2274,8 +2525,8 @@ def test_ws_continue_works_after_paused_readback_before_source_turn_done(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         assert ws.receive_json()["data"]["controlState"] == "running"
         ws.send_json({"type": "pause"})
         assert ws.receive_json()["data"]["controlState"] == "pausing"
@@ -2334,8 +2585,8 @@ def test_ws_rejected_continue_restores_paused_control_state(tmp_path, monkeypatc
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "pause"})
         while ws.receive_json()["type"] != "turn_done":
             pass
@@ -2376,8 +2627,8 @@ def test_ws_pause_and_continue_preserve_delegated_session_affinity(tmp_path, mon
         "/ws/session/s1?agent=code"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "pause"})
         while ws.receive_json()["type"] != "turn_done":
             pass
@@ -2426,8 +2677,8 @@ def test_ws_stop_cancels_delegated_invocation_before_first_sse_event(tmp_path, m
         "/ws/session/s1?agent=code"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run silently until stopped"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run silently until stopped"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "interrupt"})
         events = []
         while True:
@@ -2460,10 +2711,10 @@ def test_ws_reuses_existing_haas_binding_for_followup(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         while ws.receive_json()["type"] != "turn_done":
             pass
-        ws.send_json({"type": "user_message", "text": "hello again"})
+        ws.send_json(_user_message("hello again"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -2489,7 +2740,7 @@ def test_ws_waits_for_pending_policy_before_starting_delegated_turn(tmp_path, mo
 
     with TestClient(create_app(manager)).websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this"})
+        ws.send_json(_user_message("fix this"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -2515,7 +2766,7 @@ def test_server_confirmed_410_creates_and_reuses_one_linked_attempt(tmp_path, mo
     app_client = TestClient(create_app(manager))
     with app_client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this"})
+        ws.send_json(_user_message("fix this"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -2526,7 +2777,7 @@ def test_server_confirmed_410_creates_and_reuses_one_linked_attempt(tmp_path, mo
 
     with app_client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "again"})
+        ws.send_json(_user_message("again"))
         failed = []
         while True:
             event = ws.receive_json()
@@ -2559,17 +2810,16 @@ def test_ws_unbound_unsupported_attachment_fails_closed(tmp_path, monkeypatch):
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
         ws.send_json(
-            {
-                "type": "user_message",
-                "text": "fix this image",
-                "model": "volcengine-ark:m1",
-                "attachments": [
+            _user_message(
+                "fix this image",
+                model="volcengine-ark:m1",
+                attachments=[
                     {
                         "kind": "image",
                         "data_url": "data:image/png;base64,aaa",
                     }
                 ],
-            }
+            )
         )
         seen = []
         while True:
@@ -2579,8 +2829,8 @@ def test_ws_unbound_unsupported_attachment_fails_closed(tmp_path, monkeypatch):
                 break
 
     assert provider.calls == 0
-    assert seen[0]["type"] == "error"
-    assert "unsupported_content" in seen[0]["data"]["error"]
+    error = next(event for event in seen if event["type"] == "error")
+    assert "unsupported_content" in error["data"]["error"]
 
 
 def test_ws_uses_bound_haas_endpoint_after_config_change(tmp_path, monkeypatch):
@@ -2606,10 +2856,10 @@ def test_ws_uses_bound_haas_endpoint_after_config_change(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         while ws.receive_json()["type"] != "turn_done":
             pass
-        ws.send_json({"type": "user_message", "text": "hello again"})
+        ws.send_json(_user_message("hello again"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -2636,7 +2886,7 @@ def test_ws_retry_on_haas_bound_session_stays_delegated(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         while ws.receive_json()["type"] != "turn_done":
             pass
         ws.send_json({"type": "retry"})
@@ -2664,7 +2914,7 @@ def test_ws_bound_haas_session_fails_closed(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         events = []
         while True:
             event = ws.receive_json()
@@ -2693,7 +2943,7 @@ def test_ws_delegated_failed_terminal_status_is_preserved(tmp_path, monkeypatch)
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         seen = []
         while True:
             event = ws.receive_json()
@@ -2719,7 +2969,7 @@ def test_ws_defaults_to_haas_when_no_keyword_matches(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hello", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("hello", model="volcengine-ark:m1"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -2742,7 +2992,7 @@ def test_local_human_bridge_resumes_same_invocation_after_approval_and_input(tmp
 
     with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run interactively"})
+        ws.send_json(_user_message("run interactively"))
         approval = ws.receive_json()
         while approval["type"] != "permission_required":
             approval = ws.receive_json()
@@ -2804,7 +3054,7 @@ def test_local_structured_plan_gets_one_linked_continuation_then_completes(tmp_p
 
     with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "finish the plan"})
+        ws.send_json(_user_message("finish the plan"))
         events = []
         while True:
             event = ws.receive_json()
@@ -2835,7 +3085,7 @@ def test_local_structured_plan_stops_after_three_continuations(tmp_path, monkeyp
 
     with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "finish the plan"})
+        ws.send_json(_user_message("finish the plan"))
         events = []
         while True:
             event = ws.receive_json()
@@ -4238,6 +4488,7 @@ def test_missing_bundled_codex_keeps_manager_startup_available(tmp_path, monkeyp
     monkeypatch.setattr(sys, "executable", str(tmp_path / "openworker-server"))
     supervisor = LocalHaasSupervisor(tmp_path)
     monkeypatch.setattr(supervisor, "_healthy", lambda _url: False)
+    monkeypatch.setattr(supervisor, "_port_is_listening", lambda _host, _port: False)
     cfg = _local_api_config()
     cfg.local_autostart = True
 
@@ -4317,7 +4568,7 @@ def test_ws_fails_closed_when_haas_omits_required_accepted_headers(tmp_path, mon
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         seen = []
         while True:
             event = ws.receive_json()
@@ -4325,7 +4576,11 @@ def test_ws_fails_closed_when_haas_omits_required_accepted_headers(tmp_path, mon
             if event["type"] == "turn_done":
                 break
 
-    assert [event["type"] for event in seen] == ["error", "turn_done"]
+    assert [
+        event["type"]
+        for event in seen
+        if event["type"] not in {"command_ack", "queue_updated"}
+    ] == ["error", "turn_done"]
     assert manager.session_store.load("s1").bindings.get("haas_delegation") is None
 
 
@@ -4404,5 +4659,10 @@ async def test_scheduled_run_uses_real_manager_haas_route(tmp_path, monkeypatch)
     assert provider.calls == 0
     assert len(direct.runs) == 1
     assert direct.runs[0]["body"]["sessionId"] == "hsess_" + run.session_id
-    assert manager.session_store.load(run.session_id).bindings["haas_delegation"]["execution_mode"] == "local_api"
+    assert (
+        manager.session_store.load(run.session_id).bindings["haas_delegation"][
+            "execution_mode"
+        ]
+        == "local_api"
+    )
     assert manager.inbox.pending(run.session_id)

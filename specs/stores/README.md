@@ -5,7 +5,7 @@
 Status: Draft
 Last reviewed: 2026-09-15
 Change ID: long-task-model-proxy-stability
-Related specs: [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Harness Registry](../harness-registry/README.md), [Harness Profile](../harness-profile/README.md), [Admission Control](../admission-control/README.md), [Manager Delegation](../manager-delegation/README.md)
+Related specs: [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Harness Registry](../harness-registry/README.md), [Harness Profile](../harness-profile/README.md), [Admission Control](../admission-control/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md)
 
 ## 1. Component Role
 
@@ -401,3 +401,11 @@ Logs:
 ### Manager automation recovery boundary
 
 Manager automation.db preserves existing task/run JSON schemas. Scheduled occurrence consumption is persisted before execution. On startup unresolved running records become error with recovery_required and owning schedules are disabled in one transaction; original session IDs remain inspectable. No historical record is deleted and no execution replay occurs. HaaS store interfaces are unchanged.
+
+### Manager project/workspace records
+
+Manager persistence adds Project and WorkspaceBinding records plus additive session binding fields.
+Project + initial workspace commit atomically; canonical-key uniqueness prevents duplicates. Legacy
+session migration is idempotent and does not rewrite transcripts or move files. Endpoint records
+store only token refs/fingerprints. Backup/restore includes these records but never endpoint secret
+values; rollback retains unknown additive tables rather than running a destructive down migration.

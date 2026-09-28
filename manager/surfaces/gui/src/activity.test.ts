@@ -8,6 +8,7 @@ import {
   latestHaasTaskOutcome,
   latestUserIntentKey,
   projectToolActivity,
+  settleActivityStatusForTerminalTurn,
 } from "./activity";
 import type { Item } from "./types";
 
@@ -26,6 +27,21 @@ const tool = (overrides: Partial<ToolItem> = {}): ToolItem => ({
 });
 
 describe("semantic activity projection", () => {
+  it.each([
+    ["running", "completed", "failed"],
+    ["pending", "failed", "failed"],
+    ["waiting", "cancelled", "cancelled"],
+    ["running", "paused", "running"],
+    ["completed", "completed", "succeeded"],
+  ] as const)(
+    "settles %s activity against %s parent as %s",
+    (activityStatus, turnPhase, expected) => {
+      expect(
+        settleActivityStatusForTerminalTurn(activityStatus, turnPhase),
+      ).toBe(expected);
+    },
+  );
+
   it("maps a completed command to a quiet successful activity without machine copy", () => {
     expect(
       projectToolActivity(

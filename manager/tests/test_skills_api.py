@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import io
+import itertools
 import zipfile
 
 import pytest
@@ -37,6 +38,21 @@ def _client(tmp_path, turns=None):
     provider = ScriptedProvider(turns)
     manager = SessionManager(workspace=tmp_path, provider=provider)
     return TestClient(create_app(manager)), manager, provider
+
+
+_COMMAND_IDS = itertools.count(1)
+
+
+def _user_message(text: str, **fields):
+    sequence = next(_COMMAND_IDS)
+    return {
+        "type": "user_message",
+        "clientCommandId": f"cmd-skill-{sequence}",
+        "idempotencyKey": f"idem-skill-{sequence}",
+        "delivery": "start_now",
+        "text": text,
+        **fields,
+    }
 
 
 def _zip_b64(entries: dict[str, str]) -> str:
@@ -302,7 +318,7 @@ def test_ws_force_run_frames_the_turn(tmp_path):
     client.post("/v1/skills", json=GREET)
     with client.websocket_connect("/ws/session/s1?agent=chat") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hello", "skill": "greet"})
+        ws.send_json(_user_message("hello", skill="greet"))
         events = []
         while True:
             evt = ws.receive_json()
@@ -328,19 +344,21 @@ def test_ws_force_run_unknown_and_muted_error_without_killing_socket(tmp_path):
     with client.websocket_connect("/ws/session/s1?agent=chat") as ws:
         assert ws.receive_json()["type"] == "ready"
         # unknown skill → visible rejection, no turn
-        ws.send_json({"type": "user_message", "text": "x", "skill": "ghost"})
+        ws.send_json(_user_message("x", skill="ghost"))
         evt = ws.receive_json()
-        assert evt["type"] == "input_rejected"
-        assert "not available" in evt["data"]["error"]
+        assert evt["type"] == "command_ack"
+        assert evt["data"]["status"] == "rejected"
+        assert "not available" in evt["data"]["error"]["safeMessage"]
         # muted skill → same rejection (§4.6 #15: no silent auto-unmute)
-        ws.send_json({"type": "user_message", "text": "x", "skill": "greet"})
+        ws.send_json(_user_message("x", skill="greet"))
         evt = ws.receive_json()
-        assert evt["type"] == "input_rejected"
+        assert evt["type"] == "command_ack"
+        assert evt["data"]["status"] == "rejected"
         # empty name → invalid frame
-        ws.send_json({"type": "user_message", "text": "x", "skill": "  "})
-        assert ws.receive_json()["type"] == "input_rejected"
+        ws.send_json(_user_message("x", skill="  "))
+        assert ws.receive_json()["data"]["status"] == "rejected"
         # socket still healthy: a normal message runs a turn
-        ws.send_json({"type": "user_message", "text": "plain"})
+        ws.send_json(_user_message("plain"))
         types, _ = _drain(ws)
         assert "turn_done" in types
     # No force-run framing ever reached the model (the catalog line in the system prompt

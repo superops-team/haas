@@ -5,7 +5,7 @@
 Status: Draft
 Last reviewed: 2026-09-26
 Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface, manager-conversation-interaction-v2
-Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Config](../config/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
+Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md), [Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Config](../config/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -231,7 +231,30 @@ Manager conversation surface 遵循 Manager Conversation Experience 中的产品
 `GET /v1/sessions/{sessionId}/conversation-commands/{idempotencyKey}` 返回原持久 receipt，
 或返回 `404 command_not_found`；它绝不返回 queued prompt 或 attachment payload。
 
+命令持久化属于私有执行数据。POSIX 下必须在 SQLite 打开前，以 0600 创建自有数据库，并将已有自有 database、WAL、SHM、rollback journal 收紧为 0600。新 sidecar 必须继承私有数据库权限；schema/payload 写入后才 chmod 不足以满足要求。新 store 目录使用 0700，不修改无关已有父目录权限或进程全局 umask。数据库/sidecar 为符号链接、非普通文件、多硬链接或其他用户所有时，在接触内容或权限前拒绝。权限准备失败直接中止打开，不静默降级。Windows 保留现有 managed-profile ACL 边界；POSIX mode 测试不表示验证了 Windows ACL。A1 验收使用隔离 umask-022 子进程、活动 WAL 连接、保留 receipt 的重开/迁移以及权限/文件类型失败用例。不改变公共协议或 SQLite schema；回滚保留私有文件权限。
+
+已接受的立即执行命令最初持久化为尚无 command checkpoint 的 `running` receipt。Manager 持久化带有同一 Manager turn id 的第一条 `turn_start` 后，将 receipt 标记为已 checkpoint。进程启动时，Manager 必须在服务客户端前核对所有未 checkpoint 的 running receipt。若持久 transcript 已包含同一 turn id（两次持久写之间崩溃），则只补记 checkpoint 并继续 canonical session 恢复；否则原子地把原 command 和 payload 转成一个暂停的 `restart_uncertain` 追问项，清除已失效 turn id，绝不自动启动。此后 receipt readback 返回 `queued`，snapshot 暴露同一 queue identity 与安全预览。用户可编辑/删除，或显式恢复暂停队列；显式恢复构成再次尝试该工作的授权。重复启动核对必须幂等，不得产生第二个 item。该变更只增加 Manager 私有 schema，不新增或改义 ADK/HaaS native event。已有 checkpoint 的 HaaS invocation 继续使用既有同 invocation readback/replay，不转成新工作。
+
 Manager 拥有持久化的 per-session follow-up queue。Queue mutation 必须 revisioned 且 idempotent；只有 queued item 可编辑、删除、排序或提升为 send-now。`queue_move` 携带 `targetPosition`；send-now 停止失败返回 `queue_send_now_failed`，同时保持 item queued 与 drain paused。Configuration barrier、workspace lock、running turn 或 recovering binding 可让 item 继续排队，但不得改变用户意图。HaaS deployment admission 与 workspace-lock queue 继续作为独立 backend fact，绝不投影成用户 follow-up item。
+
+`queue_send_now` 是一次幂等队列 mutation。第一次有效应用会将选定 queued item 移到队首，并解除已有 queue pause，使空闲 session 可以领取它。若前台工作仍在运行，Manager 在发出 Stop 前记录一次性 drain intent。Stop 失败或无法确认时，必须消费该 intent，以 `send_now_interrupt_failed` 原子暂停队列，并返回包含权威 items 与 `paused:true` 的 `queue_error`；旧 turn 随后完成也不能 drain。复用 mutation key 不得再次移动 item 或再次发送 Stop。
+
+`queue_resume` 同样是持久化幂等 mutation。它只修改 queue pause flag，绝不能把 `dispatching` item 退回可编辑 `queued`。第一次有效 resume 在 session 空闲时可领取下一项；复用 key 返回原结果，不再次领取或执行。同一 session 内 mutation key 跨 kind 复用必须拒绝。每条 queue update/error 都携带权威 pause 值，避免重连或失败后 GUI 错误认为 drain 已启用。
+
+GUI 在发送 `queue_edit` 前只持久化 session id、queue item id、expected revision、mutation idempotency key 和创建时间，不在 mutation store 复制 prompt 或附件内容。`queue_restored` 与确定性 `queue_error` 回显该 key。投递或回包丢失时，重连使用同一 mutation 重放；Manager 返回已持久化的原始结果，不要求已删除的 queue row 仍存在。GUI 只在收到对应结果后删除 pending mutation。因此，已接受 payload 不会因服务端提交后首个 socket 关闭而丢失。
+
+Manager 内部 conversation WebSocket 的 snapshot 携带 `queue` 与不含内容的
+`queuePaused`，后续 `queue_updated` 携带 `items` 与 `paused`。`queue_resume` 必须携带
+operation idempotency key，并且是恢复 paused drain 的唯一动作。Item 被领取后保持
+`dispatching`，直到对应 turn 终态。若 Manager 重启或领取后无法调度，该 item 回到
+`queued`、revision 递增，持久队列进入 `restart_uncertain`/`dispatch_uncertain` 暂停，
+不得盲目重放。失败或普通 Stop 会暂停剩余 item；成功完成正常 drain；显式 send-now
+可完成用户已经授权的 interrupt-and-drain 动作。
+
+`user_message.contextRefs` 只包含有界的 typed display reference（`skill`、`file`、
+`session`）。Manager 校验后以 `_managerContext` 持久化，保证 live/replay GUI 一致，
+并在每次 local provider 请求前剥离该 sidecar。它不暴露 provider framing，也不会把
+展示引用静默改写为模型输入。
 
 GUI 接收一个 normalized conversation snapshot 与有序 change，其中 Manager row、interaction、queue 与 command identity 保持稳定，并关联 canonical HaaS event、turn、invocation 与 tool identity。Local execution 投影等价 identity。UI component 不解析 HaaS 或 harness-native payload，也不根据相邻 display item 推断 turn 边界。
 Snapshot 必须以 product turn 为中心：一个 turn 只拥有一个 work projection 与最多一个 assistant response。Model-call identity 与 usage boundary 只作为 evidence correlation，绝不得生成 GUI row、progress phase、card、heading 或 count。
@@ -325,6 +348,16 @@ Event Log 脱敏规则，因此 signed URL 在列表中可以显示为不可用�
 可用。Manager 在 lifecycle 合并中携带 `evidenceRef` 与 expiry，但不解析 evidence body，
 也不把它持久化进 transcript。Terminal event 不得擦除 start 阶段得到的 evidence ref、
 command preview 或 working-directory hint。
+
+显式选择 Manager 本地执行时，所拥有的 `run_shell` 工具通过同一 GUI 展示字段提供真实
+tool-call id 与 `commandPreview`。预览复用 HaaS 共享有界脱敏器，限制单行及最多 512 UTF-8
+字节；GUI 不从 raw arguments 推导命令。Manager 会话回读只在复制的 tool-call 对象上增加
+等价 `_managerDisplay` 元数据，不修改 engine/provider 消息，也不持久化第二份 transcript。
+其他工具在其自有 schema 定义安全事实前保持通用展示。测试覆盖 live/replay identity、命令
+可见性、credential 脱敏、多行/超长输入、畸形及非命令输入。这是 Manager 内部展示元数据的
+加法扩展，不改变 ADK/HaaS event、执行策略或 evidence 访问权限。
+桌面 bundle 必须包含共享脱敏器。独立安装的 Manager 缺少可选 HaaS 包时仍须正常启动和执行
+工具；只省略命令预览，不提供不安全回退，也不能中断 turn。通过隔离 import 验证依赖缺失路径。
 
 `facts` 是只从 canonical plan、artifact、tool terminal 与 verification record 组装的可扩展 typed map。Manager 不得从 assistant prose 推导修改文件数、测试结果或风险状态；未知事实保持 null/缺失，不能猜测。收敛后的结果摘要使用同一组 facts 与 task terminal state，确保 live view、replay、automation history 与完成态密度不会互相矛盾。
 Source event id 与 dedupe key 保留在投影旁的 Manager 私有 checkpoint 中，不进入 GUI payload。
@@ -805,3 +838,17 @@ MCP、policy、凭据不变。存储增加恢复操作，不删历史。测试�
 会话界面挂载前的启动失败也显示恢复说明。
 
 原生结果通知仅接受 ok/error 并使用固定文字；系统拒绝时 Inbox 仍可查看。定时 HaaS 交互当前在原会话审批，旧 name/target grant 不转换为更宽 HaaS 权限。未知运行恢复采用暂停核对，不声称无缝续跑。备份恢复、自动保留期、万条历史虚拟化、可信发布清单/签名密钥迁移仍未实现，已在 Beads 跟踪。
+
+### Manager 对话展示身份
+
+Manager 历史可携带 `_managerTurnId` 与 `_managerRowId` sidecar；内部 WebSocket 以
+`turnId`、`rowId` 暴露相同身份。它们是内部展示元数据的加法，不改变 ADK/HaaS invocation
+身份；provider 出站编码器必须剥离两项。旧历史只在 GUI 持久化边界按 user/connector
+意图边界归一化，渲染层不使用模型阶段或工具邻接推断。
+
+### 项目工作台 endpoint binding
+
+项目工作台消费既有 endpoint registry，并在首次 acceptance 冻结 `endpointId`、URL fingerprint、
+workspace binding、harness/profile/policy revision 与 remote workspace ref。Remote selection 不得
+序列化 Manager local path 或 host mount。Remote endpoint 失败时保持结构化 blocked target，绝不
+fallback 到 `local_managed`。Project default 变化只影响 draft/new session，accepted session 保留原 binding。

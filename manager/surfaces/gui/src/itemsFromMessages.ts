@@ -1,3 +1,7 @@
+import {
+  legacySkillFromDisplay,
+  normalizeUserContext,
+} from "./conversation/model/context";
 // Maps the raw transcript from GET /v1/sessions/{id}/messages into the GUI's `Item[]` model.
 // Extracted from App.tsx so it can be unit-tested without standing up the whole app.
 //
@@ -35,11 +39,13 @@ export function itemsFromMessages(messages: ConversationMessage[]): Item[] {
     }
   }
   for (const m of messages || []) {
+    const firstItem = items.length;
+    if (m.role === "notice" && ["mode_notice", "mode_switch"].includes(m.kind)) continue;
     if (m.role === "user") {
       // Connector message → structured card; the framed `content` stays for the model, but display
       // renders from the source sidecar.
       if (m.source?.connector) {
-        items.push({ kind: "connector", source: m.source });
+        items.push({ kind: "connector", source: m.source, turnId: m._managerTurnId, rowId: m._managerRowId });
         continue;
       }
       const user = userItemFromContent(m.content);
@@ -48,7 +54,16 @@ export function itemsFromMessages(messages: ConversationMessage[]): Item[] {
       if (typeof m._display === "string" && m._display) user.text = m._display;
       // `ts` (unix seconds) is the server's canonical-message stamp; older sessions have none.
       if (typeof m.ts === "number") user.ts = m.ts;
-      if (user.text || user.attachments?.length) items.push(user);
+      const normalizedContext = normalizeUserContext(
+        user.text,
+        legacySkillFromDisplay(m._display),
+        user.attachments,
+        Array.isArray(m._managerContext) ? m._managerContext : [],
+      );
+      user.text = normalizedContext.text;
+      if (normalizedContext.context.length > 0)
+        user.context = normalizedContext.context;
+      if (user.text || user.attachments?.length || user.context?.length) items.push(user);
     } else if (m.role === "assistant") {
       const restoredActivities = Array.isArray(m._haas_activity) ? m._haas_activity : [];
       for (const activity of restoredActivities) {
@@ -78,10 +93,11 @@ export function itemsFromMessages(messages: ConversationMessage[]): Item[] {
           ...(m._haas_task_outcome?.phase ? { taskOutcome: m._haas_task_outcome } : {}),
         });
       }
-      if (m.content || m.reasoning || (Array.isArray(m._haas_model_stages) && m._haas_model_stages.length > 0))
+      if (m.content || m.reasoning || m.usage || (Array.isArray(m._haas_model_stages) && m._haas_model_stages.length > 0))
         items.push({
           kind: "assistant",
           text: m.content || "",
+          ...(m.usage ? { usage: m.usage } : {}),
           ...(typeof m.ts === "number" ? { ts: m.ts } : {}),
           ...(m.reasoning ? { reasoning: m.reasoning } : {}),
           ...(Array.isArray(m._haas_model_stages)
@@ -107,6 +123,8 @@ export function itemsFromMessages(messages: ConversationMessage[]): Item[] {
           id: tc.id,
           name: tc.function?.name,
           args,
+          ...(tc._managerDisplay?.activityKind === "command" ? { activityKind: "command" as const } : {}),
+          ...(typeof tc._managerDisplay?.commandPreview === "string" ? { commandPreview: tc._managerDisplay.commandPreview } : {}),
           status: denied ? "denied" : "ok",
           preview,
           ...(hidden ? { hidden } : {}),
@@ -145,13 +163,12 @@ export function itemsFromMessages(messages: ConversationMessage[]): Item[] {
                   : m.kind === "reviewer_paused"
                     ? // §8.4 breaker: auto-approve paused itself for the rest of the turn.
                       { kind: "notice", tone: "info", text: m.text || "Auto-approve paused for the rest of this turn." }
-                    : m.kind === "mode_notice"
-                      ? // The once-per-session Auto-Approve explainer, in place forever.
-                        { kind: "notice", tone: "info", title: (m as any).title || "Auto-approve is on.", text: m.text || "" }
-                      : m.kind === "mode_switch"
-                        ? { kind: "notice", tone: "info", text: m.text || "" }
                   : { kind: "notice", tone: "warn", text: "Error: " + (m.text || "unknown"), retriable: true },
       );
+    }
+    for (let index = firstItem; index < items.length; index += 1) {
+      if (typeof m._managerTurnId === "string") items[index].turnId = m._managerTurnId;
+      if (typeof m._managerRowId === "string") items[index].rowId = items[index].kind === "tool" ? `${m._managerRowId}:tool:${(items[index] as Extract<Item, { kind: "tool" }>).id}` : m._managerRowId;
     }
     // system messages are omitted; tool-result messages are folded into the tool row above
   }

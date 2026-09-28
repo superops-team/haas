@@ -259,6 +259,8 @@ def test_stop_skips_remaining_tool_calls(tmp_path):
         return [ev async for ev in engine.run("go")]
 
     events = asyncio.run(run())
+    finished_ids = [event.data.get("toolCallId") for event in events if event.type == EventType.TOOL_FINISHED]
+    assert finished_ids == ["c0", "c1"]
     assert events[-1].type == EventType.INTERRUPTED
     results = _tool_results(engine)
     assert len(results) == 2  # both calls answered — no orphans

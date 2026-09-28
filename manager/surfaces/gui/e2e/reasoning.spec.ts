@@ -4,7 +4,7 @@
 import { expect } from "@playwright/test";
 import { test } from "./fixtures";
 
-test("thinking streams live, then persists as a collapsed disclosure on the answer", async ({
+test("reasoning stays behind a stable user-controlled disclosure through completion", async ({
   page,
 }) => {
   await page.goto("/");
@@ -13,19 +13,22 @@ test("thinking streams live, then persists as a collapsed disclosure on the answ
   await box.fill("think hard about this");
   await box.press("Enter");
 
-  // Live phase: the Thinking… block is up while deltas tick in; expanding shows the trace.
-  await expect(page.getByText("Thinking…").first()).toBeVisible({ timeout: 10_000 });
-  await page.getByTestId("thinking-toggle").click();
-  await expect(page.getByTestId("thinking-body")).toContainText("Weighing options.");
+  // Live reasoning stays behind the turn's explicit work disclosure.
+  const work = page.getByTestId("work-summary");
+  await expect(work).toBeVisible({ timeout: 10_000 });
+  await work.click();
+  await page.getByRole("button", { name: "Reasoning", exact: true }).click();
+  await expect(page.locator(".reasoning-body")).toContainText(
+    "Weighing options.",
+  );
 
-  // Finalized: the answer bubble carries a collapsed "Thought process" disclosure.
-  await expect(page.getByText("Decision made.").first()).toBeVisible({ timeout: 10_000 });
-  await expect(page.getByText("Thinking…")).toHaveCount(0);
-  const toggle = page.getByTestId("thinking-toggle");
-  await expect(toggle).toHaveText(/Thought process/);
-  await expect(page.getByTestId("thinking-body")).toHaveCount(0); // collapsed by default
-  await toggle.click();
-  await expect(page.getByTestId("thinking-body")).toContainText(
+  // Finalized: the disclosure remains exactly where the user left it.
+  await expect(page.getByText("Decision made.").first()).toBeVisible({
+    timeout: 10_000,
+  });
+  const completedWork = page.getByTestId("work-summary");
+  await expect(completedWork).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".reasoning-body")).toContainText(
     "Weighing options. Comparing tradeoffs. Settling it.",
   );
 });

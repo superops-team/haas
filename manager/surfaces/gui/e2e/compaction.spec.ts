@@ -10,7 +10,9 @@ test("Settings: Context compaction card edits threshold, cap, and summarizer mod
   await page.goto("/");
   await page.getByTestId("account-row").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Context optimization", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Context optimization", exact: true })
+    .click();
 
   const card = page.getByTestId("compaction-card");
   await expect(card).toBeVisible();
@@ -24,7 +26,8 @@ test("Settings: Context compaction card edits threshold, cap, and summarizer mod
   // Threshold edits POST as a fraction, clamped to 10–95%.
   const [req] = await Promise.all([
     page.waitForRequest(
-      (r) => r.url().endsWith("/v1/settings/compaction") && r.method() === "POST",
+      (r) =>
+        r.url().endsWith("/v1/settings/compaction") && r.method() === "POST",
     ),
     card.getByTestId("compaction-threshold").fill("70"),
   ]);
@@ -32,7 +35,8 @@ test("Settings: Context compaction card edits threshold, cap, and summarizer mod
 
   const [req2] = await Promise.all([
     page.waitForRequest(
-      (r) => r.url().endsWith("/v1/settings/compaction") && r.method() === "POST",
+      (r) =>
+        r.url().endsWith("/v1/settings/compaction") && r.method() === "POST",
     ),
     card.getByTestId("compaction-cap").fill("100000"),
   ]);
@@ -41,7 +45,8 @@ test("Settings: Context compaction card edits threshold, cap, and summarizer mod
   // Summarizer pin: the picker offers the session-default plus the configured models.
   const [req3] = await Promise.all([
     page.waitForRequest(
-      (r) => r.url().endsWith("/v1/settings/compaction") && r.method() === "POST",
+      (r) =>
+        r.url().endsWith("/v1/settings/compaction") && r.method() === "POST",
     ),
     card.getByTestId("compaction-model").selectOption("gpt-4o-mini"),
   ]);
@@ -58,16 +63,16 @@ test("the compacted divider renders mid-session and the transcript stays intact"
   // An earlier exchange that must survive the compaction marker (transcript intact).
   await box.fill("remember the launch date");
   await box.press("Enter");
-  await expect(page.getByText("Echo: remember the launch date").first()).toBeVisible({
+  await expect(
+    page.getByText("Echo: remember the launch date").first(),
+  ).toBeVisible({
     timeout: 10_000,
   });
 
   await box.fill("compact the context");
   await box.press("Enter");
-  // The transient signal shows while the summarizer runs, then yields to the divider.
-  await expect(page.getByText("Compacting context…").first()).toBeVisible({
-    timeout: 10_000,
-  });
+  // Compaction is internal work; the primary timeline stays calm until the durable marker.
+  await expect(page.getByText("Compacting context…")).toHaveCount(0);
   await expect(
     page.getByText("Context compacted — earlier turns were summarized").first(),
   ).toBeVisible({ timeout: 10_000 });
@@ -76,5 +81,7 @@ test("the compacted divider renders mid-session and the transcript stays intact"
     page.getByText("Still on it — continuing where I left off.").first(),
   ).toBeVisible();
   // Outbound-only: everything before the divider is still on screen.
-  await expect(page.getByText("Echo: remember the launch date").first()).toBeVisible();
+  await expect(
+    page.getByText("Echo: remember the launch date").first(),
+  ).toBeVisible();
 });

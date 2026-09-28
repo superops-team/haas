@@ -5,7 +5,7 @@
 状态：Draft
 最近评审：2026-09-15
 Change ID：manager-openharness-no-login、manager-macos-dock-reopen、manager-macos-one-command-install
-相关规格：[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
+相关规格：[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件角色
 
@@ -110,3 +110,10 @@ Manager Product Identity 定义 HaaS 配套 manager 应用的对外产品身份�
 ### 自动化桌面通知
 
 原生 shell 根据 automation_run_finished 显示固定完成/失败通知，不传生成内容、prompt 或工具参数。命令仅接受封闭 outcome 枚举；系统通知权限拒绝不影响任务结果或持久 Inbox。自动测试验证命令参数和桥接；系统通知实际展示依赖用户 OS 权限。
+
+### 原生项目工作台 window chrome
+
+Packaged desktop 顶部 chrome 在非交互区域提供平台原生 drag 与双击 maximize/restore；button、
+link、input、popover 与可选 conversation content 都是 no-drag。Sidebar 展开/折叠、zoom、
+maximize、restore、fullscreen、Dock/tray reopen 与 multi-display bounds restore 保持同一个
+window、WebView 与 sidecar。Browser geometry 不能作为充分证据，必须做 packaged native interaction。

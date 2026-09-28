@@ -218,6 +218,8 @@ Process-event rules:
   command output complete through 8 MiB (8,388,608 UTF-8 bytes); it MUST NOT apply a smaller
   intermediate accumulator limit. The stdio frame bound separately includes JSON overhead. Public events
   carry only a safe action summary, bounded redacted preview and opaque evidence reference.
+  Before redaction, occurrences of the command's authorized working directory in output are
+  converted to the semantic `workspace/` prefix; other absolute host paths remain redacted.
   Codex 0.152.1 combines turn-command stdout and stderr in `aggregatedOutput` and its
   `item/commandExecution/outputDelta` has no stream discriminator; the adapter labels this
   honestly as combined command output and MUST NOT guess a stdout/stderr split.

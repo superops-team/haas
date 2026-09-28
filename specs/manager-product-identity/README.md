@@ -5,7 +5,7 @@
 Status: Draft
 Last reviewed: 2026-09-15
 Change ID: manager-openharness-no-login, manager-macos-dock-reopen, manager-macos-one-command-install
-Related specs: [Manager Delegation](../manager-delegation/README.md), [Security Boundary](../security-boundary/README.md)
+Related specs: [Manager Delegation](../manager-delegation/README.md), [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
 
@@ -140,3 +140,11 @@ Out of scope:
 ### Automation desktop notifications
 
 The native shell may show a fixed completion/failure notification from an automation_run_finished event. No generated content, prompt or tool arguments cross the notification command. The command accepts only the closed outcome enum; OS notification denial does not affect task success or durable Inbox delivery. Automated tests verify command input/bridge behavior; native notification delivery requires user OS permission.
+
+### Native project-workbench window chrome
+
+The packaged desktop top chrome provides platform-native dragging and double-click
+maximize/restore over non-interactive regions. Buttons, links, inputs, popovers and selectable
+conversation content are no-drag. Sidebar collapse/expand, zoom, maximize, restore, fullscreen,
+Dock/tray reopen and multi-display bounds restoration preserve one window, WebView and sidecar.
+Browser geometry is not sufficient evidence; packaged native interaction is required.

@@ -5,7 +5,7 @@
 Status: Draft
 Last reviewed: 2026-09-26
 Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface, manager-conversation-interaction-v2
-Related specs: [HaaS Protocol](../haas-protocol/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager Conversation Experience](../manager-conversation-experience/README.md), [Harness Profile](../harness-profile/README.md), [Container Runtime](../container-runtime/README.md), [Config](../config/README.md), [Security Boundary](../security-boundary/README.md)
+Related specs: [HaaS Protocol](../haas-protocol/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager Conversation Experience](../manager-conversation-experience/README.md), [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md), [Harness Profile](../harness-profile/README.md), [Container Runtime](../container-runtime/README.md), [Config](../config/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
 
@@ -251,6 +251,32 @@ The content-free Manager readback
 `GET /v1/sessions/{sessionId}/conversation-commands/{idempotencyKey}` returns the original durable
 receipt or `404 command_not_found`; it never returns the queued prompt or attachment payload.
 
+Command persistence is private execution data. Before SQLite opens the store on POSIX, create
+the owned database with mode 0600 and tighten any owned existing database, WAL, SHM, or rollback
+journal to 0600. SQLite must inherit private database permissions when creating new sidecars;
+chmod after schema/payload writes is insufficient. New store directories use 0700, without
+changing unrelated existing parent-directory permissions or the process-wide umask. Reject
+symlink, non-regular, multiply linked, or foreign-owned database/sidecar files before touching
+their contents or permissions. Permission-preparation failure aborts store opening, not silent
+fallback. Windows retains the existing managed-profile ACL boundary; POSIX mode tests do not
+claim Windows ACL verification. A1 acceptance uses an isolated umask-022 subprocess, a live WAL
+connection, reopen/migration with retained receipts, and permission/type failure cases.
+This changes no public protocol or SQLite schema; rollback retains private file permissions.
+
+An accepted immediate command is initially a durable `running` receipt with no command
+checkpoint. After Manager persists the first `turn_start` carrying the same Manager turn id, it
+marks that receipt checkpointed. At process startup, Manager reconciles every uncheckpointed
+running receipt before serving clients. If the persisted transcript already contains the same
+turn id (a crash between the two durable writes), Manager marks the receipt checkpointed and
+keeps the canonical session recovery path. Otherwise it atomically converts the original command
+and payload into one paused `restart_uncertain` follow-up item, clears its obsolete turn id, and
+never starts it automatically. Receipt readback then reports `queued`; the snapshot exposes the
+same queue identity and safe preview. The user may edit/delete it or explicitly resume the paused
+queue, which is new authorization to attempt the work. Repeated startup reconciliation is
+idempotent and cannot create a second item. This is a Manager-private additive schema migration;
+it does not add or reinterpret an ADK or HaaS native event. Checkpointed HaaS invocations continue
+through their existing same-invocation readback/replay path and are not converted to new work.
+
 Manager owns the durable per-session follow-up queue. Queue mutations are revisioned and
 idempotent; only queued items can be edited, deleted, reordered, or promoted to send-now.
 `queue_move` carries `targetPosition`; send-now stop failure returns `queue_send_now_failed` while
@@ -258,6 +284,43 @@ preserving the queued item and paused drain policy. A
 configuration barrier, workspace lock, running turn, or recovering binding may keep an item queued
 without changing its user intent. HaaS deployment admission and workspace-lock queues remain
 separate backend facts and are never projected as user follow-up items.
+
+`queue_send_now` is one idempotent queue mutation. Its first accepted application moves the
+selected queued item to the head and clears a pre-existing queue pause so an idle session can
+claim it. If foreground work is active, Manager records the one-shot drain intent before sending
+Stop. A failed/unconfirmed Stop consumes that intent, atomically pauses the queue with
+`send_now_interrupt_failed`, and returns `queue_error` with the authoritative items and
+`paused:true`; completion of the old turn cannot drain it. Reusing the mutation key never moves
+the item or sends Stop a second time.
+
+`queue_resume` is also a persisted idempotent mutation. It only changes the queue pause flag; it
+never moves a `dispatching` item back to editable `queued` state. The first effective resume may
+claim the next queued item when the session is idle. Reusing its key returns the original result
+without another claim or execution. Within a session, a key reused across mutation kinds is rejected.
+Every queue update/error carries the authoritative pause value so reconnect and failure cannot
+leave the GUI assuming drain is enabled.
+
+Before sending `queue_edit`, the GUI persists only its session id, queue item id, expected
+revision, mutation idempotency key, and creation time. It does not duplicate prompt or attachment
+content in the mutation store. `queue_restored` and definitive `queue_error` echo that key.
+If delivery or the reply is lost, reconnect replays the same edit mutation; Manager returns the
+persisted original result without requiring the removed queue row. The GUI deletes the pending
+mutation only after receiving either correlated result. Thus an accepted payload is not lost just
+because the first socket closed after the server commit.
+
+The internal Manager conversation WebSocket snapshot carries `queue` plus content-free
+`queuePaused`; later `queue_updated` events carry `items` and `paused`. `queue_resume` requires an
+operation idempotency key and is the only action that restarts a paused drain. A claimed item stays
+`dispatching` until its turn becomes terminal. If Manager restarts or cannot schedule after claim,
+that item returns to `queued`, its revision advances, and the durable queue enters
+`restart_uncertain`/`dispatch_uncertain` pause instead of replaying. Failure or ordinary Stop pauses
+remaining items; successful completion drains normally, while explicit send-now may complete its
+already-authorized interrupt-and-drain action.
+
+`user_message.contextRefs` contains bounded typed display references (`skill`, `file`, `session`).
+Manager validates and persists them as `_managerContext` for live/replayed GUI parity, and strips
+that sidecar before every local provider request. It does not expose provider framing or silently
+turn a display reference into model input.
 
 The GUI receives one normalized conversation snapshot plus ordered changes with stable Manager row,
 interaction, queue, and command identities correlated to canonical HaaS event, turn, invocation,
@@ -392,6 +455,18 @@ redaction, so a signed URL can appear as unavailable in the row while remaining 
 the transient detail. Manager carries `evidenceRef` and its expiry through lifecycle merging
 but never resolves or persists the evidence body in the transcript. A terminal event cannot
 erase an evidence reference, command preview or working-directory hint learned at start.
+
+For explicitly selected Manager-local execution, the owned `run_shell` tool emits the actual
+tool-call id and a `commandPreview` through the same GUI display fields. The preview uses the shared
+HaaS bounded redactor (one line, at most 512 UTF-8 bytes); the GUI never derives it from raw arguments.
+The desktop bundle includes this redactor. Standalone Manager installations without the optional
+HaaS package must still start and execute tools; they omit command previews instead of inventing
+an unsafe fallback or failing the turn. Verify this dependency-absence path with isolated imports.
+Manager session readback adds equivalent `_managerDisplay` metadata to copied tool-call objects,
+without mutating engine/provider messages or storing another transcript. Other tools stay generic
+until their owned schema defines safe facts. Tests cover live/replay identity, command visibility,
+credential masking, multi-line/oversized input, and malformed/non-command inputs. This is additive
+Manager-local display metadata, not a change to ADK/HaaS events, execution policy, or evidence access.
 
 `facts` is an additive, typed map assembled only from canonical plan, artifact, tool
 terminal, and verification records. Manager MUST NOT derive a changed-file count, test
@@ -1002,3 +1077,19 @@ Desktop WebSocket reconnect is bounded and does not resend user messages. Startu
 show recovery guidance even before the normal conversation shell mounts.
 
 Native result notifications accept only ok/error and use fixed text; OS delivery denial leaves Inbox as fallback. Scheduled HaaS interactions currently require approval in the original conversation: legacy name/target grants are not translated into broader HaaS permissions. Recovery deliberately freezes unknown runs rather than claiming seamless execution resume. Backup/restore, automatic retention, 10k transcript windowing and trusted release manifest/key migration remain unimplemented product work, tracked in Beads.
+
+### Manager conversation display identities
+
+The Manager transcript may carry `_managerTurnId` and `_managerRowId` sidecars. Manager-local
+WebSocket envelopes expose the same identities as `turnId` and `rowId`; these are additive internal
+display metadata and never change ADK/HaaS invocation identity. The provider outbound encoder
+strips both sidecars. Older history is normalized once at the GUI persistence boundary using
+user/connector intent boundaries, with no model-stage or tool-adjacency inference in rendering.
+
+### Project workbench endpoint binding
+
+The project workbench consumes the existing endpoint registry and freezes `endpointId`, URL
+fingerprint, workspace binding, harness/profile/policy revisions, and remote workspace reference
+at first acceptance. Remote selection never serializes a Manager local path or host mount. A failed
+remote endpoint remains a structured blocked target and MUST NOT fall back to `local_managed`.
+Changing project defaults affects drafts/new sessions only; accepted sessions retain their binding.

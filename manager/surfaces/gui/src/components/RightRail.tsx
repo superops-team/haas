@@ -33,7 +33,6 @@ interface Props {
   active: boolean;
   sessionId: string;
   refreshKey: number;
-  toolNames: string[];
   todo: TodoItem[];
   running: boolean;
   // Fires when a full artifact preview opens/closes, so the app can auto-collapse the left nav
@@ -73,7 +72,6 @@ export function RightRail({
   active,
   sessionId,
   refreshKey,
-  toolNames,
   todo,
   running,
   onPreviewChange,
@@ -187,7 +185,7 @@ export function RightRail({
           {/* Leads carry no Progress panel — the board IS the lead's progress surface. */}
           {!isLead && (
             <RailSection title={t("rail.progress_title")} open={open.progress} onToggle={() => setOpen({ ...open, progress: !open.progress })}>
-              <ProgressSummary running={running} toolNames={toolNames} todo={todo} />
+              <ProgressSummary todo={todo} />
             </RailSection>
           )}
 
@@ -404,7 +402,7 @@ function boardChip(board: Board, t: TFunction): { text: string; attention: boole
   return { text: active ? t("rail.board_chip_active", { count: active }) : "", attention: false };
 }
 
-function ProgressSummary({ running, toolNames, todo }: { running: boolean; toolNames: string[]; todo: TodoItem[] }) {
+function ProgressSummary({ todo }: { todo: TodoItem[] }) {
   const { t } = useTranslation();
   if (todo.length) {
     return (
@@ -415,18 +413,6 @@ function ProgressSummary({ running, toolNames, todo }: { running: boolean; toolN
             <span>{item.content}</span>
           </div>
         ))}
-        {running && (
-          <div className="rail-muted">
-            {toolNames.length ? t("rail.tool_calls", { count: toolNames.length }) : t("rail.working")}
-          </div>
-        )}
-      </div>
-    );
-  }
-  if (running) {
-    return (
-      <div className="rail-muted">
-        {toolNames.length ? t("rail.working_task_with_tools", { count: toolNames.length }) : t("rail.working_task")}
       </div>
     );
   }

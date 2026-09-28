@@ -5,6 +5,13 @@ import { describe, expect, it } from "vitest";
 import { itemsFromMessages } from "./itemsFromMessages";
 
 describe("itemsFromMessages _display sidecar", () => {
+  it("restores safe local command display without reading raw arguments into the preview", () => {
+    const items = itemsFromMessages([{ role: "assistant", tool_calls: [{
+      id: "local-command", function: { name: "run_shell", arguments: '{"command":"private input"}' },
+      _managerDisplay: { activityKind: "command", commandPreview: "git status --short" },
+    }] }]);
+    expect(items[0]).toMatchObject({ id: "local-command", activityKind: "command", commandPreview: "git status --short" });
+  });
   it("attaches hidden counts to the matching tool item", () => {
     const items = itemsFromMessages([
       { role: "user", content: "check my mail" },

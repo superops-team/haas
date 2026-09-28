@@ -75,3 +75,123 @@ test("composer is three controls (+ attach · Mode · send); folder and branch c
   await expect(page.locator(".wschip")).toHaveCount(0);
   await expect(page.locator(".wsbranch")).toHaveCount(0);
 });
+
+for (const theme of ["light", "dark"] as const) {
+  test(`global search uses a rounded neutral focus shell in ${theme}`, async ({
+    page,
+  }) => {
+    await page.addInitScript(
+      (selectedTheme) => localStorage.setItem("openwork-theme", selectedTheme),
+      theme,
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    const input = page.getByPlaceholder("Search chats");
+    const shell = page.locator(".search-modal-input-shell");
+    await expect(input).toBeFocused();
+    await expect(shell).toHaveCSS("border-radius", "8px");
+    await expect(input).toHaveCSS("outline-style", "none");
+    const colors = await shell.evaluate((element) => {
+      const root = getComputedStyle(document.documentElement);
+      const resolve = (token: string) => {
+        const probe = document.createElement("span");
+        probe.style.color = root.getPropertyValue(token).trim();
+        document.body.appendChild(probe);
+        const value = getComputedStyle(probe).color;
+        probe.remove();
+        return value;
+      };
+      return {
+        actual: getComputedStyle(element).borderColor,
+        expected: resolve("--color-composer-focus-border"),
+        accent: resolve("--color-accent"),
+      };
+    });
+    expect(colors.actual).toBe(colors.expected);
+    expect(colors.actual).not.toBe(colors.accent);
+    await expect(page.locator(".search-result.is-active")).toHaveCSS(
+      "background-color",
+      theme === "light" ? "rgb(244, 246, 248)" : "rgb(21, 23, 26)",
+    );
+  });
+}
+
+test("macOS overlay sidebar controls share the traffic-light centerline", async ({
+  page,
+}) => {
+  await page.goto("/?overlay=1");
+  const traffic = page.locator(".sim-traffic-lights span").first();
+  const centerY = async (selector: typeof traffic) => {
+    const box = await selector.boundingBox();
+    expect(box).not.toBeNull();
+    return box!.y + box!.height / 2;
+  };
+  const trafficCenter = await centerY(traffic);
+  // AppKit keeps the native button's internal y-origin while tao changes its
+  // titlebar container inset. With the pinned stack, y=24 yields top-center 22.
+  expect(trafficCenter).toBe(22);
+  expect(
+    Math.abs(trafficCenter - (await centerY(page.locator(".nav-pin-btn")))),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      trafficCenter - (await centerY(page.locator(".sidebar .brand-wordmark"))),
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(trafficCenter - (await centerY(page.locator(".main-title")))),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      trafficCenter -
+        (await centerY(
+          page.locator(".main-topbar-actions .topbar-icon-btn").last(),
+        )),
+    ),
+  ).toBeLessThanOrEqual(1);
+
+  await page.keyboard.press("Meta+b");
+  const reveal = page
+    .getByTestId("topbar-cluster")
+    .getByRole("button", { name: "Show sidebar" });
+  await expect(reveal).toBeVisible();
+  expect(Math.abs(trafficCenter - (await centerY(reveal)))).toBeLessThanOrEqual(1);
+});
+
+test("desktop titlebar double click toggles maximize once and controls stay no-drag", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as any).__OCW_PLATFORM__ = "macos";
+    (window as any).__TAURI_CALLS__ = [];
+    (window as any).__TAURI__ = {
+      core: {
+        invoke: async (command: string) => {
+          (window as any).__TAURI_CALLS__.push(command);
+          return command === "toggle_window_maximize";
+        },
+      },
+    };
+  });
+  await page.goto("/");
+
+  await page.locator(".main-title").dblclick();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as any).__TAURI_CALLS__.filter(
+          (command: string) => command === "toggle_window_maximize",
+        ).length,
+    ),
+  ).toBe(1);
+
+  await page.getByRole("button", { name: "Hide side panel" }).dblclick();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as any).__TAURI_CALLS__.filter(
+          (command: string) => command === "toggle_window_maximize",
+        ).length,
+    ),
+  ).toBe(1);
+});

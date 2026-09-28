@@ -2,10 +2,10 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: Reviewed; post-implementation UI correction defined; implementation pending
-Last reviewed: 2026-09-26
+Status: MCX-001 through MCX-047 implemented; automated and packaged-local acceptance passed, owner visual acceptance pending
+Last reviewed: 2026-09-28
 Change ID: `manager-conversation-interaction-v2`
-Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager GUI Performance](../manager-gui-performance/README.md), [Event Log & SSE](../event-log-sse/README.md), [Session Runtime](../session-runtime/README.md), [Manager Product Identity](../manager-product-identity/README.md), [Security Boundary](../security-boundary/README.md)
+Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager GUI Performance](../manager-gui-performance/README.md), [Event Log & SSE](../event-log-sse/README.md), [Session Runtime](../session-runtime/README.md), [Manager Product Identity](../manager-product-identity/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role and Product Priority
 
@@ -27,6 +27,31 @@ The component priority is fixed and normative:
 Later items MUST NOT weaken earlier items. A visually improved flow that can lose a draft, duplicate
 a turn, misstate task progress, hide a recovery action, or regress long-session rendering does not
 satisfy this specification.
+
+### 1.1 Shared design authority
+
+The [ZCode alignment delivery contract](ALIGNMENT.md) defines the full project scope, matched
+comparison method, ordered slices, coverage, and native acceptance. It supplements rather than
+replaces the requirements below.
+
+[DESIGN.md](../../DESIGN.md) is the shared entry point for Manager UI product semantics,
+component responsibilities, visual hierarchy, tokens, and interaction review. It distills the
+ZCode reference into HaaS rules and maps them to this specification's acceptance cases.
+This component spec remains authoritative for lifecycle, data, command, compatibility, and
+acceptance contracts; `manager/surfaces/gui/src/styles.css` owns runtime token values.
+GUI contributors MUST read DESIGN.md and the affected component specs before editing UI.
+Changes to a shared design rule update both language variants and the affected spec before code.
+
+Design compliance requires reusable component defaults, focused behavior checks, and visual
+review of affected states in both themes. A document or green unit suite alone is not proof
+of compliance. Do not claim repository-wide token enforcement or native validation without
+corresponding evidence. Existing acceptance cases remain release requirements; this design
+entry point does not declare their implementation complete.
+
+Component impact: this governance and control styling delta affects Manager presentation only.
+It introduces no ADK or HaaS native API, event, state transition, persistence, permission,
+adapter, proxy, MCP/skill, container, or observability change. Diagnostic details remain subject
+to the existing authorized-evidence and redaction contracts.
 
 ## 2. Evidence and Approved Direction
 
@@ -105,6 +130,10 @@ The corrective product decision is normative:
   active interaction, and one stable assistant-response surface;
 - assistant content occupies that response surface from its first classified user-visible delta
   until terminal sealing; word count, elapsed time, adjacency, or tool arrival MUST NOT relocate it;
+- repeated or multi-model-call `assistant_message` facts for the same product turn update that
+  response owner instead of appending another assistant row. An authoritative non-empty message
+  replaces provisional text; a metadata-only message preserves the current text while updating
+  usage, reasoning, evidence, and terminal state;
 - timeline state, header state, loading treatment, and Composer controls consume one canonical
   presentation selector; and
 - internal reasoning/commentary and absent accounting data are never promoted to titles, warnings,
@@ -250,9 +279,15 @@ rail, and capsule never render the same current-turn step list concurrently.
   the Status Panel may expand inline to at most 320 px.
 - From 760 through 1199 CSS px, Status Panel defaults to a compact capsule and opens as an anchored
   overlay or non-modal drawer without covering Composer or Interaction Dock.
-- Below 760 CSS px, navigation and secondary status become drawers. Composer keeps attachment,
-  primary mode indicator, and Send/Stop visible; model, usage, and secondary actions move into one
-  labeled configuration menu.
+- Below 760 CSS px, navigation and secondary status become drawers. Composer keeps attachment and
+  the primary mode indicator visible. Model, microphone, and Send/Stop remain an inseparable
+  trailing control cluster at every supported width; usage and other secondary actions yield or
+  move before any member of that cluster disappears.
+- The trailing cluster order is always `model -> microphone -> Send/Stop`, with one compact spacing
+  token between peers and no wrapping. The model control is the only flexible member: it uses
+  `min-width: 0` and trailing ellipsis for long localized/model labels. Microphone and Send/Stop
+  retain fixed hit targets. Recording may replace the middle content area with a waveform, but the
+  model, microphone/record-stop, and lifecycle action remain visible and adjacent.
 - At 320 CSS px and 200% zoom, no required content or action is clipped, overlapped, or reachable
   only past an unhinted scroll edge.
 - Breakpoints are container-based where the available chat width can differ from window width.
@@ -415,7 +450,19 @@ interface ConversationDraftRecord {
   editorState?: string;
   attachmentRefs: string[];
   contextRefs: string[];
+  context?: ContextReference[];
+  skill?: { name: string; description: string; scope: "global" | "project"; enabled: boolean };
+  model?: string;
+  mode?: string;
   updatedAtMs: number;
+}
+
+interface ContextReference {
+  kind: "skill" | "file" | "session";
+  id: string;
+  label: string;
+  path?: string;
+  unavailable?: boolean;
 }
 
 interface FollowUpQueueItem {
@@ -423,8 +470,7 @@ interface FollowUpQueueItem {
   clientCommandId: string;
   position: number;
   state: "queued" | "dispatching" | "running";
-  submissionRef: string;
-  requestedDelivery: "enqueue" | "interrupt_then_start";
+  requestedDelivery: "start_now" | "enqueue" | "interrupt_then_start";
   safePreview: string;
   attachmentCount: number;
   contextCount: number;
@@ -441,6 +487,9 @@ HaaS canonical `eventId`, `sequenceNumber`, `sessionId`, `turnId`, `invocationId
 remain authoritative. Manager-local execution must project equivalent identities without exposing
 runtime-native details. Unknown events increment a content-free diagnostic and remain invisible;
 they never become assistant output or guessed success.
+
+
+Manager persists `_managerTurnId` and `_managerRowId` as display-only message sidecars and projects them as `turnId`/`rowId` on its internal WebSocket. These fields never enter model input. The single history migration adapter assigns deterministic identities to older records at durable user/connector intent boundaries. Model-call boundaries never allocate product turns. The last completed turn stays in the live-tail slot until a subsequent turn starts, preserving its response DOM during sealing.
 
 ### 6.3 Projection update rules
 
@@ -459,6 +508,17 @@ they never become assistant output or guessed success.
   MUST NOT append primary timeline rows or toggle disclosure.
 - One started work item receives at most one terminal state.
 - Terminal state cannot return to running without a new `turnId`/`invocationId`.
+- A terminal parent turn is authoritative over incomplete child snapshots during live sealing and
+  historical replay. A `running`, `pending`, or `waiting` activity without its own terminal event
+  normalizes to failed for completed/failed/incomplete turns, with the existing safe missing-event
+  reason, or to cancelled for a cancelled turn; completion never fabricates tool success. A stale
+  running model stage normalizes to completed only when the parent completed, otherwise to the
+  parent's failed/cancelled terminal state. Persisted source evidence remains unchanged, and
+  non-terminal/paused turns retain their actual child state.
+- A reconnect `ready` snapshot with `running=false` and idle/cancelled execution control MUST NOT
+  revive a terminal transcript merely because an older persisted task outcome still says running.
+  After history loads, its terminal outcome wins regardless of ready/history arrival order. Only
+  `running=true`, an active non-idle control state, or a new turn identity may reopen execution.
 - Pending interactions are restored before Composer enables conflicting commands.
 - Reconciliation replaces uncertain derived state only with an authoritative snapshot or event
   page; it never resubmits the original user command automatically.
@@ -491,6 +551,17 @@ The selector enforces these invariants:
 - an active interaction owns the primary action and suppresses ordinary loading duplication;
 - socket disconnection alone cannot change a terminal turn back to running; and
 - phase changes update all consuming surfaces in the same React commit.
+
+Composer lifecycle controls use a quiet toolbar treatment (MCX-031/015): Pause is a neutral
+text action and Stop is a 32 px icon button with a square glyph, localized accessible name,
+and tooltip. Neither has a resting border, filled accent/danger background, glow, or spinner.
+Continue and End task use the same compact text-control family in the paused state; permanent
+termination remains explicitly labelled. Processing/transition labels are non-interactive
+secondary text. Hover adds only a neutral surface, while keyboard focus remains visible.
+Reuse the canonical selector, handlers, capability gates and disconnected/transition disabling;
+this changes no lifecycle semantics. Verify callbacks and running/paused/transition controls,
+plus browser visibility and focus at 390/1440 px in both themes. No public API, event, persistence,
+permission, adapter, container, or observability component is affected.
 
 ### 6.5 Live-tail lifecycle
 
@@ -665,6 +736,11 @@ above the answer without replacing either. A live update cannot automatically re
 that the user closed or close one the user opened. The completed state may auto-collapse only a
 never-touched disclosure.
 
+Expanded work preserves canonical occurrence order. Reasoning summaries and tool activities are
+peer work segments in that sequence (`reasoning -> tool -> reasoning` when that is what happened),
+not a permanent reasoning parent with tools nested below it. Each reasoning segment owns its own
+disclosure state. Model-call cards and ordinals remain absent from the primary timeline.
+
 ### 8.2 Activity summaries and evidence
 
 - The summary title prioritizes an explicit localized product action, safe tool/object summary,
@@ -679,14 +755,33 @@ never-touched disclosure.
   motion.
 - Activity rows show status, safe title, optional key result, and duration. Raw arguments never
   appear by default.
-- Selecting a row opens the existing secure evidence path in an Inspector. Narrow layouts use a
-  non-modal bottom drawer that does not cover Composer or Interaction Dock.
+- Selecting an activity row toggles one inline detail disclosure immediately below that row. It
+  uses the existing secure evidence path and preserves focus/scroll context; it MUST NOT open a
+  right-side Inspector or bottom drawer. Model-call evidence follows the same inline disclosure
+  rule when explicitly requested.
+- Expanded work rows retain the backend-provided safe command preview or object summary, so
+  multiple commands can be distinguished. Inspector shows that preview immediately, including
+  while evidence loads or is absent, expired, or unavailable. Complete commands still come only
+  from authorized evidence; raw tool arguments are never serialized as a fallback. Inspector
+  selection follows the stable activity id, so status, output, and late evidence references update
+  without closing/reopening. MCX-013 regression covers preview-only, evidence expiry/failure, and
+  running-to-terminal updates while details stay open; implement projection selection and preview
+  rendering before refreshing browser baselines. The explicit local-engine path supplies the same
+  safe command preview and stable tool identity through the Manager display boundary described in
+  the sidecar spec. HaaS/ADK, tool execution permissions, and persistence formats remain unchanged.
 
-Reasoning is one semantic disclosure per turn, not one surface per model call. While collapsed and
-streaming, it may show one sanitized single-line summary. User expansion takes precedence over
-automatic behavior. On completion it auto-collapses only if the user never changed it. Heavy
-reasoning detail may remain mounted for at most 300 ms to complete a height transition, then
-unmounts; reduced-motion mode unmounts immediately.
+Public activity previews do not expose absolute host paths. When command output contains the
+owning command's authorized working directory, the adapter substitutes `workspace/` plus a safe
+relative suffix before credential/URL/path redaction. Thus `pwd` at the workspace root displays
+`workspace/`, while paths outside that root remain `[REDACTED_PATH]`. Exact paths remain available
+only through scoped, unexpired execution evidence.
+
+Reasoning is expressed as chronological peer segments inside one turn work disclosure, not as a
+parent surface or model-call card. While collapsed and streaming, a segment may show one sanitized
+single-line summary. Each segment's user expansion takes precedence over automatic behavior. On
+completion it auto-collapses only if the user never changed it. Heavy reasoning detail may remain
+mounted for at most 300 ms to complete a height transition, then unmounts; reduced-motion mode
+unmounts immediately.
 
 Tool work uses a shared `ToolActivity` contract with header, safe input summary, bounded result,
 status, duration, and evidence action. Only the active tool or first actionable failure may default
@@ -916,7 +1011,13 @@ tokens, or a layout shift that changes the reading anchor.
 - Normal text below 18 pt passes 4.5:1; large text passes 3:1; focus and non-text UI indicators pass
   3:1 against adjacent colors.
 - All interactive elements use native semantics where available and a visible 2 px minimum
-  `:focus-visible` indicator.
+  `:focus-visible` indicator. The text Composer uses its enclosing 1 px neutral focus border
+  plus the native caret instead; its controls retain individual keyboard focus indicators.
+  Composer focus must not add a brand-colored ring, glow, background tint, or shadow. Use one
+  shared semantic border token with explicit light/dark values and at least 3:1 contrast against
+  adjacent surfaces; focus must not move the layout. MCX-015 visual checks cover idle/editing
+  states and keyboard navigation at 390/1440 px in both themes. This is a presentation-only
+  correction with no change to input delivery, persistence, permissions, events, or public APIs.
 - Controls have a minimum 24×24 CSS px target and aim for 40×40 on desktop where density permits.
 - State is never communicated by color or motion alone.
 - Dynamic status announcements use one stable polite live region and publish only meaningful phase
@@ -1080,6 +1181,14 @@ the primary timeline.
 | MCX-037 | P1 | Narrow work layout | Long and pseudo-localized command/title/metadata at 320/390 px and 200% zoom wraps within the 72ch conversation measure without a fixed metadata column, clipped action, or card-height explosion |
 | MCX-038 | P0 | Live-tail geometry | Reading older content during 100 deltas, tool updates, and completion moves the semantic anchor by at most 2 CSS px until Jump to latest |
 | MCX-039 | P0 | Dynamic accessibility owner | One polite live region announces meaningful phase changes; token, usage, stage, and timer updates cause no duplicate announcement |
+| MCX-040 | P0 | Assistant response idempotency | Two assistant-message facts for one turn, including different transport row ids or a replay, render one response owner and one copy of authoritative text; reload matches live output |
+| MCX-041 | P0 | Chronological work segments | A reasoning-tool-reasoning fixture renders three peer rows in canonical order, with independent disclosures and no model-call or reasoning-parent container |
+| MCX-042 | P0 | Inline safe activity detail | Clicking a command row expands detail directly below it without opening a side/bottom Inspector; workspace-owned paths use `workspace/`, outside host paths remain redacted, and expired evidence retains the safe command/preview |
+| MCX-043 | P1 | Search overlay focus | Global search uses a rounded semantic input shell and neutral focus border in both themes; no inner rectangular brand outline or brand-filled active row appears |
+| MCX-044 | P1 | macOS titlebar alignment | In overlay mode, native traffic lights and sidebar/panel collapse or reveal controls share the center derived from the native AppKit button frame and differ by at most 1 CSS px before and after sidebar collapse. `traffic_light_position(..., y)` is a container inset, not a center or CSS top; with the pinned Tauri/tao stack, `y=24` yields a 22 px top-center and the 12 px browser simulator uses `top:16px`. Packaged macOS visual evidence is required because browser-only geometry cannot close this contract |
+| MCX-045 | P0 | Composer trailing cluster | At 320/390/760/1440 px in both themes, model, microphone, and Send/Stop remain visible in that order, share one unwrapped trailing cluster with peer gaps <=8 CSS px, and keep fixed mic/action hit targets while only the long model label ellipsizes; idle, running, and recording fixtures preserve the same ownership |
+| MCX-046 | P0 | Terminal child-state convergence | Live sealing and historical replay of a completed/failed/cancelled turn never render a child activity or model stage as running/pending/waiting; a dangling tool becomes failed unless cancelled, a stale model stage follows the parent terminal state, and persisted evidence is not mutated |
+| MCX-047 | P0 | Reconnect terminal monotonicity | For both `ready -> history` and `history -> ready` ordering, `running=false` plus idle/cancelled control cannot overwrite a terminal transcript with a stale non-terminal task outcome; the UI shows no working indicator or Stop action and a true running snapshot still restores them |
 
 ### 14.3 Requirement-to-case traceability
 
@@ -1089,7 +1198,7 @@ the primary timeline.
 | MCX-R02 | MCX-001, MCX-002, MCX-003 |
 | MCX-R03 | MCX-002, MCX-004, MCX-017 |
 | MCX-R04 | MCX-005, MCX-006, MCX-007, MCX-008 |
-| MCX-R05 | MCX-003, MCX-008, MCX-009, MCX-010, MCX-011, MCX-013 |
+| MCX-R05 | MCX-003, MCX-008, MCX-009, MCX-010, MCX-011, MCX-013, MCX-046, MCX-047 |
 | MCX-R06 | MCX-014, MCX-015, MCX-016, MCX-018, MCX-019 |
 | MCX-R07 | MCX-024, MCX-025, MCX-026 |
 | MCX-R08 | MCX-011, MCX-012, MCX-018, MCX-024 |
@@ -1100,9 +1209,9 @@ the primary timeline.
 | MCX-R13 | MCX-026 |
 | MCX-R14 | MCX-009, MCX-029, MCX-032, MCX-038 |
 | MCX-R15 | MCX-022, MCX-030, MCX-038 |
-| MCX-R16 | MCX-011, MCX-012, MCX-031, MCX-039 |
-| MCX-R17 | MCX-023, MCX-029, MCX-032, MCX-033, MCX-034 |
-| MCX-R18 | MCX-016, MCX-018, MCX-019, MCX-035, MCX-036, MCX-037 |
+| MCX-R16 | MCX-011, MCX-012, MCX-031, MCX-039, MCX-047 |
+| MCX-R17 | MCX-023, MCX-029, MCX-032, MCX-033, MCX-034, MCX-046 |
+| MCX-R18 | MCX-016, MCX-018, MCX-019, MCX-035, MCX-036, MCX-037, MCX-045 |
 
 ### 14.4 Commands
 
@@ -1113,14 +1222,14 @@ cd manager/surfaces/gui
 npm test -- --run
 npm run build
 npx playwright test \
-  e2e/conversation-submission.spec.ts \
   e2e/conversation-queue.spec.ts \
-  e2e/conversation-projection.spec.ts \
   e2e/conversation-product-turn.spec.ts \
-  e2e/conversation-stream-stability.spec.ts \
+  e2e/conversation-reconnect.spec.ts \
   e2e/conversation-accessibility.spec.ts \
   e2e/conversation-visual.spec.ts \
-  e2e/conversation-performance.spec.ts
+  e2e/conversation-performance.spec.ts \
+  e2e/haas-activity.spec.ts \
+  e2e/transcript-scroll.spec.ts
 
 cd ../../../
 make gui-preview-smoke
@@ -1148,7 +1257,7 @@ content only.
 | 10 | Cut over product-turn components | Turn/work/reasoning/tool/response/completion/inspector; no model-call cards | MCX-009/012/013/023/029-034 | 3,5 |
 | 11 | Add virtualization/stable live tail | Bounded history, first-delta response owner and scroll anchoring | MCX-020-022/030/038 | 10 |
 | 12 | Add conversation navigation and semantic context | Search/turn navigation plus typed context chips | MCX-027/028 | 10-11 |
-| 13 | Responsive, hierarchy, and motion polish | Focused Workbench at all target widths/themes | MCX-016/018/019/024/035-037/039 | 9-12 |
+| 13 | Responsive, hierarchy, and motion polish | Focused Workbench at all target widths/themes | MCX-016/018/019/024/035-037/039/045 | 9-12 |
 | 14 | Delete legacy | Remove old owners, stream heuristic, model-stage UI/CSS/copy, obsolete tests and migration flag | MCX-026/030/031 | 2-13 |
 | 15 | Release review | Required reviews and full gates | all cases | 14 |
 
@@ -1244,3 +1353,101 @@ Implementation completion requires, in order:
 7. `make full-check`.
 
 No release may claim this change complete while W6 legacy-zero evidence is missing.
+
+#### Cutover preservation rules
+
+Reviewer denial remains an actionable, compact work detail even when successful work is folded.
+A one-shot exact-action override is offered only when the existing permission event explicitly
+allows it. Inspector retains approval provenance, standing-rule explanation, and privacy-filter
+counts. Historical failures cannot retry a newer task. All migrated controls use semantic type
+and color tokens. Completion duration must come from task timing, never a sum of overlapping tool
+intervals. Usage is aggregated only when every persisted assistant accounting record in the turn
+reports authoritative usage; partial or absent accounting is omitted. Manager display identity
+sidecars are stripped before provider requests and shared by live and REST views.
+
+The receipt client starts bounded reconciliation after 10 seconds without ACK, including when the
+socket remains open. An accepted task starts even when writing its ACK fails. A late ACK from a
+previous session cannot clear the active session draft. A queued request keeps its accepted model
+selection until dispatch. Narrow windows initially close secondary panels regardless of the
+remembered desktop preference; explicit panel actions remain available. Work disclosure pauses
+following just like opening evidence. Error events project a failed phase until authoritative
+terminal/readback, rather than falling back to completed when the transport turn ends.
+
+Reconnect reconciliation is a Composer state transition, not merely a transport callback. A
+correlated accepted/duplicate receipt clears `acceptanceUnknown` and clears the visible draft only
+when its revision still matches; a correlated `command_not_found` clears the blocked state but
+retains the current draft and shows the safe rejection. Newer edits and another session are never
+cleared. Deleting the active session sends a one-shot discard signal through the same draft owner
+before changing scope, so its cleanup effect cannot save the deleted text or attachments again.
+
+
+### Final v2 closure contract
+
+The remaining W4–W6 work shares the existing component tree and storage. It introduces no
+alternative renderer or public protocol. Delivery includes MCX-004/009/010/024/026/027/028,
+not only the corrective C0–C4 subset.
+
+- **Typed transport boundary:** Decode WebSocket JSON from `unknown` into a discriminated
+  event union before any handler runs. Validate fields and nested collections consumed by the
+  GUI; reject malformed known frames and unknown types with content-free counters. Unknown
+  payloads never enter React, logs, or fabricated terminal state. Optional future fields remain
+  additive. Native tool arguments remain opaque records at this boundary.
+  The decoder must accept the Manager's structured `delegated` attribution and explicit nulls
+  for absent ready outcomes, rejected-ACK dispositions, restored draft options, and approval
+  standing targets. These are existing producer shapes, not malformed frames. MCX-013/026
+  verification must send these shapes through the decoder and open a delegated command's
+  details in the production GUI; invalid field types must still be rejected. This correction
+  changes no ADK/HaaS API, event producer, permission, persistence, or logging contract.
+- **Navigation:** A labeled conversation Find control and Cmd/Ctrl+F search the current
+  conversation, including unmounted historical turns. Plain text search is case-insensitive,
+  does not execute regex, and searches visible user/assistant prose rather than private evidence.
+  Next/previous match and turn controls use stable turn/row identity, mount only the target
+  virtual window, and explicitly suspend automatic following. Escape closes Find and restores
+  focus without stopping execution. Empty/no-result states retain the current reading position.
+  Session changes clear search state. Jump to latest remains the explicit way to resume following.
+  Find and turn controls occupy a dedicated row outside the transcript scroll viewport, aligned
+  to its reading measure. They never paint over prose, links, selection, or the Composer while
+  reading long replies, searching, or resizing. Opening Find may resize that row but cannot
+  obscure the selected result. MCX-027 regression checks scroll a long reply and open/close Find
+  in light/dark themes at 390/1440 CSS px; toolbar bounds must remain outside the scroll viewport,
+  the matched text must be visible, and Escape must restore focus. Implement this as a shell
+  layout slot using the existing navigation state owner, then verify search/virtualization and
+  visual baselines. This layout correction changes no command, event, persistence, permission,
+  ADK, HaaS, artifact, or container contract and adds no logging.
+  While Find is open, its index also consumes current public live-response text through a narrow
+  store subscription; private reasoning/tool evidence remains excluded. Selecting text in a
+  virtual historical row pins only that row in the virtual range until browser selection is
+  collapsed or leaves the timeline. Scrolling cannot unmount the selection owner, and the extra
+  pinned row remains inside MCX-020's 200-row bound.
+- **Semantic context:** User rows and Composer share typed context references for selected skills,
+  staged files, and referenced sessions. Labels never contain provider framing. Copy uses the
+  human-readable label; Open delegates only to existing authorized file/session/skill actions.
+  Missing or revoked references stay readable with an unavailable state. Context, model, and mode
+  survive draft hydration, rejection, queue edit, and reload; no text-prefix parsing in renderers.
+  Older force-run records normalize once at the history boundary.
+- **Durability:** IndexedDB writes resolve only after transaction commit; abort/error preserves
+  the in-memory draft and reports persistence failure. No production memory-only success fallback.
+  Deleting a session clears only its draft and staged context. Expiration removes only orphan
+  scopes older than 30 days. Queue restart preserves ordering and pauses uncertain dispatch rather
+  than replaying accepted work. A visible Resume queue action resumes queued work explicitly.
+- **Readback:** Session load and terminal-readback results apply only to the session/request
+  generation that requested them. Old responses cannot overwrite the newly selected conversation.
+- **Legacy gate:** No untyped WebSocket payload, renderer-side identity inference, old live-buffer
+  owner, duplicate status/step list, old renderer import, word threshold, or migration flag remains.
+  One historical data migration adapter remains solely for previously persisted records.
+
+Implementation order is transport/identity, navigation/context, durability/recovery, then final
+parity/review/package. Each slice adds focused failing contract tests before changes, followed by
+unit/build and production browser regression. Browser fixtures exercise real IndexedDB and restart;
+packaged checks cover a visible interactive window, existing history, navigation, and both themes.
+Tests and native observations distinguish unavailable external provider/platform conditions from
+passes. ADK, public HaaS events, artifact permissions, and container variants remain unchanged.
+
+### Project workbench boundary
+
+[Manager Project Workbench Experience](../manager-project-workspace-experience/README.md) owns
+project grouping, workspace/execution-target draft context, Git branch controls, and native window
+chrome. This component continues to own the one chronological TurnWork projection and inline
+ActivityInspector. Project surfaces may open that owner but MUST NOT render a second command detail
+surface. Accepted project/workspace/endpoint identities are inputs to a conversation, not facts
+inferred from transcript content.

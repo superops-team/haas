@@ -14,12 +14,29 @@ const RICH_HISTORY = [
     role: "assistant",
     content: "",
     tool_calls: [
-      { id: "t1", function: { name: "run_shell", arguments: JSON.stringify({ command: "git log --oneline -5" }) } },
-      { id: "t2", function: { name: "read_file", arguments: JSON.stringify({ path: "CHANGELOG.md" }) } },
+      {
+        id: "t1",
+        function: {
+          name: "run_shell",
+          arguments: JSON.stringify({ command: "git log --oneline -5" }),
+        },
+      },
+      {
+        id: "t2",
+        function: {
+          name: "read_file",
+          arguments: JSON.stringify({ path: "CHANGELOG.md" }),
+        },
+      },
     ],
   },
   { role: "tool", tool_call_id: "t1", content: "abc123 release: cut 0.1.7" },
-  { role: "tool", tool_call_id: "t2", content: "## 0.1.7 — fixes", _display: { hidden_by_filters: 3 } },
+  {
+    role: "tool",
+    tool_call_id: "t2",
+    content: "## 0.1.7 — fixes",
+    _display: { hidden_by_filters: 3 },
+  },
   {
     role: "assistant",
     content: "The branch is clean — **two checks** passed.",
@@ -39,24 +56,27 @@ test("a reopened session replays rich history: tools, filters, reasoning, notice
 
   // Plain items replay as they rendered live.
   await expect(page.getByText("Audit the release branch")).toBeVisible();
-  await expect(page.locator(".md strong", { hasText: "two checks" })).toBeVisible();
+  await expect(
+    page.locator(".md strong", { hasText: "two checks" }),
+  ).toBeVisible();
   await expect(page.getByText("Context compacted")).toBeVisible();
 
-  // The turn's tools fold into a collapsed step group; the filter count rides the summary.
-  const group = page.locator(".stepgroup").first();
-  await expect(group).toContainText("2 steps");
-  await expect(page.getByTestId("stepgroup-hidden")).toContainText("3 hidden");
-
-  // Expanding reveals the replayed rows with their results wired by tool_call_id.
-  await group.locator("summary").click();
-  await expect(page.getByTestId("turn-step")).toHaveCount(2);
-  await expect(page.getByTestId("tool-hidden-count")).toBeVisible();
-
-  // Reasoning persists as the collapsed disclosure, not live "Thinking…".
-  await expect(page.getByTestId("thinking-toggle")).toContainText("Thought process");
+  // The turn owns one collapsed work summary. Explicit disclosure reveals the
+  // two activity rows and the persisted reasoning without restoring stage cards.
+  const summary = page.getByTestId("work-summary").first();
+  await expect(summary).toHaveAttribute("aria-expanded", "false");
+  await summary.click();
+  await expect(page.locator(".work-tool")).toHaveCount(2);
+  await expect(page.locator(".activity-privacy")).toHaveCount(0);
+  await page.getByRole("button", { name: "Reasoning", exact: true }).click();
+  await expect(page.locator(".reasoning-body")).toContainText(
+    "Compared the log against the changelog",
+  );
 });
 
-test("a connector-sourced message replays as its structured card", async ({ page }) => {
+test("a connector-sourced message replays as its structured card", async ({
+  page,
+}) => {
   await seedSessionMessages(page, "pinned-cowork-1", [
     {
       role: "user",
@@ -121,11 +141,15 @@ test("a dead MCP server replays as one quiet line with Details and Open Connecto
   // The raw error stays hidden until asked for.
   await expect(page.getByTestId("mcp-notice-detail")).toHaveCount(0);
   await page.getByTestId("mcp-notice-details").click();
-  await expect(page.getByTestId("mcp-notice-detail")).toContainText("TaskGroup");
+  await expect(page.getByTestId("mcp-notice-detail")).toContainText(
+    "TaskGroup",
+  );
 
   // Open Connectors jumps to the Integrations surface.
   await page.getByTestId("mcp-notice-connectors").click();
-  await expect(page.getByText("Connectors", { exact: true }).first()).toBeVisible();
+  await expect(
+    page.getByText("Connectors", { exact: true }).first(),
+  ).toBeVisible();
 });
 
 test("a LEGACY mcp_error notice (pre-server-field) also collapses to the quiet line", async ({

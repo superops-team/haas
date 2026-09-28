@@ -184,6 +184,38 @@ def test_command_lifecycle_has_stable_safe_metadata() -> None:
     }
 
 
+def test_command_output_uses_semantic_workspace_paths_before_redaction() -> None:
+    event = normalize_notification(
+        _notification(
+            "item/completed",
+            {
+                "item": {
+                    "id": "call_pwd",
+                    "type": "commandExecution",
+                    "command": "pwd",
+                    "cwd": "/Users/example/project",
+                    "status": "completed",
+                    "exitCode": 0,
+                    "aggregatedOutput": (
+                        "/Users/example/project\n"
+                        "/Users/example/project/reports/result.txt\n"
+                        "/Users/example/private.txt\n"
+                        "https://example.com/Users/example/project/report\n"
+                    ),
+                }
+            },
+        ),
+        **CTX,
+    )
+    assert event is not None
+    assert event.actions["artifactDelta"]["outputPreview"].splitlines() == [
+        "workspace/",
+        "workspace/reports/result.txt",
+        "[REDACTED_PATH]",
+        "https://example.com/Users/example/project/report",
+    ]
+
+
 def test_command_array_uses_shell_payload_as_safe_preview() -> None:
     event = normalize_notification(
         _notification(

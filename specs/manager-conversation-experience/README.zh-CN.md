@@ -2,10 +2,10 @@
 
 [English](README.md) | **简体中文**
 
-状态：已评审；已定义实现后 UI 纠偏方案；待实现
-最近评审：2026-09-26
+状态：MCX-001 至 MCX-047 已实施；自动化与本机打包验收通过，等待 owner 视觉验收
+最近评审：2026-09-28
 Change ID：`manager-conversation-interaction-v2`
-相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Manager GUI Performance](../manager-gui-performance/README.zh-CN.md)、[Event Log & SSE](../event-log-sse/README.zh-CN.md)、[Session Runtime](../session-runtime/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
+相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Manager GUI Performance](../manager-gui-performance/README.zh-CN.md)、[Event Log & SSE](../event-log-sse/README.zh-CN.md)、[Session Runtime](../session-runtime/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件职责与产品优先级
 
@@ -20,6 +20,16 @@ Manager 对话体验负责用户在 OpenHarness 中创建、运行、控制、�
 5. 功能广度。
 
 后一项不得削弱前一项。任何会丢失草稿、重复执行 turn、错误描述任务进度、隐藏恢复动作或降低长会话渲染质量的视觉优化，都不满足本规格。
+
+### 1.1 统一设计规范入口
+
+[ZCode 对齐交付合同](ALIGNMENT.zh-CN.md)定义完整项目范围、同条件对照方法、迭代顺序、覆盖率和原生验收，补充而不替代下述要求。
+
+[DESIGN.md](../../DESIGN.md)（[中文版](../../DESIGN.zh-CN.md)）是 Manager UI 产品语义、组件职责、视觉层级、token 和交互评审的统一入口。它将 ZCode 参考提炼为 HaaS 规则，并映射到本规格的验收用例。本组件 spec 仍是生命周期、数据、命令、兼容性和验收合同的权威来源；`manager/surfaces/gui/src/styles.css` 负责运行时 token 值。修改 GUI 前必须阅读 DESIGN.md 和受影响组件 spec。共享设计规则发生变化时，先同步两种语言及相关 spec，再修改代码。
+
+设计合规必须由可复用组件默认行为、聚焦行为验证和受影响状态的双主题视觉评审共同证明。仅有文档或单元测试通过不能证明合规；没有对应证据，不得声称已有全库 token 自动门禁或已完成原生验证。现有验收用例继续作为准出要求，本设计入口不表示这些要求已全部实现。
+
+组件影响：本次规范治理与控制区样式 delta 仅影响 Manager 展示，不新增或改变 ADK/HaaS native API、事件、状态迁移、持久化、权限、adapter、proxy、MCP/skill、容器或可观测性行为。诊断详情继续遵守现有授权证据与脱敏合同。
 
 ## 2. 证据与已批准方向
 
@@ -75,6 +85,7 @@ HaaS 不采纳 ZCode 的仓库结构、workflow graph、产品专属命令体系
 - model-call boundary 与 identifier 只用于 correlation/evidence，不得生成同级 timeline card、heading、count 或用户可见 workflow phase；
 - 一个 turn 只拥有一个 work summary、零到多个渐进披露 work segment、最多一个 active interaction，以及一个稳定 assistant-response surface；
 - assistant content 从第一段被分类为用户可见的 delta 起到 terminal sealing 始终位于同一 response surface；不得按 word count、elapsed time、adjacency 或 tool arrival 迁移；
+- 同一 product turn 的重复或多 model-call `assistant_message` fact 必须更新该 response owner，不得追加第二条 assistant row。权威非空消息替换临时文本；仅 metadata 的消息保留现有文本，同时更新 usage、reasoning、evidence 和 terminal state；
 - timeline state、header state、loading treatment 与 Composer control 必须消费同一个 canonical presentation selector；以及
 - internal reasoning/commentary 与缺失 accounting 数据不得升级为标题、warning 或 primary status。
 
@@ -192,7 +203,13 @@ P0、P1、P2 表示实现顺序，不表示可选范围。
 
 - 可用 conversation 宽度大于等于 1200 CSS px 时，transcript 保持居中，Status Panel 可 inline 展开且最大宽度 320 px。
 - 760–1199 CSS px 时，Status Panel 默认压成紧凑 capsule，并作为 anchored overlay 或非模态 drawer 打开，不得覆盖 Composer 或 Interaction Dock。
-- 小于 760 CSS px 时，navigation 与次级 status 变成 drawer。Composer 常驻附件、主要 mode indicator 和 Send/Stop；model、usage 与次要动作进入一个有标签的配置菜单。
+- 小于 760 CSS px 时，navigation 与次级 status 变成 drawer。Composer 常驻附件与主要 mode
+  indicator。Model、microphone 与 Send/Stop 在所有支持宽度下组成不可拆分的尾部 control
+  cluster；usage 和其他 secondary action 必须先让位或移走，不能让该 cluster 的成员消失。
+- 尾部 cluster 顺序固定为 `model -> microphone -> Send/Stop`，peer 之间只使用一个 compact
+  spacing token，且禁止换行。Model control 是唯一可伸缩成员：使用 `min-width: 0`，长 localized/
+  model label 以尾部 ellipsis 处理；microphone 与 Send/Stop 保持固定 hit target。录音时中间内容区
+  可以变成 waveform，但 model、microphone/record-stop 与 lifecycle action 仍相邻可见。
 - 在 320 CSS px 和 200% zoom 下，任何必需内容或动作都不得裁切、重叠，也不得藏在没有提示的滚动边界之外。
 - 当可用 chat 宽度可能不同于 window 宽度时，断点使用 container query。
 
@@ -328,7 +345,19 @@ interface ConversationDraftRecord {
   editorState?: string;
   attachmentRefs: string[];
   contextRefs: string[];
+  context?: ContextReference[];
+  skill?: { name: string; description: string; scope: "global" | "project"; enabled: boolean };
+  model?: string;
+  mode?: string;
   updatedAtMs: number;
+}
+
+interface ContextReference {
+  kind: "skill" | "file" | "session";
+  id: string;
+  label: string;
+  path?: string;
+  unavailable?: boolean;
 }
 
 interface FollowUpQueueItem {
@@ -336,8 +365,7 @@ interface FollowUpQueueItem {
   clientCommandId: string;
   position: number;
   state: "queued" | "dispatching" | "running";
-  submissionRef: string;
-  requestedDelivery: "enqueue" | "interrupt_then_start";
+  requestedDelivery: "start_now" | "enqueue" | "interrupt_then_start";
   safePreview: string;
   attachmentCount: number;
   contextCount: number;
@@ -350,6 +378,9 @@ interface FollowUpQueueItem {
 
 HaaS canonical `eventId`、`sequenceNumber`、`sessionId`、`turnId`、`invocationId` 与 `toolCallId` 继续作为权威。Manager-local execution 必须投影等价 identity，不得暴露 runtime-native 细节。未知 event 只增加不含内容的诊断计数并保持不可见；不得转成 assistant output 或猜测的 success。
 
+
+Manager 将 `_managerTurnId` 与 `_managerRowId` 持久化为仅供展示的消息 sidecar，并在内部 WebSocket 中投影为 `turnId`/`rowId`。这些字段不得进入模型输入。唯一的历史迁移 adapter 在持久化 user/connector 意图边界为旧记录分配确定性身份；模型调用边界不得创建产品 Turn。最后一个已完成 Turn 保留在 live-tail 槽位，直到下一个 Turn 开始，保证封存期间正文 DOM 不变。
+
 ### 6.3 投影更新规则
 
 - 初次加载先应用一个有界 snapshot，再 replay `lastEventId` 之后的 event，最后进入 live。
@@ -361,6 +392,16 @@ HaaS canonical `eventId`、`sequenceNumber`、`sessionId`、`turnId`、`invocati
 - Model-call start/finish 与 usage update 只能更新 evidence correlation 和 aggregate fact，不得追加主 timeline row 或切换 disclosure。
 - 每个 started work item 最多接收一个 terminal state。
 - 没有新 `turnId`/`invocationId` 时，terminal state 不得回到 running。
+- Live sealing 与历史 replay 中，terminal parent turn 是 incomplete child snapshot 的权威状态。
+  没有自身 terminal event 的 `running`、`pending` 或 `waiting` activity 在 completed/failed/
+  incomplete turn 中归一为 failed，并沿用既有 missing-event 安全原因；cancelled turn 中归一为
+  cancelled，不能因父 turn completed 而伪造 tool success。残留 running model stage 仅在父 turn
+  completed 时归一为 completed，其他情况跟随 failed/cancelled 终态。原始持久化 evidence 不修改，
+  非终态/paused turn 保留真实 child state。
+- Reconnect `ready` snapshot 为 `running=false` 且 execution control 为 idle/cancelled 时，不得因
+  较旧的 persisted task outcome 仍为 running 而复活 terminal transcript。History 加载后，无论
+  ready/history 先后顺序如何，都由其 terminal outcome 胜出。只有 `running=true`、有效 non-idle
+  control state 或新的 turn identity 才能重新进入 running。
 - 在 Composer 启用冲突命令前恢复 pending interaction。
 - Reconciliation 只能用权威 snapshot 或 event page 替换不确定 derived state；不得自动重发原用户命令。
 
@@ -387,6 +428,14 @@ Selector 强制满足：
 - active interaction 独占 primary action，并抑制重复 ordinary loading；
 - socket disconnect 本身不能把 terminal turn 改回 running；以及
 - phase change 在同一个 React commit 中更新所有消费 surface。
+
+Composer 生命周期控件采用克制的工具栏样式（MCX-031/015）：暂停为中性文字操作，停止为
+32 px 方形图标按钮，保留本地化无障碍名称及 tooltip。静止时不使用边框、强调色或危险色填充、
+光晕、spinner。暂停态的继续与结束任务使用同一紧凑文字控件，永久终止仍须明确命名。
+处理中及过渡状态为不可点击的次级文字。Hover 只增加中性背景，键盘焦点保持清晰。
+复用 canonical selector、handler、能力门控及断线/过渡禁用规则，不改变生命周期语义。
+验证回调与运行/暂停/过渡状态，并覆盖双主题 390/1440 px 下的可见性及焦点。
+本次不影响公共 API、事件、持久化、权限、adapter、容器或可观测性组件。
 
 ### 6.5 Live-tail 生命周期
 
@@ -513,6 +562,8 @@ queued -> dispatching -> running -> terminal
 
 Completed model call、provider round、reasoning chunk、usage arrival 与 cache accounting 不得作为同级卡片占用默认 flow。展开 work 时，detail 位于 work summary 下、answer 上，且不替换两者。Live update 不得自动重新打开用户关闭的 disclosure，也不得关闭用户已展开的 disclosure。Completed 状态只可自动收起用户从未操作过的 disclosure。
 
+展开 work 必须保持 canonical 发生顺序。Reasoning summary 与 tool activity 按该顺序作为同级 work segment 展示（真实顺序为 `reasoning -> tool -> reasoning` 时即如此），不能使用永久 reasoning 父容器包裹 tool。每个 reasoning segment 独立保存 disclosure 状态；主 timeline 继续不展示 model-call card 或 ordinal。
+
 ### 8.2 Activity summary 与 evidence
 
 - Summary title 依次优先采用显式本地化 product action、安全 tool/object summary、有界 command preview，最后使用本地化中性 fallback。
@@ -521,9 +572,18 @@ Completed model call、provider round、reasoning chunk、usage arrival 与 cach
 - Running summary 不以数字 count 作为主要内容；可选 completed aggregate 只进入安静 completion footer 或展开详情。
 - Running state 必须包含持久文字标签。动画可选，并在 reduced motion 下关闭。
 - Activity row 展示 status、安全标题、可选 key result 和 duration；默认不展示 raw argument。
-- 选择 row 后，通过现有安全 evidence path 打开 Inspector。窄屏使用不覆盖 Composer 或 Interaction Dock 的非模态 bottom drawer。
+- 选择 activity row 时，在该 row 正下方切换一个 inline detail disclosure。它继续使用现有安全 evidence path，并保持焦点与滚动上下文；不得打开右侧 Inspector 或底部 drawer。显式请求 model-call evidence 时也遵守同一 inline disclosure 规则。
+- 展开的 work row 保留后端提供的安全命令预览或对象摘要，以便区分多条命令。Inspector 立即
+  展示该预览，在 evidence 加载、缺失、过期或不可用时仍然保留。完整命令只来自已授权 evidence，
+  不得序列化 raw tool arguments 作为回退。选中项使用稳定 activity id，使状态、输出和后到达的
+  evidence 引用自动更新，无须关闭重开。MCX-013 回归覆盖仅预览、evidence 过期/失败，以及
+  详情保持打开时 running 到 terminal 的更新；先实现选中投影与预览展示，再更新浏览器基线。
+  显式本地 engine 路径通过 sidecar spec 定义的 Manager 展示边界，提供相同的安全命令预览及
+  稳定 tool identity；不改变 HaaS/ADK、工具执行权限或持久化格式。
 
-每个 turn 只有一个语义 reasoning disclosure，而不是每个 model call 一块 surface。折叠且 streaming 时可展示一行脱敏 summary；用户手动展开/收起优先于自动行为。完成后只在用户从未操作时自动收起。Heavy reasoning detail 可为高度动画继续挂载最多 300 ms，之后卸载；reduced-motion 下立即卸载。
+Public activity preview 不暴露绝对 host path。当 command output 包含该命令已授权 working directory 时，adapter 先替换为 `workspace/` 加安全相对后缀，再执行 credential/URL/path 脱敏。因此在 workspace root 执行 `pwd` 时显示 `workspace/`；workspace 外 host path 继续显示 `[REDACTED_PATH]`。精确路径只通过有 scope 且未过期的 execution evidence 提供。
+
+Reasoning 在一个 turn work disclosure 中按时间作为同级 segment 表达，不作为父 surface 或 model-call card。折叠且 streaming 时，每个 segment 可展示一行脱敏 summary；各 segment 的用户手动展开/收起优先于自动行为。完成后只在用户从未操作时自动收起。Heavy reasoning detail 可为高度动画继续挂载最多 300 ms，之后卸载；reduced-motion 下立即卸载。
 
 Tool work 使用统一 `ToolActivity` 合同，包含 header、安全 input summary、有界 result、status、duration 与 evidence action。只有 active tool 或第一个可操作 failure 可默认展开；成功完成的 tool 默认收起。Tool input/output 与 evidence 不得嵌套在 model-call card 中。
 
@@ -682,6 +742,10 @@ Visual-regression fixture 覆盖 empty/idle、running with tools、waiting for a
 - 浅色和深色主题实现同一套完整 semantic token；缺失的 dark token 不得 fallback 到 light 值。
 - 小于 18 pt 的 normal text 通过 4.5:1，大字号通过 3:1，focus 与非文本 UI indicator 对相邻颜色通过 3:1。
 - 所有 interactive element 在可用时使用 native semantics，并有至少 2 px 的可见 `:focus-visible` indicator。
+  文本 Composer 使用包围输入区的 1 px 中性焦点边框与原生光标；内部控件仍保留各自键盘焦点指示。
+  Composer 聚焦不得增加品牌色外圈、光晕、背景染色或阴影。使用深浅主题均显式定义的同一个语义
+  边框 token，对相邻表面至少 3:1 对比度，聚焦不得引发布局位移。MCX-015 视觉检查覆盖两主题、
+  390/1440 px 下的空闲/编辑与键盘导航。本次仅修正展示，不改变输入投递、持久化、权限、事件或公共 API。
 - 控件最小 target 为 24×24 CSS px；在桌面密度允许时目标为 40×40。
 - 状态不得只通过颜色或动画表达。
 - 动态状态通知只使用一个稳定 polite live region，且只发布有意义的 phase transition；不得逐条播报 token、timer 或 progress increment。
@@ -813,6 +877,14 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-037 | P1 | Narrow work layout | 320/390 px 与 200% zoom 下，长及 pseudo-localized command/title/metadata 在 72ch conversation measure 内换行，不出现 fixed metadata column、action 裁切或 card 高度爆炸 |
 | MCX-038 | P0 | Live-tail geometry | 阅读旧内容期间经过 100 次 delta、tool update 与 completion，semantic anchor 偏移不超过 2 CSS px，直到 Jump to latest |
 | MCX-039 | P0 | Dynamic accessibility owner | 一个 polite live region 只播报有意义 phase change；token、usage、stage 与 timer update 不产生重复播报 |
+| MCX-040 | P0 | Assistant response 幂等 | 同一 turn 的两条 assistant-message fact（包括不同 transport row id 或 replay）只渲染一个 response owner 和一份权威文本；reload 与 live 输出一致 |
+| MCX-041 | P0 | Chronological work segment | reasoning-tool-reasoning fixture 按 canonical 顺序渲染三个同级 row，disclosure 相互独立，不出现 model-call 或 reasoning-parent container |
+| MCX-042 | P0 | Inline 安全 activity detail | 点击 command row 后详情直接在其下方展开，不打开侧边/底部 Inspector；workspace 内路径使用 `workspace/`，外部 host path 继续脱敏，evidence 过期时仍保留安全 command/preview |
+| MCX-043 | P1 | Search overlay focus | 全局搜索在双主题使用带语义圆角的 input shell 与中性 focus border；不出现内部矩形品牌色 outline 或品牌色整行 active fill |
+| MCX-044 | P1 | macOS titlebar 对齐 | overlay 模式下，原生 traffic light 与 sidebar/panel 展开、折叠控件共用从 AppKit 原生 button frame 推导的中心，sidebar 展开/折叠前后中心偏差均不超过 1 CSS px。`traffic_light_position(..., y)` 是 container inset，不是中心或 CSS top；当前 pin 的 Tauri/tao 下，`y=24` 得到距顶部 22 px 的中心，12 px browser simulator 使用 `top:16px`。browser-only geometry 不能完成验收，必须补 packaged macOS 视觉证据 |
+| MCX-045 | P0 | Composer 尾部 cluster | 双主题 320/390/760/1440 px 下，model、microphone、Send/Stop 按该顺序保持可见，以 peer gap <=8 CSS px 组成不换行的尾部 cluster；mic/action hit target 固定，仅长 model label 显示 ellipsis，idle、running 与 recording fixture 保持同一 ownership |
+| MCX-046 | P0 | Terminal child-state convergence | Live sealing 与历史 replay 的 completed/failed/cancelled turn 不得继续把 child activity 或 model stage 显示为 running/pending/waiting；dangling tool 除 cancelled 外归一为 failed，stale model stage 跟随 parent terminal state，且不修改持久化 evidence |
+| MCX-047 | P0 | Reconnect terminal monotonicity | `ready -> history` 与 `history -> ready` 两种顺序下，`running=false` 加 idle/cancelled control 不得用 stale non-terminal task outcome 覆盖 terminal transcript；UI 不显示 working indicator/Stop，同时真实 running snapshot 仍能恢复这些状态 |
 
 ### 14.3 需求到用例追溯
 
@@ -822,7 +894,7 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-R02 | MCX-001、MCX-002、MCX-003 |
 | MCX-R03 | MCX-002、MCX-004、MCX-017 |
 | MCX-R04 | MCX-005、MCX-006、MCX-007、MCX-008 |
-| MCX-R05 | MCX-003、MCX-008、MCX-009、MCX-010、MCX-011、MCX-013 |
+| MCX-R05 | MCX-003、MCX-008、MCX-009、MCX-010、MCX-011、MCX-013、MCX-046、MCX-047 |
 | MCX-R06 | MCX-014、MCX-015、MCX-016、MCX-018、MCX-019 |
 | MCX-R07 | MCX-024、MCX-025、MCX-026 |
 | MCX-R08 | MCX-011、MCX-012、MCX-018、MCX-024 |
@@ -833,9 +905,9 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-R13 | MCX-026 |
 | MCX-R14 | MCX-009、MCX-029、MCX-032、MCX-038 |
 | MCX-R15 | MCX-022、MCX-030、MCX-038 |
-| MCX-R16 | MCX-011、MCX-012、MCX-031、MCX-039 |
-| MCX-R17 | MCX-023、MCX-029、MCX-032、MCX-033、MCX-034 |
-| MCX-R18 | MCX-016、MCX-018、MCX-019、MCX-035、MCX-036、MCX-037 |
+| MCX-R16 | MCX-011、MCX-012、MCX-031、MCX-039、MCX-047 |
+| MCX-R17 | MCX-023、MCX-029、MCX-032、MCX-033、MCX-034、MCX-046 |
+| MCX-R18 | MCX-016、MCX-018、MCX-019、MCX-035、MCX-036、MCX-037、MCX-045 |
 
 ### 14.4 命令
 
@@ -846,14 +918,14 @@ cd manager/surfaces/gui
 npm test -- --run
 npm run build
 npx playwright test \
-  e2e/conversation-submission.spec.ts \
   e2e/conversation-queue.spec.ts \
-  e2e/conversation-projection.spec.ts \
   e2e/conversation-product-turn.spec.ts \
-  e2e/conversation-stream-stability.spec.ts \
+  e2e/conversation-reconnect.spec.ts \
   e2e/conversation-accessibility.spec.ts \
   e2e/conversation-visual.spec.ts \
-  e2e/conversation-performance.spec.ts
+  e2e/conversation-performance.spec.ts \
+  e2e/haas-activity.spec.ts \
+  e2e/transcript-scroll.spec.ts
 
 cd ../../../
 make gui-preview-smoke
@@ -879,7 +951,7 @@ Packaged desktop 证据使用 `manager/packaging/build_dmg.sh` 与 `manager/pack
 | 10 | 切换 product-turn component | Turn/work/reasoning/tool/response/completion/inspector；无 model-call card | MCX-009/012/013/023/029-034 | 3,5 |
 | 11 | 增加 virtualization/稳定 live tail | 有界 history、first-delta response owner 与 scroll anchoring | MCX-020-022/030/038 | 10 |
 | 12 | 增加 conversation navigation 与 semantic context | Search/turn navigation 与 typed context chip | MCX-027/028 | 10-11 |
-| 13 | Responsive、hierarchy 与 motion polish | 全目标宽度/主题的 Focused Workbench | MCX-016/018/019/024/035-037/039 | 9-12 |
+| 13 | Responsive、hierarchy 与 motion polish | 全目标宽度/主题的 Focused Workbench | MCX-016/018/019/024/035-037/039/045 | 9-12 |
 | 14 | 删除 legacy | 移除旧 owner、stream heuristic、model-stage UI/CSS/copy、过时 test 与 migration flag | MCX-026/030/031 | 2-13 |
 | 15 | Release review | 必需 review 与完整 gate | 全部用例 | 14 |
 
@@ -966,3 +1038,72 @@ Task 1 完成后，Task 2-4 可拆成小提交。Task 5 是完成的必要条件
 7. `make full-check`。
 
 W6 legacy-zero 证据缺失时，不得宣称本变更完成。
+
+#### 切换后的能力保留规则
+
+审核拒绝必须作为紧凑的可操作工作详情保留，即使成功工作已折叠。只有原权限事件明确
+允许时才提供精确操作的一次性放行。Inspector 保留审批来源、常驻规则说明和隐私过滤
+计数。历史失败不得重试较新的任务。所有迁移控件使用语义字号和颜色 token。完成耗时
+只能来自任务计时，禁止对可能重叠的工具耗时求和。仅当本轮所有持久化 assistant 计费
+记录均有权威 usage 时才聚合展示；部分或缺失计费数据省略。Manager 展示身份 sidecar
+在进入 provider 前剥离，并由实时流与 REST 回读共用。
+
+客户端在 10 秒未收到 ACK 后执行有界回执对账，即使连接仍开着。已接受任务不因 ACK
+写入失败而丢失执行。上一会话的迟到 ACK 不得清空当前会话草稿。排队请求保持接受时
+选择的模型直到调度。窄窗口初始收起次要面板，不继承桌面展开偏好；显式面板操作仍
+可用。展开工作详情与打开证据一样暂停跟随。error 事件投影为失败，直到权威终态或
+回读更新，不得因 transport turn 结束被误标完成。
+
+重连核对是 Composer 状态迁移，不只是 transport callback。对应的 accepted/duplicate receipt 必须解除 `acceptanceUnknown`，且仅在 draft revision 仍相同时清除可见草稿；对应的 `command_not_found` 解除阻塞但保留当前草稿，并展示安全拒绝信息。更新版本草稿和其他 session 绝不能被清除。删除活动 session 时，在切换 scope 前通过同一 draft owner 发出一次性 discard signal，避免 cleanup effect 再次保存已删除文字或附件。
+
+
+### v2 最终收尾合同
+
+剩余 W4–W6 沿用现有组件树与存储，不新增替代 renderer 或公共协议。交付包含
+MCX-004/009/010/024/026/027/028，不限于 C0–C4 修订子集。
+
+- **类型化 transport 边界**：WebSocket JSON 先从 `unknown` 解码为可辨别 event union，再调用
+  handler。校验 GUI 消费的字段与嵌套集合；已知畸形帧和未知类型只增加无内容计数器，不进入
+  React、日志或伪造终态。未来可选字段保持加法兼容。原生工具参数在此边界保持不透明 record。
+  Decoder 必须接受 Manager 的结构化 `delegated` 归属信息，以及 ready outcome、rejected ACK
+  disposition、恢复草稿的可选项、审批 standing target 缺省时的显式 null。这些均为生产端已有
+  形状，不能误判为畸形帧。MCX-013/026 验证须将这些帧送入 decoder，并在 production GUI
+  打开委派命令详情；错误字段类型仍须拒绝。本次修正不改变 ADK/HaaS API、事件生产端、权限、
+  持久化或日志合同。
+- **导航**：有标签的当前会话 Find 入口及 Cmd/Ctrl+F 搜索包括未挂载历史在内的会话。
+  纯文本忽略大小写，不执行正则，仅搜索可见用户/助手正文，不搜索私有 evidence。
+  上下匹配及上下轮次使用稳定 turn/row 身份，只挂载目标虚拟窗口，并明确暂停自动跟随。
+  Escape 关闭 Find、恢复焦点，不停止执行。空查询/无匹配保留阅读位置；切换会话清理搜索状态；
+  Jump to latest 显式恢复跟随。
+  Find 与轮次控制必须在正文滚动视口外独立占行，并与正文阅读宽度对齐。阅读长回复、搜索或
+  调整窗口时，控件不得覆盖正文、链接、选区或 Composer。展开 Find 可调整该行高度，但不能
+  遮住搜索命中。MCX-027 回归在 light/dark、390/1440 CSS px 下滚动长回复并开关 Find：
+  导航栏边界始终位于滚动视口之外、命中文本可见，Escape 恢复焦点。先通过 shell 布局插槽
+  保留现有导航状态 owner，再验证搜索/虚拟列表及视觉基线。本次布局修复不改变 command、
+  event、持久化、权限、ADK、HaaS、artifact 或 container 合同，不增加日志。
+  Find 打开时，其索引还通过细粒度 store 订阅消费当前公开 live-response 文本；私有 reasoning/tool evidence 继续排除。用户在虚拟历史行中选择文字时，只将该行固定在 virtual range，直到浏览器 selection 收起或离开 timeline。滚动不能卸载 selection owner，额外固定行仍须满足 MCX-020 的 200 行上限。
+- **语义上下文**：用户行与 Composer 共享已选 skill、暂存 file、引用 session 的类型化引用。
+  标签不包含 provider framing；复制使用可读标签；打开只委托现有已授权文件/会话/skill 动作。
+  引用缺失或权限撤销时仍可读并标记不可用。context、model、mode 随草稿恢复、拒绝、队列编辑及
+  reload 保留，不在 renderer 解析前缀；历史 force-run 仅在历史边界规范化一次。
+- **持久化**：IndexedDB 写入必须 transaction commit 后才成功；abort/error 保留内存草稿并
+  提示持久化失败，生产路径不允许仅内存成功降级。删除会话只清理其草稿与暂存上下文；仅清理
+  超过 30 天的孤儿 scope。队列重启保留顺序，不确定 dispatch 暂停而不重放已接受任务；
+  显式 Resume queue 动作继续排队任务。
+- **Readback**：会话加载与终态读取结果只可写入发起请求的 session/request generation，
+  旧响应不能覆盖新选择的会话。
+- **Legacy 门禁**：无未类型化 WS payload、renderer 身份推断、旧 live buffer owner、重复
+  status/step 列表、旧 renderer import、词数阈值或迁移 flag。仅保留一处旧持久记录迁移 adapter。
+
+实施顺序：transport/identity → navigation/context → durability/recovery → parity/review/package。
+每个切片先写失败合同测试，随后 unit/build 和生产浏览器回归。浏览器 fixture 覆盖真实
+IndexedDB 与重启；打包检查覆盖可见且可交互的窗口、已有历史、导航和双主题。外部 provider/
+平台不可用必须与通过区分。ADK、HaaS 公共事件、artifact 权限及容器变体合同均不改变。
+
+### 项目工作台边界
+
+[Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md) 持有 project
+分组、workspace/execution-target draft context、Git branch control 与原生 window chrome。本组件
+继续持有唯一 chronological TurnWork projection 与 inline ActivityInspector。Project surface
+可打开该 owner，但不得再渲染第二个 command detail surface。Accepted project/workspace/endpoint
+identity 是 conversation 输入，不能从 transcript 内容推断。

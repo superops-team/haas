@@ -211,7 +211,8 @@ Turn 规则：
   in-memory execution-evidence store。Sink 在 8 MiB（8,388,608 UTF-8 bytes）以内完整保留
   command output；中间 accumulator 不得使用更小上限。stdio frame 上限另行计入 JSON 开销。
   Public event 只携带安全动作摘要、有界脱敏 preview
-  和 opaque evidence ref。Codex 0.152.1 将 turn command 的 stdout/stderr 合并在
+  和 opaque evidence ref。脱敏前，command output 中属于该命令已授权 working directory
+  的部分转换为语义 `workspace/` 前缀；其他绝对 host path 继续脱敏。Codex 0.152.1 将 turn command 的 stdout/stderr 合并在
   `aggregatedOutput`，且 `item/commandExecution/outputDelta` 没有 stream discriminator；
   adapter 必须如实标为“命令输出”，不得猜测拆成 stdout/stderr。
   Codex 可能用 argv 数组，也可能用 `/bin/zsh -lc \"<payload>\"` 这类序列化命令

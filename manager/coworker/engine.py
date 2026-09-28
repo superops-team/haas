@@ -37,6 +37,7 @@ from .permissions import Mode, PermissionEngine
 from .providers import AssistantTurn, ProviderClient, ToolCall
 from .providers.errors import friendly_model_error
 from .providers.openai_provider import looks_like_unparsed_tool_call
+from .tool_display import local_tool_display
 from .tools import ToolRegistry
 
 
@@ -737,7 +738,12 @@ class TurnEngine:
                 continue
             yield Event(
                 EventType.TOOL_PROPOSED,
-                {"name": tool_call.name, "arguments": tool_call.arguments},
+                {
+                    "name": tool_call.name,
+                    "toolCallId": tool_call.id,
+                    "arguments": tool_call.arguments,
+                    **local_tool_display(tool_call.name, tool_call.arguments),
+                },
             )
             self._audit(tool_call, stage="proposed")
             if _is_mangled(tool_call):
@@ -788,7 +794,7 @@ class TurnEngine:
 
         if concurrent:
             for tool_call in concurrent:
-                yield Event(EventType.TOOL_STARTED, {"name": tool_call.name})
+                yield Event(EventType.TOOL_STARTED, {"name": tool_call.name, "toolCallId": tool_call.id})
                 self._audit(tool_call, stage="started")
             outcomes = await asyncio.gather(
                 *[asyncio.to_thread(self._execute_sync, tc) for tc in concurrent]
@@ -800,7 +806,7 @@ class TurnEngine:
             if self._cancel.is_set():
                 yield self._interrupted_tool(tool_call)
                 continue
-            yield Event(EventType.TOOL_STARTED, {"name": tool_call.name})
+            yield Event(EventType.TOOL_STARTED, {"name": tool_call.name, "toolCallId": tool_call.id})
             self._audit(tool_call, stage="started")
             result, status = await asyncio.to_thread(self._execute_sync, tool_call)
             yield self._record_result(tool_call, result, status)
@@ -833,7 +839,7 @@ class TurnEngine:
         self._audit(tool_call, stage="finished", status="error", reason=reason)
         return Event(
             EventType.TOOL_FINISHED,
-            {"name": tool_call.name, "status": "error", "reason": reason},
+            {"toolCallId": tool_call.id, "name": tool_call.name, "status": "error", "reason": reason},
         )
 
     def _interrupted_tool(self, tool_call: ToolCall) -> Event:
@@ -844,7 +850,7 @@ class TurnEngine:
         self._audit(tool_call, stage="finished", status="interrupted", reason="user stop")
         return Event(
             EventType.TOOL_FINISHED,
-            {"name": tool_call.name, "status": "interrupted", "reason": "stopped"},
+            {"toolCallId": tool_call.id, "name": tool_call.name, "status": "interrupted", "reason": "stopped"},
         )
 
     def _parallel_safe(self, tool_call: ToolCall) -> bool:
@@ -1190,6 +1196,7 @@ class TurnEngine:
                 yield Event(
                     EventType.TOOL_FINISHED,
                     {
+                        "toolCallId": tool_call.id,
                         "name": tool_call.name,
                         "status": "denied",
                         "reason": "blocked by the safety reviewer",
@@ -1362,7 +1369,7 @@ class TurnEngine:
             self.messages.append(err_msg)
             yield Event(
                 EventType.TOOL_FINISHED,
-                {"name": tool_call.name, "status": "denied", "reason": reason},
+                {"toolCallId": tool_call.id, "name": tool_call.name, "status": "denied", "reason": reason},
             )
             self._audit(tool_call, stage="finished", status="denied", reason=reason)
             yield False
@@ -1372,7 +1379,7 @@ class TurnEngine:
             self.messages.append(_tool_error_message(tool_call, f"unknown tool: {tool_call.name}"))
             yield Event(
                 EventType.TOOL_FINISHED,
-                {"name": tool_call.name, "status": "error", "reason": "unknown tool"},
+                {"toolCallId": tool_call.id, "name": tool_call.name, "status": "error", "reason": "unknown tool"},
             )
             yield False
             return
@@ -1445,6 +1452,7 @@ class TurnEngine:
                 "name": tool_call.name,
                 "status": status,
                 "result_preview": _preview(result),
+                "toolCallId": tool_call.id,
                 **({"display": display} if display else {}),
                 **({"standing_rule": rule} if rule else {}),
                 # (c) quiet provenance chip — same fields the `_display` sidecar persists.
@@ -1539,6 +1547,7 @@ class TurnEngine:
         yield Event(
             EventType.TOOL_FINISHED,
             {
+                "toolCallId": tool_call.id,
                 "name": tool_call.name,
                 "status": status,
                 "result_preview": _preview(result),
@@ -1589,6 +1598,7 @@ class TurnEngine:
         yield Event(
             EventType.TOOL_FINISHED,
             {
+                "toolCallId": tool_call.id,
                 "name": tool_call.name,
                 "status": status,
                 "result_preview": _preview(result),
@@ -1656,6 +1666,7 @@ class TurnEngine:
         yield Event(
             EventType.TOOL_FINISHED,
             {
+                "toolCallId": tool_call.id,
                 "name": tool_call.name,
                 "status": status,
                 "result_preview": _preview(result),
@@ -1751,6 +1762,7 @@ class TurnEngine:
         yield Event(
             EventType.TOOL_FINISHED,
             {
+                "toolCallId": tool_call.id,
                 "name": tool_call.name,
                 "status": status,
                 "result_preview": _preview(result),
@@ -1804,6 +1816,7 @@ class TurnEngine:
         yield Event(
             EventType.TOOL_FINISHED,
             {
+                "toolCallId": tool_call.id,
                 "name": tool_call.name,
                 "status": status,
                 "result_preview": _preview(result),
@@ -1855,6 +1868,7 @@ class TurnEngine:
         yield Event(
             EventType.TOOL_FINISHED,
             {
+                "toolCallId": tool_call.id,
                 "name": tool_call.name,
                 "status": status,
                 "result_preview": _preview(result),
@@ -1912,7 +1926,16 @@ class TurnEngine:
         # (thinking text), and `usage` (token counts) — copying only messages that carry
         # one. Whole `notice` messages (error/interrupted/model-switch markers) are
         # display-only too: dropped entirely.
-        _SIDECARS = ("source", "_display", "ts", "reasoning", "usage")
+        _SIDECARS = (
+            "source",
+            "_display",
+            "ts",
+            "reasoning",
+            "usage",
+            "_managerTurnId",
+            "_managerRowId",
+            "_managerContext",
+        )
         # Auto-compaction (OPE-27): everything before the boundary is represented by the
         # compacted block. Outbound-only — the canonical history stays intact — and the
         # block+tail are byte-stable between turns, so prompt caching keeps working.

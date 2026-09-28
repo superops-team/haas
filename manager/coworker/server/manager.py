@@ -17,6 +17,8 @@ import secrets
 import shlex
 import shutil
 import subprocess
+import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -56,11 +58,13 @@ from ..connectors.browser_automation import (
     browser_take_screenshot,
 )
 from ..connectors.parked import ParkedStore
+from ..conversation_commands import ConversationCommandStore
 from ..conversations import ConversationStore, title_from
 from ..delegation import (
     BINDING_KEY as HAAS_DELEGATION_BINDING_KEY,
 )
 from ..delegation import (
+    DelegationDecision,
     HaasDelegationClient,
     HaasDelegationConfig,
     HaasDelegationError,
@@ -81,7 +85,7 @@ from ..delegation import (
 )
 from ..engine import ApprovalOutcome, Approver, TurnEngine
 from ..events import Event, EventType
-from ..haas import EndpointMode, HaasClient, HaasClientError, HaasEndpoint
+from ..haas import EndpointMode, EndpointRecordStore, HaasClient, HaasClientError, HaasEndpoint
 from ..haas.attempts import AttemptLedger, ExpiryEvidence
 from ..haas.stream_bridge import BridgeAction, SessionKey, StreamBridgeState
 from ..haas.task_completion import TaskCompletionState
@@ -108,6 +112,12 @@ from ..projects import (
     project_presence,
     resolve_board_space,
     resolve_memory_key,
+)
+from ..project_workbench import (
+    LOCAL_ENDPOINT_ID,
+    ProjectStore,
+    ProjectStoreConflict,
+    ProjectStoreError,
 )
 from ..providers import (
     ProviderClient,
@@ -136,6 +146,7 @@ from ..teams.attachments import AttachmentStore
 from ..teams.chat import ChatStore
 from ..teams.registry import TeamRegistry, TeamWorker
 from ..teams.tokens import BoardTokens
+from ..tool_display import messages_with_tool_display
 from ..unattended import UnattendedRegistry
 from ..unrouted import UnroutedStore
 from ..workspace_trust import WorkspaceTrustStore
@@ -285,6 +296,10 @@ class SessionManager:
         self.memory_settings = MemorySettingsStore(base / "memory-settings.json")
         self.audit_store = AuditStore(base / "coworker.db")
         self.session_store = ConversationStore(base)
+        self.project_store = ProjectStore(base / "coworker.db")
+        self.endpoint_store = EndpointRecordStore(base / "haas-endpoints.json")
+        self.conversation_commands = ConversationCommandStore(base / "conversation-commands.db")
+        self._reconcile_uncheckpointed_conversation_commands()
         self.session_store.canonicalize_workspaces()  # collapse /tmp vs /private/tmp etc.
         if self.default_workspace:
             self.session_store.touch_workspace(self.default_workspace)
@@ -293,7 +308,9 @@ class SessionManager:
         # evicted from the engine cache at the next mark_idle so the following turn
         # rebuilds fully anchored on the new workspace.
         self._promotion_rebuild: set[str] = set()
+        self._project_mutation_lock = threading.RLock()
         self._running_sessions: set[str] = set()  # sessions with an in-flight turn (busy)
+        self._queue_drain_after_stop: set[str] = set()
         self._active_haas_turns: dict[str, _ActiveHaasTurn] = {}
         # Sessions with an auto-title LLM call in flight (FB-010) — one call at a time.
         self._autotitle_inflight: set[str] = set()
@@ -335,6 +352,7 @@ class SessionManager:
             base, resolve_credential=self._resolve_haas_provider_credential
         )
         # Desktop/UI prefs (default model, onboarding state) — not secrets; a plain JSON file.
+        self._prefs_lock = threading.RLock()
         self._prefs = self._load_prefs()
         self._migrate_haas_policy_defaults()
         if self._prefs.get("default_model"):
@@ -422,6 +440,19 @@ class SessionManager:
         self.unrouted = UnroutedStore(base / "unrouted.json")
 
     # -- workspaces -------------------------------------------------------------
+    def _reconcile_uncheckpointed_conversation_commands(self) -> None:
+        """Pause accepted input that never reached a durable transcript checkpoint."""
+
+        for session_id, turn_id in self.conversation_commands.uncheckpointed_running():
+            record = self.session_store.load(session_id)
+            if record is not None and any(
+                message.get("_managerTurnId") == turn_id for message in record.messages
+            ):
+                # The transcript save won the crash race; repair only the command marker.
+                self.conversation_commands.mark_checkpointed(session_id, turn_id)
+                continue
+            self.conversation_commands.recover_uncheckpointed(session_id, turn_id)
+
     def open_workspace(self, path: str, *, create: bool = False) -> dict[str, Any]:
         resolved = Path(path).expanduser()
         if resolved.exists() and not resolved.is_dir():
@@ -516,6 +547,684 @@ class SessionManager:
                 pass
             out.append({"path": path, "name": p.name, "exists": p.is_dir()})
         return out
+
+    @staticmethod
+    def _project_view(record: Any) -> dict[str, Any]:
+        return {
+            "projectId": record.project_id,
+            "canonicalKey": record.canonical_key,
+            "name": record.name,
+            "primaryWorkspaceBindingId": record.primary_workspace_binding_id,
+            "defaultEndpointId": record.default_endpoint_id,
+            "pinned": record.pinned,
+            "order": record.position,
+            "archived": record.archived,
+            "createdAtMs": record.created_at_ms,
+            "updatedAtMs": record.updated_at_ms,
+        }
+
+    @staticmethod
+    def _workspace_binding_view(record: Any) -> dict[str, Any]:
+        return {
+            "workspaceBindingId": record.workspace_binding_id,
+            "projectId": record.project_id,
+            "location": record.location,
+            "endpointId": record.endpoint_id,
+            "localPath": record.local_path,
+            "remoteWorkspaceRef": record.remote_workspace_ref,
+            "displayPath": record.display_path,
+            "state": record.state,
+            "git": record.git,
+            "createdAtMs": record.created_at_ms,
+            "updatedAtMs": record.updated_at_ms,
+        }
+
+    def _ensure_session_project_binding(self, record: SessionRecord):
+        workbench = record.bindings.get("workbench") if record.bindings else None
+        workbench = workbench if isinstance(workbench, dict) else {}
+        delegation = binding_from_record(record) or {}
+        endpoint_id = str(
+            workbench.get("endpointId")
+            or delegation.get("endpoint_id")
+            or delegation.get("endpointId")
+            or LOCAL_ENDPOINT_ID
+        )
+        branch = _git_branch(Path(record.workspace)) if record.workspace else None
+        binding = self.project_store.ensure_session_binding(
+            record.session_id,
+            workspace=record.workspace or None,
+            explicit_project_id=str(workbench.get("projectId") or "") or None,
+            explicit_workspace_binding_id=(
+                str(workbench.get("workspaceBindingId") or "") or None
+            ),
+            endpoint_id=endpoint_id,
+            endpoint_fingerprint=(
+                str(workbench.get("endpointFingerprint") or "") or None
+            ),
+            branch_snapshot=branch,
+            workspace_revision=(
+                str(workbench.get("workspaceRevision") or "") or None
+            ),
+            frozen=record.message_count > 0,
+        )
+        if record.message_count > 0 and not binding.frozen:
+            binding = self.project_store.freeze_session_binding(record.session_id) or binding
+        return binding
+
+    def bind_session_project_context(
+        self,
+        session_id: str,
+        *,
+        workspace: str | None,
+        project_id: str | None,
+        workspace_binding_id: str | None,
+        endpoint_id: str | None,
+        remote_workspace_ref: str | None = None,
+    ):
+        """Validate and persist the draft's project execution target exactly once."""
+        selected_endpoint_id = endpoint_id or LOCAL_ENDPOINT_ID
+        endpoint_fingerprint: str | None = None
+        if workspace_binding_id:
+            workspace_binding = self.project_store.get_workspace(workspace_binding_id)
+            if project_id and workspace_binding.project_id != project_id:
+                raise ProjectStoreError("workspace binding does not belong to project")
+            selected_endpoint_id = workspace_binding.endpoint_id
+            if workspace_binding.location == "remote":
+                if (
+                    remote_workspace_ref
+                    and remote_workspace_ref != workspace_binding.remote_workspace_ref
+                ):
+                    raise ProjectStoreError("remote workspace reference does not match binding")
+                endpoint = self.endpoint_store.get(selected_endpoint_id)
+                if endpoint is None or endpoint.mode is not EndpointMode.REMOTE:
+                    raise ProjectStoreError("endpoint unavailable")
+                endpoint_fingerprint = endpoint.url_fingerprint
+            elif selected_endpoint_id != LOCAL_ENDPOINT_ID:
+                raise ProjectStoreError("local workspace requires the managed local endpoint")
+        elif selected_endpoint_id != LOCAL_ENDPOINT_ID:
+            raise ProjectStoreError("remote endpoint requires a workspace binding")
+        return self.project_store.ensure_session_binding(
+            session_id,
+            workspace=workspace,
+            explicit_project_id=project_id,
+            explicit_workspace_binding_id=workspace_binding_id,
+            endpoint_id=selected_endpoint_id,
+            endpoint_fingerprint=endpoint_fingerprint,
+        )
+
+    def _project_capabilities(
+        self, project: Any, workspaces: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        primary = next(
+            (
+                workspace
+                for workspace in workspaces
+                if workspace["workspaceBindingId"]
+                == project.primary_workspace_binding_id
+            ),
+            workspaces[0] if workspaces else None,
+        )
+        local_path = str((primary or {}).get("localPath") or "")
+        local_available = bool(
+            primary
+            and primary.get("location") == "local"
+            and primary.get("state") == "available"
+            and local_path
+            and Path(local_path).is_dir()
+        )
+        is_repository = bool(local_available and (Path(local_path) / ".git").exists())
+        return {
+            "reveal": {
+                "enabled": local_available,
+                "reasonCode": None if local_available else "project_reveal_unavailable",
+            },
+            "createWorktree": {
+                "enabled": is_repository,
+                "reasonCode": None
+                if is_repository
+                else "project_worktree_unavailable",
+            },
+        }
+
+    def _project_summary(
+        self,
+        project: Any,
+        sessions_by_project: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
+        if sessions_by_project is None:
+            sessions_by_project = {}
+            for session in self.list_sessions():
+                sessions_by_project.setdefault(str(session["projectId"]), []).append(
+                    session
+                )
+        workspaces = [
+            self._workspace_binding_view(item)
+            for item in self.project_store.list_workspaces(project.project_id)
+        ]
+        sessions = sessions_by_project.get(project.project_id, [])
+        active_sessions = [row for row in sessions if not row.get("archived")]
+        return {
+            **self._project_view(project),
+            "workspaceCount": len(workspaces),
+            "sessionCount": len(sessions),
+            "activeSessionCount": len(active_sessions),
+            "archivedSessionCount": len(sessions) - len(active_sessions),
+            "workspaces": workspaces,
+            "sessions": sessions,
+            "capabilities": self._project_capabilities(project, workspaces),
+        }
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        sessions_by_project: dict[str, list[dict[str, Any]]] = {}
+        for session in self.list_sessions():
+            sessions_by_project.setdefault(str(session["projectId"]), []).append(session)
+        return [
+            self._project_summary(project, sessions_by_project)
+            for project in self.project_store.list_projects()
+        ]
+
+    def project_projection(self) -> dict[str, Any]:
+        return {
+            "projects": self.list_projects(),
+            "orderRevision": self.project_store.order_revision(),
+        }
+
+    def _project_has_busy_session(self, project_id: str) -> bool:
+        for row in self.project_sessions(project_id):
+            session_id = str(row.get("session_id") or "")
+            if session_id in self._running_sessions or self.conversation_commands.queue_snapshot(
+                session_id
+            ):
+                return True
+            state = str(row.get("controlState") or row.get("control_state") or "idle")
+            if state in {
+                "running",
+                "waiting",
+                "queued",
+                "pausing",
+                "paused",
+                "resuming",
+                "stopping",
+            }:
+                return True
+        return False
+
+    def update_project(
+        self,
+        project_id: str,
+        patch: dict[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        allowed = {"name", "defaultEndpointId", "pinned", "archived"}
+        if not patch or not set(patch).issubset(allowed):
+            raise ProjectStoreError("project update contains unsupported fields")
+        for flag in ("pinned", "archived"):
+            if flag in patch and not isinstance(patch[flag], bool):
+                raise ProjectStoreError(f"{flag} must be a boolean")
+        if "name" in patch and not isinstance(patch["name"], str):
+            raise ProjectStoreError("project name must be a string")
+        if "defaultEndpointId" in patch and not isinstance(
+            patch["defaultEndpointId"], str
+        ):
+            raise ProjectStoreError("default endpoint must be a string")
+        default_endpoint_id = patch.get("defaultEndpointId")
+        if default_endpoint_id is not None:
+            endpoint_id = str(default_endpoint_id).strip()
+            if endpoint_id != LOCAL_ENDPOINT_ID and self.endpoint_store.get(endpoint_id) is None:
+                raise ProjectStoreError("endpoint unavailable")
+            if not any(
+                binding.endpoint_id == endpoint_id
+                for binding in self.project_store.list_workspaces(project_id)
+            ):
+                raise ProjectStoreError("endpoint is not bound to this project")
+        with self._project_mutation_lock:
+            if patch.get("archived") is True and self._project_has_busy_session(project_id):
+                raise ProjectStoreConflict("project sessions are busy", project_id=project_id)
+            project, revision = self.project_store.update_project(
+                project_id,
+                name=patch.get("name") if "name" in patch else None,
+                default_endpoint_id=(
+                    str(default_endpoint_id) if default_endpoint_id is not None else None
+                ),
+                pinned=patch.get("pinned") if "pinned" in patch else None,
+                archived=patch.get("archived") if "archived" in patch else None,
+                idempotency_key=idempotency_key,
+            )
+        return {
+            "project": self._project_summary(project),
+            "orderRevision": revision,
+        }
+
+    def reorder_projects(
+        self,
+        project_ids: list[str],
+        *,
+        observed_revision: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        with self._project_mutation_lock:
+            _, revision = self.project_store.reorder_projects(
+                project_ids,
+                observed_revision=observed_revision,
+                idempotency_key=idempotency_key,
+            )
+        return {
+            "projects": self.list_projects(),
+            "orderRevision": revision,
+        }
+
+    def sidebar_order(self) -> dict[str, str]:
+        project_order = str(self._prefs.get("project_order") or "manual")
+        conversation_order = str(self._prefs.get("conversation_order") or "recent")
+        if project_order not in {"manual", "recent", "name"}:
+            project_order = "manual"
+        if conversation_order not in {"recent", "oldest", "name"}:
+            conversation_order = "recent"
+        return {
+            "projectOrder": project_order,
+            "conversationOrder": conversation_order,
+        }
+
+    def set_sidebar_order(
+        self,
+        project_order: str,
+        conversation_order: str,
+        *,
+        idempotency_key: str,
+    ) -> dict[str, str]:
+        if project_order not in {"manual", "recent", "name"} or conversation_order not in {
+            "recent",
+            "oldest",
+            "name",
+        }:
+            raise ProjectStoreError("invalid sidebar order")
+        request: dict[str, object] = {
+            "projectOrder": project_order,
+            "conversationOrder": conversation_order,
+        }
+        mutation_key = f"settings:sidebar-order:{idempotency_key.strip()}"
+        if not idempotency_key.strip():
+            raise ProjectStoreError("idempotency key required")
+        request_hash, replay = self.project_store.replay_json_mutation(
+            mutation_key, request
+        )
+        if replay is not None:
+            return {
+                "projectOrder": str(replay["projectOrder"]),
+                "conversationOrder": str(replay["conversationOrder"]),
+            }
+        with self._prefs_lock:
+            self._prefs["project_order"] = project_order
+            self._prefs["conversation_order"] = conversation_order
+            self._save_prefs()
+        result = {
+            "projectOrder": project_order,
+            "conversationOrder": conversation_order,
+        }
+        self.project_store.record_json_mutation(mutation_key, request_hash, result)
+        return result
+
+    def archive_project_sessions(
+        self, project_id: str, *, idempotency_key: str
+    ) -> dict[str, Any]:
+        request: dict[str, object] = {"projectId": project_id}
+        mutation_key = f"project:archive-sessions:{project_id}:{idempotency_key.strip()}"
+        if not idempotency_key.strip():
+            raise ProjectStoreError("idempotency key required")
+        request_hash, replay = self.project_store.replay_json_mutation(
+            mutation_key, request
+        )
+        if replay is not None:
+            return replay
+        with self._project_mutation_lock:
+            self.project_store.get_project(project_id)
+            if self._project_has_busy_session(project_id):
+                raise ProjectStoreConflict("project sessions are busy", project_id=project_id)
+            session_ids = [
+                str(row["session_id"])
+                for row in self.project_sessions(project_id)
+                if not row.get("archived")
+            ]
+            archived_ids = self.session_store.set_archived_many(session_ids)
+            result: dict[str, Any] = {
+                "archivedSessionIds": archived_ids,
+                "archivedCount": len(archived_ids),
+            }
+            self.project_store.record_json_mutation(mutation_key, request_hash, result)
+            return result
+
+    def _project_primary_local_binding(self, project_id: str):
+        project = self.project_store.get_project(project_id)
+        workspaces = self.project_store.list_workspaces(project_id)
+        binding = next(
+            (
+                item
+                for item in workspaces
+                if item.workspace_binding_id == project.primary_workspace_binding_id
+            ),
+            workspaces[0] if workspaces else None,
+        )
+        if (
+            binding is None
+            or binding.location != "local"
+            or not binding.local_path
+            or binding.state != "available"
+        ):
+            raise ProjectStoreError("project capability unsupported")
+        path = Path(binding.local_path).expanduser().resolve()
+        if not path.is_dir():
+            raise ProjectStoreError("project capability unsupported")
+        return project, binding, path
+
+    def reveal_project(self, project_id: str, *, idempotency_key: str) -> dict[str, Any]:
+        request: dict[str, object] = {"projectId": project_id}
+        mutation_key = f"project:reveal:{project_id}:{idempotency_key.strip()}"
+        if not idempotency_key.strip():
+            raise ProjectStoreError("idempotency key required")
+        request_hash, replay = self.project_store.replay_json_mutation(
+            mutation_key, request
+        )
+        if replay is not None:
+            return replay
+        _, _, path = self._project_primary_local_binding(project_id)
+        try:
+            if sys.platform == "darwin":
+                args = ["open", str(path)]
+            elif sys.platform == "win32":
+                args = ["explorer", str(path)]
+            else:
+                args = ["xdg-open", str(path)]
+            subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            raise ProjectStoreError("project reveal unavailable") from exc
+        result: dict[str, Any] = {"ok": True}
+        self.project_store.record_json_mutation(mutation_key, request_hash, result)
+        return result
+
+    @staticmethod
+    def _worktree_destination(repo: Path, branch_name: str) -> Path:
+        safe_branch = re.sub(r"[^A-Za-z0-9._-]+", "-", branch_name).strip("-.")
+        if not safe_branch:
+            raise ProjectStoreError("invalid branch name")
+        candidate = repo.parent / f"{repo.name}-{safe_branch}"
+        suffix = 2
+        while candidate.exists():
+            candidate = repo.parent / f"{repo.name}-{safe_branch}-{suffix}"
+            suffix += 1
+        return candidate
+
+    def preview_project_worktree(
+        self, project_id: str, *, branch_name: str
+    ) -> dict[str, Any]:
+        branch = branch_name.strip()
+        _, _, path = self._project_primary_local_binding(project_id)
+        if _run_git_metadata(path, "rev-parse", "--is-inside-work-tree") != "true":
+            raise ProjectStoreError("project capability unsupported")
+        if _run_git_metadata(path, "check-ref-format", "--branch", branch) is None:
+            raise ProjectStoreError("invalid branch name")
+        destination = self._worktree_destination(path, branch)
+        return {"displayPath": str(destination)}
+
+    def create_project_worktree(
+        self,
+        project_id: str,
+        *,
+        branch_name: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        branch = branch_name.strip()
+        request: dict[str, object] = {"projectId": project_id, "branchName": branch}
+        mutation_key = f"project:worktree:{project_id}:{idempotency_key.strip()}"
+        if not idempotency_key.strip():
+            raise ProjectStoreError("idempotency key required")
+        request_hash, replay = self.project_store.replay_json_mutation(
+            mutation_key, request
+        )
+        if replay is not None:
+            return replay
+        with self._project_mutation_lock:
+            if self._project_has_busy_session(project_id):
+                raise ProjectStoreConflict("project sessions are busy", project_id=project_id)
+            project, _, path = self._project_primary_local_binding(project_id)
+            if _run_git_metadata(path, "rev-parse", "--is-inside-work-tree") != "true":
+                raise ProjectStoreError("project capability unsupported")
+            if _run_git_metadata(path, "check-ref-format", "--branch", branch) is None:
+                raise ProjectStoreError("invalid branch name")
+            if (_run_git_metadata(path, "status", "--porcelain") or "").strip():
+                raise ProjectStoreConflict("Git checkout blocked")
+            destination = self._worktree_destination(path, branch)
+            branch_exists = (
+                subprocess.run(
+                    ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                    cwd=path,
+                    timeout=10,
+                ).returncode
+                == 0
+            )
+            command = ["git", "worktree", "add"]
+            if not branch_exists:
+                command.extend(["-b", branch])
+            command.extend([str(destination), branch] if branch_exists else [str(destination)])
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=path,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ProjectStoreError("Git worktree operation unavailable") from exc
+            if completed.returncode != 0:
+                raise ProjectStoreConflict("Git checkout blocked")
+            workspace = self.project_store.ensure_local_project(
+                destination, name=project.name
+            ).workspace
+            project_summary = next(
+                item
+                for item in self.list_projects()
+                if item["projectId"] == project_id
+            )
+            response: dict[str, Any] = {
+                "project": project_summary,
+                "workspace": self._workspace_binding_view(workspace),
+                "git": self.workspace_git(workspace.workspace_binding_id),
+                "orderRevision": self.project_store.order_revision(),
+            }
+            self.project_store.record_json_mutation(
+                mutation_key, request_hash, response
+            )
+            return response
+
+    def create_project(
+        self, body: dict[str, Any], *, idempotency_key: str
+    ) -> dict[str, Any]:
+        workspace = body.get("workspace")
+        if not isinstance(workspace, dict):
+            raise ProjectStoreError("project workspace required")
+        name = str(body.get("name") or "")
+        location = str(workspace.get("location") or "local")
+        if location == "local":
+            selected_endpoint_id = str(
+                body.get("defaultEndpointId") or LOCAL_ENDPOINT_ID
+            )
+            if selected_endpoint_id != LOCAL_ENDPOINT_ID:
+                raise ProjectStoreError(
+                    "local workspace requires the managed local endpoint"
+                )
+            path = str(workspace.get("path") or "")
+            opened = self.open_workspace(path)
+            if not opened.get("ok"):
+                raise ProjectStoreError(str(opened.get("error") or "workspace unavailable"))
+            created = self.project_store.create_local_project(
+                name=name,
+                workspace=str(opened["path"]),
+                endpoint_id=selected_endpoint_id,
+                idempotency_key=idempotency_key,
+            )
+        elif location == "remote":
+            endpoint_id = str(workspace.get("endpointId") or "")
+            endpoint = self.endpoint_store.get(endpoint_id)
+            if endpoint is None or endpoint.mode is not EndpointMode.REMOTE:
+                raise ProjectStoreError("endpoint unavailable")
+            created = self.project_store.create_remote_project(
+                name=name,
+                endpoint_id=endpoint_id,
+                remote_workspace_ref=str(workspace.get("remoteWorkspaceRef") or ""),
+                display_path=str(workspace.get("displayPath") or "Remote workspace"),
+                idempotency_key=idempotency_key,
+            )
+        else:
+            raise ProjectStoreError("unsupported workspace location")
+        project_summary = next(
+            item
+            for item in self.list_projects()
+            if item["projectId"] == created.project.project_id
+        )
+        return {
+            "project": project_summary,
+            "workspace": self._workspace_binding_view(created.workspace),
+        }
+
+    def project_workspaces(self, project_id: str) -> list[dict[str, Any]]:
+        self.project_store.get_project(project_id)
+        return [
+            self._workspace_binding_view(item)
+            for item in self.project_store.list_workspaces(project_id)
+        ]
+
+    def project_sessions(self, project_id: str) -> list[dict[str, Any]]:
+        self.project_store.get_project(project_id)
+        return [row for row in self.list_sessions() if row.get("projectId") == project_id]
+
+    def add_project_workspace(
+        self,
+        project_id: str,
+        body: dict[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        if str(body.get("location") or "") != "remote":
+            raise ProjectStoreError("only remote workspace additions are supported")
+        endpoint_id = str(body.get("endpointId") or "")
+        endpoint = self.endpoint_store.get(endpoint_id)
+        if endpoint is None or endpoint.mode is not EndpointMode.REMOTE:
+            raise ProjectStoreError("endpoint unavailable")
+        workspace = self.project_store.add_remote_workspace(
+            project_id,
+            endpoint_id=endpoint_id,
+            remote_workspace_ref=str(body.get("remoteWorkspaceRef") or ""),
+            display_path=str(body.get("displayPath") or "Remote workspace"),
+            idempotency_key=idempotency_key,
+        )
+        return {"workspace": self._workspace_binding_view(workspace)}
+
+    def list_haas_endpoints(self) -> list[dict[str, Any]]:
+        endpoints = [
+            {
+                "endpointId": LOCAL_ENDPOINT_ID,
+                "mode": "local_managed",
+                "serverIdentity": "This Mac",
+                "urlFingerprint": None,
+                "state": "ready",
+            }
+        ]
+        for endpoint in self.endpoint_store.list():
+            if endpoint.endpoint_id == LOCAL_ENDPOINT_ID:
+                continue
+            endpoints.append(
+                {
+                    "endpointId": endpoint.endpoint_id,
+                    "mode": endpoint.mode.value,
+                    "serverIdentity": endpoint.server_identity,
+                    "urlFingerprint": endpoint.url_fingerprint,
+                    "state": "configured",
+                }
+            )
+        return endpoints
+
+    def workspace_git(self, workspace_binding_id: str) -> dict[str, Any]:
+        binding = self.project_store.get_workspace(workspace_binding_id)
+        if binding.location != "local" or not binding.local_path:
+            return {"isRepository": False, "readOnly": True}
+        path = Path(binding.local_path)
+        inside = _run_git_metadata(path, "rev-parse", "--is-inside-work-tree")
+        if inside != "true":
+            return {"isRepository": False, "readOnly": True}
+        branch = _run_git_metadata(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+        revision = _run_git_metadata(path, "rev-parse", "HEAD")
+        status = _run_git_metadata(path, "status", "--porcelain") or ""
+        branches = _run_git_metadata(
+            path, "for-each-ref", "--format=%(refname:short)", "refs/heads"
+        )
+        return {
+            "isRepository": True,
+            "readOnly": False,
+            "headRefType": "branch" if branch else "detached",
+            "branchName": branch,
+            "dirtyFileCount": len([line for line in status.splitlines() if line]),
+            "branches": sorted(line for line in (branches or "").splitlines() if line),
+            "observedRevision": revision,
+        }
+
+    def mutate_workspace_git(
+        self,
+        workspace_binding_id: str,
+        *,
+        branch_name: str,
+        observed_revision: str,
+        create: bool,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        binding = self.project_store.get_workspace(workspace_binding_id)
+        if binding.location != "local" or not binding.local_path:
+            raise ProjectStoreError("remote Git mutation is unavailable")
+        path = Path(binding.local_path)
+        operation = "create" if create else "switch"
+        request = {
+            "operation": operation,
+            "workspaceBindingId": workspace_binding_id,
+            "branchName": branch_name,
+            "observedRevision": observed_revision,
+        }
+        mutation_key = f"git:{idempotency_key}"
+        request_hash, replay = self.project_store.replay_json_mutation(
+            mutation_key, request
+        )
+        if replay is not None:
+            return replay
+        current = self.workspace_git(workspace_binding_id)
+        if not current.get("isRepository"):
+            raise ProjectStoreError("workspace is not a Git repository")
+        if current.get("observedRevision") != observed_revision:
+            raise ProjectStoreConflict("git state is stale")
+        for session_id in self._running_sessions:
+            active_binding = self.project_store.get_session_binding(session_id)
+            if active_binding and active_binding.workspace_binding_id == workspace_binding_id:
+                raise ProjectStoreConflict("active session blocks Git mutation")
+        valid = _run_git_metadata(path, "check-ref-format", "--branch", branch_name)
+        if valid is None:
+            raise ProjectStoreError("invalid branch name")
+        command = ["git", "switch"]
+        if create:
+            command.append("-c")
+        command.append(branch_name)
+        try:
+            result = subprocess.run(
+                command,
+                cwd=path,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ProjectStoreError("Git operation unavailable") from exc
+        if result.returncode != 0:
+            raise ProjectStoreConflict("Git checkout blocked")
+        response: dict[str, object] = {"git": self.workspace_git(workspace_binding_id)}
+        self.project_store.record_json_mutation(mutation_key, request_hash, response)
+        return response
 
     DEFAULT_SCRATCH_BASE = "~/OpenWorker"
 
@@ -644,6 +1353,102 @@ class SessionManager:
                 base.api_token = local_token
         return base
 
+    def _haas_execution_target(
+        self, session_id: str, workspace: str | None
+    ) -> tuple[HaasDelegationConfig, str | None]:
+        """Resolve the immutable project binding into one executable HaaS target.
+
+        A non-local endpoint is fail-closed: its URL, TLS policy, credential, and
+        workspace scope all come from the persisted endpoint/workspace records.  The
+        caller-provided local workspace is never reused for a remote endpoint.
+        """
+        base = self._haas_config(workspace)
+        project_binding = self.project_store.get_session_binding(session_id)
+        if project_binding is None:
+            return base, workspace
+        if project_binding.endpoint_id == LOCAL_ENDPOINT_ID:
+            local_defaults = HaasDelegationConfig()
+            local_token = base.api_token if base.mode == "local_managed" else ""
+            token_reader = getattr(self._haas_supervisor, "token", None)
+            supervised_token = token_reader() if callable(token_reader) else None
+            if supervised_token:
+                local_token = supervised_token
+            return (
+                replace(
+                    base,
+                    mode="local_managed",
+                    endpoint_id=LOCAL_ENDPOINT_ID,
+                    endpoint_fingerprint="",
+                    base_url=(
+                        base.base_url
+                        if base.mode == "local_managed"
+                        else local_defaults.base_url
+                    ),
+                    api_token=local_token,
+                    tls_verify=False,
+                    allow_insecure_development=True,
+                ),
+                workspace,
+            )
+
+        endpoint = self.endpoint_store.get(project_binding.endpoint_id)
+        if endpoint is None or endpoint.mode is not EndpointMode.REMOTE:
+            raise HaasDelegationError(
+                "Configured remote HaaS endpoint is unavailable.",
+                code="endpoint_unavailable",
+            )
+        if (
+            project_binding.endpoint_fingerprint
+            and project_binding.endpoint_fingerprint != endpoint.url_fingerprint
+        ):
+            raise HaasDelegationError(
+                "Configured remote HaaS endpoint identity changed.",
+                code="endpoint_identity_changed",
+            )
+        if not project_binding.workspace_binding_id:
+            raise HaasDelegationError(
+                "Remote workspace binding is unavailable.",
+                code="workspace_unavailable",
+            )
+        workspace_binding = self.project_store.get_workspace(
+            project_binding.workspace_binding_id
+        )
+        if (
+            workspace_binding.project_id != project_binding.project_id
+            or workspace_binding.endpoint_id != endpoint.endpoint_id
+            or workspace_binding.location != "remote"
+            or not workspace_binding.remote_workspace_ref
+        ):
+            raise HaasDelegationError(
+                "Remote workspace binding is unavailable.",
+                code="workspace_unavailable",
+            )
+        secret = self.secrets.get(endpoint.token_ref) or {}
+        api_token = secret.get("api_token")
+        if not isinstance(api_token, str) or not api_token:
+            raise HaasDelegationError(
+                "Configured remote HaaS credential is unavailable.",
+                code="endpoint_unavailable",
+            )
+        return (
+            replace(
+                base,
+                enabled=True,
+                mode="remote",
+                endpoint_id=endpoint.endpoint_id,
+                endpoint_fingerprint=endpoint.url_fingerprint,
+                tls_verify=endpoint.tls_verify,
+                allow_insecure_development=endpoint.allow_insecure_development,
+                backend_preference="haas",
+                execution_mode="local_api",
+                base_url=endpoint.base_url,
+                api_token=api_token,
+                local_autostart=False,
+                require_trusted_workspace=False,
+            ),
+            workspace_binding.remote_workspace_ref,
+        )
+
     @staticmethod
     def _haas_config_from_prefs(
         base: HaasDelegationConfig, prefs: dict[str, Any]
@@ -715,13 +1520,13 @@ class SessionManager:
     def _build_direct_haas_client(self, config: HaasDelegationConfig) -> HaasClient:
         mode = EndpointMode.LOCAL_MANAGED if config.mode == "local_managed" else EndpointMode.REMOTE
         endpoint = HaasEndpoint.create(
-            endpoint_id=f"{config.mode}:default",
+            endpoint_id=config.endpoint_id,
             mode=mode,
             base_url=config.base_url,
             token_ref="secret://manager/haas/default",
             server_identity=config.base_url.rstrip("/"),
-            tls_verify=config.mode != "local_managed",
-            allow_insecure_development=config.mode == "local_managed",
+            tls_verify=config.tls_verify,
+            allow_insecure_development=config.allow_insecure_development,
         )
         return HaasClient(
             endpoint,
@@ -738,7 +1543,9 @@ class SessionManager:
         haas_session_id = str(binding.get("haas_session_id") or "")
         if not haas_session_id.startswith("hsess_"):
             raise HaasDelegationError("Session is not bound to HaaS.")
-        config = self._haas_config(record.workspace if record else None)
+        config, _ = self._haas_execution_target(
+            session_id, record.workspace if record else None
+        )
         config = apply_config_snapshot(config, binding)
         client = (
             self._haas_direct_client(config)
@@ -761,11 +1568,11 @@ class SessionManager:
         binding = (record.bindings if record else {}).get("haas_delegation") or {}
         if not binding:
             return None
-        config = self._haas_config(record.workspace if record else None)
+        config, _ = self._haas_execution_target(
+            session_id, record.workspace if record else None
+        )
         approval_mode = (
-            "on-request"
-            if mode in {Mode.INTERACTIVE, Mode.AUTO_APPROVE, Mode.CUSTOM}
-            else "never"
+            "on-request" if mode in {Mode.INTERACTIVE, Mode.AUTO_APPROVE, Mode.CUSTOM} else "never"
         )
         expected_revision = int(binding.get("desired_revision") or 1)
         if binding.get("execution_mode") == "local_api":
@@ -776,8 +1583,7 @@ class SessionManager:
                 {"tools": {"disabled": [], "approvalMode": approval_mode}},
                 expected_revision=expected_revision,
                 idempotency_key=(
-                    f"manager-mode-policy:{haas_session_id}:"
-                    f"{expected_revision + 1}:{approval_mode}"
+                    f"manager-mode-policy:{haas_session_id}:{expected_revision + 1}:{approval_mode}"
                 ),
             )
         else:
@@ -851,9 +1657,7 @@ class SessionManager:
         try:
             client, haas_session_id = self._haas_interaction_client(session_id)
             invocation_id = (
-                str(bridge_data.get("invocationId") or "")
-                if isinstance(bridge_data, dict)
-                else ""
+                str(bridge_data.get("invocationId") or "") if isinstance(bridge_data, dict) else ""
             )
             get_invocation = getattr(client, "get_invocation", None)
             if invocation_id and callable(get_invocation):
@@ -885,9 +1689,7 @@ class SessionManager:
                                 continue
                             event_type = str(native.get("type") or "")
                             if event_type.startswith("haas.turn."):
-                                event_type = (
-                                    "invocation." + event_type.removeprefix("haas.turn.")
-                                )
+                                event_type = "invocation." + event_type.removeprefix("haas.turn.")
                             metadata = native.get("haas") or {}
                             bridge.consume_native(
                                 event_id=event_id,
@@ -1060,11 +1862,7 @@ class SessionManager:
         return {
             "phase": phase,
             **({"code": str(task["code"])} if task.get("code") else {}),
-            **(
-                {"safeReason": str(task["safeReason"])}
-                if task.get("safeReason")
-                else {}
-            ),
+            **({"safeReason": str(task["safeReason"])} if task.get("safeReason") else {}),
             **(
                 {"retryable": bridge["terminalRetryable"]}
                 if isinstance(bridge.get("terminalRetryable"), bool)
@@ -1239,14 +2037,22 @@ class SessionManager:
     ):
         record = self.session_store.load(session_id)
         ws = record.workspace if record else self.resolve_workspace(workspace)
-        config = self._haas_config(ws)
+        try:
+            config, execution_workspace = self._haas_execution_target(session_id, ws)
+        except HaasDelegationError as exc:
+            return DelegationDecision(
+                "blocked", exc.code or "endpoint_unavailable"
+            )
         binding = binding_from_record(record)
         return deterministic_decision(
             config=config,
             session_id=session_id,
             agent=(record.agent if record else agent) or "code",
-            workspace=ws,
-            workspace_trusted=bool(ws and self.workspace_trust.is_trusted(ws)),
+            workspace=execution_workspace,
+            workspace_trusted=(
+                config.mode == "remote"
+                or bool(ws and self.workspace_trust.is_trusted(ws))
+            ),
             content=content,
             binding=binding,
         )
@@ -1301,8 +2107,7 @@ class SessionManager:
             current_invocation
             and current_invocation == incoming_invocation
             and current_control_state in {"idle", "paused", "cancelled"}
-            and incoming_control_state
-            in {"running", "pausing", "paused", "resuming", "stopping"}
+            and incoming_control_state in {"running", "pausing", "paused", "resuming", "stopping"}
         ):
             # A stream-local snapshot can finish persisting after a concurrent
             # control mutation. Terminal control for the same invocation is
@@ -1403,8 +2208,7 @@ class SessionManager:
         role = recovered.get("role")
         if role == "user":
             return any(
-                message.get("role") == "user"
-                and message.get("content") == recovered.get("content")
+                message.get("role") == "user" and message.get("content") == recovered.get("content")
                 for message in messages
             )
         if role != "assistant":
@@ -1424,10 +2228,9 @@ class SessionManager:
             }
             if recovered_invocations and recovered_invocations & message_invocations:
                 return True
-            if (
-                message.get("content") == recovered.get("content")
-                and message.get("_haas_task_outcome") == recovered.get("_haas_task_outcome")
-            ):
+            if message.get("content") == recovered.get("content") and message.get(
+                "_haas_task_outcome"
+            ) == recovered.get("_haas_task_outcome"):
                 return True
         return False
 
@@ -1490,7 +2293,9 @@ class SessionManager:
                 return
 
         if existing_binding is not None:
-            config = self._haas_config(self.engine_workspace(session_id, workspace=workspace))
+            config, _ = self._haas_execution_target(
+                session_id, self.engine_workspace(session_id, workspace=workspace)
+            )
             if existing_binding.get("execution_mode") == "local_api":
                 async for event in self._run_haas_local_api_turn(
                     session_id,
@@ -1592,7 +2397,9 @@ class SessionManager:
             "supports_resume": False,
         }
         self._persist_haas_binding(session_id, engine, binding)
-        config = self._haas_config(self.engine_workspace(session_id))
+        config, _ = self._haas_execution_target(
+            session_id, self.engine_workspace(session_id)
+        )
         try:
             if binding.get("execution_mode") == "local_api":
                 async for event in self._run_haas_local_api_turn(
@@ -1642,10 +2449,12 @@ class SessionManager:
         config: HaasDelegationConfig,
         workspace: str | None,
     ) -> dict[str, Any]:
-        return {
+        binding = {
             "backend": "haas",
             "execution_mode": "local_api",
-            "haas_base_url": config.base_url.rstrip("/"),
+            "endpoint_id": config.endpoint_id,
+            "endpoint_mode": config.mode,
+            "endpoint_fingerprint": config.endpoint_fingerprint or None,
             "haas_session_id": f"hsess_{session_id}",
             "haas_user_id": config.user_id,
             "harness_id": config.harness_id,
@@ -1655,6 +2464,11 @@ class SessionManager:
             "runtime": {"status": "local_api"},
             "bound_at": int(time.time()),
         }
+        if config.mode == "local_managed":
+            binding["haas_base_url"] = config.base_url.rstrip("/")
+        else:
+            binding["remote_workspace_ref"] = workspace
+        return binding
 
     async def _recover_accepted_local_attempt(
         self,
@@ -1798,12 +2612,15 @@ class SessionManager:
         continue_from_invocation_id: str | None = None,
     ):
         record = self.session_store.load(session_id)
-        workspace = (
+        local_workspace = (
             record.workspace
             if record is not None and record.workspace
             else str(engine.executor.cwd)
         )
-        config = config or self._haas_config(workspace)
+        target_config, workspace = self._haas_execution_target(
+            session_id, local_workspace
+        )
+        config = config or target_config
         if binding is not None:
             config = apply_config_snapshot(config, binding)
         if config.mode == "local_managed":
@@ -1811,14 +2628,12 @@ class SessionManager:
             if not local_status.get("running"):
                 reason = local_status.get("reason") or local_status.get("status")
                 raise HaasDelegationError(f"local HaaS sidecar unavailable: {reason}")
-            config = self._haas_config(workspace)
+            config, workspace = self._haas_execution_target(session_id, local_workspace)
             if binding is not None:
                 config = apply_config_snapshot(config, binding)
         try:
             message = (
-                adk_message_from_content(content)
-                if continue_from_invocation_id is None
-                else None
+                adk_message_from_content(content) if continue_from_invocation_id is None else None
             )
         except HaasDelegationError as exc:
             message_text = f"HaaS local API unavailable: {exc}"
@@ -1838,12 +2653,19 @@ class SessionManager:
         binding = {
             **binding,
             "execution_mode": "local_api",
-            "haas_base_url": config.base_url.rstrip("/"),
+            "endpoint_id": config.endpoint_id,
+            "endpoint_mode": config.mode,
+            "endpoint_fingerprint": config.endpoint_fingerprint or None,
             "haas_user_id": config.user_id,
             "harness_id": config.harness_id,
             "harness_base": config.harness_base,
             "workspace": workspace,
         }
+        if config.mode == "local_managed":
+            binding["haas_base_url"] = config.base_url.rstrip("/")
+        else:
+            binding.pop("haas_base_url", None)
+            binding["remote_workspace_ref"] = workspace
         haas_session_id = require_binding_value(binding, "haas_session_id")
         harness_id = require_binding_value(binding, "harness_id")
         haas_user_id = require_binding_value(binding, "haas_user_id")
@@ -1937,8 +2759,7 @@ class SessionManager:
             "policy": {
                 "approvalPolicy": (
                     "on-request"
-                    if engine.permissions.mode
-                    in {Mode.INTERACTIVE, Mode.AUTO_APPROVE, Mode.CUSTOM}
+                    if engine.permissions.mode in {Mode.INTERACTIVE, Mode.AUTO_APPROVE, Mode.CUSTOM}
                     else "never"
                 ),
                 "network": {
@@ -1948,10 +2769,15 @@ class SessionManager:
             },
         }
         if workspace:
+            workspace_root = (
+                workspace
+                if config.mode == "remote"
+                else str(Path(workspace).expanduser().resolve())
+            )
             body["sandbox"] = {
                 "mode": config.workspace_mode,
-                "workspaceRoot": str(Path(workspace).expanduser().resolve()),
-                "writableRoots": [str(Path(workspace).expanduser().resolve())],
+                "workspaceRoot": workspace_root,
+                "writableRoots": [workspace_root],
             }
 
         client = self._haas_direct_client(config)
@@ -1960,18 +2786,29 @@ class SessionManager:
         )
         bridge: StreamBridgeState | None = None
         try:
-            if config.mode != "local_managed":
-                raise HaasDelegationError("local API requires the managed local endpoint")
-            binding = await self._sync_local_haas_profile(client, engine, binding)
-            self._persist_haas_binding(session_id, engine, binding)
+            if config.mode == "remote":
+                readiness = await client.ready(scope="execution")
+                readiness_data = readiness.data if hasattr(readiness, "data") else readiness
+                if (
+                    not isinstance(readiness_data, dict)
+                    or readiness_data.get("status") != "ready"
+                ):
+                    raise HaasDelegationError(
+                        "Configured remote HaaS endpoint is unavailable.",
+                        code="endpoint_unavailable",
+                    )
+            else:
+                binding = await self._sync_local_haas_profile(client, engine, binding)
+                self._persist_haas_binding(session_id, engine, binding)
             binding["pause_supported"] = await self._require_haas_interaction_capability(
                 client, harness_id, engine.permissions.mode
             )
             binding["interaction_capability"] = "human_bridge"
-            body["haas"] = {
-                "profileId": binding["profile_id"],
-                "profileVersion": binding["profile_version"],
-            }
+            if config.mode == "local_managed":
+                body["haas"] = {
+                    "profileId": binding["profile_id"],
+                    "profileVersion": binding["profile_version"],
+                }
             stream_context = (
                 client.run_sse(body, idempotency_key=idempotency_key)
                 if continue_from_invocation_id is None
@@ -1985,6 +2822,7 @@ class SessionManager:
             )
             async with stream_context as stream:
                 accepted = stream.accepted
+                self.project_store.freeze_session_binding(session_id)
                 binding = {
                     **binding,
                     "binding": "haas_bound",
@@ -2007,14 +2845,12 @@ class SessionManager:
                     invocation_id=accepted.invocation_id,
                 )
                 prior_task = (
-                    TaskCompletionState.from_dict(
-                        (binding.get("stream_bridge") or {}).get("task")
-                    )
+                    TaskCompletionState.from_dict((binding.get("stream_bridge") or {}).get("task"))
                     if not append_user and continue_from_invocation_id is None
                     else TaskCompletionState()
                 )
                 bridge = StreamBridgeState(
-                    endpoint_id=config.base_url.rstrip("/"),
+                    endpoint_id=config.endpoint_id,
                     session=SessionKey(harness_id, haas_user_id, accepted.session_id),
                     invocation_id=accepted.invocation_id,
                     task=prior_task,
@@ -2032,9 +2868,7 @@ class SessionManager:
                     },
                 }
                 if continue_from_invocation_id is not None:
-                    turn_start_data["continuedFromInvocationId"] = (
-                        continue_from_invocation_id
-                    )
+                    turn_start_data["continuedFromInvocationId"] = continue_from_invocation_id
                 yield Event(
                     EventType.TURN_START,
                     turn_start_data,
@@ -2086,9 +2920,11 @@ class SessionManager:
                                 invocation = await client.get_invocation(
                                     bridge.session.session_id, bridge.invocation_id
                                 )
-                                if invocation.data.get("status") not in {
-                                    "accepted", "running", "cancelling"
-                                } or time.monotonic() >= recovery_deadline:
+                                if (
+                                    invocation.data.get("status")
+                                    not in {"accepted", "running", "cancelling"}
+                                    or time.monotonic() >= recovery_deadline
+                                ):
                                     return
                             await asyncio.sleep(0.05)
                     finally:
@@ -2252,9 +3088,7 @@ class SessionManager:
                     except HaasClientError:
                         pass
                     else:
-                        invocation_status = str(
-                            invocation.data.get("status") or "unknown"
-                        )
+                        invocation_status = str(invocation.data.get("status") or "unknown")
                         terminal_event_id = invocation.data.get("terminalEventId")
                     actions.extend(
                         bridge.reconcile_authoritative_terminal(
@@ -2268,8 +3102,7 @@ class SessionManager:
                         event.data["haasEventId"] = event_id
                         yield event
             page_checkpoint = (
-                str(page.data[-1].get("eventId") or page.data[-1].get("id") or "")
-                or None
+                str(page.data[-1].get("eventId") or page.data[-1].get("id") or "") or None
                 if page.data
                 else None
             )
@@ -2311,9 +3144,7 @@ class SessionManager:
         attempt.terminal = True
         binding["attempt_ledger"] = ledger.to_dict()
         binding["stream_bridge"] = bridge.to_dict()
-        binding["control_state"] = (
-            "paused" if bridge.terminal_status == "interrupted" else "idle"
-        )
+        binding["control_state"] = "paused" if bridge.terminal_status == "interrupted" else "idle"
         binding["supports_resume"] = bridge.terminal_status == "interrupted"
         binding["resumable_invocation_id"] = (
             bridge.invocation_id if bridge.terminal_status == "interrupted" else None
@@ -2586,9 +3417,7 @@ class SessionManager:
                     },
                 }
                 if continue_from_invocation_id is not None:
-                    turn_start_data["continuedFromInvocationId"] = (
-                        continue_from_invocation_id
-                    )
+                    turn_start_data["continuedFromInvocationId"] = continue_from_invocation_id
                 yield Event(
                     EventType.TURN_START,
                     turn_start_data,
@@ -2693,9 +3522,7 @@ class SessionManager:
         attempt.terminal = True
         binding["attempt_ledger"] = ledger.to_dict()
         binding["stream_bridge"] = bridge.to_dict()
-        binding["control_state"] = (
-            "paused" if bridge.terminal_status == "interrupted" else "idle"
-        )
+        binding["control_state"] = "paused" if bridge.terminal_status == "interrupted" else "idle"
         binding["supports_resume"] = bridge.terminal_status == "interrupted"
         binding["resumable_invocation_id"] = (
             bridge.invocation_id if bridge.terminal_status == "interrupted" else None
@@ -2707,16 +3534,10 @@ class SessionManager:
                 {
                     "role": "assistant",
                     "content": assistant_text,
-                    **(
-                        {"reasoning": bridge.reasoning_summary}
-                        if bridge.reasoning_summary
-                        else {}
-                    ),
+                    **({"reasoning": bridge.reasoning_summary} if bridge.reasoning_summary else {}),
                     "ts": time.time(),
                     "_delegated": {"backend": "haas", "session": delegated_session_id},
-                    "_haas_activity": [
-                        dict(activity) for activity in bridge.activities.values()
-                    ],
+                    "_haas_activity": [dict(activity) for activity in bridge.activities.values()],
                     "_haas_model_stages": bridge.public_model_stages(),
                     "_haas_task_outcome": {
                         **bridge.task.to_dict(),
@@ -3380,7 +4201,8 @@ class SessionManager:
         engine = self.get_engine(item.session_id)
         if engine is None or not hasattr(engine, "resume"):
             return
-        self.mark_running(item.session_id)
+        if not self.mark_running(item.session_id):
+            return
         try:
             async for _event in engine.resume():
                 pass
@@ -4980,10 +5802,14 @@ class SessionManager:
             result = _run_sync(client.list_artifacts(haas_session_id))
             artifacts = result.data if hasattr(result, "data") else result
         except (HaasClientError, HaasDelegationError, ValueError):
-            return None, None, {
-                "_error": "artifact_unavailable",
-                "relativePath": path,
-            }
+            return (
+                None,
+                None,
+                {
+                    "_error": "artifact_unavailable",
+                    "relativePath": path,
+                },
+            )
         if not isinstance(artifacts, list):
             return None, None, None
         candidates = [item for item in artifacts if isinstance(item, dict)]
@@ -4994,9 +5820,7 @@ class SessionManager:
             newest = max(
                 exact,
                 key=lambda item: (
-                    item.get("createdAtMs")
-                    if isinstance(item.get("createdAtMs"), int)
-                    else 0
+                    item.get("createdAtMs") if isinstance(item.get("createdAtMs"), int) else 0
                 ),
             )
             return client, haas_session_id, newest
@@ -5004,10 +5828,14 @@ class SessionManager:
         if len(basename) == 1:
             return client, haas_session_id, basename[0]
         if len(basename) > 1:
-            return client, haas_session_id, {
-                "_error": "artifact_ambiguous",
-                "matches": [item.get("relativePath") for item in basename],
-            }
+            return (
+                client,
+                haas_session_id,
+                {
+                    "_error": "artifact_ambiguous",
+                    "matches": [item.get("relativePath") for item in basename],
+                },
+            )
         return client, haas_session_id, None
 
     def _artifact_target(
@@ -5183,9 +6011,7 @@ class SessionManager:
                 "download_status": "available",
             }
         try:
-            content, media_type = _run_sync(
-                client.download_file(str(artifact.get("id") or ""))
-            )
+            content, media_type = _run_sync(client.download_file(str(artifact.get("id") or "")))
         except (HaasClientError, HaasDelegationError, ValueError):
             return {
                 "ok": False,
@@ -5269,8 +6095,7 @@ class SessionManager:
                 "ok": False,
                 "code": "artifact_ambiguous",
                 "error": (
-                    "More than one artifact has this name. "
-                    "Download it by its full output path."
+                    "More than one artifact has this name. Download it by its full output path."
                 ),
                 "matches": artifact.get("matches") or [],
             }
@@ -5288,9 +6113,7 @@ class SessionManager:
                 "error": HAAS_ARTIFACT_UNAVAILABLE_MESSAGE,
             }
         try:
-            content, media_type = _run_sync(
-                client.download_file(str(artifact.get("id") or ""))
-            )
+            content, media_type = _run_sync(client.download_file(str(artifact.get("id") or "")))
         except (HaasClientError, HaasDelegationError, ValueError):
             return {
                 "ok": False,
@@ -5311,7 +6134,10 @@ class SessionManager:
         (`open`). The server runs on the user's machine in both desktop and browser builds, so
         this is local. Cross-platform: macOS `open`, Windows Explorer/ShellExecute, Linux
         `xdg-open`."""
-        if origin != "files" and binding_from_record(self.session_store.load(session_id)) is not None:
+        if (
+            origin != "files"
+            and binding_from_record(self.session_store.load(session_id)) is not None
+        ):
             return {
                 "ok": False,
                 "code": "remote_artifact_reveal_unavailable",
@@ -5679,7 +6505,14 @@ class SessionManager:
             return {}
 
     def _save_prefs(self) -> None:
-        self._prefs_path().write_text(json.dumps(self._prefs, indent=2), encoding="utf-8")
+        with self._prefs_lock:
+            target = self._prefs_path()
+            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_text(json.dumps(self._prefs, indent=2), encoding="utf-8")
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def _migrate_haas_policy_defaults(self) -> None:
         current = self._prefs.get("haas_delegation")
@@ -5849,6 +6682,7 @@ class SessionManager:
             "experimental_connectors": experimental_enabled(self.secrets),
             "surfaces": self._surfaces(),
             "nav_layout": self._nav_layout(),
+            **self._sidebar_order(),
             "sessions_peek": self.sessions_peek(),
             "context_bar": self.context_bar(),
             # Auto-Approve feature flag + its shadow-eval sibling (spec §1.5). Drive the
@@ -5968,6 +6802,20 @@ class SessionManager:
         """Sidebar layout: ``"flat"`` (default) or ``"grouped"`` (by persona). Persisted in
         prefs (UI-REFRESH §7)."""
         return "grouped" if self._prefs.get("nav_layout") == "grouped" else "flat"
+
+    def _sidebar_order(self) -> dict[str, str]:
+        project_order = str(self._prefs.get("project_order") or "manual")
+        conversation_order = str(self._prefs.get("conversation_order") or "recent")
+        return {
+            "project_order": (
+                project_order if project_order in {"manual", "recent", "name"} else "manual"
+            ),
+            "conversation_order": (
+                conversation_order
+                if conversation_order in {"recent", "oldest", "name"}
+                else "recent"
+            ),
+        }
 
     def set_nav_layout(self, nav_layout: str) -> dict[str, Any]:
         """Set + persist the sidebar layout. Unknown values fall back to ``"flat"``."""
@@ -6695,6 +7543,7 @@ class SessionManager:
         await self.mcp.aclose()
         self._haas_supervisor.stop()
         self.audit_store.close()
+        self.conversation_commands.close()
 
     # -- automation (scheduled tasks) -------------------------------------------
     def approval_prompt_data(self, session_id: str, request) -> dict[str, Any]:
@@ -7090,21 +7939,46 @@ class SessionManager:
                 self.wakes.mark_fired(wake.id)
         return resumed
 
-    def mark_running(self, session_id: str) -> None:
-        self._running_sessions.add(session_id)
-        self._active_haas_turns[session_id] = _ActiveHaasTurn()
+    def _session_project_is_archived(self, session_id: str) -> bool:
+        binding = self.project_store.get_session_binding(session_id)
+        if binding is None:
+            return False
+        try:
+            return self.project_store.get_project(binding.project_id).archived
+        except ProjectStoreError:
+            return False
+
+    def mark_running(self, session_id: str) -> bool:
+        with self._project_mutation_lock:
+            if self._session_project_is_archived(session_id):
+                return False
+            self._running_sessions.add(session_id)
+            self._active_haas_turns[session_id] = _ActiveHaasTurn()
+            return True
 
     def try_mark_running(self, session_id: str) -> bool:
         """Atomically claim an idle session for one turn on the server event loop."""
-        if session_id in self._running_sessions:
-            return False
-        self._running_sessions.add(session_id)
-        self._active_haas_turns[session_id] = _ActiveHaasTurn()
-        return True
+        with self._project_mutation_lock:
+            if session_id in self._running_sessions or self._session_project_is_archived(
+                session_id
+            ):
+                return False
+            self._running_sessions.add(session_id)
+            self._active_haas_turns[session_id] = _ActiveHaasTurn()
+            return True
 
     def active_turn_token(self, session_id: str) -> str | None:
         control = self._active_haas_turns.get(session_id)
         return control.token if control is not None else None
+
+    def request_queue_drain_after_stop(self, session_id: str) -> None:
+        self._queue_drain_after_stop.add(session_id)
+
+    def consume_queue_drain_after_stop(self, session_id: str) -> bool:
+        if session_id not in self._queue_drain_after_stop:
+            return False
+        self._queue_drain_after_stop.discard(session_id)
+        return True
 
     def try_mark_resuming_from_paused(self, session_id: str) -> bool:
         """Claim a new Continue turn after authoritative paused readback.
@@ -7115,28 +7989,27 @@ class SessionManager:
         record = self.session_store.load(session_id)
         binding = binding_from_record(record) or {}
         resumable_invocation_id = str(binding.get("resumable_invocation_id") or "")
-        if (
-            binding.get("control_state") != "paused"
-            or not binding.get("supports_resume")
-            or not resumable_invocation_id.startswith("inv_")
-        ):
-            return self.try_mark_running(session_id)
-        self._running_sessions.add(session_id)
-        self._active_haas_turns[session_id] = _ActiveHaasTurn()
-        return True
+        with self._project_mutation_lock:
+            if self._session_project_is_archived(session_id):
+                return False
+            if (
+                binding.get("control_state") != "paused"
+                or not binding.get("supports_resume")
+                or not resumable_invocation_id.startswith("inv_")
+            ):
+                return self.try_mark_running(session_id)
+            self._running_sessions.add(session_id)
+            self._active_haas_turns[session_id] = _ActiveHaasTurn()
+            return True
 
-    async def request_interrupt(
-        self, session_id: str, engine: TurnEngine
-    ) -> dict[str, Any] | None:
+    async def request_interrupt(self, session_id: str, engine: TurnEngine) -> dict[str, Any] | None:
         """Interrupt local work and propagate Stop to an accepted HaaS invocation."""
         engine.request_interrupt()
         control = self._active_haas_turns.get(session_id)
         if control is None:
             record = self.session_store.load(session_id)
             binding = binding_from_record(record) or {}
-            resumable_invocation_id = str(
-                binding.get("resumable_invocation_id") or ""
-            )
+            resumable_invocation_id = str(binding.get("resumable_invocation_id") or "")
             if (
                 binding.get("control_state") != "paused"
                 or not binding.get("supports_resume")
@@ -7144,9 +8017,7 @@ class SessionManager:
             ):
                 return None
             client, haas_session_id = self._haas_interaction_client(session_id)
-            result = await client.cancel_invocation(
-                haas_session_id, resumable_invocation_id
-            )
+            result = await client.cancel_invocation(haas_session_id, resumable_invocation_id)
             invocation = result.data if hasattr(result, "data") else result
             if not isinstance(invocation, dict):
                 invocation = {}
@@ -7155,9 +8026,7 @@ class SessionManager:
                 "supportsResume": False,
                 "resumableInvocationId": None,
             }
-            self._persist_haas_control(
-                session_id, {"sessionControl": session_control}
-            )
+            self._persist_haas_control(session_id, {"sessionControl": session_control})
             return {"sessionControl": session_control}
         control.cancel_requested = True
         try:
@@ -7208,9 +8077,7 @@ class SessionManager:
             control.invocation_id = invocation_id
         await self._dispatch_haas_pause(control)
         cancel_result = await self._dispatch_haas_cancel(control)
-        if cancel_result is not None and isinstance(
-            cancel_result.get("sessionControl"), dict
-        ):
+        if cancel_result is not None and isinstance(cancel_result.get("sessionControl"), dict):
             self._persist_haas_control(session_id, cancel_result)
 
     @staticmethod
@@ -7269,8 +8136,9 @@ class SessionManager:
             control = self._active_haas_turns.get(session_id)
             if control is not None and control.token != token:
                 return
-        self._running_sessions.discard(session_id)
-        self._active_haas_turns.pop(session_id, None)
+        with self._project_mutation_lock:
+            self._running_sessions.discard(session_id)
+            self._active_haas_turns.pop(session_id, None)
         # Every turn path (WS, background delivery, durable resume) marks idle when it
         # finishes — the one shared post-turn moment, so auto-titling hooks in here and
         # can never add latency to the response itself.
@@ -7338,8 +8206,10 @@ class SessionManager:
                     "resumableInvocationId": None,
                     "pauseSupported": bool(binding.get("pause_supported", False)),
                 }
-            state = "stopping" if control.cancel_requested else (
-                "pausing" if control.pause_requested else "running"
+            state = (
+                "stopping"
+                if control.cancel_requested
+                else ("pausing" if control.pause_requested else "running")
             )
             return {
                 "controlState": state,
@@ -8392,13 +9262,11 @@ class SessionManager:
         # (opening a "running" automation showed a blank session; owner report 2026-07-04).
         engine = self._engines.get(session_id)
         if engine is not None:
-            return list(engine.messages)
+            return messages_with_tool_display(engine.messages)
         record = self.session_store.load(session_id)
         if not record:
             return []
-        return self._recover_haas_messages(
-            record.messages, binding_from_record(record)
-        ) or []
+        return messages_with_tool_display(self._recover_haas_messages(record.messages, binding_from_record(record)) or [])
 
     def cowork_recall(
         self,
@@ -8431,9 +9299,7 @@ class SessionManager:
             self._memory_recall_item(item)
             for item in self._scoped_recall_memories(workspace=workspace, limit=bounded_limit)
         ]
-        messages = self._recover_haas_messages(
-            record.messages, binding
-        ) or []
+        messages = self._recover_haas_messages(record.messages, binding) or []
         transcript = self._recall_transcript_items(messages, query=query, limit=bounded_limit)
         return {
             "sessionId": manager_session_id,
@@ -8454,9 +9320,7 @@ class SessionManager:
                 return record.session_id
         return ""
 
-    def _scoped_recall_memories(
-        self, *, workspace: str | None, limit: int
-    ) -> list[Any]:
+    def _scoped_recall_memories(self, *, workspace: str | None, limit: int) -> list[Any]:
         items = [
             *self.memory_store.list(scope=Scope.GLOBAL),
             *self.memory_store.list(scope=Scope.WORKSPACE, workspace=workspace),
@@ -8485,9 +9349,7 @@ class SessionManager:
                 continue
             content = message.get("content")
             text = content.strip() if isinstance(content, str) else ""
-            activities = SessionManager._recall_activity_items(
-                message.get("_haas_activity")
-            )
+            activities = SessionManager._recall_activity_items(message.get("_haas_activity"))
             model_stages = SessionManager._recall_model_stage_items(
                 message.get("_haas_model_stages")
             )
@@ -8634,6 +9496,8 @@ class SessionManager:
                 pass
         record = self.session_store.load(session_id)
         ok = self.session_store.delete(session_id)
+        self._queue_drain_after_stop.discard(session_id)
+        self.conversation_commands.delete_session(session_id)
         # Deleting a session is the one implicit unsubscribe (otherwise subscriptions are permanent).
         self.subscriptions.remove_session(session_id)
         # ...and releases any Slack threads it owned (§31): the next tag there spawns fresh.
@@ -8672,42 +9536,52 @@ class SessionManager:
     # -- read models ------------------------------------------------------------
     def list_sessions(self, workspace: str | None = None) -> list[dict[str, Any]]:
         ws = self.resolve_workspace(workspace) if workspace else None
-        return [
-            {
-                "session_id": r.session_id,
-                "title": r.title or "New session",
-                "workspace": r.workspace,
-                "agent": r.agent,
-                "model": r.model,
-                "mode": r.mode,
-                "updated_at": r.updated_at,
-                "messages": r.message_count,
-                "pinned": r.pinned,
-                "archived": r.archived,
-                # §31: non-user origin ("slack") + display label — drives the sidebar's
-                # "From Slack" group and the row's platform icon.
-                "origin": r.origin,
-                "origin_label": r.origin_label,
-                # Attention = Inbox items awaiting this session (the amber count that bubbles
-                # session → persona → footer Inbox). Liveness = working (in-flight turn) /
-                # sleeping (a self-wake is pending) / idle — a count-less dot that never bubbles.
-                "attention": len(self.inbox.pending(session_id=r.session_id)),
-                "liveness": self._session_liveness(r.session_id),
-                # When sleeping: the next timer fire (ISO) — drives the "sleeping
-                # until…" strip so a scheduled agent never reads as a dead one.
-                "sleeping_until": self._sleeping_until(r.session_id),
-                # Channels this session listens to (inbound subscriptions) — drives the per-session
-                # "connections" indicator.
-                "subscriptions": [s.channel for s in self.subscriptions.for_session(r.session_id)],
-                # Agent teams: {} for plain sessions. Workers carry role/lead_session
-                # (+ a computed current-item line); leads carry role/team_id — drives
-                # the sidebar's ONE expandable team entry.
-                "team": self._session_team_row(r),
-                "delegation": self._session_delegation_row(r),
-            }
-            for r in self.session_store.list(workspace=ws)
-            if not r.session_id.startswith("__")  # hide internal threads
-        ]
+        rows: list[dict[str, Any]] = []
+        for record in self.session_store.list(workspace=ws):
+            if record.session_id.startswith("__"):
+                continue
+            project_binding = self._ensure_session_project_binding(record)
+            workspace_binding = (
+                self.project_store.get_workspace(project_binding.workspace_binding_id)
+                if project_binding.workspace_binding_id
+                else None
+            )
+            rows.append(
+                {
+                    "session_id": record.session_id,
+                    "title": record.title or "New session",
+                    "workspace": record.workspace,
+                    "agent": record.agent,
+                    "model": record.model,
+                    "mode": record.mode,
+                    "updated_at": record.updated_at,
+                    "messages": record.message_count,
+                    "pinned": record.pinned,
+                    "archived": record.archived,
+                    "origin": record.origin,
+                    "origin_label": record.origin_label,
+                    "attention": len(self.inbox.pending(session_id=record.session_id)),
+                    "liveness": self._session_liveness(record.session_id),
+                    "sleeping_until": self._sleeping_until(record.session_id),
+                    "subscriptions": [
+                        subscription.channel
+                        for subscription in self.subscriptions.for_session(record.session_id)
+                    ],
+                    "team": self._session_team_row(record),
+                    "delegation": self._session_delegation_row(record),
+                    "projectId": project_binding.project_id,
+                    "workspaceBindingId": project_binding.workspace_binding_id,
+                    "endpointId": project_binding.endpoint_id,
+                    "executionLocation": (
+                        workspace_binding.location if workspace_binding else "local"
+                    ),
+                    "branchSnapshot": project_binding.branch_snapshot,
+                    "remoteWorkspaceRef": (
+                        workspace_binding.remote_workspace_ref if workspace_binding else None
+                    ),
+                }
+            )
+        return rows
 
     def _session_delegation_row(self, record: SessionRecord) -> dict[str, Any]:
         binding = binding_from_record(record)
@@ -9283,3 +10157,19 @@ def _git_branch(path: Path) -> str | None:
         return branch or None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _run_git_metadata(path: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()

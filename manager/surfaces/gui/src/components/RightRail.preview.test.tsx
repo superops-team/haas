@@ -31,7 +31,6 @@ function rail(
       active
       sessionId={sessionId}
       refreshKey={refreshKey}
-      toolNames={[]}
       todo={[]}
       running={false}
       onPreviewChange={onPreviewChange}

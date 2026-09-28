@@ -1,5 +1,8 @@
 import { test as base, expect, type Page } from "@playwright/test";
 
+export const HAAS_ACTIVITY_COMMAND =
+  "git status --short --branch && git diff --stat && git diff --cached --stat && git log --oneline --decorate --max-count=20 && git worktree list --porcelain";
+
 // The app-wide /ws/events socket each page opened (UX-026 toast et al.) — specs
 // push server events through it via sendAppEvent below.
 const eventSockets = new WeakMap<Page, { send: (data: string) => void }>();
@@ -695,13 +698,102 @@ export async function mockApi(page: import("@playwright/test").Page) {
     // The page's session id, from the socket URL — team approval stamps THIS session
     // as the lead (the active conversation IS the lead; workers hang off it).
     const sid = ws.url().split("/ws/session/")[1]?.split("?")[0] || "sess-lead";
-    send("ready", sid === "resume-live-1" ? { running: true } : {});
+    send("ready", {
+      conversationProtocolVersion: 2,
+      queue: [],
+      ...(sid === "resume-live-1"
+        ? {
+            running: true,
+            execution_control: {
+              controlState: "running",
+              pauseSupported: true,
+            },
+          }
+        : {}),
+    });
     let pendingTool = "run_shell"; // which proposal the next approval decision resolves
     let epicTimer: ReturnType<typeof setInterval> | null = null; // the slow stream, stoppable via interrupt
+    let queuedMessages: Array<{
+      text: string;
+      queueItemId: string;
+      clientCommandId: string;
+      revision: number;
+    }> = [];
+    const queueSnapshot = () =>
+      queuedMessages.map((item, index) => ({
+        queueItemId: item.queueItemId,
+        clientCommandId: item.clientCommandId,
+        position: index + 1,
+        state: "queued",
+        requestedDelivery: "enqueue",
+        revision: item.revision,
+        safePreview: item.text,
+        attachmentCount: 0,
+        contextCount: 0,
+        createdAtMs: Date.now() + index,
+      }));
     let hadTurn = false; // a user_message landed — set_model is now a mid-session switch
     ws.onMessage((raw) => {
       const msg = JSON.parse(String(raw));
+      if (["queue_delete", "queue_edit", "queue_move"].includes(msg.type)) {
+        const index = queuedMessages.findIndex(
+          (item) => item.queueItemId === msg.queueItemId,
+        );
+        if (index < 0 || queuedMessages[index].revision !== msg.expectedRevision) {
+          send("queue_error", {
+            code: "queue_conflict",
+            safeMessage: "The queued message changed.",
+            items: queueSnapshot(),
+          });
+          return;
+        }
+        const [item] = queuedMessages.splice(index, 1);
+        if (msg.type === "queue_edit") {
+          send("queue_restored", { payload: { text: item.text, attachments: [] } });
+        } else if (msg.type === "queue_move") {
+          const target = Math.max(
+            0,
+            Math.min(queuedMessages.length, Number(msg.targetPosition) - 1),
+          );
+          item.revision += 1;
+          queuedMessages.splice(target, 0, item);
+        }
+        send("queue_updated", { items: queueSnapshot() });
+        return;
+      }
       if (msg.type === "user_message") {
+        const turnId = `turn_${msg.clientCommandId || "legacy"}`;
+        if (epicTimer && msg.delivery === "enqueue" && msg.clientCommandId) {
+          const queueItemId = `queue_${msg.clientCommandId}`;
+          queuedMessages.push({
+            text: String(msg.text || ""),
+            queueItemId,
+            clientCommandId: msg.clientCommandId,
+            revision: 1,
+          });
+          send("command_ack", {
+            clientCommandId: msg.clientCommandId,
+            status: "accepted",
+            disposition: "queued",
+            turnId: null,
+            queueItemId,
+            outcomeRef: null,
+            error: null,
+          });
+          send("queue_updated", { items: queueSnapshot() });
+          return;
+        }
+        if (msg.clientCommandId) {
+          send("command_ack", {
+            clientCommandId: msg.clientCommandId,
+            status: "accepted",
+            disposition: "running",
+            turnId,
+            queueItemId: null,
+            outcomeRef: null,
+            error: null,
+          });
+        }
         hadTurn = true;
         if (/delay acceptance/i.test(msg.text)) {
           return;
@@ -710,6 +802,7 @@ export async function mockApi(page: import("@playwright/test").Page) {
         // literal "/name …" line as `display` so the client dedupes on what the user sees.
         send("turn_start", {
           input: msg.text,
+          turnId,
           ...(msg.skill ? { display: `/${msg.skill}${msg.text ? ` ${msg.text}` : ""}` } : {}),
         });
         if (/trip the reviewer/i.test(msg.text)) {
@@ -936,6 +1029,7 @@ export async function mockApi(page: import("@playwright/test").Page) {
         }
         if (/inspect haas activity/i.test(msg.text)) {
           const toolCallId = "haas_call_1";
+          const delegated = { backend: "haas", session: "haas-session", haas_session_id: "haas-session", execution_mode: "local_api" };
           send("reasoning_delta", {
             text: "Inspecting the package and choosing focused verification.",
             haasEventId: "evt_reasoning_1",
@@ -945,7 +1039,8 @@ export async function mockApi(page: import("@playwright/test").Page) {
             toolName: "exec_command",
             activityKind: "command",
             safeSummary: "Run the focused test suite",
-            delegated: { backend: "haas", execution_mode: "local_api" },
+            commandPreview: HAAS_ACTIVITY_COMMAND,
+            delegated,
             haasEventId: "evt_tool_start_1",
           });
           send("tool_output_delta", {
@@ -953,7 +1048,7 @@ export async function mockApi(page: import("@playwright/test").Page) {
             activityKind: "command",
             outputPreview: "24 passed\n1 warning",
             omittedLineCount: 0,
-            delegated: { backend: "haas", execution_mode: "local_api" },
+            delegated,
             haasEventId: "evt_tool_output_1",
           });
           send("tool_finished", {
@@ -961,18 +1056,19 @@ export async function mockApi(page: import("@playwright/test").Page) {
             toolName: "exec_command",
             activityKind: "command",
             safeSummary: "Run the focused test suite",
+            commandPreview: HAAS_ACTIVITY_COMMAND,
             status: "completed",
             durationMs: 820,
             exitCode: 0,
             outputPreview: "24 passed\n1 warning",
             omittedLineCount: 0,
-            delegated: { backend: "haas", execution_mode: "local_api" },
+            delegated,
             haasEventId: "evt_tool_done_1",
           });
           send("assistant_message", {
             text: "The release checks passed.",
             reasoning: "Inspecting the package and choosing focused verification.",
-            delegated: { backend: "haas", execution_mode: "local_api" },
+            delegated,
           });
           send("turn_end", { status: "completed", taskPhase: "completed" });
           send("turn_done");
@@ -1010,6 +1106,13 @@ export async function mockApi(page: import("@playwright/test").Page) {
               epicTimer = null;
               send("assistant_message", { text: ("The epic concludes. " + line).repeat(20) });
               send("turn_done");
+              if (queuedMessages.length > 0) {
+                const next = queuedMessages.shift()!;
+                send("queue_updated", { items: queueSnapshot() });
+                send("turn_start", { input: next.text, turnId: `turn_${next.queueItemId}` });
+                send("assistant_message", { text: `Queued reply: ${next.text}` });
+                send("turn_done", { turnId: `turn_${next.queueItemId}` });
+              }
             }
           }, 120);
           return;

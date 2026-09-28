@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { App, LIVE_PROJECTION_FLUSH_MS } from "./App";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { App } from "./App";
 import { getSessionMessages } from "./api";
 import type { WsEvent } from "./types";
 
@@ -9,14 +16,22 @@ const mockState = vi.hoisted(() => {
   let withHistorySessions = false;
 
   class FakeSession {
-    handlers: { onEvent: (event: WsEvent) => void; onOpen?: () => void; onClose?: () => void };
+    handlers: {
+      onEvent: (event: WsEvent) => void;
+      onOpen?: () => void;
+      onClose?: () => void;
+    };
     sent: any[] = [];
 
     constructor(
       _sessionId: string,
       _workspace: string,
       _agent: string,
-      handlers: { onEvent: (event: WsEvent) => void; onOpen?: () => void; onClose?: () => void },
+      handlers: {
+        onEvent: (event: WsEvent) => void;
+        onOpen?: () => void;
+        onClose?: () => void;
+      },
     ) {
       this.handlers = handlers;
       mockState.lastSession = this;
@@ -39,8 +54,29 @@ const mockState = vi.hoisted(() => {
       });
     }
 
-    userMessage(text: string, attachments?: unknown[], model?: string, skill?: string) {
-      this.sent.push({ type: "user_message", text, attachments, model, skill });
+    userMessage(
+      text: string,
+      attachments?: unknown[],
+      model?: string,
+      skill?: string,
+      delivery = "start_now",
+    ) {
+      this.sent.push({
+        type: "user_message",
+        text,
+        attachments,
+        model,
+        skill,
+        delivery,
+      });
+      return Promise.resolve({
+        clientCommandId: "cmd-test",
+        status: "accepted" as const,
+        disposition: "running" as const,
+        turnId: "turn-test",
+        queueItemId: null,
+        outcomeRef: null,
+      });
     }
 
     interrupt() {
@@ -61,6 +97,7 @@ const mockState = vi.hoisted(() => {
   }
 
   return {
+    commits: { sidebar: 0, composer: 0 },
     FakeSession,
     lastSession: null as FakeSession | null,
     get livenessOnly() {
@@ -78,13 +115,61 @@ const mockState = vi.hoisted(() => {
   };
 });
 
+vi.mock("./components/Sidebar", async () => {
+  const actual = await vi.importActual<typeof import("./components/Sidebar")>(
+    "./components/Sidebar",
+  );
+  const { createElement, Profiler } = await import("react");
+  return {
+    ...actual,
+    Sidebar: (props: React.ComponentProps<typeof actual.Sidebar>) =>
+      createElement(
+        Profiler,
+        {
+          id: "sidebar",
+          onRender: () => {
+            mockState.commits.sidebar += 1;
+          },
+        },
+        createElement(actual.Sidebar, props),
+      ),
+  };
+});
+
+vi.mock("./conversation/components/ConversationComposer", async () => {
+  const actual = await vi.importActual<
+    typeof import("./conversation/components/ConversationComposer")
+  >("./conversation/components/ConversationComposer");
+  const { createElement, Profiler } = await import("react");
+  return {
+    ...actual,
+    ConversationComposer: (
+      props: React.ComponentProps<typeof actual.ConversationComposer>,
+    ) =>
+      createElement(
+        Profiler,
+        {
+          id: "composer",
+          onRender: () => {
+            mockState.commits.composer += 1;
+          },
+        },
+        createElement(actual.ConversationComposer, props),
+      ),
+  };
+});
+
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
   return {
     ...actual,
     Session: mockState.FakeSession,
     connectEvents: vi.fn(() => () => {}),
-    getHealth: vi.fn(async () => ({ status: "ok", default_workspace: null, model: "gpt-5.6-sol" })),
+    getHealth: vi.fn(async () => ({
+      status: "ok",
+      default_workspace: null,
+      model: "gpt-5.6-sol",
+    })),
     getSettings: vi.fn(async () => ({
       provider: "openai",
       model: "gpt-5.6-sol",
@@ -136,21 +221,25 @@ vi.mock("./api", async () => {
             },
           ]
         : mockState.livenessOnly
-        ? [
-            {
-              session_id: "s1",
-              title: "Activity still running",
-              workspace: "",
-              agent: "cowork",
-              model: "gpt-5.6-sol",
-              mode: "interactive",
-              updated_at: "2026-09-17T00:00:00Z",
-              messages: 1,
-              liveness: "working",
-            },
-          ]
-        : [],
+          ? [
+              {
+                session_id: "s1",
+                title: "Activity still running",
+                workspace: "",
+                agent: "cowork",
+                model: "gpt-5.6-sol",
+                mode: "interactive",
+                updated_at: "2026-09-17T00:00:00Z",
+                messages: 1,
+                liveness: "working",
+              },
+            ]
+          : [],
     ),
+    getProjectProjection: vi.fn(async () => ({
+      projects: [],
+      orderRevision: 0,
+    })),
     getRecentWorkspaces: vi.fn(async () => []),
     getSessionMessages: vi.fn(async (sessionId: string) =>
       mockState.withHistorySessions
@@ -163,7 +252,11 @@ vi.mock("./api", async () => {
     getArtifacts: vi.fn(async () => []),
     getInbox: vi.fn(async () => []),
     getUnattended: vi.fn(async () => false),
-    getSessionConnections: vi.fn(async () => ({ connected: [], recommended: [], attention: 0 })),
+    getSessionConnections: vi.fn(async () => ({
+      connected: [],
+      recommended: [],
+      attention: 0,
+    })),
     getConnectors: vi.fn(async () => []),
     getRoots: vi.fn(async () => []),
   };
@@ -262,6 +355,76 @@ describe("App execution lifecycle controls", () => {
     await expectStopOnly();
   });
 
+  it("does not revive an idle historical session from a stale running outcome", async () => {
+    mockState.withHistorySessions = true;
+    vi.mocked(getSessionMessages).mockImplementation(async (sessionId: string) => [
+      {
+        role: "user",
+        content: `question for ${sessionId}`,
+        _managerTurnId: "turn-historical",
+      },
+      {
+        role: "assistant",
+        content: "historical answer",
+        _managerTurnId: "turn-historical",
+        _haas_task_outcome: {
+          phase: "incomplete",
+          code: "haas_terminal_integrity_error",
+          retryable: true,
+        },
+      },
+    ]);
+    render(<App />);
+    await screen.findByText("historical answer");
+    await waitFor(() => expect(screen.getByLabelText("Send")).toBeTruthy());
+
+    act(() => {
+      mockState.lastSession?.handlers.onEvent({
+        type: "ready",
+        data: {
+          session_id: "s1",
+          running: false,
+          execution_control: { controlState: "idle", pauseSupported: false },
+          haas_task_outcome: { phase: "running" },
+          agent: "cowork",
+          model: "gpt-5.6-sol",
+          mode: "interactive",
+          haas_interaction_supported: true,
+          workspace: "",
+          temp_workspace: false,
+        },
+      });
+    });
+
+    await waitFor(() => expect(screen.getByLabelText("Send")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: /Stop/ })).toBeNull();
+  });
+
+  it("restores running controls from an authoritative active ready snapshot", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getByLabelText("Send")).toBeTruthy());
+
+    act(() => {
+      mockState.lastSession?.handlers.onEvent({
+        type: "ready",
+        data: {
+          session_id: "s1",
+          running: true,
+          execution_control: { controlState: "running", pauseSupported: true },
+          haas_task_outcome: { phase: "running" },
+          agent: "cowork",
+          model: "gpt-5.6-sol",
+          mode: "interactive",
+          haas_interaction_supported: true,
+          workspace: "",
+          temp_workspace: false,
+        },
+      });
+    });
+
+    await expectStopOnly();
+  });
+
   it("uses session-list working liveness when the ready snapshot is stale idle", async () => {
     mockState.livenessOnly = true;
     render(<App />);
@@ -291,6 +454,52 @@ describe("App execution lifecycle controls", () => {
     expect(mockState.lastSession?.sent).toHaveLength(1);
   });
 
+  it("upserts multiple assistant facts into one authoritative turn response", async () => {
+    render(<App />);
+    await screen.findByPlaceholderText(/Ask the coworker/);
+    act(() => {
+      mockState.lastSession?.handlers.onEvent({
+        type: "turn_start",
+        data: {
+          input: "synthetic request",
+          turnId: "turn-response-owner",
+          rowId: "user-response-owner",
+        },
+      });
+      mockState.lastSession?.handlers.onEvent({
+        type: "assistant_message",
+        data: {
+          text: "Provisional response",
+          turnId: "turn-response-owner",
+          rowId: "assistant-model-call-1",
+        },
+      });
+      mockState.lastSession?.handlers.onEvent({
+        type: "assistant_message",
+        data: {
+          text: "Authoritative response",
+          turnId: "turn-response-owner",
+          rowId: "assistant-model-call-2",
+        },
+      });
+    });
+
+    const response = await waitFor(() => {
+      const element = document.querySelector(
+        '[data-response-id="turn-response-owner:response"]',
+      );
+      expect(element).toBeTruthy();
+      return element!;
+    });
+    expect(response.textContent).toContain("Authoritative response");
+    expect(response.textContent).not.toContain("Provisional response");
+    expect(
+      document.querySelectorAll(
+        '[data-response-id="turn-response-owner:response"]',
+      ),
+    ).toHaveLength(1);
+  });
+
   it("recovers a missed terminal transcript after disconnect with single-flight readback", async () => {
     render(<App />);
 
@@ -316,6 +525,9 @@ describe("App execution lifecycle controls", () => {
 
     fireEvent.change(input, { target: { value: "recover terminal" } });
     fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {
+      await Promise.resolve();
+    });
     mockState.lastSession?.handlers.onEvent({
       type: "turn_start",
       data: { input: "recover terminal" },
@@ -342,9 +554,19 @@ describe("App execution lifecycle controls", () => {
 
     const input = await screen.findByPlaceholderText(/Ask the coworker/);
     const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
-    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
-    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
-    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 800 });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 1000,
+    });
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      value: 200,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 800,
+    });
     fireEvent.change(input, { target: { value: "stream a detailed answer" } });
     fireEvent.keyDown(input, { key: "Enter" });
     await expectStopOnly();
@@ -365,9 +587,11 @@ describe("App execution lifecycle controls", () => {
     expect(screen.queryByText(/word44/)).toBeNull();
 
     await waitFor(() => expect(screen.getByText(/word44/)).toBeTruthy(), {
-      timeout: LIVE_PROJECTION_FLUSH_MS + 1000,
+      timeout: 17 + 1000,
     });
-    expect(document.querySelector(".stream-cursor")?.getAttribute("aria-hidden")).toBe("true");
+    expect(
+      document.querySelector(".work-status-slot")?.getAttribute("aria-hidden"),
+    ).toBe("true");
 
     expect(scrollTo).toHaveBeenCalled();
     expect(scrollTo).toHaveBeenLastCalledWith(
@@ -382,9 +606,12 @@ describe("App execution lifecycle controls", () => {
       type: "assistant_delta",
       data: { text: "after-user-scroll " },
     });
-    await waitFor(() => expect(screen.getByText(/after-user-scroll/)).toBeTruthy(), {
-      timeout: LIVE_PROJECTION_FLUSH_MS + 1000,
-    });
+    await waitFor(
+      () => expect(screen.getByText(/after-user-scroll/)).toBeTruthy(),
+      {
+        timeout: 17 + 1000,
+      },
+    );
     expect(screen.getByTestId("jump-to-latest")).toBeTruthy();
   });
 
@@ -400,10 +627,22 @@ describe("App execution lifecycle controls", () => {
 
     const input = await screen.findByPlaceholderText(/Ask the coworker/);
     const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
-    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
-    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
-    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 800 });
-    fireEvent.change(input, { target: { value: "stream with reduced motion" } });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 1000,
+    });
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      value: 200,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 800,
+    });
+    fireEvent.change(input, {
+      target: { value: "stream with reduced motion" },
+    });
     fireEvent.keyDown(input, { key: "Enter" });
     await expectStopOnly();
 
@@ -415,7 +654,7 @@ describe("App execution lifecycle controls", () => {
       });
     }
     await waitFor(() => expect(screen.getByText(/motion44/)).toBeTruthy(), {
-      timeout: LIVE_PROJECTION_FLUSH_MS + 1000,
+      timeout: 17 + 1000,
     });
 
     scroller.scrollTop = 500;
@@ -427,6 +666,45 @@ describe("App execution lifecycle controls", () => {
     );
   });
 
+  it("30 distinct live publications cause zero Sidebar or Composer profiler commits", async () => {
+    render(<App />);
+    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    fireEvent.change(input, { target: { value: "measure stream isolation" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await expectStopOnly();
+    act(() => {
+      mockState.lastSession?.handlers.onEvent({
+        type: "turn_start",
+        data: { input: "measure stream isolation" },
+      });
+      mockState.lastSession?.handlers.onEvent({
+        type: "assistant_delta",
+        data: { text: "Start " },
+      });
+    });
+    await screen.findByText("Start");
+    // Finish the independent draft-save debounce before measuring stream-driven work.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    expect(mockState.commits.sidebar).toBeGreaterThan(0);
+    expect(mockState.commits.composer).toBeGreaterThan(0);
+    mockState.commits.sidebar = 0;
+    mockState.commits.composer = 0;
+
+    for (let index = 0; index < 30; index += 1) {
+      act(() => {
+        mockState.lastSession?.handlers.onEvent({
+          type: "assistant_delta",
+          data: { text: `publication-${index} ` },
+        });
+      });
+      // Observe every publication separately; a single batched update is insufficient.
+      await screen.findByText(new RegExp(`publication-${index}(?:\\s|$)`));
+    }
+    expect(mockState.commits).toEqual({ sidebar: 0, composer: 0 });
+  });
+
   it("opens restored sessions at the latest content even after the previous session was scrolled up", async () => {
     mockState.withHistorySessions = true;
     const scrollTo = vi.fn();
@@ -435,9 +713,19 @@ describe("App execution lifecycle controls", () => {
 
     expect(await screen.findByText("answer for s2")).toBeTruthy();
     const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
-    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1200 });
-    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 300 });
-    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 200 });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 200,
+    });
     fireEvent.scroll(scroller);
 
     scrollTo.mockClear();
@@ -448,6 +736,64 @@ describe("App execution lifecycle controls", () => {
       expect.objectContaining({ top: 1200, behavior: "auto" }),
     );
     expect(screen.queryByTestId("jump-to-latest")).toBeNull();
+  });
+
+  it("does not let a stale session readback overwrite a newer selection", async () => {
+    mockState.withHistorySessions = true;
+    let resolveOlder:
+      | ((messages: Array<{ role: string; content: string }>) => void)
+      | undefined;
+    vi.mocked(getSessionMessages).mockImplementation((sessionId: string) => {
+      if (sessionId === "s1")
+        return new Promise((resolve) => {
+          resolveOlder = resolve;
+        });
+      return Promise.resolve([
+        { role: "user", content: `question for ${sessionId}` },
+        { role: "assistant", content: `answer for ${sessionId}` },
+      ]);
+    });
+    render(<App />);
+
+    expect(await screen.findByText("answer for s2")).toBeTruthy();
+    fireEvent.click(screen.getByText("Earlier conversation"));
+    fireEvent.click(screen.getByText("Long previous conversation"));
+    expect(await screen.findByText("answer for s2")).toBeTruthy();
+
+    await act(async () => {
+      resolveOlder?.([
+        { role: "user", content: "stale question" },
+        { role: "assistant", content: "stale answer" },
+      ]);
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("stale answer")).toBeNull();
+    expect(screen.getByText("answer for s2")).toBeTruthy();
+  });
+
+  it("projects a reconciled command receipt back into the active Composer", async () => {
+    render(<App />);
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "accepted during reconnect" } });
+
+    act(() => {
+      mockState.lastSession?.handlers.onEvent({
+        type: "command_ack",
+        data: {
+          clientCommandId: "cmd-reconciled",
+          status: "duplicate",
+          disposition: "running",
+          turnId: "turn-reconciled",
+          queueItemId: null,
+          outcomeRef: null,
+          reconciledDraftRevision: 1,
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect((input as HTMLTextAreaElement).value).toBe(""),
+    );
   });
 });
 

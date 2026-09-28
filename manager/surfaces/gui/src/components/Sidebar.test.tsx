@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Sidebar } from "./Sidebar";
 import type { SessionInfo } from "../types";
+import type { ProjectSummary } from "../api";
 
 // Hermetic fetch stub routing by URL substring + method; records calls for POST assertions.
 type Call = { url: string; method: string; body: any };
@@ -42,6 +43,7 @@ const baseProps = {
   surfaces: { cowork: true, chat: false, code: false },
   sessions: SESSIONS,
   projects: [],
+  projectProjectionReady: true,
   activeSession: "s-cowork-1",
   onSwitchAgent: vi.fn(),
   onNewSession: vi.fn(),
@@ -65,6 +67,7 @@ const baseProps = {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
@@ -210,4 +213,203 @@ describe("New session button", () => {
     fireEvent.click(screen.getByText("New session"));
     expect(baseProps.onNewSession).toHaveBeenCalledWith("cowork");
   });
+});
+
+describe("Project navigation management (MPW-022 through MPW-028)", () => {
+  const project: ProjectSummary = {
+    projectId: "prj-haas",
+    canonicalKey: "/repos/haas",
+    name: "haas",
+    primaryWorkspaceBindingId: "wsb-main",
+    defaultEndpointId: "hep_local_managed",
+    pinned: false,
+    order: 1,
+    archived: false,
+    createdAtMs: 1,
+    updatedAtMs: 2,
+    workspaceCount: 1,
+    sessionCount: 1,
+    activeSessionCount: 1,
+    archivedSessionCount: 0,
+    capabilities: {
+      reveal: { enabled: true },
+      createWorktree: { enabled: true },
+    },
+    workspaces: [
+      {
+        workspaceBindingId: "wsb-main",
+        projectId: "prj-haas",
+        location: "local",
+        endpointId: "hep_local_managed",
+        localPath: "/repos/haas",
+        remoteWorkspaceRef: null,
+        displayPath: "~/repos/haas",
+        state: "available",
+      },
+    ],
+    sessions: [],
+  };
+  const onUpdateProject = vi.fn();
+  const onSidebarOrderChange = vi.fn();
+
+  const renderProjectSidebar = () => {
+    stubFetch([
+      { match: "/v1/personas", method: "GET", json: PERSONAS },
+      {
+        match: "/v1/settings",
+        method: "GET",
+        json: {
+          nav_layout: "flat",
+          project_order: "manual",
+          conversation_order: "recent",
+        },
+      },
+    ]);
+    return render(
+      <Sidebar
+        {...baseProps}
+        agent="ops"
+        workspace="/repos/haas"
+        activeSession="s-main"
+        projects={[project]}
+        sessions={[
+          {
+            ...SESSIONS[0],
+            session_id: "s-main",
+            title: "Review project code",
+            workspace: "/repos/haas",
+            projectId: "prj-haas",
+          },
+        ]}
+        projectOrder="manual"
+        conversationOrder="recent"
+        onUpdateProject={onUpdateProject}
+        onSidebarOrderChange={onSidebarOrderChange}
+      />,
+    );
+  };
+
+  it("uses a plain plus and separates the organization menu", async () => {
+    renderProjectSidebar();
+    const create = await screen.findByTestId("project-create-button");
+    expect(create.querySelector('[data-icon="plus"]')).toBeTruthy();
+    expect(create.querySelector('[data-icon="folderPlus"]')).toBeNull();
+    fireEvent.click(screen.getByTestId("project-organize-button"));
+    expect(screen.getByText("Project order")).toBeTruthy();
+    expect(screen.getByText("Conversation order")).toBeTruthy();
+    fireEvent.click(screen.getByText("Project order"));
+    fireEvent.click(screen.getAllByRole("menuitemradio", { name: "Name" })[0]);
+    expect(onSidebarOrderChange).toHaveBeenCalledWith("name", "recent");
+  });
+
+  it("reveals stable row actions and opens a project menu without toggling", async () => {
+    renderProjectSidebar();
+    const row = await screen.findByTestId("project-row-prj-haas");
+    const more = screen.getByTestId("project-menu-prj-haas");
+    expect(more.parentElement).toBe(row);
+    fireEvent.click(more);
+    expect(screen.getByText("Pin project")).toBeTruthy();
+    expect(screen.getByText("Edit project")).toBeTruthy();
+    expect(screen.getByText("Reveal in Finder")).toBeTruthy();
+    expect(screen.getByText("Create persistent worktree")).toBeTruthy();
+    fireEvent.click(screen.getByText("Pin project"));
+    expect(onUpdateProject).toHaveBeenCalledWith("prj-haas", { pinned: true });
+  });
+
+  it("shows a project summary after the hover delay and keeps shortcuts actionable", async () => {
+    renderProjectSidebar();
+    const row = screen.getByTestId("project-row-prj-haas");
+    fireEvent.mouseEnter(row);
+    expect(screen.queryByTestId("project-hover-card")).toBeNull();
+    const card = await screen.findByTestId("project-hover-card", {}, { timeout: 700 });
+    expect(card.textContent).toContain(
+      "~/repos/haas",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Pin project" }));
+    expect(onUpdateProject).toHaveBeenCalledWith("prj-haas", { pinned: true });
+  });
+
+  it("keeps conversation hover actions separate from row selection", async () => {
+    renderProjectSidebar();
+    const row = screen.getByTestId("conversation-row-s-main");
+    fireEvent.mouseEnter(row);
+    const card = await screen.findByTestId(
+      "conversation-hover-card",
+      {},
+      { timeout: 700 },
+    );
+    expect(card.textContent).toContain("Review project code");
+    fireEvent.click(screen.getByRole("button", { name: "Pin" }));
+    expect(baseProps.onTogglePin).toHaveBeenCalledWith("s-main", true);
+    expect(baseProps.onSelectSession).not.toHaveBeenCalled();
+  });
+
+  it("replaces the current hover preview when focus moves to another row", () => {
+    renderProjectSidebar();
+    const projectRow = screen.getByTestId("project-row-prj-haas");
+    const conversationRow = screen.getByTestId("conversation-row-s-main");
+
+    fireEvent.focus(projectRow.querySelector(".project-sidebar-disclosure")!);
+    expect(screen.getByTestId("project-hover-card")).toBeTruthy();
+
+    fireEvent.focus(conversationRow.querySelector(".sidebar-conversation-primary")!);
+    expect(screen.queryByTestId("project-hover-card")).toBeNull();
+    expect(screen.getByTestId("conversation-hover-card")).toBeTruthy();
+
+    fireEvent.click(conversationRow.querySelector('[data-testid="row-menu"]')!);
+    expect(screen.queryByTestId("conversation-hover-card")).toBeNull();
+    expect(screen.getByTestId("row-menu-rename")).toBeTruthy();
+  });
+});
+
+it("groups conversations by stable project id instead of worktree path", async () => {
+  stubFetch([
+    { match: "/v1/personas", method: "GET", json: PERSONAS },
+    { match: "/v1/settings", method: "GET", json: { nav_layout: "flat" } },
+  ]);
+  const projects: ProjectSummary[] = [
+    {
+      projectId: "prj-haas",
+      canonicalKey: "/repos/haas",
+      name: "haas",
+      primaryWorkspaceBindingId: "wsb-main",
+      defaultEndpointId: "hep_local_managed",
+      order: 1,
+      archived: false,
+      workspaceCount: 2,
+      sessionCount: 2,
+      workspaces: [
+        {
+          workspaceBindingId: "wsb-main",
+          projectId: "prj-haas",
+          location: "local",
+          endpointId: "hep_local_managed",
+          localPath: "/repos/haas",
+          remoteWorkspaceRef: null,
+          displayPath: "/repos/haas",
+          state: "available",
+        },
+      ],
+      sessions: [],
+    },
+  ];
+  const sessions: SessionInfo[] = [
+    { ...SESSIONS[0], session_id: "s-main", title: "main task", workspace: "/repos/haas", projectId: "prj-haas" },
+    { ...SESSIONS[0], session_id: "s-wt", title: "worktree task", workspace: "/repos/haas-feature", projectId: "prj-haas" },
+  ];
+  render(
+    <Sidebar
+      {...baseProps}
+      agent="ops"
+      workspace="/repos/haas"
+      activeSession="s-main"
+      projects={projects}
+      sessions={sessions}
+    />,
+  );
+
+  expect(await screen.findAllByText("haas")).toHaveLength(1);
+  expect(screen.getByText("main task")).toBeTruthy();
+  expect(screen.getByText("worktree task")).toBeTruthy();
+  expect(screen.queryByText("haas-feature")).toBeNull();
 });

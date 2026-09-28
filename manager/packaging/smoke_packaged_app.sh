@@ -249,6 +249,9 @@ with connect(uri, subprotocols=["openworker", token], open_timeout=5, close_time
         raise SystemExit(f"expected ready, got {ready!r}")
     ws.send(json.dumps({
         "type": "user_message",
+        "clientCommandId": "cmd-packaged-smoke",
+        "idempotencyKey": "idem-packaged-smoke",
+        "delivery": "start_now",
         "text": "fix packaged startup smoke",
         "model": "openai:gpt-5.6-sol",
     }))
@@ -410,6 +413,9 @@ with connect(uri, subprotocols=["openworker", token], open_timeout=5, close_time
         raise SystemExit(f"expected ready, got {ready!r}")
     ws.send(json.dumps({
         "type": "user_message",
+        "clientCommandId": "cmd-packaged-smoke-occupied",
+        "idempotencyKey": "idem-packaged-smoke-occupied",
+        "delivery": "start_now",
         "text": "exercise occupied local HaaS port",
         "model": "openai:gpt-5.6-sol",
     }))

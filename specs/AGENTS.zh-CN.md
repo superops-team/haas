@@ -30,6 +30,7 @@
 - `manager-delegation/README.md`
 - `manager-haas-sidecar-backend/README.md`
 - `manager-conversation-experience/README.md`
+- `manager-project-workspace-experience/README.md`
 - `manager-product-identity/README.md`
 - `mcp-tool-skill-runtime/README.md`
 - `artifact-store/README.md`

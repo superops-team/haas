@@ -77,6 +77,7 @@ export const setKeepAwake = (enabled: boolean) => invoke<boolean>("set_keep_awak
 
 /** Begin native window dragging from a custom title/header region. */
 export const startWindowDrag = () => invoke<boolean>("start_window_drag");
+export const toggleWindowMaximize = () => invoke<boolean>("toggle_window_maximize");
 
 // Local dictation is native-only. The browser build deliberately keeps this unavailable rather
 // than silently sending microphone audio to a server.

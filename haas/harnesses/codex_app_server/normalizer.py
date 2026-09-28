@@ -9,6 +9,7 @@ notifications are mapped to HaaS canonical events and projected to ADK
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 from typing import Any
 
@@ -97,6 +98,21 @@ def _working_directory_hint(cwd: str) -> str:
         return cwd
     preview, _ = bounded_redacted_preview(cwd, max_lines=1, max_bytes=512)
     return preview
+
+
+def _semantic_workspace_output(output: str, cwd: object) -> str:
+    """Replace only the validated command cwd prefix before public redaction."""
+
+    if not isinstance(cwd, str) or not cwd.startswith("/"):
+        return output
+    root = cwd.rstrip("/")
+    if not root:
+        return output
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_./:]){re.escape(root)}"
+        rf"(?:(?P<slash>/)|(?=$|[\s,;:)\]}}\"']))"
+    )
+    return pattern.sub("workspace/", output)
 
 
 def notification_method(notification: JsonObject) -> str:
@@ -275,7 +291,9 @@ def normalize_notification(
             completed_artifact["exitCode"] = valid_exit_code
         output = item.get("aggregatedOutput")
         if isinstance(output, str) and output:
-            preview, omitted = bounded_redacted_preview(output)
+            preview, omitted = bounded_redacted_preview(
+                _semantic_workspace_output(output, item.get("cwd"))
+            )
             completed_artifact["outputPreview"] = preview
             completed_artifact["omittedLineCount"] = omitted
         if failed:
