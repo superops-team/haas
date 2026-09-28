@@ -380,9 +380,9 @@ const baseName = (p: string) => p.split("/").filter(Boolean).pop() || p;
 
 const PROVIDERS = [
   // openai: configured + used (drives the "Last used" sub-line and the status dot).
-  { name: "openai", title: "OpenAI", needs_key: true, fields: [{ key: "api_key", label: "OpenAI API key", secret: true, required: true, help: "", placeholder: "sk-…" }], configured: true, values: {}, suggested_models: ["gpt-5.5"], key_set_at: "2026-06-12", last_used_at: Math.floor(Date.now() / 1000) - 7200 },
+  { name: "openai", title: "OpenAI", needs_key: true, fields: [{ key: "api_key", label: "OpenAI API key", secret: true, required: true, help: "", placeholder: "sk-…" }], configured: true, source: "store", values: {}, suggested_models: ["gpt-5.5"], key_set_at: "2026-06-12", last_used_at: Math.floor(Date.now() / 1000) - 7200 },
   // anthropic: configured but never used ("Not used yet").
-  { name: "anthropic", title: "Claude (Anthropic)", needs_key: true, fields: [{ key: "api_key", label: "API key", secret: true, required: true, help: "", placeholder: "sk-…" }], configured: true, values: {}, suggested_models: ["claude-opus-4-8"], key_set_at: null, last_used_at: null },
+  { name: "anthropic", title: "Claude (Anthropic)", needs_key: true, fields: [{ key: "api_key", label: "API key", secret: true, required: true, help: "", placeholder: "sk-…" }], configured: true, source: "store", values: {}, suggested_models: ["claude-opus-4-8"], key_set_at: null, last_used_at: null },
   // zai: an OpenAI-compatible vendor — unconfigured, with a prefilled editable endpoint + blurb.
   { name: "zai", title: "Z AI (GLM)", needs_key: true, blurb: "Uses Z AI's OpenAI-compatible API — the endpoint is prefilled, just add your key.", fields: [{ key: "api_key", label: "Z AI API key", secret: true, required: true, help: "", placeholder: "" }, { key: "base_url", label: "Endpoint", secret: false, required: false, help: "Prefilled with Z AI's international endpoint.", placeholder: "https://api.z.ai/api/paas/v4", default: "https://api.z.ai/api/paas/v4" }], configured: false, values: {}, suggested_models: ["glm-5.2"], key_set_at: null, last_used_at: null },
   // Ark uses two provider identities: BytePlus pay-as-you-go and Volcengine Agent Plan CN
@@ -836,7 +836,7 @@ export async function mockApi(page: import("@playwright/test").Page) {
           send("permission_required", {
             name: "run_shell",
             arguments: { command: "ls" },
-            reason: "The coworker wants to run a command.",
+            reason: "The AI assistant wants to run a command.",
             readonly_ok: true, // `ls` classifies read-only server-side
           });
           return; // suspended on the approval
@@ -1034,6 +1034,29 @@ export async function mockApi(page: import("@playwright/test").Page) {
             text: "Inspecting the package and choosing focused verification.",
             haasEventId: "evt_reasoning_1",
           });
+          for (let index = 0; index < 12; index += 1) {
+            const readCallId = `haas_read_${index}`;
+            send("tool_proposed", {
+              toolCallId: readCallId,
+              toolName: "read_file",
+              activityKind: "read",
+              safeSummary: `sed -n '${index * 80 + 1},${index * 80 + 80}p' manager/coworker/conversation_commands.py && inspect the remaining implementation boundaries`,
+              delegated,
+              haasEventId: `evt_read_start_${index}`,
+            });
+            send("tool_finished", {
+              toolCallId: readCallId,
+              toolName: "read_file",
+              activityKind: "read",
+              safeSummary: `sed -n '${index * 80 + 1},${index * 80 + 80}p' manager/coworker/conversation_commands.py && inspect the remaining implementation boundaries`,
+              status: "completed",
+              durationMs: 20 + index,
+              outputPreview: `chunk ${index}`,
+              omittedLineCount: 0,
+              delegated,
+              haasEventId: `evt_read_${index}`,
+            });
+          }
           send("tool_proposed", {
             toolCallId,
             toolName: "exec_command",

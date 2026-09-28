@@ -57,25 +57,7 @@ export function TurnWork({
     () => new Map(work.activities.map((activity) => [activity.id, activity])),
     [work.activities],
   );
-  const failedActivityIds = useMemo(
-    () =>
-      new Set(
-        work.activities
-          .filter(
-            (activity) =>
-              activity.status === "failed" || activity.status === "waiting",
-          )
-          .map((activity) => activity.id),
-      ),
-    [work.activities],
-  );
-  const visibleSegments = disclosure.work
-    ? work.segments
-    : work.segments.filter(
-        (segment) =>
-          segment.kind === "tool" &&
-          segment.activityRefs.some((id) => failedActivityIds.has(id)),
-      );
+  const visibleSegments = disclosure.work ? work.segments : [];
   const nonSuccess = ["failed", "cancelled", "paused"].includes(
     presentation.phase,
   );
@@ -198,7 +180,7 @@ export function TurnWork({
             return (
               <Fragment key={segment.segmentId}>
                 <button
-                  className={`work-tool work-segment is-${activity.status}${activity.kind === "command" ? " is-command" : ""}`}
+                  className={`work-tool work-segment is-${activity.status}`}
                   data-work-segment="tool"
                   aria-expanded={expanded}
                   aria-controls={`activity-detail-${activity.id}`}
@@ -221,11 +203,6 @@ export function TurnWork({
                         <span className="work-tool-primary">
                           {activity.commandPreview || activity.summary}
                         </span>
-                        {activity.kind !== "command" && (
-                          <span className="work-tool-category">
-                            {t(`transcript.activity.kind.${activity.kind}`)}
-                          </span>
-                        )}
                       </>
                     ) : (
                       t(`transcript.activity.kind.${activity.kind}`)

@@ -21,6 +21,12 @@ OpenHarness is a calm, compact workspace for long-running Agent tasks. Make the 
 current work, required decision, and result easy to find. Color, motion, cards, and accounting
 must not compete with that reading order.
 
+User-facing product terminology calls a selectable specialized persona an **AI Assistant** in
+English and **AI助手** in Chinese. Do not expose the legacy generic terms `Coworker` or `同事` for
+that product object. Stable implementation identifiers (`coworker`, `.coworker/config.toml`, API
+fields and package names), user-authored assistant names, and literal references to human colleagues
+remain unchanged; presentation copy translates only at the UI boundary.
+
 ## 2. AI product objects
 
 These are product responsibilities, not a requirement to add a new table or framework for every
@@ -145,6 +151,13 @@ when it removes a demonstrated duplicate responsibility.
   states. Only the model control may shrink and ellipsize; microphone and lifecycle-action hit
   targets remain fixed, adjacent peers use one compact spacing token, and usage/secondary controls
   yield first.
+- User and assistant messages are distinguished without visible speaker headings: user messages
+  are right-aligned on a neutral filled surface; assistant responses remain left-aligned on the
+  canvas. Accessible names remain available to assistive technology. The conversation does not
+  own a Find/previous/next toolbar or intercept Cmd/Ctrl+F; native browser/WebView find remains.
+- The Composer model menu is a capability surface, not a catalog. It renders only the backend's
+  usable-model list and never injects an unavailable current/default model. Full discovery and
+  credential setup remain in Settings.
 - Desktop information architecture is project-first: a Project groups its conversations and one
   or more executable workspace bindings. Project expansion never changes the active conversation.
   Draft context presents Project, Work location, and Git branch as quiet peer controls; accepted
@@ -161,9 +174,11 @@ when it removes a demonstrated duplicate responsibility.
   the shelf/Composer geometry. Non-Git workspaces omit Branch without reserving a fake third control.
 - Project navigation uses progressive disclosure. The section header keeps a plain `+` for creation
   and reveals one organization menu on hover/focus. Each project row uses a primary disclosure
-  button plus sibling Edit/`...` actions; conversation rows use a primary selection button plus
+  button plus sibling New conversation/`...` actions; conversation rows use a primary selection button plus
   sibling Pin/Archive actions. Their reserved trailing areas prevent layout shift. Project hover
-  cards may expose Pin/Edit shortcuts, while conversation cards remain informational. All cards and
+  cards may expose Pin/New conversation shortcuts, while conversation cards remain informational.
+  New conversation binds a fresh draft to that Project's primary workspace/default execution target;
+  project metadata editing has exactly one owner in the Project `...` menu. All cards and
   menus share one collision-aware overlay family, use neutral surfaces, preserve keyboard paths,
   and never change row geometry, selection, or expansion as they appear.
 - Project and conversation previews are mutually exclusive states of one hover controller. Entering
@@ -188,6 +203,13 @@ when it removes a demonstrated duplicate responsibility.
   fixed at the trailing edge. Clicking the row expands one inline Shell panel directly beneath it
   with the complete safely wrapped `$ command` and bounded output; it never opens a second Inspector
   owner or repeats full evidence plus preview.
+- Every collapsed activity kind uses that same one-line row shell; safe summary ellipsizes while
+  status and disclosure remain fixed, and category metadata never creates a second line. A collapsed
+  work group shows no child rows, including failures. Expanded work is capped at 320 CSS px and
+  scrolls internally; complete details remain available in the one inline inspector.
+- Every full-page route shares the native title drag contract. Route titles and non-interactive
+  top chrome are drag regions; buttons, links, form controls, menus, selectable content and
+  scrollbars remain no-drag. Double-click on a route drag region performs one maximize/restore.
 - The 44 px desktop chrome is a native interaction surface, not decorative padding. Empty chrome
   is draggable, interactive controls are no-drag islands, and double-clicking draggable chrome
   performs exactly one platform maximize/restore action.

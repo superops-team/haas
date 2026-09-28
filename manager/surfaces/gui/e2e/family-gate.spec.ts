@@ -22,7 +22,7 @@ test("scratch coworker: new session starts instantly, no gate, no dialog", async
   await newDraftAs(page, /Ops Coworker/);
 
   await expect(page.locator(".gate-overlay")).toHaveCount(0);
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("hello there");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText(/Echo: hello there/)).toBeVisible();
@@ -37,7 +37,7 @@ test("gated coworker: send with no folder asks where to work; temp folder sends 
 
   // No modal gate up front — the composer is live and the draft is composable.
   await expect(page.locator(".gate-overlay")).toHaveCount(0);
-  await page.getByPlaceholder(/Ask the coworker/).fill("fix the tests");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("fix the tests");
   await page.getByRole("button", { name: "Send" }).click();
 
   const dlg = page.getByTestId("send-folder-dialog");
@@ -70,7 +70,7 @@ test("gated coworker: Choose a folder… binds the picked project and sends", as
   await page.goto("/");
   await newDraftAs(page, /Security Coworker/);
 
-  await page.getByPlaceholder(/Ask the coworker/).fill("hello repo");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("hello repo");
   await page.getByRole("button", { name: "Send" }).click();
 
   // Native pick is mocked server-side → /tmp/picked-folder.
@@ -84,7 +84,7 @@ test("escape restores the draft instead of losing it", async ({ page }) => {
   await page.goto("/");
   await newDraftAs(page, /Security Coworker/);
 
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("precious draft");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByTestId("send-folder-dialog")).toBeVisible();
@@ -123,7 +123,7 @@ test("an explicit folder pick survives a coworker change; menu copy matches stat
   await expect(page.getByTestId("folder-chip")).toContainText("picked-folder");
 
   // …and the send goes straight through, no folder dialog.
-  await page.getByPlaceholder(/Ask the coworker/).fill("scan here");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("scan here");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText(/Echo: scan here/)).toBeVisible();
   await expect(page.getByTestId("send-folder-dialog")).toHaveCount(0);

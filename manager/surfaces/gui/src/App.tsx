@@ -286,7 +286,7 @@ export function App() {
     useState<WorkspaceCommandTrust | null>(null);
   const [agent, setAgent] = useState("cowork");
   const [model, setModel] = useState("gpt-5.6-sol");
-  const [models, setModels] = useState<string[]>([]);
+  const [models, setModels] = useState<string[] | undefined>(undefined);
   const [modelLabels, setModelLabels] = useState<Record<string, string>>({});
   // {full model id → context window in tokens} from the curated matrix (verified only);
   // drives the composer usage chip's context-fill meter.
@@ -332,7 +332,6 @@ export function App() {
   const [pauseSupported, setPauseSupported] = useState(false);
   const [taskPhase, setTaskPhase] = useState<string | undefined>();
   const [taskOutcome, setTaskOutcome] = useState<TaskOutcome | undefined>();
-  const [conversationNavigationHost, setConversationNavigationHost] = useState<HTMLDivElement | null>(null);
   const [sessionId, setSessionId] = useState<string>(newId());
   const activeSessionIdRef = useRef(sessionId);
   activeSessionIdRef.current = sessionId;
@@ -440,7 +439,6 @@ export function App() {
   // Whether the default model's provider is actually configured (any provider). Drives the
   // composer's "No model connected" chip. Default true so we don't flash the chip before settings
   // load; corrected by loadSettings.
-  const [modelReady, setModelReady] = useState(true);
   const [surface, setSurface] = useState<
     "session" | "scheduled" | "integrations" | "audit" | "inbox" | "persona" | "settings"
   >("session");
@@ -863,7 +861,6 @@ export function App() {
           projectOrder: s.project_order || "manual",
           conversationOrder: s.conversation_order || "recent",
         });
-        setModelReady(s.model_ready);
         if (s.surfaces) setSurfaces(s.surfaces);
       })
       .catch(() => {});
@@ -1529,7 +1526,15 @@ export function App() {
           // Mid-session switch (server-applied): update the header fact and drop the
           // persisted marker into the live transcript (replay renders it from history).
           if (d.model) setModel(d.model);
-          setItems((p) => [...p, { kind: "notice", tone: "info", text: d.text || t("app.notice.model_switched") }]);
+          setItems((p) => [
+            ...p,
+            {
+              kind: "notice",
+              tone: "info",
+              event: "model_switch",
+              text: d.text || t("app.notice.model_switched"),
+            },
+          ]);
           break;
         case "memory_saved":
           // §5.1 save notice — inline in the transcript, where the user is already
@@ -1554,11 +1559,27 @@ export function App() {
         case "compacted":
           // Auto-compaction marker (OPE-27): outbound-only — the transcript stays intact,
           // this divider just shows where the model's memory was summarized.
-          setItems((p) => [...p, { kind: "notice", tone: "info", text: d.text || t("app.notice.context_compacted") }]);
+          setItems((p) => [
+            ...p,
+            {
+              kind: "notice",
+              tone: "info",
+              event: "compacted",
+              text: d.text || t("app.notice.context_compacted"),
+            },
+          ]);
           break;
         case "interrupted":
           flushPartialStream();
-          setItems((p) => [...p, { kind: "notice", tone: "warn", text: t("app.notice.interrupted") }]);
+          setItems((p) => [
+            ...p,
+            {
+              kind: "notice",
+              tone: "warn",
+              event: "interrupted",
+              text: t("app.notice.interrupted"),
+            },
+          ]);
           break;
         case "error":
           setTaskPhase("failed");
@@ -2481,6 +2502,7 @@ export function App() {
       project.workspaces.find(
         (item) => item.workspaceBindingId === project.primaryWorkspaceBindingId,
       ) || project.workspaces[0];
+    setSurface("session");
     setActiveProjectId(project.projectId);
     if (binding) selectWorkspaceContext(binding);
   };
@@ -2623,7 +2645,10 @@ export function App() {
   // UX-029: with the coworker picker shipping, the coworker's name is a fixed fact again
   // (it was dropped 2026-07-22 while personas were hidden). For temporary folders the raw
   // path never shows — "Temporary folder" + the Save as project… affordance instead.
-  const subtitleParts = [fullPersonaName(personaOf(agent)?.name, agent), modelDisplay];
+  const subtitleParts = [
+    fullPersonaName(personaOf(agent)?.name, agent, t("common.ai_assistant")),
+    modelDisplay,
+  ];
   if (isProjectScoped(personaOf(agent)) && workspace)
     subtitleParts.push(tempWorkspace ? t("root.temporary_space") : baseName(workspace));
   const showSaveAsProject = hasHistory && tempWorkspace && isProjectScoped(personaOf(agent));
@@ -2842,6 +2867,7 @@ export function App() {
         onUpdateProject={updateProjectNavigation}
         onReorderProjects={reorderProjectNavigation}
         onSidebarOrderChange={updateSidebarOrder}
+        onNewProjectSession={selectProjectContext}
         onEditProject={setEditingProject}
         onArchiveProjectSessions={archiveProjectNavigation}
         onRevealProject={revealProjectNavigation}
@@ -3081,7 +3107,6 @@ export function App() {
             <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{t(presentation.statusLabel)}</span>
             <div className="conversation-body">
             <div className="conversation-reading-pane">
-            <div className="conversation-navigation-host" ref={setConversationNavigationHost} />
             <div className="main-scroll" ref={scrollRef} onScroll={handleScroll}>
               {idle ? (
                 agent === "cowork" ? (
@@ -3118,7 +3143,6 @@ export function App() {
                     presentation={presentation}
                     outcome={taskOutcome}
                     loadExecutionEvidence={loadExecutionEvidence}
-                    navigationHost={conversationNavigationHost}
                     onOpenContext={openContext}
                     isContextAvailable={isContextAvailable}
                     onRetry={retry}
@@ -3238,7 +3262,6 @@ export function App() {
               onSubmissionChange={setSubmission}
               submissionResolution={submissionResolution}
               connected={connected}
-              modelReady={modelReady}
               onConnectModel={openModelSetup}
               onOpenMemory={() => openSettings("memory")}
               onConfigureVoiceInput={() => openSettings("voice")}
@@ -3481,7 +3504,11 @@ export function App() {
           choice lands; Escape/backdrop restores the draft to the composer. */}
       {sendGate && surface === "session" && (
         <SendFolderDialog
-          coworkerName={fullPersonaName(personaOf(agent)?.name, agent)}
+          coworkerName={fullPersonaName(
+            personaOf(agent)?.name,
+            agent,
+            t("common.ai_assistant"),
+          )}
           onPick={resolveSendFolder}
           onTemp={() => void startTempAndSend()}
           onCancel={cancelSendGate}

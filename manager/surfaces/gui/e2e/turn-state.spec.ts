@@ -24,7 +24,7 @@ test("sending a message shows Stop before the server confirms turn_start", async
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
 
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("delay acceptance");
   await page.getByRole("button", { name: "Send" }).click();
 

@@ -67,6 +67,7 @@ for (const theme of ["light", "dark"] as const) {
       );
       await expect(page.locator(".model-stage")).toHaveCount(0);
       await expect(page.getByText("Mode explanation")).toHaveCount(0);
+      await expect(page.locator(".conversation-turn .who")).toHaveCount(0);
       await expect(page.getByTestId("turn-completion")).toContainText(
         "8 actions",
       );
@@ -81,13 +82,17 @@ for (const theme of ["light", "dark"] as const) {
           .querySelector(".turn-work")!
           .getBoundingClientRect();
         return {
-          spread:
-            Math.max(user.left, response.left, work.left) -
-            Math.min(user.left, response.left, work.left),
+          responseWorkSpread: Math.abs(response.left - work.left),
+          userIsRightAligned: user.left > response.left && user.right >= response.right - 1,
+          surfacesDiffer:
+            getComputedStyle(document.querySelector(".user-message")!).backgroundColor !==
+            getComputedStyle(document.querySelector("[data-response-id]")!).backgroundColor,
           overflow: document.documentElement.scrollWidth - innerWidth,
         };
       });
-      expect(geometry.spread).toBeLessThanOrEqual(1);
+      expect(geometry.responseWorkSpread).toBeLessThanOrEqual(1);
+      expect(geometry.userIsRightAligned).toBe(true);
+      expect(geometry.surfacesDiffer).toBe(true);
       expect(geometry.overflow).toBeLessThanOrEqual(0);
       await expect(page).toHaveScreenshot(
         `product-turn-${theme}-${width}.png`,
@@ -201,20 +206,13 @@ test("short live response keeps its DOM through tools, 100 updates and terminal 
   await expect(
     page.getByText("Earlier answer 24", { exact: true }),
   ).toBeVisible();
-  const input = page.getByPlaceholder(/Ask the coworker/);
+  const input = page.getByPlaceholder(/Ask the AI assistant/);
   await input.fill("Synthetic live request");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByRole("button", { name: /Stop/ })).toBeVisible();
   send("assistant_delta", { text: "Yes." });
   const response = page.locator('[data-response-id="live-turn:response"]');
   await expect(response).toContainText("Yes.");
-  await page.keyboard.press("Control+f");
-  const liveFind = page.getByRole("searchbox", {
-    name: "Find in conversation",
-  });
-  await liveFind.fill("Yes.");
-  await expect(page.locator(".conversation-navigation-count")).toHaveText("1/1");
-  await liveFind.press("Escape");
   await response.evaluate((element) => {
     (window as any).__responseOwner = element;
   });

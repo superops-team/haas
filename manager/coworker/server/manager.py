@@ -6588,10 +6588,10 @@ class SessionManager:
 
     def _curated_models(self) -> list[str]:
         """The models offered in the composer's selector: every curated-matrix model
-        (`get_settings` culls the ones whose provider has no key) plus custom ids the user
-        added, minus matrix models they removed. Deliberately NO built-in seed list — a
-        fresh install offers nothing until a provider key exists, and then exactly that
-        provider's matrix models appear. The active default is always kept selectable.
+        (`get_settings` culls the ones whose provider cannot currently run) plus custom ids
+        the user added, minus matrix models they removed. Deliberately NO built-in seed list
+        — a fresh install offers nothing until a provider becomes usable. The active default
+        remains a session fact but is not forced into the selectable list.
         """
         from ..providers.matrix import MATRIX
 
@@ -6646,9 +6646,9 @@ class SessionManager:
         env_key = bool(os.environ.get("OPENAI_API_KEY"))
         stored = bool((self.secrets.get("provider:openai") or {}).get("api_key"))
 
-        # Only surface models whose provider is actually configured — the composer picker
-        # reflects exactly what's connected. The active default is always kept selectable
-        # (it's hidden behind the "No model" state until a provider is connected anyway).
+        # Only surface models whose provider is actually usable — the composer picker
+        # reflects exactly what's connected. An unavailable active default remains in
+        # `model` as a session fact, but is intentionally absent from `models`.
         # Ollama is keyless, so "configured" is meaningless there — its models show only
         # while a local Ollama answers (cached liveness probe).
         def _selectable(m: str) -> bool:
@@ -6658,8 +6658,6 @@ class SessionManager:
             return self._provider_configured(provider)
 
         selectable = [m for m in self._curated_models() if _selectable(m)]
-        if self.model not in selectable:
-            selectable.insert(0, self.model)
         from ..providers.matrix import model_context_windows, model_labels
 
         return {
@@ -6674,8 +6672,8 @@ class SessionManager:
             "model_context_windows": model_context_windows(),
             "has_key": env_key or stored,
             # Provider-agnostic "can this default model actually run?" — true when the default
-            # model's provider is configured (any provider, not just OpenAI). Drives the GUI's
-            # "No model connected" composer chip and the onboarding Skip warning.
+            # model's provider is configured (any provider, not just OpenAI). Retained as an API
+            # fact for onboarding and compatibility; the composer derives choices from `models`.
             "model_ready": self._provider_configured(self._model_provider(self.model)),
             "source": "env" if env_key else ("store" if stored else None),
             "onboarded": bool(self._prefs.get("onboarded")),

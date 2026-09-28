@@ -309,6 +309,37 @@ test("project context switches branch and remote work location without duplicate
   await expect(context.getByRole("button", { name: "feature/workbench" })).toHaveCount(0);
 });
 
+test("project row pencil starts a fresh conversation while overflow remains the edit owner", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const row = page.getByTestId("project-row-prj_haas");
+  const disclosure = row.locator(".project-sidebar-disclosure");
+  const expandedBefore = await disclosure.getAttribute("aria-expanded");
+  const previousConversation = page.getByTestId("conversation-row-project-main");
+  await expect(previousConversation.locator(".sidebar-conversation-primary")).toHaveClass(
+    /is-active/,
+  );
+
+  await row.hover();
+  await expect(page.getByTestId("project-hover-card")).toBeVisible();
+  await row.getByRole("button", { name: "New conversation in HaaS" }).click();
+
+  await expect(page.getByTestId("project-hover-card")).toHaveCount(0);
+  await expect(previousConversation.locator(".sidebar-conversation-primary")).not.toHaveClass(
+    /is-active/,
+  );
+  await expect(disclosure).toHaveAttribute("aria-expanded", expandedBefore!);
+  await expect(page.getByTestId("project-context-bar").getByRole("button", { name: "HaaS" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Edit project" })).toHaveCount(0);
+
+  await row.hover();
+  await page.getByTestId("project-menu-prj_haas").click();
+  await expect(
+    page.getByTestId("project-action-menu").getByRole("menuitem", { name: "Edit project" }),
+  ).toBeVisible();
+});
+
 test("new project dialog creates a remote workspace binding", async ({ page }) => {
   await page.goto("/");
   const sidebar = page.locator(".sidebar");

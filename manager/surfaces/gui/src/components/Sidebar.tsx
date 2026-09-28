@@ -38,14 +38,14 @@ import {
 // Session surfaces shown as accordions, in display order. The surfaced personas drive this list
 // (so third-party / Ops personas appear); the hardcoded set is the fallback before personas load.
 const SURFACES: { key: string; label: string; icon: IconName; cls: string }[] = [
-  { key: "cowork", label: "Coworker", icon: "diamond", cls: "ico-cowork" },
+  { key: "cowork", label: "AI Assistant", icon: "diamond", cls: "ico-cowork" },
   { key: "chat", label: "Chat", icon: "chat", cls: "ico-chat" },
   { key: "code", label: "Code", icon: "code", cls: "ico-code" },
 ];
 
-const surfaceFromPersona = (p: Persona) => ({
+const surfaceFromPersona = (p: Persona, assistantLabel: string) => ({
   key: p.id,
-  label: shortPersonaName(p.name, p.id),
+  label: shortPersonaName(p.name, p.id, assistantLabel),
   icon: personaGlyph(p.icon, p.requires_folder),
   cls: `ico-${p.icon || "cowork"}`,
 });
@@ -146,6 +146,7 @@ interface Props {
     projectOrder: ProjectOrder,
     conversationOrder: ConversationOrder,
   ) => void | Promise<void>;
+  onNewProjectSession: (project: ProjectSummary) => void;
   onEditProject?: (project: ProjectSummary) => void;
   onArchiveProjectSessions?: (projectId: string) => void | Promise<void>;
   onRevealProject?: (projectId: string) => void | Promise<void>;
@@ -1111,8 +1112,12 @@ export function Sidebar(props: Props) {
       ? personas
           .filter((p) => (p.enabled && p.surfaced) || agentsWithSessions.has(p.id))
           .sort((a, b) => Number(b.default) - Number(a.default)) // default leads
-          .map(surfaceFromPersona)
-      : SURFACES.filter(
+          .map((persona) => surfaceFromPersona(persona, t("common.ai_assistant")))
+      : SURFACES.map((surface) =>
+          surface.key === "cowork"
+            ? { ...surface, label: t("common.ai_assistant") }
+            : surface,
+        ).filter(
           (s) => s.key === "cowork" || props.surfaces[s.key as keyof SurfaceVisibility],
         )
   ).filter((s) => personaVisible(s.key));
@@ -1198,9 +1203,11 @@ export function Sidebar(props: Props) {
                 </button>
                 <button
                   type="button"
-                  aria-label={t("sidebar.edit_project")}
+                  aria-label={t("sidebar.new_project_session", {
+                    name: hovered.name,
+                  })}
                   onClick={() =>
-                    invokeProjectAction(() => props.onEditProject?.(hovered))
+                    invokeProjectAction(() => props.onNewProjectSession(hovered))
                   }
                 >
                   <Icon name="pencil" size={15} />
@@ -1623,9 +1630,15 @@ export function Sidebar(props: Props) {
                         <>
                           <button
                             type="button"
-                            className="project-row-action is-edit"
-                            aria-label={t("sidebar.edit_project")}
-                            onClick={() => props.onEditProject?.(project)}
+                            className="project-row-action is-create"
+                            aria-label={t("sidebar.new_project_session", {
+                              name: project.name,
+                            })}
+                            onClick={() =>
+                              invokeProjectAction(() =>
+                                props.onNewProjectSession(project),
+                              )
+                            }
                           >
                             <Icon name="pencil" size={14} />
                           </button>

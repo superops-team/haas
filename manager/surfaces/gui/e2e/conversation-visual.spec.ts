@@ -15,7 +15,7 @@ for (const theme of ["light", "dark"] as const) {
         "Draft the launch note",
       );
       await page.evaluate(() => document.fonts.ready);
-      const input = page.getByPlaceholder(/Ask the coworker/);
+      const input = page.getByPlaceholder(/Ask the AI assistant/);
       await input.blur();
       await expect(page).toHaveScreenshot(`idle-workbench-${theme}-${width}.png`, {
         animations: "disabled",

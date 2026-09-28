@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: MCX-001 through MCX-047 implemented; automated and packaged-local acceptance passed, owner visual acceptance pending
+Status: MCX-001 through MCX-049 implemented; owner visual acceptance pending
 Last reviewed: 2026-09-28
 Change ID: `manager-conversation-interaction-v2`
 Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager GUI Performance](../manager-gui-performance/README.md), [Event Log & SSE](../event-log-sse/README.md), [Session Runtime](../session-runtime/README.md), [Manager Product Identity](../manager-product-identity/README.md), [Security Boundary](../security-boundary/README.md)
@@ -1189,6 +1189,8 @@ the primary timeline.
 | MCX-045 | P0 | Composer trailing cluster | At 320/390/760/1440 px in both themes, model, microphone, and Send/Stop remain visible in that order, share one unwrapped trailing cluster with peer gaps <=8 CSS px, and keep fixed mic/action hit targets while only the long model label ellipsizes; idle, running, and recording fixtures preserve the same ownership |
 | MCX-046 | P0 | Terminal child-state convergence | Live sealing and historical replay of a completed/failed/cancelled turn never render a child activity or model stage as running/pending/waiting; a dangling tool becomes failed unless cancelled, a stale model stage follows the parent terminal state, and persisted evidence is not mutated |
 | MCX-047 | P0 | Reconnect terminal monotonicity | For both `ready -> history` and `history -> ready` ordering, `running=false` plus idle/cancelled control cannot overwrite a terminal transcript with a stale non-terminal task outcome; the UI shows no working indicator or Stop action and a true running snapshot still restores them |
+| MCX-048 | P0 | Selectable model availability | The Composer model menu contains only models whose routed provider is currently usable: credential-backed providers require configured credentials, OAuth providers require a signed-in profile, and keyless local providers require live discovery. An unavailable current/default model may remain visible as an immutable session fact but is never injected into selectable options. With no usable model the Composer shows Connect a model; with another usable model it offers only that list. Settings retains the complete catalog for configuration. No credential material enters the response or GUI |
+| MCX-049 | P0 | Focused runtime presentation | User messages align right on a neutral filled surface while assistant responses align left on the canvas; visible `You`/`Assistant` headings are absent but accessible response names remain. Model-switch and lifecycle markers use one quiet divider treatment. Collapsed work shows only its canonical summary—even when a child failed—and expanded work has a 320 CSS px maximum with internal scrolling. The conversation-local Find/previous/next toolbar and Cmd/Ctrl+F interception are removed; browser find remains available |
 
 ### 14.3 Requirement-to-case traceability
 

@@ -111,9 +111,13 @@ export function InboxView({
     const ids = [...new Set(items.map((i) => i.session_agent).filter(Boolean))] as string[];
     return ids.map((id) => ({
       id,
-      label: shortPersonaName(personas?.find((p) => p.id === id)?.name, id),
+      label: shortPersonaName(
+        personas?.find((p) => p.id === id)?.name,
+        id,
+        tt("common.ai_assistant"),
+      ),
     }));
-  }, [items, personas]);
+  }, [items, personas, tt]);
 
   const visible = items.filter(
     (it) =>

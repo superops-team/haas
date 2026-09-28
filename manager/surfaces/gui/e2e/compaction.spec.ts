@@ -58,7 +58,7 @@ test("the compacted divider renders mid-session and the transcript stays intact"
 }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
 
   // An earlier exchange that must survive the compaction marker (transcript intact).
   await box.fill("remember the launch date");
@@ -76,6 +76,9 @@ test("the compacted divider renders mid-session and the transcript stays intact"
   await expect(
     page.getByText("Context compacted — earlier turns were summarized").first(),
   ).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".timeline-notice.is-compacted")).toContainText(
+    "Context compacted — earlier turns were summarized",
+  );
   await expect(page.getByText("Compacting context…")).toHaveCount(0);
   await expect(
     page.getByText("Still on it — continuing where I left off.").first(),

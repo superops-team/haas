@@ -18,7 +18,7 @@ test("reconnects a dropped session without resubmitting accepted work", async ({
     });
   });
   await page.goto("/");
-  const input = page.getByPlaceholder(/Ask the coworker/);
+  const input = page.getByPlaceholder(/Ask the AI assistant/);
   await input.fill("Do not replay this task");
   await input.press("Enter");
   await expect.poll(() => connections, { timeout: 12_000 }).toBeGreaterThan(1);

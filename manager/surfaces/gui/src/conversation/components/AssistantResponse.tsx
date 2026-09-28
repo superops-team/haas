@@ -18,7 +18,6 @@ export const AssistantResponse = memo(function AssistantResponse({
       data-state={response.state}
       aria-label={t("transcript.who_assistant")}
     >
-      <div className="who">{t("transcript.who_assistant")}</div>
       <Markdown text={response.text} />
       <BubbleMeta text={response.text} align="left" />
     </div>

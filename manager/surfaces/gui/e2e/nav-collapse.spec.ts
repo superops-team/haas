@@ -1,5 +1,5 @@
 // Left-nav polish (§20): collapse (⌘B / brand button → reveal button docks it back) and the
-// RECENT-header group/filter popover (Group by Persona↔Chronological, Filter by coworker).
+// RECENT-header group/filter popover (Group by Persona↔Chronological, Filter by AI assistant).
 import { expect } from "@playwright/test";
 import { test } from "./fixtures";
 
@@ -39,7 +39,7 @@ test("RECENT header group/filter popover: switch grouping + see coworker filters
   await header.getByRole("button", { name: "Group and filter conversations" }).click();
   const menu = page.getByTestId("group-filter-menu");
   await expect(menu).toContainText("Group by");
-  await expect(menu).toContainText("Filter by coworker");
+  await expect(menu).toContainText("Filter by AI assistant");
 
   // Switch to Chronological → the persona accordion collapses into a flat list (the "OpenWorker"
   // persona group header is no longer a row; sessions list directly).

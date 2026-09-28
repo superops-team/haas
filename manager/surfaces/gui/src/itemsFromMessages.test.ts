@@ -93,7 +93,7 @@ describe("itemsFromMessages notices", () => {
     expect(items).toEqual([
       { kind: "user", text: "hi" },
       { kind: "assistant", text: "partial ans" },
-      { kind: "notice", tone: "warn", text: "Interrupted." },
+      { kind: "notice", tone: "warn", event: "interrupted", text: "Interrupted." },
       { kind: "user", text: "again" },
       { kind: "notice", tone: "warn", text: "Error: model down", retriable: true },
     ]);
@@ -109,6 +109,7 @@ describe("itemsFromMessages model switch", () => {
     expect(items[1]).toEqual({
       kind: "notice",
       tone: "info",
+      event: "model_switch",
       text: "Model switched to Kimi K2.6 · Moonshot",
     });
   });
@@ -123,6 +124,7 @@ describe("itemsFromMessages compaction", () => {
     expect(items[1]).toEqual({
       kind: "notice",
       tone: "info",
+      event: "compacted",
       text: "Context compacted — earlier turns were summarized",
     });
   });

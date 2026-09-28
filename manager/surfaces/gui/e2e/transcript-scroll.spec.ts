@@ -18,7 +18,7 @@ test("scrolling up mid-stream pins the viewport; jump-to-latest re-engages", asy
 }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("stream the epic");
   await box.press("Enter");
 
@@ -71,7 +71,7 @@ test("submitting from older history follows the new prompt and initial waiting p
 }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
 
   // First produce enough committed history to make the transcript independently scrollable.
   await box.fill("stream the epic");
@@ -127,7 +127,7 @@ test("bubbles carry hover copy + timestamp without layout shift", async ({
 }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("hello meta");
   await box.press("Enter");
   await expect(

@@ -318,6 +318,7 @@ export type Item = (
       kind: "notice";
       tone: "info" | "warn";
       text: string;
+      event?: "model_switch" | "compacted" | "interrupted" | "status";
       retriable?: boolean;
       // `title` switches the one-line status notice to a block: a heading plus
       // blank-line-separated paragraphs, left-aligned. Used for the Auto-Approve

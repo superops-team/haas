@@ -18,6 +18,11 @@
 OpenHarness 是安静、紧凑、适合长时间 Agent 任务的工作台。用户应能迅速找到自己的请求、
 当前工作、待决策事项和结果。颜色、动效、卡片和计量信息不能争夺这条阅读主线。
 
+用户可见产品术语将可选择的专用 persona 统一称为：英文 **AI Assistant**，中文 **AI助手**。
+该产品对象不得继续暴露旧的泛化术语 `Coworker` 或 `同事`。稳定实现标识（`coworker`、
+`.coworker/config.toml`、API field 与 package name）、用户自定义助手名称，以及确实指向人类同事
+的文案保持不变；只在 UI presentation boundary 统一翻译。
+
 ## 2. AI 产品对象
 
 以下定义产品职责，不要求每个名词都增加一张表或一套框架。复用现有类型模型和组件边界。
@@ -120,6 +125,11 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
   Send/Stop`。它们在所有支持宽度以及 recording/running 状态下始终可见。只有 model control
   可以收缩并显示 ellipsis；microphone 与 lifecycle-action hit target 保持固定，相邻 peer 只使用
   一个 compact spacing token，usage/secondary control 必须先让位。
+- User 与 assistant message 不显示可见 speaker heading：user message 在中性填充 surface 上右对齐，
+  assistant response 在 canvas 左对齐；辅助技术仍可获得 accessible name。Conversation 不再拥有
+  Find/上一条/下一条 toolbar，也不拦截 Cmd/Ctrl+F；保留 browser/WebView 原生查找。
+- Composer model menu 是 capability surface，不是 catalog：只渲染 backend 返回的 usable-model
+  list，绝不重新注入不可用的 current/default model。完整发现与 credential 配置留在 Settings。
 - 桌面信息架构以 Project 为先：Project 聚合 conversations 与一个或多个可执行
   workspace binding。展开 Project 不等于切换 conversation。Draft context 将 Project、Work
   location 与 Git branch 作为克制的同级控件；accepted work 冻结这些身份，后续变化创建新
@@ -133,9 +143,11 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
   shelf，也不改变 shelf/Composer geometry。非 Git workspace 直接省略 Branch，不预留虚假的第三项。
 - Project navigation 使用 progressive disclosure。Section header 保留纯 `+` 创建项目，并在
   hover/focus 时显示唯一 organization menu。每个 project row 使用 primary disclosure button 与
-  sibling Edit/`...` action；conversation row 使用 primary selection button 与 sibling Pin/Archive
-  action。预留的尾部区域避免 layout shift。Project hover card 可提供 Pin/Edit shortcut，
-  conversation card 保持 informational。所有 card/menu 共用同一 collision-aware overlay 家族，
+  sibling 新建会话/`...` action；conversation row 使用 primary selection button 与 sibling Pin/Archive
+  action。预留的尾部区域避免 layout shift。Project hover card 可提供 Pin/新建会话 shortcut，
+  conversation card 保持 informational。新建会话把 fresh draft 绑定到目标 Project 的 primary
+  workspace/default execution target；项目资料编辑只有 Project `...` menu 一个 owner。所有
+  card/menu 共用同一 collision-aware overlay 家族，
   使用中性 surface，保留键盘路径，出现时不改变 row geometry、selection 或 expansion。
 - Project 与 conversation preview 是同一个 hover controller 的互斥状态。进入不同 anchor 时，
   必须先关闭旧 preview，再开始新的 300 ms dwell；延迟关闭可以保留通往当前 card 的 corridor，
@@ -155,6 +167,12 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
   state 与 disclosure 固定在尾部。点击后只在该 row 正下方展开一个 inline Shell panel，安全换行
   展示完整 `$ command` 与 bounded output；不得再打开第二个 Inspector owner，也不得同时重复
   full evidence 与 preview。
+- 所有折叠 activity kind 共用同一个单行 row shell；safe summary 只做 ellipsis，status/disclosure
+  固定在尾部，category metadata 不生成第二行。Work 收起时不显示任何 child row，包括失败项。
+  展开 work 最大高度 320 CSS px，超出后内部滚动；完整详情仍由唯一 inline inspector 提供。
+- 所有 full-page route 共用原生 title drag 合同：route title 与非交互 top chrome 可拖拽；button、
+  link、form control、menu、可选文本与 scrollbar 保持 no-drag。双击 route drag region 只执行一次
+  maximize/restore。
 - 44 px desktop chrome 是原生交互面，不是装饰 padding。空白 chrome 可拖拽，interactive
   control 是 no-drag island；双击 draggable chrome 只触发一次平台 maximize/restore。
 

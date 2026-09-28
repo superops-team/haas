@@ -143,12 +143,12 @@ export function itemsFromMessages(messages: ConversationMessage[]): Item[] {
       // the Transcript only offers the button when it's the transcript tail.
       items.push(
         m.kind === "interrupted"
-          ? { kind: "notice", tone: "warn", text: "Interrupted." }
+          ? { kind: "notice", tone: "warn", event: "interrupted", text: "Interrupted." }
           : m.kind === "model_switch"
-            ? { kind: "notice", tone: "info", text: m.text || "Model switched" }
+            ? { kind: "notice", tone: "info", event: "model_switch", text: m.text || "Model switched" }
             : m.kind === "compacted"
               ? // The subtle "compacted here" divider (OPE-27) — the transcript itself is intact.
-                { kind: "notice", tone: "info", text: m.text || "Context compacted" }
+                { kind: "notice", tone: "info", event: "compacted", text: m.text || "Context compacted" }
               : m.kind === "mcp_error"
                 ? // A configured MCP server failed to start for this session — informational,
                   // NOT retriable (retry re-runs the model turn, which can't fix a dead server).

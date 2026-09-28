@@ -15,10 +15,10 @@ async function openModeMenu(page) {
 
 test("attended (default): a tool request surfaces the inline approval card", async ({ page }) => {
   await page.goto("/");
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("please run a tool");
   await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.getByText("The coworker wants to run a command.").first()).toBeVisible();
+  await expect(page.getByText("The AI assistant wants to run a command.").first()).toBeVisible();
 });
 
 test("Send-to-Inbox toggle (in the Mode menu) flips and persists across a reload", async ({
@@ -47,14 +47,14 @@ test("unattended: a tool request parks (no inline approval card)", async ({ page
   // The menu's full-screen overlay closes it on any outside click.
   await page.mouse.click(5, 5);
 
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("please run a tool");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
   // The turn still starts, but the live approval card is suppressed — the prompt is parked to the
   // Inbox instead. Give the (suppressed) card a beat to NOT appear.
   await expect(page.getByText("Echo:").first()).toBeVisible().catch(() => {});
-  await expect(page.getByText("The coworker wants to run a command.")).toHaveCount(0);
+  await expect(page.getByText("The AI assistant wants to run a command.")).toHaveCount(0);
 });
 
 test("answering the live approval never re-flashes its parked Inbox mirror", async ({ page }) => {
@@ -94,10 +94,10 @@ test("answering the live approval never re-flashes its parked Inbox mirror", asy
   });
 
   await page.goto("/");
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("please run a tool");
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText("The coworker wants to run a command.").first()).toBeVisible();
+  await expect(page.getByText("The AI assistant wants to run a command.").first()).toBeVisible();
 
   mirrorResolved = true; // server side resolves with the decision; the stale client copy is the bug
   await page.getByRole("button", { name: "Allow once" }).last().click();

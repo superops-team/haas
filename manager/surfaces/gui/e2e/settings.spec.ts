@@ -17,7 +17,7 @@ test("Settings opens as a full page and navigates sections", async ({ page }) =>
   }
   // Folded tabs: Files is a General card now; Coworkers ships as its own tab (UX-029).
   await expect(page.getByRole("button", { name: "Files", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Coworkers", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "AI Assistants", exact: true })).toBeVisible();
 
   // The Files card lives inside General.
   await expect(page.getByText("Each conversation gets its own folder")).toBeVisible();
@@ -26,12 +26,24 @@ test("Settings opens as a full page and navigates sections", async ({ page }) =>
   await expect(page.getByTestId("set-provider-openai")).toBeVisible();
 });
 
+test("Settings uses AI Assistant terminology in Chinese", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("openworker.lang", "zh"));
+  await page.goto("/");
+  await page.getByTestId("account-row").click();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+
+  await page.getByRole("button", { name: "AI助手", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "AI助手", exact: true })).toBeVisible();
+  await expect(page.getByText("管理你的AI助手，并添加新AI助手。")).toBeVisible();
+  await expect(page.getByText(/同事/)).toHaveCount(0);
+});
+
 // The flag's "0" escape hatch hides the tab again (the default is on — UX-029).
 test("Settings: Coworkers tab opens by default; flag \"0\" hides it", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("account-row").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Coworkers", exact: true }).click();
+  await page.getByRole("button", { name: "AI Assistants", exact: true }).click();
   await expect(page.getByTestId("install-disclosure")).toBeVisible();
 });
 
@@ -41,7 +53,7 @@ test("Settings: the flag escape hatch hides the Coworkers tab", async ({ page })
   await page.getByTestId("account-row").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("heading", { name: "General" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Coworkers", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "AI Assistants", exact: true })).toHaveCount(0);
 });
 
 // UX-021: Settings ▸ Models is the shared provider gallery (§39 components). Cards wear

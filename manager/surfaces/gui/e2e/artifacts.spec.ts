@@ -8,7 +8,7 @@ import { test } from "./fixtures";
 
 async function openReport(page: import("@playwright/test").Page) {
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("hello");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("hello");
   await page.getByRole("button", { name: "Send" }).click();
   // Seventeenth pass: sections start collapsed — expand Artifacts to reach the list.
   await page.getByTestId("rail-toggle-artifacts").click();
@@ -50,7 +50,7 @@ test("a transcript chip opens the viewer on the FIRST click even with the rail h
   // registered while the rail was visible, so click #1 unhid an empty rail and the
   // selection was lost — the viewer appeared only on a later click.
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("show the report");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("show the report");
   await page.getByRole("button", { name: "Send" }).click();
   await page.getByRole("button", { name: "Hide side panel" }).click();
 
@@ -66,7 +66,7 @@ test("Artifacts section renders for a folder-gated coworker too (universal scrat
   await page.goto("/");
   await page.getByTestId("coworker-chip").click();
   await page.locator(".setup-menu").getByRole("button", { name: /Security Coworker/ }).click();
-  await page.getByPlaceholder(/Ask the coworker/).fill("audit this repo");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("audit this repo");
   await page.getByRole("button", { name: "Send" }).click();
   await page.getByTestId("send-folder-dialog").getByRole("button", { name: "Choose a folder…" }).click();
   await expect(page.getByText(/Echo: audit this repo/)).toBeVisible();

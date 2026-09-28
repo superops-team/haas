@@ -116,7 +116,7 @@ export function SettingsView({
   return (
     <main className="flex-1 min-w-0 flex bg-paper">
       <nav className="page-subnav w-[208px] shrink-0 border-r border-line bg-panel/40 px-3 py-4">
-        <div className="px-2 text-[13px] font-semibold mb-3 flex items-center gap-2">
+        <div className="px-2 text-[13px] font-semibold mb-3 flex items-center gap-2" data-page-drag-region data-tauri-drag-region>
           <Icon name="gear" size={16} /> {t("nav.settings")}
         </div>
         {tabs.map((tb) => {
@@ -1054,7 +1054,7 @@ function CompactionCard() {
       <div className={FIELD_LABEL}>Context compaction</div>
       <div className={FIELD_HELP}>
         Long sessions are compacted automatically: older turns are summarized so the
-        coworker keeps working instead of running out of context. Your visible transcript
+        AI assistant keeps working instead of running out of context. Your visible transcript
         is never changed — a small marker shows where compaction happened.
       </div>
 

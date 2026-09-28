@@ -33,8 +33,11 @@ def test_settings_rest_roundtrip(tmp_path, monkeypatch):
 
     from coworker.server.app import create_app
     from coworker.server.manager import SessionManager
+    from coworker.providers import provider_descriptors
 
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    for descriptor in provider_descriptors():
+        if descriptor.env_key:
+            monkeypatch.delenv(descriptor.env_key, raising=False)
     monkeypatch.setenv("COWORKER_STATE_DIR", str(tmp_path / "state"))
     manager = SessionManager(data_dir=tmp_path / "data")
     client = TestClient(create_app(manager))
@@ -45,7 +48,9 @@ def test_settings_rest_roundtrip(tmp_path, monkeypatch):
         and before["source"] is None
         and before["provider"] == "openai"
     )
-    assert before["onboarded"] is False and before["model"] in before["models"]
+    assert before["onboarded"] is False
+    assert before["model_ready"] is False
+    assert before["models"] == []
 
     set_resp = client.post(
         "/v1/settings/model-key", json={"api_key": "sk-secret-xyz"}
@@ -174,3 +179,23 @@ def test_ollama_models_gated_on_liveness(tmp_path, monkeypatch):
 
     monkeypatch.setattr(SessionManager, "_ollama_alive", lambda self: True)
     assert "ollama:llama3.3" in manager.get_settings()["models"]
+
+
+def test_unavailable_default_is_not_reinserted_into_selectable_models(tmp_path, monkeypatch):
+    from coworker.server.manager import SessionManager
+    from coworker.providers import provider_descriptors
+
+    for descriptor in provider_descriptors():
+        if descriptor.env_key:
+            monkeypatch.delenv(descriptor.env_key, raising=False)
+    monkeypatch.setenv("COWORKER_STATE_DIR", str(tmp_path / "state"))
+    manager = SessionManager(data_dir=tmp_path / "data")
+    manager.model = "gpt-5.6-sol"
+    manager.add_model("zai:glm-5.2")
+    manager.secrets.put("provider:zai", {"api_key": "test-key"})
+
+    settings = manager.get_settings()
+    assert settings["model"] == "gpt-5.6-sol"
+    assert settings["model_ready"] is False
+    assert "gpt-5.6-sol" not in settings["models"]
+    assert "zai:glm-5.2" in settings["models"]

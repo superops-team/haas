@@ -9,7 +9,7 @@ test("send → user bubble → streamed echo reply renders", async ({ page }) =>
 
   // Boot resumes the most recent session ("Draft the launch note") and connects; the composer is
   // live once the fake agent's `ready` lands.
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await expect(box).toBeVisible();
 
   await box.fill("hello agent");
@@ -41,7 +41,7 @@ test("approval: tool request suspends the turn; Allow once resumes it", async ({
   page,
 }) => {
   await page.goto("/");
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await expect(box).toBeVisible();
 
   await box.fill("please run a tool");
@@ -49,7 +49,7 @@ test("approval: tool request suspends the turn; Allow once resumes it", async ({
 
   // The approval card surfaces the tool + reason and blocks until a decision.
   await expect(
-    page.getByText("The coworker wants to run a command.").first(),
+    page.getByText("The AI assistant wants to run a command.").first(),
   ).toBeVisible();
   await page.getByRole("button", { name: "Allow once" }).last().click();
 
@@ -61,7 +61,7 @@ test("approval: Deny skips the tool and the agent says so", async ({
   page,
 }) => {
   await page.goto("/");
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await expect(box).toBeVisible();
 
   await box.fill("please run a tool");
@@ -76,7 +76,7 @@ test("approval: Deny skips the tool and the agent says so", async ({
 
 test("long user pastes clamp with a more…/less… toggle", async ({ page }) => {
   await page.goto("/");
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await expect(box).toBeVisible();
 
   const tail = "END-OF-PASTE-MARKER";

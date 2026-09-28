@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-状态：MPW-022 至 MPW-034 已实施；自动化与本机打包验收通过，等待 owner 视觉验收
+状态：MPW-022 至 MPW-037 已实施；等待 owner 视觉验收
 最近评审：2026-09-28
 Change ID：`manager-project-workspace-experience`
 相关规格：[Manager 对话体验](../manager-conversation-experience/README.zh-CN.md)、[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager 产品身份](../manager-product-identity/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Stores](../stores/README.zh-CN.md)、[安全边界](../security-boundary/README.zh-CN.md)
@@ -432,11 +432,11 @@ Remote workspace 的 `canonicalKey` 是
   `:focus-within` 时显示。两者预留至少 28 CSS px hit target，可键盘访问且不移动 heading。
 - Project row 使用 semantic primary disclosure button 与 sibling action，不得嵌套 interactive
   control。它展示 folder/repository icon、截断 name、expand/collapse、availability，以及由 row
-  hover 或 `:focus-within` 显示的尾部 Edit 与 `...` control。预留尾部区域使 name/
+  hover 或 `:focus-within` 显示的尾部新建会话与 `...` control。预留尾部区域使 name/
   chevron 不位移。Conversation row 同样使用 semantic selection button 与 sibling Pin/Unpin、
   Archive shortcut。Shortcut/menu event 不 toggle project 或 select conversation。
 - Hover 300 ms 或 keyboard-focus project row 时，展示 summary card，包含 project name、active task
-  count、safe display path/remote label 与 Pin/Edit 快捷操作。Safe hover corridor 保证指针
+  count、safe display path/remote label 与 Pin/新建会话快捷操作。Safe hover corridor 保证指针
   从 row 移向 card 时不关闭。Conversation row card 只展示 title、owning project 与 relative
   update age。离开 anchor/card、focus departure、Escape、ancestor scroll、row unmount 或 menu open
   时关闭 card；card 不改变 selection。
@@ -449,7 +449,7 @@ Remote workspace 的 `canonicalKey` 是
 - Conversation metadata 与渐进式 row action 共用一个预留尾部 grid cell。Hover、focus、menu-open
   以及在展开/折叠 project group 之间移动时，只改变 opacity/visibility 和 pointer availability；
   row 的 `x/y/width/height`、title width 与 project expansion state 保持不变。
-- Interactive project card 使用有 label 的 non-modal `role="group"`；focus 可进入其 Pin/Edit
+- Interactive project card 使用有 label 的 non-modal `role="group"`；focus 可进入其 Pin/新建会话
   control 而不关闭。Informational conversation card 使用 `role="tooltip"`，anchor 只在 card
   存在时设置 `aria-describedby`。Project disclosure button 暴露 `aria-expanded`；overflow trigger
   暴露 `aria-haspopup="menu"` 与 `aria-expanded`。
@@ -461,6 +461,10 @@ Remote workspace 的 `canonicalKey` 是
 - Edit mode 只修改 display name 与供 future draft 使用的已验证 default execution endpoint。
   现有 workspace binding 只读展示，accepted session 保留冻结的 endpoint/workspace snapshot。
   Add/relink workspace 仍是独立显式流程。
+- 新建会话由 project row 与 project hover card 上的铅笔/compose shortcut 唯一承担。点击任一入口
+  只创建一个绑定到目标 Project primary workspace 与 default endpoint 的 fresh draft session，保留
+  旧 session 与旧 draft，关闭 hover surface，不打开 Edit Project，也不切换 project expansion。
+  `Edit project` 只出现在 Project `...` menu 中，并作为项目资料编辑的唯一入口。
 - `Remove from sidebar` 设置 project archived flag，并可从 archived-project management 恢复。
   File、Git state、workspace binding、session、transcript、artifact 与 immutable accepted-session
   binding 全部保留。`Archive conversations` 保留 project row。
@@ -736,6 +740,9 @@ project name、branch、path、command、output 或 endpoint URL。
 | MPW-032 | P0 | Hover/focus/menu transition 不改变任何可见 project/conversation row bounding box 与 expansion state；section label 为 11 px/500，inactive conversation 为 12 px/400 secondary text，仅选中 conversation 提升为 12 px/500 primary text |
 | MPW-033 | P0 | Sessions 先返回、project projection 延迟时，初始导航只显示一套固定 project-loading skeleton 且 legacy conversation row 数为零；projection 完成后原子显示 project hierarchy，无中间 list 闪现，后续 refresh 保留已 settle 的 hierarchy |
 | MPW-034 | P0 | 深浅主题的 320/390/760/1440 px 与 200% zoom 下，Project/Work location/Git branch 渲染为一个衔接在 Composer 背后的中性 shelf：同一 30 px 中心线、idle 无边框、Local 使用设备 icon、不换行/不越界、menu 语义真实、hover/focus/open 几何稳定，且 shelf 与 Composer 之间没有 canvas 色断层 |
+| MPW-035 | P0 | 点击 project row 或 project hover card 的铅笔会且仅会创建一个绑定到该 Project 的 fresh conversation，不打开 Edit Project，也不改变 expansion；Project `...` menu 保持唯一 Edit project 入口，并具备正确 accessible name 与 keyboard path |
+| MPW-036 | P0 | 每个 Manager full-page surface——Settings、AI助手、Inbox、Automations list/detail、Connectors、Audit 与 persona detail——都提供与 conversation surface 一致的 native drag affordance。空白/title 区启动 native drag，双击只执行一次 maximize/restore；button、link、input、menu、可选文本与 scrollbar 保持 no-drag。Browser overlay check 与 packaged macOS movement/maximize 覆盖全部 surface family |
+| MPW-037 | P0 | 每个折叠 TurnWork activity row，无论 command/read/search/file/tool kind，都严格使用一条不换行视觉行：icon/status/disclosure 固定在两端，primary safe summary 按可用宽度 ellipsis；category metadata 不生成第二行。点击后由唯一 inline detail owner 展示完整 safe summary/command 与 bounded evidence；mixed kind 在双主题 390/760/1440 px 下保持行高与对齐一致 |
 
 要求执行：
 
@@ -783,7 +790,10 @@ validation 与 capability guard 至少 95%。
 | 12 | 互斥 hover 与稳定尾部几何 | mixed-row 快速 hover 与 before/after bounding box 暴露重复 card 和宽度变化 | 单一 discriminated hover state + grid-stacked trailing content 保持单一 card 与稳定 row |
 | 13 | 初始 project projection | 延迟 project response + 提前完成 sessions 暴露 legacy-list flash | 显式 unresolved/empty state 与固定 skeleton 保证 first paint 原子切换 |
 | 14 | Composer context shelf 对齐 | Browser geometry/computed-style 断言暴露游离透明行、默认层级过弱、Local 代码括号 icon 与缺失 menu state 语义 | 单一 token-driven attached shelf 通过双主题、支持宽度、键盘/menu geometry、production preview 与 packaged-native 视觉对比 |
-| 15 | Review 与 release gate | code-review、brooks-review、brooks-test manifest | 无 unresolved finding；full-check、preview、DMG/native 通过 |
+| 15 | Project shortcut action ownership | row/card 铅笔当前打开重复 Edit Project surface | 单一 `onNewProjectSession` intent 创建 project-bound draft；Edit Project 仅保留在 `...`；component/browser test 证明 action 不串线 |
+| 16 | Review 与 release gate | code-review、brooks-review、brooks-test manifest | 无 unresolved finding；full-check、preview、DMG/native 通过 |
+| 17 | Full-page native drag parity | Settings 等 route surface 缺少 conversation topbar drag owner | shared route-title drag region 覆盖全部 full-page family，interactive descendant 保持 no-drag；packaged movement/maximize 通过 |
+| 18 | 统一折叠 activity row | non-command activity 会换行并渲染 category subtitle，而 command 使用 ellipsis | 一个 row shell 对所有 activity kind 应用 nowrap/ellipsis/fixed trailing slot；inline detail 保持唯一完整内容 owner |
 
 P0/P1 表示实现顺序，不代表可静默裁剪。任何未完成 acceptance case 必须保持 open，并阻止该
 change id 被宣称完成。

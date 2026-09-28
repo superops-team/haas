@@ -24,6 +24,39 @@ afterEach(async () => {
 });
 
 describe("Composer HaaS lifecycle controls", () => {
+  it("does not inject an unavailable current model into the selectable menu", () => {
+    render(
+      <Composer
+        {...props({
+          model: "stale:model",
+          models: ["gpt-5.6-sol"],
+          modelLabels: {
+            "stale:model": "Unavailable model",
+            "gpt-5.6-sol": "GPT-5.6 Sol",
+          },
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose a model" }));
+    expect(screen.getByText("GPT-5.6 Sol")).toBeTruthy();
+    expect(screen.queryByText("Unavailable model")).toBeNull();
+  });
+
+  it("does not submit an unavailable current model with Enter", () => {
+    const p = props({
+      model: "stale:model",
+      models: ["gpt-5.6-sol"],
+    });
+    render(<Composer {...p} />);
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "must choose a usable model" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(p.onSend).not.toHaveBeenCalled();
+  });
+
   it("shows distinct Pause and Stop actions while a pausable turn is running", () => {
     const p = props({ presentation: selectConversationPresentation({ phase: "running", pauseSupported: true }) });
     render(<Composer {...p} />);

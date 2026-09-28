@@ -15,7 +15,7 @@ async function openTaskDetail(page: import("@playwright/test").Page) {
 
 test("creation consent card renders writes as grants and reads as disclosure", async ({ page }) => {
   await page.goto("/");
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await expect(box).toBeVisible();
 
   await box.fill("please create an automation for the weekly digest");
@@ -46,7 +46,7 @@ test("a run session's approval card offers Allow every time and sends always_tas
   await expect(page.getByText(/Echo: .*Fetch the latest AI news/)).toBeVisible();
 
   // An eligible gated write inside the run (the event carries the pinnable target).
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("post the digest");
   await page.getByRole("button", { name: "Send" }).click();
 
@@ -64,7 +64,7 @@ test("a plain session never offers Allow every time, even for an eligible call",
   page,
 }) => {
   await page.goto("/");
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await expect(box).toBeVisible();
 
   await box.fill("post the digest");

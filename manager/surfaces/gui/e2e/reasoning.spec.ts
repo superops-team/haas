@@ -9,7 +9,7 @@ test("reasoning stays behind a stable user-controlled disclosure through complet
 }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("think hard about this");
   await box.press("Enter");
 

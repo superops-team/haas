@@ -273,6 +273,8 @@ describe("product conversation", () => {
         })}
       />,
     );
+    expect(screen.queryByRole("button", { name: /Verify project Failed$/ })).toBeNull();
+    fireEvent.click(screen.getByTestId("work-summary"));
     const source = screen.getByRole("button", { name: /Verify project Failed$/ });
     fireEvent.click(source);
     await waitFor(() => expect(load).toHaveBeenCalledOnce());
@@ -335,6 +337,7 @@ it("preserves reviewer override, provenance and privacy evidence", () => {
   fireEvent.click(screen.getByTestId("reviewer-allow-anyway"));
   expect(allow).toHaveBeenCalledWith("run_shell", { command: "synthetic" });
   expect(screen.queryByTestId("reviewer-allow-anyway")).toBeNull();
+  fireEvent.click(screen.getByTestId("work-summary"));
   fireEvent.click(screen.getByRole("button", { name: "Used a tool Failed" }));
   expect(screen.getByTestId("activity-privacy").textContent).toContain("3");
 });

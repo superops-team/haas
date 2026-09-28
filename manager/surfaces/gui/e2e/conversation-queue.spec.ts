@@ -5,7 +5,7 @@ test("a follow-up can be queued while the current turn keeps running", async ({
   page,
 }) => {
   await page.goto("/");
-  const input = page.getByPlaceholder(/Ask the coworker/);
+  const input = page.getByPlaceholder(/Ask the AI assistant/);
   await expect(input).toBeVisible();
 
   await input.fill("stream the epic");
@@ -32,7 +32,7 @@ test("queued follow-ups can be reordered, restored for editing, and removed", as
   page,
 }) => {
   await page.goto("/");
-  const input = page.getByPlaceholder(/Ask the coworker/);
+  const input = page.getByPlaceholder(/Ask the AI assistant/);
 
   await input.fill("stream the epic");
   await page.getByRole("button", { name: "Send", exact: true }).click();

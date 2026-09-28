@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-状态：MCX-001 至 MCX-047 已实施；自动化与本机打包验收通过，等待 owner 视觉验收
+状态：MCX-001 至 MCX-049 已实施；等待 owner 视觉验收
 最近评审：2026-09-28
 Change ID：`manager-conversation-interaction-v2`
 相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Manager GUI Performance](../manager-gui-performance/README.zh-CN.md)、[Event Log & SSE](../event-log-sse/README.zh-CN.md)、[Session Runtime](../session-runtime/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
@@ -885,6 +885,8 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-045 | P0 | Composer 尾部 cluster | 双主题 320/390/760/1440 px 下，model、microphone、Send/Stop 按该顺序保持可见，以 peer gap <=8 CSS px 组成不换行的尾部 cluster；mic/action hit target 固定，仅长 model label 显示 ellipsis，idle、running 与 recording fixture 保持同一 ownership |
 | MCX-046 | P0 | Terminal child-state convergence | Live sealing 与历史 replay 的 completed/failed/cancelled turn 不得继续把 child activity 或 model stage 显示为 running/pending/waiting；dangling tool 除 cancelled 外归一为 failed，stale model stage 跟随 parent terminal state，且不修改持久化 evidence |
 | MCX-047 | P0 | Reconnect terminal monotonicity | `ready -> history` 与 `history -> ready` 两种顺序下，`running=false` 加 idle/cancelled control 不得用 stale non-terminal task outcome 覆盖 terminal transcript；UI 不显示 working indicator/Stop，同时真实 running snapshot 仍能恢复这些状态 |
+| MCX-048 | P0 | 可选模型可用性 | Composer 模型菜单只包含 routed provider 当前可用的模型：凭证型 provider 必须已配置 credential，OAuth provider 必须有已登录 profile，keyless local provider 必须通过 live discovery。不可用的当前/default model 可作为 immutable session fact 继续显示，但不得被注入 selectable option。无可用模型时 Composer 显示连接模型；存在其他可用模型时只提供该列表。Settings 保留完整目录用于配置。Response 与 GUI 不包含 credential material |
+| MCX-049 | P0 | 聚焦运行时展示 | User message 使用右对齐中性填充 surface，assistant response 在 canvas 左对齐；不显示 `你`/`助手` heading，但保留 accessible response name。Model-switch 与 lifecycle marker 使用统一克制 divider。Work 收起时只显示 canonical summary，即使 child failed 也不泄漏；展开 work 最大高度 320 CSS px，内部滚动。移除会话内 Find/上一条/下一条 toolbar 及 Cmd/Ctrl+F 拦截，保留浏览器原生查找 |
 
 ### 14.3 需求到用例追溯
 

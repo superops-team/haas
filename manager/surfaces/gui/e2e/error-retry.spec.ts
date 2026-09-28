@@ -9,7 +9,7 @@ test("provider error shows a retriable notice; Retry re-runs without a new user 
 }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("please fail the turn");
   await box.press("Enter");
 
@@ -29,7 +29,7 @@ test("provider error shows a retriable notice; Retry re-runs without a new user 
 test("Retry survives a model switch — the intended recovery path", async ({ page }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("please fail the turn");
   await box.press("Enter");
   await expect(page.getByTestId("notice-retry")).toBeVisible({ timeout: 10_000 });

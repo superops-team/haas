@@ -112,7 +112,7 @@ test("recording and running keep the same trailing control ownership", async ({ 
   await expect(cluster.getByRole("button", { name: "Send" })).toBeDisabled();
 
   await page.reload();
-  const input = page.getByPlaceholder(/Ask the coworker/);
+  const input = page.getByPlaceholder(/Ask the AI assistant/);
   await input.fill("delay acceptance");
   await cluster.getByRole("button", { name: "Send" }).click();
   await expect(cluster.locator(".dd > button")).toBeVisible();

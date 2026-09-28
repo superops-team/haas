@@ -1,12 +1,7 @@
 import { ContextChips } from "./ContextChips";
 import type { ContextReference } from "../model/context";
-import { ConversationNavigation } from "./ConversationNavigation";
-import {
-  buildConversationIndex,
-  type NavigationTarget,
-} from "../model/navigation";
+import { Icon } from "../../components/Icon";
 import { memo, useCallback, useMemo, useState } from "react";
-import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import type { Item } from "../../types";
 import type { ExecutionEvidence } from "../../api";
@@ -44,7 +39,6 @@ interface Props extends TranscriptActions {
   liveStore: LiveProjectionStore;
   presentation: ConversationPresentation;
   outcome?: import("../../types").TaskOutcome;
-  navigationHost?: HTMLElement | null;
   loadExecutionEvidence?: (
     invocationId: string,
     toolCallId: string,
@@ -72,7 +66,6 @@ const ProductTurn = memo(function ProductTurn({
   loadExecutionEvidence,
   ...actions
 }: TurnProps) {
-  const { t } = useTranslation();
   const showWork =
     turn.work.segments.length > 0 ||
     turn.work.evidence.length > 0 ||
@@ -86,7 +79,6 @@ const ProductTurn = memo(function ProductTurn({
             className="group user-message"
             data-row-id={item.rowId}
           >
-            <div className="who">{t("transcript.who_user")}</div>
             {item.attachments?.length ? (
               <div className="bubble-attachments">
                 {item.attachments.map((attachment, index) =>
@@ -164,9 +156,14 @@ function ContextRow({
     if (item.server && item.detail)
       return <McpNotice item={item} onOpenConnectors={onOpenConnectors} />;
     return (
-      <div className={`notice${item.tone === "warn" ? " warn" : ""}`}>
+      <div className={`notice timeline-notice${item.tone === "warn" ? " warn" : ""}${item.event ? ` is-${item.event}` : ""}`}>
+        {item.event === "model_switch" && (
+          <Icon name="diamond" size={14} className="timeline-notice-icon" />
+        )}
+        <span className="timeline-notice-text">
         {item.title && <div className="notice-title">{item.title}</div>}
         {item.text}
+        </span>
         {item.retriable && canRetry && onRetry && (
           <button className="btn" data-testid="notice-retry" onClick={onRetry}>
             {t("transcript.retry")}
@@ -276,7 +273,6 @@ export function ConversationTranscript({
   liveStore,
   presentation,
   outcome,
-  navigationHost,
   loadExecutionEvidence,
   ...actions
 }: Props) {
@@ -292,9 +288,6 @@ export function ConversationTranscript({
       }),
     [normalized, presentation.phase, outcome],
   );
-  const [navigationTarget, setNavigationTarget] =
-    useState<NavigationTarget | null>(null);
-  const navigationIndex = useMemo(() => buildConversationIndex(turns), [turns]);
   const tail = turns[turns.length - 1];
   const tailId = tail?.turnId || "conversation:turn:0";
   const tailItems = useMemo(
@@ -310,20 +303,8 @@ export function ConversationTranscript({
       setDisclosures((current) => ({ ...current, [turnId]: value })),
     [],
   );
-  const navigation = (
-    <ConversationNavigation
-      index={navigationIndex}
-      onNavigate={setNavigationTarget}
-      liveStore={liveStore}
-      liveTurnId={tailId}
-    />
-  );
   return (
-    <>
-      {navigationHost && createPortal(navigation, navigationHost)}
       <ConversationTimeline
-        target={navigationTarget}
-        navigation={navigationHost ? undefined : navigation}
         history={history}
         live={[]}
         renderRow={({ value: turn }) => (
@@ -355,6 +336,5 @@ export function ConversationTranscript({
           />
         </div>
       </ConversationTimeline>
-    </>
   );
 }

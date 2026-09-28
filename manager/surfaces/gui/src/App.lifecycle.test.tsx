@@ -300,7 +300,7 @@ describe("App execution lifecycle controls", () => {
   it("shows Stop immediately after sending before the server sends turn_start", async () => {
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     fireEvent.change(input, { target: { value: "run a slow task" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -315,7 +315,7 @@ describe("App execution lifecycle controls", () => {
   it("restores Send when a locally submitted turn is rejected before turn_start", async () => {
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     fireEvent.change(input, { target: { value: "run invalid task" } });
     fireEvent.keyDown(input, { key: "Enter" });
     await expectStopOnly();
@@ -332,7 +332,7 @@ describe("App execution lifecycle controls", () => {
   it("keeps Stop visible when a stale idle ready frame races after local send", async () => {
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     fireEvent.change(input, { target: { value: "run before stale ready" } });
     fireEvent.keyDown(input, { key: "Enter" });
     await expectStopOnly();
@@ -435,7 +435,7 @@ describe("App execution lifecycle controls", () => {
   it("does not poll the full transcript during healthy running WebSocket silence", async () => {
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     vi.mocked(getSessionMessages).mockClear();
     vi.useFakeTimers();
 
@@ -456,7 +456,7 @@ describe("App execution lifecycle controls", () => {
 
   it("upserts multiple assistant facts into one authoritative turn response", async () => {
     render(<App />);
-    await screen.findByPlaceholderText(/Ask the coworker/);
+    await screen.findByPlaceholderText(/Ask the AI assistant/);
     act(() => {
       mockState.lastSession?.handlers.onEvent({
         type: "turn_start",
@@ -503,7 +503,7 @@ describe("App execution lifecycle controls", () => {
   it("recovers a missed terminal transcript after disconnect with single-flight readback", async () => {
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     vi.mocked(getSessionMessages).mockClear();
 
     let inFlight = 0;
@@ -552,7 +552,7 @@ describe("App execution lifecycle controls", () => {
     Element.prototype.scrollTo = scrollTo;
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
     Object.defineProperty(scroller, "scrollHeight", {
       configurable: true,
@@ -625,7 +625,7 @@ describe("App execution lifecycle controls", () => {
     }));
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
     Object.defineProperty(scroller, "scrollHeight", {
       configurable: true,
@@ -668,7 +668,7 @@ describe("App execution lifecycle controls", () => {
 
   it("30 distinct live publications cause zero Sidebar or Composer profiler commits", async () => {
     render(<App />);
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     fireEvent.change(input, { target: { value: "measure stream isolation" } });
     fireEvent.keyDown(input, { key: "Enter" });
     await expectStopOnly();
@@ -802,4 +802,17 @@ async function expectStopOnly() {
     expect(screen.getByRole("button", { name: /Stop/ })).toBeTruthy();
     expect(screen.queryByLabelText("Send")).toBeNull();
   });
+}
+
+async function findReadyComposer() {
+  const input = await screen.findByPlaceholderText(/Ask the AI assistant/);
+  await waitFor(() => {
+    expect(mockState.lastSession).not.toBeNull();
+    expect(screen.queryByTestId("models-loading")).toBeNull();
+    expect(document.querySelector(".composer-trailing-cluster .dd")).toBeTruthy();
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  return input;
 }

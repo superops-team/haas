@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Sidebar } from "./Sidebar";
 import type { SessionInfo } from "../types";
 import type { ProjectSummary } from "../api";
@@ -49,6 +49,7 @@ const baseProps = {
   onNewSession: vi.fn(),
   onSelectSession: vi.fn(),
   onNewProject: vi.fn(),
+  onNewProjectSession: vi.fn(),
   onRenameSession: vi.fn(),
   onDeleteSession: vi.fn(),
   onArchiveSession: vi.fn(),
@@ -87,7 +88,7 @@ describe("Sidebar group/filter control", () => {
 
     // Open the popover and choose "Group by → Coworker".
     fireEvent.click(control);
-    fireEvent.click(await screen.findByText("Coworker"));
+    fireEvent.click(await screen.findByText("AI Assistant"));
 
     // POSTs the new layout pref.
     await waitFor(() => {
@@ -215,7 +216,7 @@ describe("New session button", () => {
   });
 });
 
-describe("Project navigation management (MPW-022 through MPW-028)", () => {
+describe("Project navigation management (MPW-022 through MPW-035)", () => {
   const project: ProjectSummary = {
     projectId: "prj-haas",
     canonicalKey: "/repos/haas",
@@ -251,6 +252,8 @@ describe("Project navigation management (MPW-022 through MPW-028)", () => {
   };
   const onUpdateProject = vi.fn();
   const onSidebarOrderChange = vi.fn();
+  const onNewProjectSession = vi.fn();
+  const onEditProject = vi.fn();
 
   const renderProjectSidebar = () => {
     stubFetch([
@@ -285,6 +288,8 @@ describe("Project navigation management (MPW-022 through MPW-028)", () => {
         conversationOrder="recent"
         onUpdateProject={onUpdateProject}
         onSidebarOrderChange={onSidebarOrderChange}
+        onNewProjectSession={onNewProjectSession}
+        onEditProject={onEditProject}
       />,
     );
   };
@@ -316,6 +321,22 @@ describe("Project navigation management (MPW-022 through MPW-028)", () => {
     expect(onUpdateProject).toHaveBeenCalledWith("prj-haas", { pinned: true });
   });
 
+  it("starts a fresh project conversation from the row pencil without editing or toggling", async () => {
+    renderProjectSidebar();
+    const row = await screen.findByTestId("project-row-prj-haas");
+    const disclosure = row.querySelector(".project-sidebar-disclosure")!;
+    const expandedBefore = disclosure.getAttribute("aria-expanded");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "New conversation in haas" }),
+    );
+
+    expect(onNewProjectSession).toHaveBeenCalledTimes(1);
+    expect(onNewProjectSession).toHaveBeenCalledWith(project);
+    expect(onEditProject).not.toHaveBeenCalled();
+    expect(disclosure.getAttribute("aria-expanded")).toBe(expandedBefore);
+  });
+
   it("shows a project summary after the hover delay and keeps shortcuts actionable", async () => {
     renderProjectSidebar();
     const row = screen.getByTestId("project-row-prj-haas");
@@ -327,6 +348,32 @@ describe("Project navigation management (MPW-022 through MPW-028)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Pin project" }));
     expect(onUpdateProject).toHaveBeenCalledWith("prj-haas", { pinned: true });
+  });
+
+  it("starts a fresh project conversation from the hover card and closes the preview", async () => {
+    renderProjectSidebar();
+    fireEvent.mouseEnter(screen.getByTestId("project-row-prj-haas"));
+    const card = await screen.findByTestId("project-hover-card", {}, { timeout: 700 });
+
+    fireEvent.click(
+      within(card).getByRole("button", { name: "New conversation in haas" }),
+    );
+
+    expect(onNewProjectSession).toHaveBeenCalledTimes(1);
+    expect(onNewProjectSession).toHaveBeenCalledWith(project);
+    expect(onEditProject).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("project-hover-card")).toBeNull();
+  });
+
+  it("keeps project metadata editing exclusively in the overflow menu", async () => {
+    renderProjectSidebar();
+    await screen.findByTestId("project-row-prj-haas");
+    fireEvent.click(screen.getByTestId("project-menu-prj-haas"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Edit project" }));
+
+    expect(onEditProject).toHaveBeenCalledTimes(1);
+    expect(onEditProject).toHaveBeenCalledWith(project);
+    expect(onNewProjectSession).not.toHaveBeenCalled();
   });
 
   it("keeps conversation hover actions separate from row selection", async () => {

@@ -3,7 +3,7 @@ import { HAAS_ACTIVITY_COMMAND, test } from "./fixtures";
 
 async function runActivity(page: import("@playwright/test").Page) {
   await page.goto("/");
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await expect(box).toBeVisible();
   await box.fill("inspect haas activity");
   await box.press("Enter");
@@ -55,7 +55,7 @@ test("narrow activity details remain inline and inside the reading pane", async 
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("inspect haas activity");
   await box.press("Enter");
   await expect(page.getByText("The release checks passed.")).toBeVisible();
@@ -82,6 +82,52 @@ test("narrow activity details remain inline and inside the reading pane", async 
     path: "test-results/haas-activity-narrow.png",
     fullPage: false,
   });
+});
+
+test("mixed activity kinds share one-line rows inside a bounded work scroller", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await runActivity(page);
+  await page.getByTestId("work-summary").click();
+
+  const rows = page.locator(".work-tool");
+  await expect(rows).toHaveCount(13);
+  const geometry = await rows.evaluateAll((elements) =>
+    elements.map((element) => {
+      const primary = element.querySelector<HTMLElement>(".work-tool-primary")!;
+      const rowStyle = getComputedStyle(element);
+      const primaryStyle = getComputedStyle(primary);
+      return {
+        rowHeight: element.getBoundingClientRect().height,
+        rowWrap: rowStyle.flexWrap,
+        whiteSpace: primaryStyle.whiteSpace,
+        overflow: primaryStyle.overflow,
+        textOverflow: primaryStyle.textOverflow,
+      };
+    }),
+  );
+  expect(new Set(geometry.map(({ rowHeight }) => Math.round(rowHeight))).size).toBe(1);
+  expect(
+    geometry.every(
+      (item) =>
+        item.rowWrap === "nowrap" &&
+        item.whiteSpace === "nowrap" &&
+        item.overflow === "hidden" &&
+        item.textOverflow === "ellipsis",
+    ),
+  ).toBe(true);
+  await expect(page.locator(".work-tool-category")).toHaveCount(0);
+
+  const scroller = page.locator(".work-segments");
+  const scrollMetrics = await scroller.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    overflowY: getComputedStyle(element).overflowY,
+  }));
+  expect(scrollMetrics.clientHeight).toBeLessThanOrEqual(320);
+  expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
+  expect(scrollMetrics.overflowY).toBe("auto");
 });
 
 for (const theme of ["light", "dark"] as const) {

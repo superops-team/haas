@@ -384,6 +384,7 @@ body {
 .app.tauri-overlay .main-drag-fill {
   -webkit-app-region: drag;
 }
+.app.tauri-overlay [data-page-drag-region] { -webkit-app-region: drag; user-select: none; }
 .app.tauri-overlay button,
 .app.tauri-overlay input,
 .app.tauri-overlay textarea,
@@ -395,9 +396,6 @@ body {
 .main-chat { position: relative; display: flex; flex-direction: column; min-width: 0; flex: 1; padding-top: 48px; }
 .conversation-body { position: relative; container-type: inline-size; display: flex; flex: 1 1 auto; min-height: 0; min-width: 0; }
 .conversation-reading-pane { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
-.conversation-navigation-host:empty { display: none; }
-.conversation-navigation-host:not(:empty) { flex: none; padding: var(--space-2) 8% 0; }
-.conversation-navigation-host:not(:empty) + .main-scroll { padding-top: var(--space-3); }
 .composer-wrap { position: relative; flex: none; pointer-events: none; }
 .composer-wrap > * { pointer-events: auto; }
 .main.rail-open .main-chat { margin-right: 332px; }
@@ -455,7 +453,6 @@ body {
   display: none;
 }
 .bubble-assistant { font-size: var(--text-body); line-height: 1.6; white-space: pre-wrap; }
-.bubble-assistant .who { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); margin-bottom: 4px; }
 
 /* markdown-rendered assistant content (the bubble's pre-wrap would double-space block output) */
 .md { white-space: normal; font-size: var(--text-body); line-height: 1.6; color: var(--ink); }
@@ -523,6 +520,10 @@ body {
 
 .notice { font-size: 13px; color: var(--muted); text-align: center; }
 .notice.warn { color: var(--accent); }
+.timeline-notice { display: flex; align-items: center; gap: var(--space-3); width: 100%; color: var(--color-text-secondary); }
+.timeline-notice::before, .timeline-notice::after { content: ""; height: 1px; flex: 1; background: var(--line); }
+.timeline-notice-text { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.timeline-notice-icon { flex: none; }
 /* Mode banner: prose, so it reads left-aligned in a card rather than as a centred
    status line. Same `notice` item, switched on by a title. */
 .notice-block {
@@ -2480,7 +2481,7 @@ html[data-platform="linux"] ::-webkit-scrollbar-thumb:hover { background-color: 
   .main .right-rail { z-index: 25; top: 48px; bottom: 140px; width: min(332px, 85%); }
   .main-topbar .main-title { min-width: 0; flex: 1; overflow: hidden; }
   .main-topbar .topbar-icon-btn { flex-shrink: 0; }
-  .main-scroll, .conversation-navigation-host:not(:empty) { min-width: 0; padding-inline: 16px; }
+  .main-scroll { min-width: 0; padding-inline: 16px; }
 }
 
 @media (max-width: 800px) {
@@ -2508,9 +2509,9 @@ html[data-platform="linux"] ::-webkit-scrollbar-thumb:hover { background-color: 
 /* Product turn components share a reading edge and one motion owner. */
 .conversation-turn { display: flex; flex-direction: column; gap: var(--conversation-item-gap); min-width: 0; overflow-wrap: anywhere; }
 .conversation-turn > .user-message { margin-block-end: var(--space-4); }
-.user-message { color: var(--ink); font-size: var(--text-body); line-height: 1.6; }
+.user-message { align-self: flex-end; max-width: min(82%, 640px); padding: var(--space-3) var(--space-4); border-radius: var(--radius-surface); background: var(--color-chrome); color: var(--ink); font-size: var(--text-body); line-height: 1.6; }
+.assistant-response { align-self: flex-start; width: 100%; }
 .user-message-text { white-space: pre-wrap; }
-.conversation-turn .who { font-size: var(--text-caption); letter-spacing: 0; text-transform: none; font-weight: 600; color: var(--muted); margin-block-end: var(--space-2); }
 .turn-work { min-width: 0; font-size: var(--text-ui); line-height: 1.5; color: var(--muted); }
 .work-summary { display: flex; align-items: center; gap: var(--space-2); min-height: 32px; max-width: 100%; border: 0; padding: 4px 0; color: var(--muted); background: transparent; text-align: start; }
 .work-summary:not(:disabled) { cursor: pointer; }
@@ -2519,22 +2520,20 @@ html[data-platform="linux"] ::-webkit-scrollbar-thumb:hover { background-color: 
 .work-summary > svg.is-open { transform: rotate(180deg); }
 .work-status-slot { display: inline-flex; justify-content: center; align-items: center; flex: 0 0 16px; width: 16px; height: 16px; }
 .work-status-slot.is-working { border: 1.5px solid var(--line-strong); border-block-start-color: var(--muted); border-radius: 50%; animation: spin var(--motion-work) linear infinite; }
-.work-segments { display: flex; flex-direction: column; gap: var(--space-1); margin-block: var(--space-2); }
+.work-segments { display: flex; flex-direction: column; gap: var(--space-1); margin-block: var(--space-2); max-height: 320px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .work-segment { min-width: 0; }
-.work-tool { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-2); width: 100%; padding: var(--space-2) 0; background: transparent; border: 0; text-align: start; cursor: pointer; color: var(--muted); }
+.work-tool { display: flex; align-items: center; flex-wrap: nowrap; gap: var(--space-2); width: 100%; min-height: 32px; padding: var(--space-2) 0; background: transparent; border: 0; text-align: start; cursor: pointer; color: var(--muted); }
 .work-tool:hover { color: var(--ink); }
 .work-tool-mark { flex: 0 0 16px; text-align: center; }
 .work-tool.is-failed .work-tool-mark { color: var(--danger); }
 .work-tool.is-succeeded .work-tool-mark { color: var(--ok); }
-.work-tool-title { flex: 1 1 100px; min-width: 0; overflow-wrap: anywhere; }
-.work-tool.is-command { align-items: center; flex-wrap: nowrap; }
-.work-tool.is-command .work-tool-title,
-.work-tool.is-command .work-tool-primary {
+.work-tool-title,
+.work-tool-primary {
   display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   overflow-wrap: normal; white-space: nowrap;
 }
-.work-tool-category { display: block; color: var(--color-text-secondary); font-size: var(--text-caption); }
-.work-tool-meta { color: var(--faint); font-size: var(--text-caption); }
+.work-tool-title { flex: 1 1 100px; }
+.work-tool-meta { flex: none; color: var(--faint); font-size: var(--text-caption); }
 .work-tool > svg { flex: none; align-self: center; }
 .work-tool > svg.is-open { transform: rotate(90deg); }
 .work-segment-detail { margin: 0 0 var(--space-2) calc(16px + var(--space-2)); min-width: 0; scroll-margin-block-end: 168px; }
@@ -2583,12 +2582,6 @@ html[data-theme-changing] *, html[data-theme-changing] *::before, html[data-them
 .reviewer-denial { padding: var(--space-3); border-inline-start: 2px solid var(--danger); color: var(--ink); }
 .reviewer-denial p { margin-block: var(--space-2); }
 
-.conversation-navigation { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-1); width: 100%; max-width: var(--conversation-measure); min-height: 32px; margin-inline: auto; background: var(--color-canvas); color: var(--color-text-secondary); font-size: var(--text-ui); }
-.conversation-navigation button { display: grid; place-items: center; min-width: 28px; height: 28px; border: 0; border-radius: var(--radius-compact); background: transparent; color: inherit; cursor: pointer; }
-.conversation-navigation button:disabled { opacity: .4; cursor: default; }
-.conversation-navigation input { flex: 1; min-width: 0; max-width: 360px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-compact); background: var(--color-surface); color: var(--color-text-primary); padding: var(--space-1) var(--space-2); font: inherit; }
-.conversation-navigation-count { font-size: var(--text-caption); font-variant-numeric: tabular-nums; }
-[data-navigation-target] { outline: 1px solid var(--color-accent); outline-offset: 4px; border-radius: var(--radius-compact); }
 .context-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); padding: 0; margin: var(--space-2) 0; list-style: none; }
 .composer .context-chips { padding-inline: var(--space-3); }
 .context-chip { display: inline-flex; max-width: 100%; min-width: 0; align-items: center; border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-surface); color: var(--color-text-primary); font-size: var(--text-ui); }

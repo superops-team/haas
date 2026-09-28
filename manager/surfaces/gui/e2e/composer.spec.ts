@@ -6,7 +6,7 @@ test("composer: send-gating, + attach menu, Mode menu", async ({ page }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
 
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   const send = page.getByRole("button", { name: "Send" });
 
   // Send is subtle grey when empty, accent once there's content, grey again when cleared.

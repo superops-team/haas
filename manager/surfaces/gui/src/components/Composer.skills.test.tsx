@@ -62,7 +62,7 @@ const props = (extra: Partial<Parameters<typeof Composer>[0]> = {}) => ({
   ...extra,
 });
 
-const box = () => screen.getByPlaceholderText(/Ask the coworker/);
+const box = () => screen.getByPlaceholderText(/Ask the AI assistant/);
 
 afterEach(() => {
   cleanup();

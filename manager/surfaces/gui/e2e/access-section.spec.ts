@@ -76,7 +76,7 @@ test("+ Add a source: full catalog on focus, filter as you type → connect-in-c
   // Lands in the SAME connect-in-context child view the Recommended flow uses, with the
   // scope-semantics line; back returns to the Sources list.
   const body = page.getByRole("region", { name: "Session access" });
-  await expect(body.getByText("Connecting makes Notion available to all your coworkers", { exact: false })).toBeVisible();
+  await expect(body.getByText("Connecting makes Notion available to all your AI assistants", { exact: false })).toBeVisible();
   await expect(body.getByPlaceholder("ntn_…")).toBeVisible();
   await body.getByRole("button", { name: "Back to sources" }).click();
   await expect(body.getByText("Slack", { exact: true })).toBeVisible();

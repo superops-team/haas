@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: MPW-022 through MPW-034 implemented; automated and packaged-local acceptance passed, owner visual acceptance pending
+Status: MPW-022 through MPW-037 implemented; owner visual acceptance pending
 Last reviewed: 2026-09-28
 Change ID: `manager-project-workspace-experience`
 Related specs: [Manager Conversation Experience](../manager-conversation-experience/README.md), [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Product Identity](../manager-product-identity/README.md), [Manager Delegation](../manager-delegation/README.md), [Stores](../stores/README.md), [Security Boundary](../security-boundary/README.md)
@@ -463,12 +463,12 @@ For a remote workspace, `canonicalKey` is an opaque digest of
   remain keyboard reachable without moving the heading.
 - A project row uses a semantic primary disclosure button plus sibling actions; it never nests
   interactive controls. It shows folder/repository icon, truncated name, expand/collapse, current
-  availability, and reserved trailing Edit plus `...` controls revealed by row hover or
+  availability, and reserved trailing New conversation plus `...` controls revealed by row hover or
   `:focus-within`. The reserved trailing area prevents the name or chevron from shifting. A
   conversation row similarly exposes a semantic selection button plus sibling Pin/Unpin and
   Archive shortcuts. Shortcut/menu events never toggle a project or select a conversation.
 - Hovering for 300 ms or keyboard-focusing a project row opens one summary card with project name,
-  active task count, safe display path/remote label, and Pin/Edit shortcuts. A safe hover corridor keeps the
+  active task count, safe display path/remote label, and Pin/New conversation shortcuts. A safe hover corridor keeps the
   card open while moving from row to card. A conversation row card is informational and shows title,
   owning project, and relative update age. Cards close after leaving both anchor and card, focus
   departure, Escape, ancestor scroll, row unmount, or opening a menu; they never change selection.
@@ -483,7 +483,7 @@ For a remote workspace, `canonicalKey` is an opaque digest of
   focus, menu-open, and movement between expanded and collapsed project groups change only
   opacity/visibility and pointer availability; row `x/y/width/height`, title width, and project
   expansion state remain unchanged.
-- The interactive project card is a labelled non-modal `role="group"`; focus may enter its Pin/Edit
+- The interactive project card is a labelled non-modal `role="group"`; focus may enter its Pin/New conversation
   controls without closing it. The informational conversation card uses `role="tooltip"` and its
   anchor uses `aria-describedby` only while the card exists. Project disclosure buttons expose
   `aria-expanded`; overflow triggers expose `aria-haspopup="menu"` and `aria-expanded`.
@@ -495,6 +495,11 @@ For a remote workspace, `canonicalKey` is an opaque digest of
 - Edit mode changes only the display name and validated default execution endpoint for future
   drafts. Existing workspace bindings are listed read-only and accepted sessions keep their frozen
   endpoint/workspace snapshot. Adding or relinking a workspace remains a separate explicit flow.
+- New conversation is owned by the pencil/compose shortcut on the project row and project hover
+  card. Invoking either shortcut creates one fresh draft session bound to the selected Project's
+  primary workspace and default endpoint, preserves earlier sessions and their drafts, closes the
+  hover surface, and does not open Edit Project or toggle project expansion. `Edit project` appears
+  only in the Project `...` menu and remains the sole entry to project metadata editing.
 - `Remove from sidebar` sets the project archived flag and is reversible from archived-project
   management. It preserves files, Git state, workspace bindings, sessions, transcripts, artifacts,
   and immutable accepted-session bindings. `Archive conversations` preserves the project row.
@@ -802,6 +807,9 @@ They do not include project names, branch names, paths, commands, output, or end
 | MPW-032 | P0 | Hover/focus/menu transitions preserve every visible project/conversation row bounding box and expansion state; section labels are 11 px/500, inactive conversations are 12 px/400 secondary text, and only the selected conversation rises to 12 px/500 primary text |
 | MPW-033 | P0 | With sessions resolving before a delayed project projection, initial navigation renders one fixed project-loading skeleton and zero legacy conversation rows; after resolution it atomically shows the project hierarchy without an intermediate list flash, and later refreshes preserve the settled hierarchy |
 | MPW-034 | P0 | In light/dark at 320/390/760/1440 px and 200% zoom, Project/Work location/Git branch render as one neutral shelf attached behind the Composer: equal 30 px centerline, borderless idle controls, device glyph for Local, no wrap/overflow, truthful menu semantics, stable geometry through hover/focus/open, and no canvas gap between shelf and Composer |
+| MPW-035 | P0 | Clicking the project-row or project-hover-card pencil creates exactly one fresh conversation bound to that Project and never opens Edit Project or toggles expansion; the Project `...` menu remains the only Edit project entry, with correct accessible names and keyboard paths |
+| MPW-036 | P0 | Every full-page Manager surface—Settings, AI Assistants, Inbox, Automations list/detail, Connectors, Audit, and persona detail—provides the same native drag affordance as the conversation surface. Empty/title regions start native drag and double-click maximize/restore exactly once; buttons, links, inputs, menus, selectable content, and scrollbars remain no-drag. Browser overlay checks plus packaged macOS movement/maximize cover every surface family |
+| MPW-037 | P0 | Every collapsed TurnWork activity row, regardless of command/read/search/file/tool kind, uses one non-wrapping visual line with icon/status/disclosure fixed at the edges and the primary safe summary ellipsized by available width. Category metadata does not create a second line. Clicking expands one inline detail owner containing the complete safe summary/command and bounded evidence; mixed kinds preserve row height and alignment in both themes at 390/760/1440 px |
 
 Required evidence:
 
@@ -850,7 +858,10 @@ cannot substitute for native window evidence. New project mutation/ordering modu
 | 12 | Exclusive hover and stable trailing geometry | rapid mixed-row hover plus before/after bounding boxes expose duplicate cards and width changes | one discriminated hover state and grid-stacked trailing content preserve one card and stable rows |
 | 13 | Initial project projection | delayed project response with eager sessions exposes legacy-list flash | explicit unresolved/empty states and a fixed skeleton make first paint atomic |
 | 14 | Composer context shelf parity | browser geometry and computed-style assertions expose the detached transparent row, weak default hierarchy, code-bracket Local icon, and missing menu-state semantics | one token-driven attached shelf passes both themes, supported widths, keyboard/menu geometry, production preview, and packaged-native visual comparison |
-| 15 | Review and release gates | code-review, brooks-review, brooks-test manifests | no unresolved finding; full-check, preview, DMG and native evidence pass |
+| 15 | Project shortcut action ownership | row/card pencil currently opens duplicate Edit Project surfaces | one `onNewProjectSession` intent creates a project-bound draft; Edit Project remains only in `...`; component and browser tests prove no cross-action |
+| 16 | Review and release gates | code-review, brooks-review, brooks-test manifests | no unresolved finding; full-check, preview, DMG and native evidence pass |
+| 17 | Full-page native drag parity | Settings and other route surfaces lack the conversation topbar drag owner | shared route-title drag regions cover every full-page family while interactive descendants remain no-drag; packaged movement/maximize passes |
+| 18 | Uniform collapsed activity rows | non-command activities wrap and render category subtitles while commands ellipsize | one row shell applies nowrap/ellipsis/fixed trailing slots to every activity kind; inline detail remains the only complete-content owner |
 
 P0/P1 is implementation order, not permission to silently drop scope. Any unimplemented acceptance
 case remains explicitly open and prevents this change id from being declared complete.

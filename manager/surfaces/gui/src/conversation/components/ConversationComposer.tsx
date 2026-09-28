@@ -128,7 +128,6 @@ interface Props {
   connected: boolean;
   // False when the default model's provider has no key — the composer shows a "connect a model"
   // banner and routes sends to setup (preserving the draft) instead of dropping them.
-  modelReady?: boolean;
   onConnectModel?: () => void;
   onConfigureVoiceInput?: () => void;
   onSend: (
@@ -671,7 +670,11 @@ export function ConversationComposer(props: Props) {
     }
   };
 
-  const needsModel = props.modelReady === false;
+  const selectableModels = props.models ?? [];
+  const modelsLoaded = props.models !== undefined;
+  const currentModelSelectable = selectableModels.includes(props.model);
+  const needsModel = modelsLoaded && selectableModels.length === 0;
+  const needsModelSelection = modelsLoaded && !needsModel && !currentModelSelectable;
 
   const submit = async () => {
     // While the "/" popup is open the draft is a query, not a message — never send it.
@@ -687,7 +690,8 @@ export function ConversationComposer(props: Props) {
       dictation?.recording ||
       dictationBusy ||
       submitting ||
-      acceptanceUnknown
+      acceptanceUnknown ||
+      needsModelSelection
     )
       return;
     // No model connected: keep the draft (don't drop it) and send the user to setup instead.
@@ -833,10 +837,7 @@ export function ConversationComposer(props: Props) {
     }
   };
 
-  const modelsLoaded = !!(props.models && props.models.length);
-  const modelOptions: Option[] = Array.from(
-    new Set([props.model, ...(props.models || [])]),
-  ).map((m) => ({
+  const modelOptions: Option[] = Array.from(new Set(selectableModels)).map((m) => ({
     value: m,
     label: props.modelLabels?.[m] || shortModel(m),
   }));
@@ -1251,6 +1252,11 @@ export function ConversationComposer(props: Props) {
                   options={modelOptions}
                   onChange={props.onModelChange}
                   align="right"
+                  placeholder={
+                    needsModelSelection
+                      ? t("composer.model.choose")
+                      : undefined
+                  }
                 />
               ) : (
                 <button
@@ -1340,6 +1346,7 @@ export function ConversationComposer(props: Props) {
                     disabled={
                       !hasContent ||
                       !props.connected ||
+                      needsModelSelection ||
                       !!dictation?.recording ||
                       !!dictationBusy ||
                       submitting ||
@@ -1350,6 +1357,8 @@ export function ConversationComposer(props: Props) {
                         ? t("composer.queue_follow_up")
                         : needsModel
                           ? t("composer.connect_to_send")
+                          : needsModelSelection
+                            ? t("composer.model.choose")
                           : undefined
                     }
                     aria-label={

@@ -22,7 +22,7 @@ test("enabling an installed persona surfaces it in picker + sidebar without relo
   // Enable it on the Coworkers page.
   await page.getByTestId("account-row").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Coworkers", exact: true }).click();
+  await page.getByRole("button", { name: "AI Assistants", exact: true }).click();
   const row = page.locator(".divide-y > div").filter({ hasText: "Acme Notes" });
   // Controlled checkbox: the DOM state flips only after the POST round-trip, so click + expect
   // (a plain .check() asserts the state synchronously and fails).
@@ -49,7 +49,7 @@ test("disabling a persona with conversations asks first, then archives them", as
 
   await page.getByTestId("account-row").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Coworkers", exact: true }).click();
+  await page.getByRole("button", { name: "AI Assistants", exact: true }).click();
   // Ops is ships:false — it lives in the collapsed "Not in this release" group.
   await page.getByTestId("unshipped-disclosure").click();
   const row = page.locator(".divide-y > div").filter({ hasText: "Ops Coworker" });
@@ -77,7 +77,7 @@ test("disabling a persona with no conversations skips the confirm", async ({ pag
   await page.goto("/");
   await page.getByTestId("account-row").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Coworkers", exact: true }).click();
+  await page.getByRole("button", { name: "AI Assistants", exact: true }).click();
   // Security ships enabled and has no conversations in the fixtures (Code now ships
   // disabled, so it can't exercise the disable path).
   const row = page.locator(".divide-y > div").filter({ hasText: "Security Coworker" });

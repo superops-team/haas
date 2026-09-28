@@ -6,7 +6,7 @@ test("composer focus is visible and the focused workbench remains usable at 320p
 }) => {
   await page.setViewportSize({ width: 320, height: 700 });
   await page.goto("/");
-  const input = page.getByPlaceholder(/Ask the coworker/);
+  const input = page.getByPlaceholder(/Ask the AI assistant/);
   await input.focus();
 
   const composer = page.locator(".composer");
@@ -107,7 +107,7 @@ for (const width of [390, 760, 1200, 1440]) {
     });
     await page.goto("/");
 
-    const input = page.getByPlaceholder(/Ask the coworker/);
+    const input = page.getByPlaceholder(/Ask the AI assistant/);
     await expect(input).toBeVisible();
     await input.fill("responsive request");
     await expect(page.getByRole("button", { name: "Send" })).toBeInViewport();
@@ -122,7 +122,7 @@ test("reduced motion removes conversation progress animation", async ({
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
-  const input = page.getByPlaceholder(/Ask the coworker/);
+  const input = page.getByPlaceholder(/Ask the AI assistant/);
   await input.fill("stream the epic");
   await page.getByRole("button", { name: "Send" }).click();
   const spinner = page.locator(".work-status-slot.is-working").first();
@@ -159,7 +159,7 @@ for (const theme of ["light", "dark"] as const) {
     ]);
     await page.goto("/");
     await expect(page.getByTestId("turn-completion")).toBeVisible();
-    await page.getByPlaceholder(/Ask the coworker/).fill("Next task");
+    await page.getByPlaceholder(/Ask the AI assistant/).fill("Next task");
 
     const samples = await page.evaluate(() => {
       type RGB = [number, number, number];
@@ -285,7 +285,7 @@ test("200% page-scale emulation retains required actions in a 320 CSS px content
   await expect(
     page.getByRole("button", { name: /Ran a command Succeeded/ }),
   ).toBeInViewport();
-  const input = page.getByPlaceholder(/Ask the coworker/);
+  const input = page.getByPlaceholder(/Ask the AI assistant/);
   await input.fill("Next task");
   await expect(
     page.getByRole("button", { name: "Send", exact: true }),

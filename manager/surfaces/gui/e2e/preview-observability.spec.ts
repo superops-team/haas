@@ -27,7 +27,7 @@ test("production preview reports content-free browser health metrics", async ({ 
   });
 
   await page.goto("/");
-  await expect(page.getByPlaceholder(/Ask the coworker/)).toBeVisible();
+  await expect(page.getByPlaceholder(/Ask the AI assistant/)).toBeVisible();
   await page.waitForLoadState("networkidle");
 
   const longTaskDurations = await page.evaluate(

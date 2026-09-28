@@ -1,9 +1,7 @@
-import type { NavigationTarget } from "../model/navigation";
 import {
   useCallback,
   useEffect,
   useRef,
-  useLayoutEffect,
   useState,
   type ReactNode,
 } from "react";
@@ -28,8 +26,6 @@ interface Props<T> {
   renderRow: (entry: ConversationTimelineEntry<T>) => ReactNode;
   virtualizationThreshold?: number;
   children?: ReactNode;
-  navigation?: ReactNode;
-  target?: NavigationTarget | null;
 }
 
 /**
@@ -42,12 +38,8 @@ export function ConversationTimeline<T>({
   renderRow,
   virtualizationThreshold = DEFAULT_VIRTUALIZATION_THRESHOLD,
   children,
-  navigation,
-  target,
 }: Props<T>) {
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const handledNavigationNonce = useRef<number | null>(null);
-  const selectedNavigationRow = useRef<HTMLElement | null>(null);
   const [selectedRowKey, setSelectedRowKey] = useState<string | number | null>(
     null,
   );
@@ -105,49 +97,8 @@ export function ConversationTimeline<T>({
     return () => document.removeEventListener("selectionchange", selectionChanged);
   }, [history, virtualized]);
 
-  useLayoutEffect(() => {
-    if (!target) return;
-    if (handledNavigationNonce.current === target.nonce) return;
-    handledNavigationNonce.current = target.nonce;
-    selectedNavigationRow.current?.removeAttribute("data-navigation-target");
-    selectedNavigationRow.current = null;
-    const scroller = rootRef.current?.closest<HTMLElement>(".main-scroll");
-    scroller?.dispatchEvent(
-      new CustomEvent("conversation:navigate", { bubbles: true }),
-    );
-    const index = history.findIndex((entry) => entry.key === target.turnId);
-    if (virtualized && index >= 0)
-      virtualizer.scrollToIndex(index, { align: "start", behavior: "auto" });
-    let frame = 0;
-    let attempts = 0;
-    const settle = () => {
-      const row =
-        rootRef.current?.querySelector<HTMLElement>(
-          `[data-row-id="${CSS.escape(target.rowId)}"]`,
-        ) ??
-        rootRef.current?.querySelector<HTMLElement>(
-          `[data-turn-id="${CSS.escape(target.turnId)}"]`,
-        );
-      if (row && scroller) {
-        const top =
-          row.getBoundingClientRect().top -
-          scroller.getBoundingClientRect().top +
-          scroller.scrollTop -
-          44;
-        scroller.scrollTo({ top: Math.max(0, top), behavior: "auto" });
-        row.setAttribute("data-navigation-target", "true");
-        selectedNavigationRow.current = row;
-        return;
-      }
-      if (++attempts < 12) frame = requestAnimationFrame(settle);
-    };
-    frame = requestAnimationFrame(settle);
-    return () => cancelAnimationFrame(frame);
-  }, [target, virtualized, history, virtualizer]);
-
   return (
     <div className="transcript" ref={rootRef}>
-      {navigation}
       {virtualized ? (
         <div
           className="conversation-history-virtual"

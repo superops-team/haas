@@ -38,7 +38,11 @@ export function SearchModal({
   const tagFor = (s: SessionInfo) =>
     s.workspace && isProjectScoped(personaOf(s.agent))
       ? baseName(s.workspace)
-      : shortPersonaName(personaOf(s.agent)?.name, s.agent);
+      : shortPersonaName(
+          personaOf(s.agent)?.name,
+          s.agent,
+          t("common.ai_assistant"),
+        );
 
   const q = query.trim().toLowerCase();
   const real = sessions.filter((s) => !s.session_id.startsWith("__") && !s.archived);

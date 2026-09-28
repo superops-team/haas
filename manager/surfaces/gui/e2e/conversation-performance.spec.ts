@@ -18,34 +18,6 @@ test("large conversation history keeps the mounted row count bounded", async ({
   expect(mountedRows).toBeLessThanOrEqual(200);
 });
 
-test("find navigates to an unmounted historical turn without expanding the DOM", async ({
-  page,
-}) => {
-  const messages = Array.from({ length: 5_000 }, (_, index) => [
-    { role: "user", content: `Search request ${index}` },
-    { role: "assistant", content: `Search response ${index}` },
-  ]).flat();
-  await seedSessionMessages(page, "pinned-cowork-1", messages);
-  await page.goto("/");
-  await page.getByText("Draft the launch note").first().click();
-  await expect(page.getByText("Search response 4999")).toBeVisible();
-
-  await page.keyboard.press("Control+f");
-  const find = page.getByRole("searchbox", { name: "Find in conversation" });
-  await find.fill("Search response 1234");
-  await expect(
-    page.getByText("Search response 1234", { exact: true }),
-  ).toBeVisible();
-  expect(
-    await page.locator("[data-conversation-row]").count(),
-  ).toBeLessThanOrEqual(200);
-
-  await find.press("Escape");
-  await expect(
-    page.getByRole("button", { name: "Find in conversation" }),
-  ).toBeFocused();
-});
-
 test("virtual history retains selected text while scrolling away", async ({ page }) => {
   const messages = Array.from({ length: 500 }, (_, index) => [
     { role: "user", content: `Selection request ${index}` },
@@ -62,7 +34,12 @@ test("virtual history retains selected text while scrolling away", async ({ page
     range.selectNodeContents(element);
     selection?.removeAllRanges();
     selection?.addRange(range);
+    // Programmatic Range changes do not consistently emit selectionchange under
+    // parallel Chromium load. Dispatch the same browser signal a real drag selection
+    // produces, then let React commit the pinned virtual row before scrolling it away.
+    document.dispatchEvent(new Event("selectionchange"));
   });
+  await page.evaluate(() => new Promise(requestAnimationFrame));
   await page.locator(".main-scroll").evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
