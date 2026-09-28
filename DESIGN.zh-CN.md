@@ -89,7 +89,7 @@ HaaS 公共 API 暴露。遵循现有 Manager transport 边界。
 | 组件 / 当前落点 | 接收 | 负责 | 不得负责 |
 |---|---|---|---|
 | ConversationTimeline / ConversationView | 已投影 turn、live tail | 阅读顺序、锚点、有界历史 | transport 或 runtime 生命周期 |
-| TurnWork | 工作事实、presentation、展开状态 | 一个摘要；类型化工具/推理展开 | model-call 卡片或独立猜运行状态 |
+| TurnWork | 工作事实、presentation、展开状态 | 一条当前动作摘要；类型化工具/evidence 展开 | model-call 卡片、持久 reasoning row 或独立猜运行状态 |
 | AssistantResponse / MessageContent | 稳定 response 与内容 | 渐进可读答复 | 答复文本迁移 |
 | PendingInteractionDock | 类型化 interaction 与回调 | 单一决策区和焦点 | 影子审批状态 |
 | ConversationComposer / ContextChips | 草稿 scope、availability、context | 编辑、准入反馈、克制控件 | 将 ACK 当成完成 |
@@ -117,9 +117,10 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
 - macOS overlay window 的原生 traffic light 与相邻 sidebar/panel 展开、折叠控件共用一条
   titlebar 中心线。Tauri/tao 的 `traffic_light_position(..., y)` 是 AppKit container
   inset，既不是原生按钮中心，也不是模拟圆点的 CSS `top`；中心必须从原生 button frame
-  推导。当前 pin 的 Tauri/tao 下，`y=24` 得到距窗口顶部 22 px 的中心，因此 12 px 模拟
-  圆点使用 `top: 16px`。wordmark 与 title 在同一个 44 px 条带内做光学对齐，但不能反向
-  定义交互控件中心。浏览器几何是快速回归门禁，packaged macOS 截图才是最终视觉合同。
+  在 packaged app 中实测。当前 pin 的 Tauri/tao 与 macOS 组合下，`y=24` 得到 WebView 相对
+  22 CSS px 的 control 中心，因此 12 px browser 模拟圆点使用 `top: 16px`。wordmark 与 title
+  在同一个 44 px 条带内做光学对齐，但不能反向定义交互控件中心。浏览器几何只作为快速
+  回归门禁；packaged macOS 截图是最终视觉合同，并覆盖任何推算 offset。
 - 每个局部动作组最多一个填充式主按钮。模型中的 `primaryAction` 表示行为优先级，不代表必须着色。
 - Composer 尾部控件组成一个禁止换行的 cluster，顺序固定为 `model -> microphone ->
   Send/Stop`。它们在所有支持宽度以及 recording/running 状态下始终可见。只有 model control
@@ -161,7 +162,8 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
   在新结果 settle 前保留当前 projection。
 - Project management 默认 non-destructive。移除 project 仅表示隐藏/archive sidebar record，
   必须有明确 restore 路径；不删除 file、worktree、conversation、transcript、artifact 或 accepted
-  binding。Pinned 与 active work 始终高于已选 project/conversation sort mode。
+  binding。Pinned project 始终高于已选 project sort mode；选择 project 绝不对其重排序。
+  Active/running conversation 可在所属 project 内继续保持优先级。
 - Command work 使用紧凑 chronological row list。折叠 command 严格只有一条视觉行：model 中
   保留完整脱敏值，visible label 按可用宽度显示尾部 ellipsis，并移除冗余分类副标题；terminal
   state 与 disclosure 固定在尾部。点击后只在该 row 正下方展开一个 inline Shell panel，安全换行
@@ -170,6 +172,15 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
 - 所有折叠 activity kind 共用同一个单行 row shell；safe summary 只做 ellipsis，status/disclosure
   固定在尾部，category metadata 不生成第二行。Work 收起时不显示任何 child row，包括失败项。
   展开 work 最大高度 320 CSS px，超出后内部滚动；完整详情仍由唯一 inline inspector 提供。
+- 终态历史 disclosure 不得抢占滚动所有权。展开 work、reasoning、activity 或 evidence 时不调用
+  `scrollIntoView`；用户滚动有界 work 区域或 transcript 后，延迟详情渲染必须保持当前位置。
+  只有显式 Jump to latest、session 切换或新的前台 turn 才可恢复 transcript following。
+- 活跃 work 使用一条单行 ellipsis 的“当前动作”标签。最新的安全 reasoning 或 tool summary
+  在原位替换上一条，可使用一个克制的渐变文字动画；spinner 不再同时动画。
+  Reduced motion 使用静态颜色；终态历史恢复 completed/failed/cancelled 标签，且不保留 reasoning row。
+  Work 展开时，终态 failure/outcome summary 放在 activity list 之后，让语义结论成为用户最后读到的内容。
+- Document 根节点固定且不可滚动。在空白 chrome 上的双指/wheel 手势不得移动或 rubber-band
+  整个 WebView；只有明确的滚动容器消费手势，并在自身边界阻断 overscroll chaining。
 - 所有 full-page route 共用原生 title drag 合同：route title 与非交互 top chrome 可拖拽；button、
   link、form control、menu、可选文本与 scrollbar 保持 no-drag。双击 route drag region 只执行一次
   maximize/restore。

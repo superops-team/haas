@@ -19,10 +19,7 @@ test("completed HaaS work opens activity detail inline on desktop", async ({
   await expect(page.getByTestId("work-summary")).toBeVisible();
   await expect(page.getByText("Run the focused test suite")).toHaveCount(0);
   await page.getByTestId("work-summary").click();
-  await page.getByRole("button", { name: "Reasoning", exact: true }).click();
-  await expect(
-    page.getByText("Inspecting the package and choosing focused verification."),
-  ).toBeVisible();
+  await expect(page.locator(".reasoning-body, .reasoning-toggle")).toHaveCount(0);
   const row = page.getByRole("button", { name: /git status --short --branch/ });
   await row.click();
 
@@ -68,13 +65,15 @@ test("narrow activity details remain inline and inside the reading pane", async 
   const rowBox = await page
     .getByRole("button", { name: /git status --short --branch/ })
     .boundingBox();
+  const scrollerBox = await page.locator(".work-segments").boundingBox();
   const composerBox = await page.locator(".composer").boundingBox();
   expect(inspectorBox).not.toBeNull();
   expect(rowBox).not.toBeNull();
+  expect(scrollerBox).not.toBeNull();
   expect(composerBox).not.toBeNull();
   expect(inspectorBox!.width).toBeLessThanOrEqual(390);
   expect(inspectorBox!.y).toBeGreaterThanOrEqual(rowBox!.y + rowBox!.height);
-  expect(inspectorBox!.y + inspectorBox!.height).toBeLessThanOrEqual(
+  expect(scrollerBox!.y + scrollerBox!.height).toBeLessThanOrEqual(
     composerBox!.y + 1,
   );
   await expect(page.locator(".activity-inspector-host")).toHaveCount(0);
@@ -128,6 +127,46 @@ test("mixed activity kinds share one-line rows inside a bounded work scroller", 
   expect(scrollMetrics.clientHeight).toBeLessThanOrEqual(320);
   expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
   expect(scrollMetrics.overflowY).toBe("auto");
+});
+
+test("terminal activity detail preserves user-owned work and transcript scroll", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as any).__workScrollIntoViewCalls = 0;
+    Element.prototype.scrollIntoView = function () {
+      (window as any).__workScrollIntoViewCalls += 1;
+    };
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await runActivity(page);
+  await page.getByTestId("work-summary").click();
+
+  const workScroller = page.locator(".work-segments");
+  await workScroller.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await page.locator(".work-tool").last().click();
+  await expect(page.getByTestId("activity-inspector")).toBeVisible();
+  await workScroller.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  const transcript = page.locator(".main-scroll");
+  const before = await Promise.all([
+    workScroller.evaluate((element) => element.scrollTop),
+    transcript.evaluate((element) => element.scrollTop),
+  ]);
+
+  await page.waitForTimeout(1_000);
+  const after = await Promise.all([
+    workScroller.evaluate((element) => element.scrollTop),
+    transcript.evaluate((element) => element.scrollTop),
+  ]);
+  expect(Math.abs(after[0] - before[0])).toBeLessThanOrEqual(2);
+  expect(Math.abs(after[1] - before[1])).toBeLessThanOrEqual(2);
+  expect(
+    await page.evaluate(() => (window as any).__workScrollIntoViewCalls),
+  ).toBe(0);
 });
 
 for (const theme of ["light", "dark"] as const) {

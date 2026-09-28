@@ -191,18 +191,6 @@ export function projectConversationTurns(
         });
       }
     }
-    if (
-      reasoning &&
-      !orderedSegments.some((segment) => segment.kind === "reasoning")
-    )
-      orderedSegments.unshift({
-        segmentId: `${turnId}:reasoning`,
-        kind: "reasoning" as const,
-        state: working ? ("running" as const) : ("succeeded" as const),
-        safeTitle: "conversation.reasoning",
-        activityRefs: [],
-        text: reasoning,
-      });
     for (const activity of activities) {
       if (seenActivities.has(activity.id)) continue;
       orderedSegments.push({
@@ -212,6 +200,24 @@ export function projectConversationTurns(
         safeTitle: `transcript.activity.kind.${activity.kind}`,
         activityRefs: [activity.id],
       });
+    }
+    if (
+      reasoning &&
+      !orderedSegments.some((segment) => segment.kind === "reasoning")
+    ) {
+      const reasoningSegment = {
+        segmentId: `${turnId}:reasoning`,
+        kind: "reasoning" as const,
+        state: working ? ("running" as const) : ("succeeded" as const),
+        safeTitle: "conversation.reasoning",
+        activityRefs: [],
+        text: reasoning,
+      };
+      // A live reasoning delta happened after the already-materialized item rows and is
+      // therefore the current step. Historical reasoning keeps its original leading
+      // position for deterministic replay, although the view no longer renders it as a row.
+      if (active && live.reasoning) orderedSegments.push(reasoningSegment);
+      else orderedSegments.unshift(reasoningSegment);
     }
     return {
       turnId,

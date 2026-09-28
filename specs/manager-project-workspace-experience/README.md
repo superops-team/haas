@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: MPW-022 through MPW-037 implemented; owner visual acceptance pending
+Status: MPW-022 through MPW-039 implemented; owner visual acceptance pending
 Last reviewed: 2026-09-28
 Change ID: `manager-project-workspace-experience`
 Related specs: [Manager Conversation Experience](../manager-conversation-experience/README.md), [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Product Identity](../manager-product-identity/README.md), [Manager Delegation](../manager-delegation/README.md), [Stores](../stores/README.md), [Security Boundary](../security-boundary/README.md)
@@ -99,7 +99,8 @@ worktrees reliably. Strategy 2 duplicates authority and creates migration drift.
 7. The user opens a project's trailing overflow menu to pin, edit, reveal, create a persistent
    worktree, archive its conversations, or remove it from the active sidebar without deleting data.
 8. The user opens the project-section overflow menu to change project and conversation ordering;
-   the chosen order survives restart while pinned and active work retain priority.
+   the chosen order survives restart. Pinned projects retain priority, while selection changes only
+   active styling and expansion rather than moving a project row.
 
 ## 4. Upstream and Downstream Relationships
 
@@ -506,13 +507,17 @@ For a remote workspace, `canonicalKey` is an opaque digest of
 - The section organization menu owns two submenus plus `Archived projects`, which lists hidden
   projects and restores one without reconstructing it. Project order supports Manual, Recent activity,
   and Name. Conversation order supports Recent update, Oldest update, and Name. Pinned projects and
-  conversations always lead; active/running work leads the remaining conversation set. Manual
+  conversations always lead. Selection and liveness are presentation state and never override the
+  chosen conversation order. Manual
   project movement is offered as Move up/Move down in the project menu and persists server-side.
-- Project sorting is deterministic: pinned explicit projects first, then the active explicit
-  project, then the selected mode; ties use persisted manual position and finally `projectId`.
+- Project sorting is deterministic: pinned explicit projects first, then the selected mode; ties
+  use persisted manual position and finally `projectId`. Selecting a project never participates in
+  sorting and therefore cannot move its row.
   Personal is always the final active group and is excluded from pin/reorder/archive controls.
-  Conversation sorting is pinned first, then active/running, then the selected mode; ties use
-  normalized `updated_at` descending and finally `session_id`. Recent project activity is the
+  Conversation sorting is pinned first, then the selected mode; ties use normalized `updated_at`
+  descending and finally `session_id`. Selecting a conversation changes only its active styling and
+  context. A liveness transition may change status decoration, but liveness itself is not a sort key.
+  Recent project activity is the
   maximum unarchived conversation `updated_at`, falling back to project `updatedAtMs` when none
   exists.
 - Conversations render under their owning project with the selected stable ordering. The same
@@ -810,6 +815,8 @@ They do not include project names, branch names, paths, commands, output, or end
 | MPW-035 | P0 | Clicking the project-row or project-hover-card pencil creates exactly one fresh conversation bound to that Project and never opens Edit Project or toggles expansion; the Project `...` menu remains the only Edit project entry, with correct accessible names and keyboard paths |
 | MPW-036 | P0 | Every full-page Manager surface—Settings, AI Assistants, Inbox, Automations list/detail, Connectors, Audit, and persona detail—provides the same native drag affordance as the conversation surface. Empty/title regions start native drag and double-click maximize/restore exactly once; buttons, links, inputs, menus, selectable content, and scrollbars remain no-drag. Browser overlay checks plus packaged macOS movement/maximize cover every surface family |
 | MPW-037 | P0 | Every collapsed TurnWork activity row, regardless of command/read/search/file/tool kind, uses one non-wrapping visual line with icon/status/disclosure fixed at the edges and the primary safe summary ellipsized by available width. Category metadata does not create a second line. Clicking expands one inline detail owner containing the complete safe summary/command and bounded evidence; mixed kinds preserve row height and alignment in both themes at 390/760/1440 px |
+| MPW-038 | P0 | Selecting a project changes only active styling, expansion, and conversation context. It never changes project row order. Pinned projects remain first; Manual/Recent/Name ordering remains stable before and after selecting each project, including equal-key tie cases |
+| MPW-039 | P0 | Selecting any conversation changes only active styling and conversation context and preserves the DOM order of every conversation in its project. Pinned remains the only priority tier; Recent/Oldest/Name and deterministic tie-breakers are unchanged by selection or liveness decoration. The order is identical before click, after click, after reload, and while another row reports working unless its selected ordering field itself changes |
 
 Required evidence:
 

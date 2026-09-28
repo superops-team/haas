@@ -10,13 +10,16 @@ import type {
 import { ActivityInspector } from "./ActivityInspector";
 import { ModelEvidenceInspector } from "./ModelEvidenceInspector";
 
+const latestReasoningAction = (value: string): string => {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.match(/[^.!?。！？]+[.!?。！？]?\s*$/)?.[0].trim() || compact;
+};
+
 export interface WorkDisclosureState {
   work: boolean;
-  reasoning: Record<string, boolean>;
 }
 export const CLOSED_WORK: WorkDisclosureState = {
   work: false,
-  reasoning: {},
 };
 
 export function TurnWork({
@@ -49,15 +52,16 @@ export function TurnWork({
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const activitySource = useRef<HTMLButtonElement | null>(null);
   const evidenceSource = useRef<HTMLButtonElement | null>(null);
-  const detail = useRef<HTMLDivElement | null>(null);
   const hasDetails = Boolean(
-    work.activities.length || work.reasoning || work.evidence.length,
+    work.activities.length || work.evidence.length,
   );
   const activityById = useMemo(
     () => new Map(work.activities.map((activity) => [activity.id, activity])),
     [work.activities],
   );
-  const visibleSegments = disclosure.work ? work.segments : [];
+  const visibleSegments = disclosure.work
+    ? work.segments.filter((segment) => segment.kind !== "reasoning")
+    : [];
   const nonSuccess = ["failed", "cancelled", "paused"].includes(
     presentation.phase,
   );
@@ -68,13 +72,31 @@ export function TurnWork({
     )
       setExpandedActivityId(null);
   }, [expandedActivityId, work.activities]);
-  useEffect(() => {
-    if (!expandedActivityId && !evidenceOpen) return;
-    const frame = requestAnimationFrame(() =>
-      detail.current?.scrollIntoView({ block: "nearest", behavior: "auto" }),
-    );
-    return () => cancelAnimationFrame(frame);
-  }, [evidenceOpen, expandedActivityId]);
+  const currentAction = useMemo(() => {
+    if (!presentation.showWorkingIndicator) return null;
+    for (let index = work.segments.length - 1; index >= 0; index -= 1) {
+      const segment = work.segments[index];
+      let label =
+        segment.kind === "reasoning"
+          ? latestReasoningAction(segment.text || "")
+          : segment.text || "";
+      if (segment.kind === "tool") {
+        const activity = segment.activityRefs
+          .map((id) => activityById.get(id))
+          .find((candidate): candidate is ToolActivity => Boolean(candidate));
+        label =
+          activity?.commandPreview ||
+          activity?.summary ||
+          activity?.title ||
+          t(segment.safeTitle);
+      } else if (!label) {
+        label = t(segment.safeTitle);
+      }
+      const compact = label.replace(/\s+/g, " ").trim();
+      if (compact) return compact;
+    }
+    return null;
+  }, [activityById, presentation.showWorkingIndicator, t, work.segments]);
   const closeActivity = () => {
     setExpandedActivityId(null);
     requestAnimationFrame(() => activitySource.current?.focus({ preventScroll: true }));
@@ -109,7 +131,11 @@ export function TurnWork({
                 ? "−"
                 : "○"}
         </span>
-        <span>{t(presentation.statusLabel)}</span>
+        <span
+          className={`work-summary-label${presentation.showWorkingIndicator ? " is-active" : ""}`}
+        >
+          {currentAction || t(presentation.statusLabel)}
+        </span>
         {hasDetails && (
           <Icon
             name="chevronDown"
@@ -118,60 +144,9 @@ export function TurnWork({
           />
         )}
       </button>
-      {nonSuccess && (outcome?.safeReason || outcome?.code) && (
-        <div className="activity-task-error" data-testid="activity-task-error">
-          <p>{outcome.safeReason || outcome.code}</p>
-          {outcome.safeReason && outcome.code && <code>{outcome.code}</code>}
-          {outcome.retryable && onRetry && (
-            <button className="btn" onClick={onRetry}>
-              {t("transcript.retry")}
-            </button>
-          )}
-        </div>
-      )}
       {visibleSegments.length > 0 && (
         <div className="work-segments">
           {visibleSegments.map((segment) => {
-            if (segment.kind === "reasoning") {
-              const open = disclosure.reasoning[segment.segmentId] === true;
-              return (
-                <div
-                  className="reasoning-disclosure work-segment"
-                  key={segment.segmentId}
-                  data-work-segment="reasoning"
-                >
-                  <button
-                    className="reasoning-toggle"
-                    aria-expanded={open}
-                    aria-controls={`reasoning-detail-${segment.segmentId}`}
-                    onClick={() =>
-                      onDisclosure({
-                        ...disclosure,
-                        reasoning: {
-                          ...disclosure.reasoning,
-                          [segment.segmentId]: !open,
-                        },
-                      })
-                    }
-                  >
-                    <Icon
-                      name="chevronRight"
-                      size={13}
-                      className={open ? "is-open" : ""}
-                    />
-                    {t("conversation.reasoning")}
-                  </button>
-                  {open && (
-                    <div
-                      className="reasoning-body"
-                      id={`reasoning-detail-${segment.segmentId}`}
-                    >
-                      {segment.text || work.reasoning}
-                    </div>
-                  )}
-                </div>
-              );
-            }
             const activity = segment.activityRefs
               .map((id) => activityById.get(id))
               .find((candidate): candidate is ToolActivity => Boolean(candidate));
@@ -221,7 +196,6 @@ export function TurnWork({
                   <div
                     className="work-segment-detail"
                     id={`activity-detail-${activity.id}`}
-                    ref={detail}
                   >
                     <ActivityInspector
                       activity={activity}
@@ -287,7 +261,6 @@ export function TurnWork({
             <div
               className="work-segment-detail"
               id={`model-evidence-${turn.turnId}`}
-              ref={detail}
             >
               <ModelEvidenceInspector
                 evidence={work.evidence}
@@ -298,6 +271,17 @@ export function TurnWork({
             </div>
           )}
         </>
+      )}
+      {nonSuccess && (outcome?.safeReason || outcome?.code) && (
+        <div className="activity-task-error" data-testid="activity-task-error">
+          <p>{outcome.safeReason || outcome.code}</p>
+          {outcome.safeReason && outcome.code && <code>{outcome.code}</code>}
+          {outcome.retryable && onRetry && (
+            <button className="btn" onClick={onRetry}>
+              {t("transcript.retry")}
+            </button>
+          )}
+        </div>
       )}
     </section>
   );

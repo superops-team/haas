@@ -57,7 +57,7 @@ describe("product conversation", () => {
       { ...items[1], turnId: "second", commandPreview: "git diff" } as Item,
     ] })} />);
     fireEvent.click(screen.getAllByTestId("work-summary")[1]);
-    fireEvent.click(screen.getByRole("button", { name: /git diff/ }));
+    fireEvent.click(screen.getByRole("button", { name: /git diff Succeeded$/ }));
     const inspector = screen.getByTestId("activity-inspector");
     expect(inspector.textContent).toContain("git diff");
     expect(inspector.textContent).not.toContain("git status");
@@ -152,17 +152,19 @@ describe("product conversation", () => {
     expect(owner?.getAttribute("data-state")).toBe("sealed");
   });
 
-  it("MCX-032 preserves explicit work/reasoning disclosure through live updates and completion", () => {
+  it("MCX-032 preserves work disclosure while reasoning remains transient", () => {
     const p = props();
     act(() => p.liveStore.replace({ reasoning: "Reasoning detail" }));
     const view = render(<ConversationView {...p} />);
+    expect(screen.getByTestId("work-summary").textContent).toContain(
+      "Reasoning detail",
+    );
     fireEvent.click(screen.getByTestId("work-summary"));
-    fireEvent.click(screen.getByRole("button", { name: "Reasoning" }));
     act(() => {
       p.liveStore.appendText("Ready.");
       p.liveStore.flush();
     });
-    expect(screen.getByText("Reasoning detail")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Reasoning" })).toBeNull();
     act(() => {
       p.liveStore.clear();
       view.rerender(
@@ -180,7 +182,10 @@ describe("product conversation", () => {
         />,
       );
     });
-    expect(screen.getByText("Reasoning detail")).toBeTruthy();
+    expect(screen.queryByText("Reasoning detail")).toBeNull();
+    expect(screen.getByTestId("work-summary").textContent).toContain(
+      "Completed",
+    );
     expect(
       screen.getByTestId("work-summary").getAttribute("aria-expanded"),
     ).toBe("true");

@@ -25,7 +25,6 @@ const projectActivity = (
 export function sortProjects(
   projects: ProjectSummary[],
   sessions: SessionInfo[],
-  activeProjectId: string | undefined,
   order: ProjectOrder,
 ): ProjectSummary[] {
   return [...projects].sort((left, right) => {
@@ -34,10 +33,6 @@ export function sortProjects(
     if (leftPersonal !== rightPersonal) return leftPersonal ? 1 : -1;
     const pinned = Number(Boolean(right.pinned)) - Number(Boolean(left.pinned));
     if (pinned) return pinned;
-    const active =
-      Number(right.projectId === activeProjectId) -
-      Number(left.projectId === activeProjectId);
-    if (active) return active;
     if (order === "recent") {
       const recent =
         projectActivity(right, sessions) - projectActivity(left, sessions);
@@ -54,17 +49,11 @@ export function sortProjects(
 
 export function sortProjectSessions(
   sessions: SessionInfo[],
-  activeSessionId: string,
   order: ConversationOrder,
 ): SessionInfo[] {
   return [...sessions].sort((left, right) => {
     const pinned = Number(Boolean(right.pinned)) - Number(Boolean(left.pinned));
     if (pinned) return pinned;
-    const leftActive =
-      left.session_id === activeSessionId || left.liveness === "working";
-    const rightActive =
-      right.session_id === activeSessionId || right.liveness === "working";
-    if (leftActive !== rightActive) return rightActive ? 1 : -1;
     if (order === "name") {
       const named = (left.title || left.session_id).localeCompare(
         right.title || right.session_id,

@@ -88,10 +88,10 @@
   --radius-control: 8px;
   --radius-compact: 6px;
   --motion-fast: 150ms;
+  --motion-current-action: 2400ms;
   --conversation-measure: 72ch;
   --conversation-item-gap: 12px;
   --conversation-group-gap: 32px;
-  --motion-work: 1000ms;
   --paper: #f5f6f7;          /* cool light gray — washes/chips over panel or canvas */
   --panel: var(--color-surface);
   /* UX-039 surface hierarchy: content brightest, chrome tinted. The chat column sits on
@@ -215,7 +215,12 @@ summary:focus-visible,
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
-html, body, #root { height: 100%; margin: 0; }
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 body {
   font-family: var(--sans);
   color: var(--ink);
@@ -229,6 +234,7 @@ body {
   grid-template-rows: minmax(0, 1fr); /* row fills viewport AND allows children to shrink */
   height: 100vh;
   overflow: hidden;
+  overscroll-behavior: none;
 }
 
 /* ---------- sidebar ---------- */
@@ -285,9 +291,9 @@ body {
   background: transparent;
 }
 .nav-reveal-btn:hover { color: var(--ink); background: var(--paper); }
-/* tao keeps AppKit's internal button origin while applying y=24 to the titlebar container;
-   for the pinned stack the resulting top-center is 22px. Use one 44px WebView strip and only
-   shift controls horizontally to clear the traffic lights. */
+/* Packaged AppKit measurement owns this geometry: with the pinned Tauri stack the native
+   traffic-light center is 22px in WebView coordinates. The 28px reveal control therefore starts
+   at 8px; in-flow 44px titlebar controls already center at 22px and need no transform. */
 .app.tauri-overlay .nav-reveal-btn { top: 8px; left: 84px; }
 .app.tauri-overlay .main-topbar { height: 44px; padding-top: 0; }
 /* The session topbar's collapsed-state cluster is INLINE (§22), so only the overlay build pads
@@ -401,7 +407,7 @@ body {
 .main.rail-open .main-chat { margin-right: 332px; }
 /* 40px top gutter: the transcript needs clear air under the edgeless glass topbar
    (owner call 2026-08-21 — bubbles sat nearly against the title). */
-.main-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 40px 8% 24px; }
+.main-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 40px 8% 24px; }
 
 /* idle hero */
 .hero { max-width: 720px; margin: 6vh auto 0; }
@@ -505,9 +511,6 @@ body {
 .md a:hover { text-decoration: underline; }
 .md hr { border: none; border-top: 1px solid var(--line); margin: 18px 0; }
 .md img { max-width: 100%; border-radius: 8px; }
-@keyframes spin { to { transform: rotate(360deg); } }
-
-
 .tool {
   border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
   padding: 8px 11px; font-size: 13px; color: var(--muted);
@@ -1230,8 +1233,8 @@ button.btn.sm.danger-btn:hover { border-color: var(--danger); }
   50% { opacity: 0.9; transform: scale(1.04); }
 }
 
-/* Dev-only fake traffic lights (?overlay=1). AppKit reports a 22px top-center for the pinned
-   y=24 inset, so a 12px simulated light starts at 16px. */
+/* Dev-only fake traffic lights (?overlay=1). Mirror the packaged AppKit frame: the 12px
+   native controls have a 22px WebView-relative centerline. */
 .sim-traffic-lights {
   position: fixed;
   left: 19px;
@@ -1256,8 +1259,8 @@ button.btn.sm.danger-btn:hover { border-color: var(--danger); }
   top: 0;
   left: 0;
   right: 0;
-  /* Sit the wordmark on the same y=22 centerline as the traffic lights, sidebar control,
-     collapsed topbar cluster, and main title. */
+  /* Keep the wordmark optically centered in the 44px strip. Native controls use the
+     separately measured 22px traffic-light centerline below. */
   height: 44px;
   padding-top: 0;
   z-index: 180;
@@ -2513,13 +2516,24 @@ html[data-platform="linux"] ::-webkit-scrollbar-thumb:hover { background-color: 
 .assistant-response { align-self: flex-start; width: 100%; }
 .user-message-text { white-space: pre-wrap; }
 .turn-work { min-width: 0; font-size: var(--text-ui); line-height: 1.5; color: var(--muted); }
-.work-summary { display: flex; align-items: center; gap: var(--space-2); min-height: 32px; max-width: 100%; border: 0; padding: 4px 0; color: var(--muted); background: transparent; text-align: start; }
+.work-summary { display: flex; align-items: center; gap: var(--space-2); width: 100%; min-height: 32px; max-width: 100%; border: 0; padding: 4px 0; color: var(--muted); background: transparent; text-align: start; }
 .work-summary:not(:disabled) { cursor: pointer; }
 .work-summary:disabled { opacity: 1; }
 .work-summary > svg { flex: none; transition: transform var(--motion-fast) ease; }
 .work-summary > svg.is-open { transform: rotate(180deg); }
 .work-status-slot { display: inline-flex; justify-content: center; align-items: center; flex: 0 0 16px; width: 16px; height: 16px; }
-.work-status-slot.is-working { border: 1.5px solid var(--line-strong); border-block-start-color: var(--muted); border-radius: 50%; animation: spin var(--motion-work) linear infinite; }
+.work-status-slot.is-working { border: 1.5px solid var(--line-strong); border-block-start-color: var(--muted); border-radius: 50%; }
+.work-summary-label { min-width: 0; max-width: calc(100% - 48px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.work-summary-label.is-active {
+  color: transparent;
+  background: linear-gradient(90deg, var(--color-text-secondary) 0%, var(--color-accent) 48%, var(--color-text-secondary) 100%);
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: work-current-action var(--motion-current-action) linear infinite;
+}
+@keyframes work-current-action { to { background-position: -220% 0; } }
 .work-segments { display: flex; flex-direction: column; gap: var(--space-1); margin-block: var(--space-2); max-height: 320px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .work-segment { min-width: 0; }
 .work-tool { display: flex; align-items: center; flex-wrap: nowrap; gap: var(--space-2); width: 100%; min-height: 32px; padding: var(--space-2) 0; background: transparent; border: 0; text-align: start; cursor: pointer; color: var(--muted); }
@@ -2537,11 +2551,7 @@ html[data-platform="linux"] ::-webkit-scrollbar-thumb:hover { background-color: 
 .work-tool > svg { flex: none; align-self: center; }
 .work-tool > svg.is-open { transform: rotate(90deg); }
 .work-segment-detail { margin: 0 0 var(--space-2) calc(16px + var(--space-2)); min-width: 0; scroll-margin-block-end: 168px; }
-.reasoning-disclosure { margin-block: var(--space-2); }
-.reasoning-toggle, .work-evidence { display: flex; align-items: center; gap: var(--space-2); border: 0; padding: var(--space-2) 0; background: transparent; color: var(--muted); font: inherit; text-align: start; cursor: pointer; }
-.reasoning-toggle svg { transition: transform var(--motion-fast) ease; }
-.reasoning-toggle .is-open { transform: rotate(90deg); }
-.reasoning-body { max-height: 240px; overflow: auto; white-space: pre-wrap; color: var(--muted); border-inline-start: 1px solid var(--line); padding-inline-start: var(--space-4); margin-block: var(--space-2); }
+.work-evidence { display: flex; align-items: center; gap: var(--space-2); border: 0; padding: var(--space-2) 0; background: transparent; color: var(--muted); font: inherit; text-align: start; cursor: pointer; }
 .turn-completion { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-block-start: var(--space-2); font-size: var(--text-caption); color: var(--faint); }
 .resolved-interaction { color: var(--muted); font-size: var(--text-ui); }
 .memory-notice { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
@@ -2574,6 +2584,7 @@ html[data-platform="linux"] ::-webkit-scrollbar-thumb:hover { background-color: 
 html[data-theme-changing] *, html[data-theme-changing] *::before, html[data-theme-changing] *::after { transition: none !important; }
 @media (prefers-reduced-motion: reduce) {
   .conversation-turn *, .conversation-turn *::before, .conversation-turn *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  .work-summary-label.is-active { color: var(--color-text-secondary); background: none; -webkit-text-fill-color: currentColor; }
 }
 
 .conversation-type-ui { font-size: var(--text-ui); }

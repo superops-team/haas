@@ -77,7 +77,7 @@ describe("MCX-029 product turn projection", () => {
     expect(turns[0].assistantResponse?.text).toBe("Ready.");
   });
 
-  it("preserves reasoning and tool work as chronological peer segments", () => {
+  it("preserves chronological reasoning and tool facts for transient projection", () => {
     const orderedStages: ModelCallStage[] = [
       {
         modelCallId: "call-1",

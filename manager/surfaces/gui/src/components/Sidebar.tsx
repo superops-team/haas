@@ -1051,13 +1051,12 @@ export function Sidebar(props: Props) {
     for (const list of grouped.values()) {
       const ordered = sortProjectSessions(
         list,
-        props.activeSession,
         props.conversationOrder || "recent",
       );
       list.splice(0, list.length, ...ordered);
     }
     return grouped;
-  }, [mine, props.activeSession, props.conversationOrder]);
+  }, [mine, props.conversationOrder]);
 
   const filteredByProject = useMemo(() => {
     const grouped = new Map<string, SessionInfo[]>();
@@ -1075,7 +1074,6 @@ export function Sidebar(props: Props) {
   const orderedProjects = sortProjects(
     props.projects.filter((project) => !project.archived),
     props.sessions,
-    activeProjectId,
     props.projectOrder || "manual",
   );
   for (const project of orderedProjects) {

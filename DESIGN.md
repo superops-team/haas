@@ -103,7 +103,7 @@ These contracts apply to existing components; they do not mandate additional wra
 | Component / current home | Receives | Owns | Must not own |
 |---|---|---|---|
 | ConversationTimeline / ConversationView | Projected turns, live tail | Reading order, anchor, bounded history | Transport or runtime lifecycle |
-| TurnWork | Work facts, presentation, disclosure | One summary; typed tool/reasoning disclosures | Model-call cards or independent run-state inference |
+| TurnWork | Work facts, presentation, disclosure | One current-action summary; typed tool/evidence disclosures | Model-call cards, durable reasoning rows, or independent run-state inference |
 | AssistantResponse / MessageContent | Stable response and content | Incremental readable answer | Relocation of answer text |
 | PendingInteractionDock | Typed interaction and callbacks | Single decision surface and focus | Shadow approval state |
 | ConversationComposer / ContextChips | Draft scope, availability, context | Editing, acceptance feedback, quiet controls | Treating ACK as completion |
@@ -139,11 +139,12 @@ when it removes a demonstrated duplicate responsibility.
 - On macOS overlay windows, the native traffic lights and every adjacent sidebar/panel
   collapse or reveal control share one titlebar center line. Tauri/tao's
   `traffic_light_position(..., y)` is an AppKit container inset, not either the button center or
-  the CSS top of a simulated circle. The center must be derived from the native button frame; for
-  the pinned Tauri/tao stack, `y=24` produces a 22 px top-center and a 12 px simulation therefore
-  uses `top: 16px`. Wordmarks and titles align optically inside the same 44 px strip but never
-  redefine the interactive-control center. Browser geometry is a fast regression gate; a
-  packaged macOS screenshot is the final visual contract.
+  the CSS top of a simulated circle. The center must be measured from the native button frame in
+  the packaged app. For the pinned Tauri/tao and macOS stack, `y=24` currently yields a 22 CSS px
+  WebView-relative center, so the 12 px browser simulation uses `top: 16px`. Wordmarks and titles
+  align optically inside the same 44 px strip but never redefine the interactive-control center.
+  Browser geometry is only a fast regression gate; a packaged macOS screenshot is the final visual
+  contract and overrides any inferred offset.
 - At most one filled primary action per local action group. The model's `primaryAction` expresses
   behavioral precedence, not a requirement for a colored button.
 - Composer trailing controls form one non-wrapping cluster in the invariant order `model ->
@@ -195,8 +196,9 @@ when it removes a demonstrated duplicate responsibility.
   result settles.
 - Project management is non-destructive by default. Removing a project means hiding/archiving its
   sidebar record with an explicit restore path; it never deletes files, worktrees, conversations,
-  transcripts, artifacts, or accepted bindings. Pinned and active work keep precedence over the
-  chosen project/conversation sorting mode.
+  transcripts, artifacts, or accepted bindings. Pinned projects keep precedence over the chosen
+  project sorting mode; selecting a project never reorders it. Active/running conversations may
+  retain precedence inside their owning project.
 - Command work uses a compact chronological row list. A collapsed command is exactly one visual
   line: the complete redacted value remains in the model, while the visible label uses width-based
   trailing ellipsis and omits the redundant category subtitle. Terminal state and disclosure stay
@@ -207,6 +209,19 @@ when it removes a demonstrated duplicate responsibility.
   status and disclosure remain fixed, and category metadata never creates a second line. A collapsed
   work group shows no child rows, including failures. Expanded work is capped at 320 CSS px and
   scrolls internally; complete details remain available in the one inline inspector.
+- Terminal history disclosures never seize scroll ownership. Expanding work, reasoning, activity,
+  or evidence does not call `scrollIntoView`; after the user scrolls either the bounded work region
+  or the transcript, late detail rendering preserves that position. Only explicit Jump to latest,
+  a session switch, or a new foreground turn may resume transcript following.
+- Active work uses one single-line, ellipsized current-action label. The latest safe reasoning or
+  tool summary replaces the previous label in place and may use one restrained gradient text
+  animation; the spinner does not animate at the same time. Reduced motion uses a static color.
+  Terminal history uses its completed/failed/cancelled label and never retains reasoning rows.
+  When work is expanded, a terminal failure/outcome summary follows the activity list instead of
+  preceding it, so the semantic conclusion remains the last item the user reads.
+- The document root is fixed and non-scrollable. Trackpad/wheel gestures over blank chrome never
+  move or rubber-band the whole WebView; only explicit scroll containers consume the gesture and
+  they contain overscroll at their boundaries.
 - Every full-page route shares the native title drag contract. Route titles and non-interactive
   top chrome are drag regions; buttons, links, form controls, menus, selectable content and
   scrollbars remain no-drag. Double-click on a route drag region performs one maximize/restore.

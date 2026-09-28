@@ -1,10 +1,8 @@
-// Model-layer roadmap item 4 (2026-07-22): reasoning traces. Live turn shows a quiet
-// pulsing "Thinking…" disclosure that streams the trace; once the message finalizes the
-// trace folds into a collapsed "Thought process" disclosure on the answer bubble.
+// MCX-051: reasoning is transient current-action copy, not accumulated history chrome.
 import { expect } from "@playwright/test";
 import { test } from "./fixtures";
 
-test("reasoning stays behind a stable user-controlled disclosure through completion", async ({
+test("reasoning updates the single running label and leaves the final answer last", async ({
   page,
 }) => {
   await page.goto("/");
@@ -13,22 +11,40 @@ test("reasoning stays behind a stable user-controlled disclosure through complet
   await box.fill("think hard about this");
   await box.press("Enter");
 
-  // Live reasoning stays behind the turn's explicit work disclosure.
+  // Live reasoning replaces the generic running label in place.
   const work = page.getByTestId("work-summary");
   await expect(work).toBeVisible({ timeout: 10_000 });
-  await work.click();
-  await page.getByRole("button", { name: "Reasoning", exact: true }).click();
-  await expect(page.locator(".reasoning-body")).toContainText(
-    "Weighing options.",
+  await expect(work.locator(".work-summary-label.is-active")).toContainText(
+    /Weighing options|Comparing tradeoffs|Settling it/,
+  );
+  const activeStyle = await work.locator(".work-summary-label.is-active").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      animationName: style.animationName,
+      backgroundImage: style.backgroundImage,
+      textOverflow: style.textOverflow,
+      whiteSpace: style.whiteSpace,
+    };
+  });
+  expect(activeStyle.animationName).toBe("work-current-action");
+  expect(activeStyle.backgroundImage).toContain("linear-gradient");
+  expect(activeStyle.textOverflow).toBe("ellipsis");
+  expect(activeStyle.whiteSpace).toBe("nowrap");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(work.locator(".work-summary-label.is-active")).toHaveCSS(
+    "animation-name",
+    "none",
   );
 
-  // Finalized: the disclosure remains exactly where the user left it.
+  // Finalized: transient reasoning is gone and the answer is the final content.
   await expect(page.getByText("Decision made.").first()).toBeVisible({
     timeout: 10_000,
   });
-  const completedWork = page.getByTestId("work-summary");
-  await expect(completedWork).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator(".reasoning-body")).toContainText(
-    "Weighing options. Comparing tradeoffs. Settling it.",
+  await expect(work.locator(".work-summary-label")).toHaveText("Completed");
+  await expect(work.locator(".work-summary-label")).not.toHaveClass(/is-active/);
+  await expect(page.locator(".reasoning-body, .reasoning-toggle")).toHaveCount(0);
+  const order = await page.locator(".turn-work, [data-response-id]").evaluateAll((nodes) =>
+    nodes.map((node) => node.classList.contains("turn-work") ? "work" : "response"),
   );
+  expect(order.slice(-2)).toEqual(["work", "response"]);
 });

@@ -340,6 +340,53 @@ test("project row pencil starts a fresh conversation while overflow remains the 
   ).toBeVisible();
 });
 
+test("selecting a project never changes project row order", async ({ page }) => {
+  await page.goto("/");
+  const rows = page.locator('[data-testid^="project-row-"]');
+  await expect(rows).toHaveCount(2);
+  const ids = () =>
+    rows.evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-testid")),
+    );
+  const before = await ids();
+
+  const mpa = page.getByTestId("project-row-prj_mpa");
+  await mpa.hover();
+  await mpa
+    .getByRole("button", { name: "New conversation in mpa-agent" })
+    .click();
+  await expect(
+    page.getByTestId("project-context-bar").getByRole("button", {
+      name: "mpa-agent",
+    }),
+  ).toBeVisible();
+
+  expect(await ids()).toEqual(before);
+});
+
+test("selecting a conversation never changes its project row order", async ({ page }) => {
+  await page.goto("/");
+  const rows = page.locator('[data-testid^="conversation-row-project-"]');
+  await expect(rows).toHaveCount(2);
+  const ids = () =>
+    rows.evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-testid")),
+    );
+  const before = await ids();
+
+  await page
+    .getByTestId("conversation-row-project-worktree")
+    .locator(".sidebar-conversation-primary")
+    .click();
+  await expect(
+    page
+      .getByTestId("conversation-row-project-worktree")
+      .locator(".sidebar-conversation-primary"),
+  ).toHaveClass(/is-active/);
+
+  expect(await ids()).toEqual(before);
+});
+
 test("new project dialog creates a remote workspace binding", async ({ page }) => {
   await page.goto("/");
   const sidebar = page.locator(".sidebar");

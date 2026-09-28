@@ -13,6 +13,42 @@ const scrollerState = `(() => {
   return el ? { top: el.scrollTop, height: el.scrollHeight, client: el.clientHeight } : null;
 })()`;
 
+test("blank desktop chrome cannot scroll or rubber-band the document root", async ({
+  page,
+}) => {
+  await page.goto("/?overlay=1");
+  await expect(page.getByPlaceholder(/Ask the AI assistant/)).toBeVisible();
+  const containment = await page.evaluate(() => {
+    const root = document.documentElement;
+    const body = document.body;
+    const app = document.querySelector<HTMLElement>(".app")!;
+    const transcript = document.querySelector<HTMLElement>(".main-scroll")!;
+    return {
+      rootOverflow: getComputedStyle(root).overflow,
+      bodyOverflow: getComputedStyle(body).overflow,
+      rootOverscroll: getComputedStyle(root).overscrollBehaviorY,
+      bodyOverscroll: getComputedStyle(body).overscrollBehaviorY,
+      appOverscroll: getComputedStyle(app).overscrollBehaviorY,
+      transcriptOverscroll: getComputedStyle(transcript).overscrollBehaviorY,
+    };
+  });
+  expect(containment).toEqual({
+    rootOverflow: "hidden",
+    bodyOverflow: "hidden",
+    rootOverscroll: "none",
+    bodyOverscroll: "none",
+    appOverscroll: "none",
+    transcriptOverscroll: "contain",
+  });
+
+  await page.locator(".main-topbar").hover();
+  await page.mouse.wheel(0, 900);
+  expect(await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }))).toEqual({
+    x: 0,
+    y: 0,
+  });
+});
+
 test("scrolling up mid-stream pins the viewport; jump-to-latest re-engages", async ({
   page,
 }) => {

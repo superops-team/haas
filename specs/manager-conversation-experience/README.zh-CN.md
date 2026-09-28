@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-状态：MCX-001 至 MCX-049 已实施；等待 owner 视觉验收
+状态：MCX-001 至 MCX-052 已实施；等待 owner 视觉验收
 最近评审：2026-09-28
 Change ID：`manager-conversation-interaction-v2`
 相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Manager GUI Performance](../manager-gui-performance/README.zh-CN.md)、[Event Log & SSE](../event-log-sse/README.zh-CN.md)、[Session Runtime](../session-runtime/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
@@ -179,7 +179,7 @@ P0、P1、P2 表示实现顺序，不表示可选范围。
 | MCX-R14 Product-turn projection | P0 | Model call 只保留为 evidence metadata；一个 product turn 只拥有一个 work summary 与一个 assistant response |
 | MCX-R15 稳定 assistant stream | P0 | 第一段用户可见 delta 挂载最终 response owner；任何 heuristic 都不得隐藏或迁移内容 |
 | MCX-R16 Canonical lifecycle presentation | P0 | Timeline、header、loading、interaction dock 与 Composer action 使用同一 selector，不能互相矛盾 |
-| MCX-R17 安全 work disclosure | P0 | Work 默认紧凑；reasoning、tool 与 telemetry 使用有界语义 disclosure 与安全文案 |
+| MCX-R17 安全 work disclosure | P0 | Work 默认紧凑；最新 reasoning/tool action 使用一条安全短暂文案，tool detail 与 telemetry 使用有界语义 disclosure |
 | MCX-R18 动效与密度纪律 | P1 | 每个状态只有一个动画 owner；稳定几何、semantic token 与可度量信息密度共同约束页面 |
 
 ## 5. 信息架构与响应式布局
@@ -547,7 +547,7 @@ queued -> dispatching -> running -> terminal
 
 1. 用户意图与结构化 context chip；
 2. 紧凑的当前/已完成 activity summary；
-3. 渐进披露的 reasoning 与 work row；
+3. 渐进披露的 tool activity 与 execution evidence；
 4. 最终 assistant result；
 5. completion summary 与持久恢复动作。
 
@@ -562,7 +562,7 @@ queued -> dispatching -> running -> terminal
 
 Completed model call、provider round、reasoning chunk、usage arrival 与 cache accounting 不得作为同级卡片占用默认 flow。展开 work 时，detail 位于 work summary 下、answer 上，且不替换两者。Live update 不得自动重新打开用户关闭的 disclosure，也不得关闭用户已展开的 disclosure。Completed 状态只可自动收起用户从未操作过的 disclosure。
 
-展开 work 必须保持 canonical 发生顺序。Reasoning summary 与 tool activity 按该顺序作为同级 work segment 展示（真实顺序为 `reasoning -> tool -> reasoning` 时即如此），不能使用永久 reasoning 父容器包裹 tool。每个 reasoning segment 独立保存 disclosure 状态；主 timeline 继续不展示 model-call card 或 ordinal。
+展开 work 只按 canonical 发生顺序保留用户相关的 tool activity。Reasoning summary 不得累积为历史 disclosure row。Turn 运行时，只有最新的安全 reasoning 或 tool summary 可替换 work header 中的单行当前动作；下一步在原位替换它。主 timeline 继续不展示 model-call card 或 ordinal。
 
 ### 8.2 Activity summary 与 evidence
 
@@ -583,7 +583,7 @@ Completed model call、provider round、reasoning chunk、usage arrival 与 cach
 
 Public activity preview 不暴露绝对 host path。当 command output 包含该命令已授权 working directory 时，adapter 先替换为 `workspace/` 加安全相对后缀，再执行 credential/URL/path 脱敏。因此在 workspace root 执行 `pwd` 时显示 `workspace/`；workspace 外 host path 继续显示 `[REDACTED_PATH]`。精确路径只通过有 scope 且未过期的 execution evidence 提供。
 
-Reasoning 在一个 turn work disclosure 中按时间作为同级 segment 表达，不作为父 surface 或 model-call card。折叠且 streaming 时，每个 segment 可展示一行脱敏 summary；各 segment 的用户手动展开/收起优先于自动行为。完成后只在用户从未操作时自动收起。Heavy reasoning detail 可为高度动画继续挂载最多 300 ms，之后卸载；reduced-motion 下立即卸载。
+Reasoning 是短暂进度，不是持久 transcript chrome。Turn 运行时，最新的安全 reasoning summary 可占用单行当前动作标签，并被下一个 reasoning 或 tool step 原位替换。Completed、failed、cancelled 或 paused 历史不渲染 reasoning row 及其 disclosure state；最终 assistant response 保持为该 turn 最后一段实质内容。
 
 Tool work 使用统一 `ToolActivity` 合同，包含 header、安全 input summary、有界 result、status、duration 与 evidence action。只有 active tool 或第一个可操作 failure 可默认展开；成功完成的 tool 默认收起。Tool input/output 与 evidence 不得嵌套在 model-call card 中。
 
@@ -818,7 +818,7 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 |---|---|---|---|
 | C0 Projection contract | Product-turn/work/answer model 与 canonical presentation selector | 当前 fixture 产生同级 model-stage card 与矛盾 action | Selector/invariant test 证明一个 turn、一个 response owner、一个合法 primary action |
 | C1 Stable live answer | 删除 word-count gate，把第一段 delta 绑定到 `AssistantResponse` | 测试证明短 response 被隐藏或迁移 | 短/长/tool-interleaved stream 保持同一 row 与 semantic node |
-| C2 Calm work disclosure | 用 summary、reasoning/tool disclosure 与 evidence correlation 替换 stage timeline | 八次调用 fixture 占满主视口 | 默认只渲染一个 work summary、零 stage card，且只展开可操作 detail |
+| C2 Calm work disclosure | 用当前动作 summary、tool disclosure 与 evidence correlation 替换 stage timeline | 八次调用 fixture 占满主视口 | 默认只渲染一个 work summary、零 stage/reasoning history row，且只展开可操作 detail |
 | C3 Hierarchy and motion | 移动 persistent mode context，删除 token warning/raw color，统一 type/layout/motion | 成对截图复现密集卡片与竞争动画 | 双主题及所有目标宽度通过 visual、motion、contrast 与 reading-anchor review |
 | C4 Legacy correction | 删除 `streamGate`、stage-card UI/CSS/copy、独立 lifecycle selector 与过时测试 | Grep/import inventory 找到每个旧 owner | 不保留旧 heuristic、component、style、translation key、selector 或 dual projection |
 
@@ -864,7 +864,7 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-024 | P1 | Browser/Tauri parity | 同一 fixture 在两个 surface 产生等价 semantic DOM 与 action |
 | MCX-025 | P1 | Component API | 每个导出 AI component 都有聚焦 state/keyboard/theme test |
 | MCX-026 | P0 | Legacy-zero gate | 旧 symbol、CSS hook、renderer import、dual write 与 migration flag 均不存在 |
-| MCX-027 | P2 | Search 与 turn navigation | Virtualized history 中所有匹配项可达，导航保持 reading anchor |
+| MCX-027 | 已由 MCX-049 退役 | 不提供 conversation-local search 与上一条/下一条控件；Cmd/Ctrl+F 交由 browser/WebView 原生处理，global session search 继续可用 |
 | MCX-028 | P2 | Semantic context chip | Skill/file/session/context ref 正确渲染、复制和打开，不暴露 raw transport syntax |
 | MCX-029 | P0 | Product-turn hierarchy | 含八次 model call 的 fixture 在主 timeline 只渲染一个 Turn、一个 work summary、一个 assistant response、零 model-call card |
 | MCX-030 | P0 | First-delta stability | 1-39 词 answer 在一次合并 publication 后可见；经过 40 词、tool arrival 与 terminal sealing 时 `rowId` 和 semantic DOM owner 不变 |
@@ -878,15 +878,18 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-038 | P0 | Live-tail geometry | 阅读旧内容期间经过 100 次 delta、tool update 与 completion，semantic anchor 偏移不超过 2 CSS px，直到 Jump to latest |
 | MCX-039 | P0 | Dynamic accessibility owner | 一个 polite live region 只播报有意义 phase change；token、usage、stage 与 timer update 不产生重复播报 |
 | MCX-040 | P0 | Assistant response 幂等 | 同一 turn 的两条 assistant-message fact（包括不同 transport row id 或 replay）只渲染一个 response owner 和一份权威文本；reload 与 live 输出一致 |
-| MCX-041 | P0 | Chronological work segment | reasoning-tool-reasoning fixture 按 canonical 顺序渲染三个同级 row，disclosure 相互独立，不出现 model-call 或 reasoning-parent container |
+| MCX-041 | P0 | Chronological tool activity | Tool activity 按 canonical 发生顺序仅渲染一次，不出现 model-call 或 reasoning-parent container。Reasoning 仍可作为短暂进度进入 projection，但不成为持久 disclosure row |
 | MCX-042 | P0 | Inline 安全 activity detail | 点击 command row 后详情直接在其下方展开，不打开侧边/底部 Inspector；workspace 内路径使用 `workspace/`，外部 host path 继续脱敏，evidence 过期时仍保留安全 command/preview |
 | MCX-043 | P1 | Search overlay focus | 全局搜索在双主题使用带语义圆角的 input shell 与中性 focus border；不出现内部矩形品牌色 outline 或品牌色整行 active fill |
-| MCX-044 | P1 | macOS titlebar 对齐 | overlay 模式下，原生 traffic light 与 sidebar/panel 展开、折叠控件共用从 AppKit 原生 button frame 推导的中心，sidebar 展开/折叠前后中心偏差均不超过 1 CSS px。`traffic_light_position(..., y)` 是 container inset，不是中心或 CSS top；当前 pin 的 Tauri/tao 下，`y=24` 得到距顶部 22 px 的中心，12 px browser simulator 使用 `top:16px`。browser-only geometry 不能完成验收，必须补 packaged macOS 视觉证据 |
+| MCX-044 | P1 | macOS titlebar 对齐 | overlay 模式下，原生 traffic light 与 sidebar/panel 展开、折叠控件共用 packaged AppKit button frame 的实测中心，sidebar 展开/折叠前后中心偏差均不超过 1 CSS px。当前 pin 的 `traffic_light_position(..., y=24)` 组合实测 WebView 相对中心为 22 CSS px，12 px browser simulator 使用 `top:16px`；任何推算 geometry 都不得覆盖 packaged 证据。文字块保持自身排版 baseline，不作为 control center 的对齐参考。Browser 与 packaged screenshot 必须覆盖 expanded、collapsed、maximize 与 restore 状态 |
 | MCX-045 | P0 | Composer 尾部 cluster | 双主题 320/390/760/1440 px 下，model、microphone、Send/Stop 按该顺序保持可见，以 peer gap <=8 CSS px 组成不换行的尾部 cluster；mic/action hit target 固定，仅长 model label 显示 ellipsis，idle、running 与 recording fixture 保持同一 ownership |
 | MCX-046 | P0 | Terminal child-state convergence | Live sealing 与历史 replay 的 completed/failed/cancelled turn 不得继续把 child activity 或 model stage 显示为 running/pending/waiting；dangling tool 除 cancelled 外归一为 failed，stale model stage 跟随 parent terminal state，且不修改持久化 evidence |
 | MCX-047 | P0 | Reconnect terminal monotonicity | `ready -> history` 与 `history -> ready` 两种顺序下，`running=false` 加 idle/cancelled control 不得用 stale non-terminal task outcome 覆盖 terminal transcript；UI 不显示 working indicator/Stop，同时真实 running snapshot 仍能恢复这些状态 |
 | MCX-048 | P0 | 可选模型可用性 | Composer 模型菜单只包含 routed provider 当前可用的模型：凭证型 provider 必须已配置 credential，OAuth provider 必须有已登录 profile，keyless local provider 必须通过 live discovery。不可用的当前/default model 可作为 immutable session fact 继续显示，但不得被注入 selectable option。无可用模型时 Composer 显示连接模型；存在其他可用模型时只提供该列表。Settings 保留完整目录用于配置。Response 与 GUI 不包含 credential material |
 | MCX-049 | P0 | 聚焦运行时展示 | User message 使用右对齐中性填充 surface，assistant response 在 canvas 左对齐；不显示 `你`/`助手` heading，但保留 accessible response name。Model-switch 与 lifecycle marker 使用统一克制 divider。Work 收起时只显示 canonical summary，即使 child failed 也不泄漏；展开 work 最大高度 320 CSS px，内部滚动。移除会话内 Find/上一条/下一条 toolbar 及 Cmd/Ctrl+F 拦截，保留浏览器原生查找 |
+| MCX-050 | P0 | 终态 disclosure 滚动所有权 | 在 completed、failed、cancelled 或 paused turn 中展开 activity、evidence 或 work disclosure 时，不得调度 `scrollIntoView`，也不得重新开启 transcript auto-follow。用户将有界 work 区域滚到任意位置后，延迟详情渲染与父级重渲染在至少 1 秒内必须使 work 区域与 transcript 滚动偏移都保持在 2 CSS px 内。只有新的前台 turn、session 切换或用户显式点击 Jump to latest 才可恢复 transcript following |
+| MCX-051 | P0 | 单行当前动作 | Work 活跃时，work header 用最新的安全 reasoning/tool action 替换通用的“执行中”，严格保持一行 ellipsis；step 切换时在原位更新。克制的渐变文字是唯一持续 motion owner，reduced-motion 下禁用动画。Work 进入终态后停止渐变，恢复 terminal label，不显示 reasoning row，失败/outcome summary 放在展开 activity 详情之后，并让最终 assistant summary 成为 turn 最后一段实质内容 |
+| MCX-052 | P0 | Desktop 根滚动隔离 | `html`、`body`、`#root` 与 application shell 不得成为滚动容器，也不得出现 WebView rubber-band 位移。在非滚动空白 chrome 上使用双指/wheel 时 document 偏移始终为零。Transcript、sidebar、settings 与有界 work-detail 区域仍各自可滚动，并在边界停止 overscroll chaining |
 
 ### 14.3 需求到用例追溯
 
@@ -981,7 +984,7 @@ Packaged desktop 证据使用 `manager/packaging/build_dmg.sh` 与 `manager/pack
 |---:|---|---|---|---:|
 | 1 | 增加 product-turn projection invariant 与 presentation selector | MCX-029/031 对当前 stage/action output 失败 | Projector/selector 与 golden fixture | 1-2 天 |
 | 2 | 替换 heuristic stream ownership | MCX-030 对短流/tool-interleaved stream 失败 | 稳定 `AssistantResponse` 并删除 word gate | 1 天 |
-| 3 | 替换 model-stage timeline | MCX-032-034 对八调用 fixture 失败 | Work summary、reasoning/tool disclosure、Inspector-only telemetry | 1-2 天 |
+| 3 | 替换 model-stage timeline | MCX-032-034 对八调用 fixture 失败 | 当前动作 summary、tool disclosure、Inspector-only telemetry | 1-2 天 |
 | 4 | 修正 hierarchy、mode context、窄屏 layout 与 motion | MCX-035-037/039 出现 visual/semantic failure | 双主题、所有目标宽度的 tokenized EN/ZH UI | 1-2 天 |
 | 5 | 删除被替代代码并执行 release review | MCX-026 与 grep/import 失败 | 不保留 legacy stage UI/selector/style/copy；完整 gate 证据 | 1 天 |
 
@@ -1072,18 +1075,10 @@ MCX-004/009/010/024/026/027/028，不限于 C0–C4 修订子集。
   形状，不能误判为畸形帧。MCX-013/026 验证须将这些帧送入 decoder，并在 production GUI
   打开委派命令详情；错误字段类型仍须拒绝。本次修正不改变 ADK/HaaS API、事件生产端、权限、
   持久化或日志合同。
-- **导航**：有标签的当前会话 Find 入口及 Cmd/Ctrl+F 搜索包括未挂载历史在内的会话。
-  纯文本忽略大小写，不执行正则，仅搜索可见用户/助手正文，不搜索私有 evidence。
-  上下匹配及上下轮次使用稳定 turn/row 身份，只挂载目标虚拟窗口，并明确暂停自动跟随。
-  Escape 关闭 Find、恢复焦点，不停止执行。空查询/无匹配保留阅读位置；切换会话清理搜索状态；
-  Jump to latest 显式恢复跟随。
-  Find 与轮次控制必须在正文滚动视口外独立占行，并与正文阅读宽度对齐。阅读长回复、搜索或
-  调整窗口时，控件不得覆盖正文、链接、选区或 Composer。展开 Find 可调整该行高度，但不能
-  遮住搜索命中。MCX-027 回归在 light/dark、390/1440 CSS px 下滚动长回复并开关 Find：
-  导航栏边界始终位于滚动视口之外、命中文本可见，Escape 恢复焦点。先通过 shell 布局插槽
-  保留现有导航状态 owner，再验证搜索/虚拟列表及视觉基线。本次布局修复不改变 command、
-  event、持久化、权限、ADK、HaaS、artifact 或 container 合同，不增加日志。
-  Find 打开时，其索引还通过细粒度 store 订阅消费当前公开 live-response 文本；私有 reasoning/tool evidence 继续排除。用户在虚拟历史行中选择文字时，只将该行固定在 virtual range，直到浏览器 selection 收起或离开 timeline。滚动不能卸载 selection owner，额外固定行仍须满足 MCX-020 的 200 行上限。
+- **导航**：MCX-027 定义的 conversation-local Find 与上一条/下一条控件已由 MCX-049 退役。
+  Cmd/Ctrl+F 交由 browser/WebView 原生处理，global session search 继续作为产品级搜索入口。
+  用户在虚拟历史行中选择文字时，只将该行固定在 virtual range，直到 browser selection
+  收起或离开 timeline；滚动不能卸载 selection owner，额外固定行仍须满足 MCX-020 的 200 行上限。
 - **语义上下文**：用户行与 Composer 共享已选 skill、暂存 file、引用 session 的类型化引用。
   标签不包含 provider framing；复制使用可读标签；打开只委托现有已授权文件/会话/skill 动作。
   引用缺失或权限撤销时仍可读并标记不可用。context、model、mode 随草稿恢复、拒绝、队列编辑及
@@ -1106,6 +1101,6 @@ IndexedDB 与重启；打包检查覆盖可见且可交互的窗口、已有历�
 
 [Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md) 持有 project
 分组、workspace/execution-target draft context、Git branch control 与原生 window chrome。本组件
-继续持有唯一 chronological TurnWork projection 与 inline ActivityInspector。Project surface
+继续持有唯一 chronological tool-activity projection、短暂 current-action summary 与 inline ActivityInspector。Project surface
 可打开该 owner，但不得再渲染第二个 command detail surface。Accepted project/workspace/endpoint
 identity 是 conversation 输入，不能从 transcript 内容推断。

@@ -56,22 +56,18 @@ test("a reopened session replays rich history: tools, filters, reasoning, notice
 
   // Plain items replay as they rendered live.
   await expect(page.getByText("Audit the release branch")).toBeVisible();
-  await expect(
-    page.locator(".md strong", { hasText: "two checks" }),
-  ).toBeVisible();
+  await expect(page.getByText("Anything else before I file the summary?")).toBeVisible();
+  await expect(page.locator(".md strong", { hasText: "two checks" })).toHaveCount(0);
   await expect(page.getByText("Context compacted")).toBeVisible();
 
   // The turn owns one collapsed work summary. Explicit disclosure reveals the
-  // two activity rows and the persisted reasoning without restoring stage cards.
+  // two activity rows without restoring persisted reasoning or stage cards.
   const summary = page.getByTestId("work-summary").first();
   await expect(summary).toHaveAttribute("aria-expanded", "false");
   await summary.click();
   await expect(page.locator(".work-tool")).toHaveCount(2);
   await expect(page.locator(".activity-privacy")).toHaveCount(0);
-  await page.getByRole("button", { name: "Reasoning", exact: true }).click();
-  await expect(page.locator(".reasoning-body")).toContainText(
-    "Compared the log against the changelog",
-  );
+  await expect(page.locator(".reasoning-body, .reasoning-toggle")).toHaveCount(0);
 });
 
 test("a connector-sourced message replays as its structured card", async ({

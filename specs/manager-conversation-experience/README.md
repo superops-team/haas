@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: MCX-001 through MCX-049 implemented; owner visual acceptance pending
+Status: MCX-001 through MCX-052 implemented; owner visual acceptance pending
 Last reviewed: 2026-09-28
 Change ID: `manager-conversation-interaction-v2`
 Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager GUI Performance](../manager-gui-performance/README.md), [Event Log & SSE](../event-log-sse/README.md), [Session Runtime](../session-runtime/README.md), [Manager Product Identity](../manager-product-identity/README.md), [Security Boundary](../security-boundary/README.md)
@@ -250,7 +250,7 @@ P0, P1, and P2 define implementation order, not optional scope.
 | MCX-R14 Product-turn projection | P0 | Model calls remain evidence metadata; one product turn owns one work summary and one assistant response |
 | MCX-R15 Stable assistant stream | P0 | First user-visible delta mounts the final response owner; heuristics never hide or relocate content |
 | MCX-R16 Canonical lifecycle presentation | P0 | Timeline, header, loading, interaction dock, and Composer actions use one selector and cannot contradict |
-| MCX-R17 Safe work disclosure | P0 | Work is compact by default; reasoning, tools, and telemetry use bounded semantic disclosures with safe copy |
+| MCX-R17 Safe work disclosure | P0 | Work is compact by default; the latest reasoning/tool action uses one safe transient line while tool details and telemetry use bounded semantic disclosures |
 | MCX-R18 Motion and density discipline | P1 | One animation owner per state, stable geometry, semantic tokens, and measured information density govern the surface |
 
 ## 5. Information Architecture and Responsive Layout
@@ -714,7 +714,7 @@ Each visible turn follows one stable order:
 
 1. user intent and structured context chips;
 2. compact current/completed activity summary;
-3. progressively disclosed reasoning and work rows;
+3. progressively disclosed tool activity and execution evidence;
 4. final assistant result;
 5. completion summary and durable recovery actions.
 
@@ -736,10 +736,10 @@ above the answer without replacing either. A live update cannot automatically re
 that the user closed or close one the user opened. The completed state may auto-collapse only a
 never-touched disclosure.
 
-Expanded work preserves canonical occurrence order. Reasoning summaries and tool activities are
-peer work segments in that sequence (`reasoning -> tool -> reasoning` when that is what happened),
-not a permanent reasoning parent with tools nested below it. Each reasoning segment owns its own
-disclosure state. Model-call cards and ordinals remain absent from the primary timeline.
+Expanded work preserves the canonical occurrence order of user-relevant tool activities. Reasoning
+summaries never accumulate as historical disclosure rows. While a turn is active, only the latest
+safe reasoning or tool summary may replace the work header's single-line current-action label; the
+next step replaces it in place. Model-call cards and ordinals remain absent from the primary timeline.
 
 ### 8.2 Activity summaries and evidence
 
@@ -776,12 +776,11 @@ relative suffix before credential/URL/path redaction. Thus `pwd` at the workspac
 `workspace/`, while paths outside that root remain `[REDACTED_PATH]`. Exact paths remain available
 only through scoped, unexpired execution evidence.
 
-Reasoning is expressed as chronological peer segments inside one turn work disclosure, not as a
-parent surface or model-call card. While collapsed and streaming, a segment may show one sanitized
-single-line summary. Each segment's user expansion takes precedence over automatic behavior. On
-completion it auto-collapses only if the user never changed it. Heavy reasoning detail may remain
-mounted for at most 300 ms to complete a height transition, then unmounts; reduced-motion mode
-unmounts immediately.
+Reasoning is transient progress, not durable transcript chrome. While a turn is active, the latest
+safe reasoning summary may occupy the single-line current-action label and is replaced in place by
+the next reasoning or tool step. Reasoning rows and their disclosure state are not rendered in
+completed, failed, cancelled, or paused history. The final assistant response remains the last
+substantive content in the turn.
 
 Tool work uses a shared `ToolActivity` contract with header, safe input summary, bounded result,
 status, duration, and evidence action. Only the active tool or first actionable failure may default
@@ -1117,7 +1116,7 @@ a v3 renderer, a second transcript, or a long-lived UI flag.
 |---|---|---|---|
 | C0 Projection contract | Product-turn/work/answer models and canonical presentation selector | Fixture currently produces peer model-stage cards and contradictory actions | Selector/invariant tests prove one turn, one response owner, and one valid primary action |
 | C1 Stable live answer | Remove word-count gate and bind first delta to `AssistantResponse` | Test proves short response is hidden or relocates | Short/long/tool-interleaved streams keep one row and semantic node |
-| C2 Calm work disclosure | Replace stage timeline with summary, reasoning/tool disclosures, and evidence correlation | Eight-call fixture dominates the viewport | Default view renders one work summary, no stage cards, and only actionable open detail |
+| C2 Calm work disclosure | Replace stage timeline with one current-action summary, tool disclosures, and evidence correlation | Eight-call fixture dominates the viewport | Default view renders one work summary, no stage/reasoning history rows, and only actionable open detail |
 | C3 Hierarchy and motion | Move persistent mode context, remove token warnings/raw colors, unify type/layout/motion | Paired screenshot reproduces dense cards and competing animation | Both themes and target widths pass visual, motion, contrast, and reading-anchor review |
 | C4 Legacy correction | Delete `streamGate`, stage-card UI/CSS/copy, independent lifecycle selectors, and obsolete tests | Grep/import inventory identifies every old owner | No old heuristic, component, style, translation key, selector, or dual projection remains |
 
@@ -1168,7 +1167,7 @@ the primary timeline.
 | MCX-024 | P1 | Browser/Tauri parity | Same fixture yields equivalent semantic DOM and actions on both surfaces |
 | MCX-025 | P1 | Component API | Every exported AI component has focused states/keyboard/theme tests |
 | MCX-026 | P0 | Legacy-zero gate | Old symbols, CSS hooks, renderer imports, dual writes and migration flag are absent |
-| MCX-027 | P2 | Search and turn navigation | Matches remain reachable across virtualized history and navigation preserves the reading anchor |
+| MCX-027 | Retired by MCX-049 | Conversation-local search and previous/next controls are absent; Cmd/Ctrl+F remains owned by the browser/WebView and global session search remains available |
 | MCX-028 | P2 | Semantic context chips | Skill/file/session/context refs render, copy and open correctly without exposing raw transport syntax |
 | MCX-029 | P0 | Product-turn hierarchy | Fixture with eight model calls renders one Turn, one work summary, one assistant response, and zero model-call cards in the primary timeline |
 | MCX-030 | P0 | First-delta stability | A 1-39 word answer is visible after one coalesced publication; its `rowId` and semantic DOM owner remain unchanged past 40 words, tool arrival, and terminal sealing |
@@ -1182,15 +1181,18 @@ the primary timeline.
 | MCX-038 | P0 | Live-tail geometry | Reading older content during 100 deltas, tool updates, and completion moves the semantic anchor by at most 2 CSS px until Jump to latest |
 | MCX-039 | P0 | Dynamic accessibility owner | One polite live region announces meaningful phase changes; token, usage, stage, and timer updates cause no duplicate announcement |
 | MCX-040 | P0 | Assistant response idempotency | Two assistant-message facts for one turn, including different transport row ids or a replay, render one response owner and one copy of authoritative text; reload matches live output |
-| MCX-041 | P0 | Chronological work segments | A reasoning-tool-reasoning fixture renders three peer rows in canonical order, with independent disclosures and no model-call or reasoning-parent container |
+| MCX-041 | P0 | Chronological tool activity | Tool activities render once in canonical occurrence order without model-call or reasoning-parent containers. Reasoning stays available to projection as transient progress but does not become a durable disclosure row |
 | MCX-042 | P0 | Inline safe activity detail | Clicking a command row expands detail directly below it without opening a side/bottom Inspector; workspace-owned paths use `workspace/`, outside host paths remain redacted, and expired evidence retains the safe command/preview |
 | MCX-043 | P1 | Search overlay focus | Global search uses a rounded semantic input shell and neutral focus border in both themes; no inner rectangular brand outline or brand-filled active row appears |
-| MCX-044 | P1 | macOS titlebar alignment | In overlay mode, native traffic lights and sidebar/panel collapse or reveal controls share the center derived from the native AppKit button frame and differ by at most 1 CSS px before and after sidebar collapse. `traffic_light_position(..., y)` is a container inset, not a center or CSS top; with the pinned Tauri/tao stack, `y=24` yields a 22 px top-center and the 12 px browser simulator uses `top:16px`. Packaged macOS visual evidence is required because browser-only geometry cannot close this contract |
+| MCX-044 | P1 | macOS titlebar alignment | In overlay mode, native traffic lights and sidebar/panel collapse or reveal controls share the center measured from the packaged AppKit button frame and differ by at most 1 CSS px before and after sidebar collapse. With the pinned `traffic_light_position(..., y=24)` stack, the measured WebView-relative center is currently 22 CSS px and the 12 px browser simulator uses `top:16px`; inferred geometry must never override packaged evidence. Text blocks keep their typographic baseline and are not used as the control-center reference. Browser and packaged screenshots must cover expanded, collapsed, maximize, and restore states |
 | MCX-045 | P0 | Composer trailing cluster | At 320/390/760/1440 px in both themes, model, microphone, and Send/Stop remain visible in that order, share one unwrapped trailing cluster with peer gaps <=8 CSS px, and keep fixed mic/action hit targets while only the long model label ellipsizes; idle, running, and recording fixtures preserve the same ownership |
 | MCX-046 | P0 | Terminal child-state convergence | Live sealing and historical replay of a completed/failed/cancelled turn never render a child activity or model stage as running/pending/waiting; a dangling tool becomes failed unless cancelled, a stale model stage follows the parent terminal state, and persisted evidence is not mutated |
 | MCX-047 | P0 | Reconnect terminal monotonicity | For both `ready -> history` and `history -> ready` ordering, `running=false` plus idle/cancelled control cannot overwrite a terminal transcript with a stale non-terminal task outcome; the UI shows no working indicator or Stop action and a true running snapshot still restores them |
 | MCX-048 | P0 | Selectable model availability | The Composer model menu contains only models whose routed provider is currently usable: credential-backed providers require configured credentials, OAuth providers require a signed-in profile, and keyless local providers require live discovery. An unavailable current/default model may remain visible as an immutable session fact but is never injected into selectable options. With no usable model the Composer shows Connect a model; with another usable model it offers only that list. Settings retains the complete catalog for configuration. No credential material enters the response or GUI |
 | MCX-049 | P0 | Focused runtime presentation | User messages align right on a neutral filled surface while assistant responses align left on the canvas; visible `You`/`Assistant` headings are absent but accessible response names remain. Model-switch and lifecycle markers use one quiet divider treatment. Collapsed work shows only its canonical summary—even when a child failed—and expanded work has a 320 CSS px maximum with internal scrolling. The conversation-local Find/previous/next toolbar and Cmd/Ctrl+F interception are removed; browser find remains available |
+| MCX-050 | P0 | Terminal disclosure scroll ownership | Expanding an activity, evidence, or work disclosure in a completed, failed, cancelled, or paused turn MUST NOT schedule `scrollIntoView` or re-enable transcript auto-follow. After the user scrolls the bounded work region to any position, late detail rendering and parent re-renders preserve both the work-region and transcript scroll offsets within 2 CSS px for at least 1 second. Only a new foreground turn, a session switch, or an explicit Jump to latest action may resume transcript following |
+| MCX-051 | P0 | Single-line current action | While work is active, the work header replaces the generic running label with the latest safe reasoning/tool action in one ellipsized line. Step changes update that line in place. A restrained gradient text treatment is the sole continuous motion owner and is disabled under reduced motion. Terminal work stops the gradient, uses the terminal label, omits reasoning rows, places a failure/outcome summary after expanded activity detail, and leaves the final assistant summary as the turn's last substantive content |
+| MCX-052 | P0 | Desktop root scroll containment | `html`, `body`, `#root`, and the application shell never become scroll containers or expose WebView rubber-band movement. Trackpad/wheel input over non-scrollable blank chrome leaves the document at offset zero. Transcript, sidebar, settings, and bounded work-detail containers remain independently scrollable and stop overscroll chaining at their boundaries |
 
 ### 14.3 Requirement-to-case traceability
 
@@ -1292,7 +1294,7 @@ days for one engineer:
 |---:|---|---|---|---:|
 | 1 | Add product-turn projection invariants and presentation selector | MCX-029/031 fail against current stage/action output | Projector/selectors plus golden fixtures | 1-2 days |
 | 2 | Replace heuristic stream ownership | MCX-030 fails for short/tool-interleaved streams | Stable `AssistantResponse` and deletion of word gate | 1 day |
-| 3 | Replace model-stage timeline | MCX-032-034 fail against eight-call fixture | Work summary, reasoning/tool disclosures, Inspector-only telemetry | 1-2 days |
+| 3 | Replace model-stage timeline | MCX-032-034 fail against eight-call fixture | Current-action summary, tool disclosures, Inspector-only telemetry | 1-2 days |
 | 4 | Correct hierarchy, mode context, narrow layout, and motion | MCX-035-037/039 visual and semantic failures | Tokenized EN/ZH UI at both themes and target widths | 1-2 days |
 | 5 | Remove superseded code and run release reviews | MCX-026 plus grep/import failures | No legacy stage UI/selectors/styles/copy; full gate evidence | 1 day |
 
@@ -1400,27 +1402,11 @@ not only the corrective C0–C4 subset.
   verification must send these shapes through the decoder and open a delegated command's
   details in the production GUI; invalid field types must still be rejected. This correction
   changes no ADK/HaaS API, event producer, permission, persistence, or logging contract.
-- **Navigation:** A labeled conversation Find control and Cmd/Ctrl+F search the current
-  conversation, including unmounted historical turns. Plain text search is case-insensitive,
-  does not execute regex, and searches visible user/assistant prose rather than private evidence.
-  Next/previous match and turn controls use stable turn/row identity, mount only the target
-  virtual window, and explicitly suspend automatic following. Escape closes Find and restores
-  focus without stopping execution. Empty/no-result states retain the current reading position.
-  Session changes clear search state. Jump to latest remains the explicit way to resume following.
-  Find and turn controls occupy a dedicated row outside the transcript scroll viewport, aligned
-  to its reading measure. They never paint over prose, links, selection, or the Composer while
-  reading long replies, searching, or resizing. Opening Find may resize that row but cannot
-  obscure the selected result. MCX-027 regression checks scroll a long reply and open/close Find
-  in light/dark themes at 390/1440 CSS px; toolbar bounds must remain outside the scroll viewport,
-  the matched text must be visible, and Escape must restore focus. Implement this as a shell
-  layout slot using the existing navigation state owner, then verify search/virtualization and
-  visual baselines. This layout correction changes no command, event, persistence, permission,
-  ADK, HaaS, artifact, or container contract and adds no logging.
-  While Find is open, its index also consumes current public live-response text through a narrow
-  store subscription; private reasoning/tool evidence remains excluded. Selecting text in a
-  virtual historical row pins only that row in the virtual range until browser selection is
-  collapsed or leaves the timeline. Scrolling cannot unmount the selection owner, and the extra
-  pinned row remains inside MCX-020's 200-row bound.
+- **Navigation:** MCX-027's conversation-local Find and previous/next controls are retired by
+  MCX-049. Cmd/Ctrl+F remains browser/WebView-native, while global session search remains the
+  product-owned search surface. Selecting text in a virtual historical row pins only that row in
+  the virtual range until browser selection is collapsed or leaves the timeline. Scrolling cannot
+  unmount the selection owner, and the extra pinned row remains inside MCX-020's 200-row bound.
 - **Semantic context:** User rows and Composer share typed context references for selected skills,
   staged files, and referenced sessions. Labels never contain provider framing. Copy uses the
   human-readable label; Open delegates only to existing authorized file/session/skill actions.
@@ -1449,7 +1435,7 @@ passes. ADK, public HaaS events, artifact permissions, and container variants re
 
 [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md) owns
 project grouping, workspace/execution-target draft context, Git branch controls, and native window
-chrome. This component continues to own the one chronological TurnWork projection and inline
-ActivityInspector. Project surfaces may open that owner but MUST NOT render a second command detail
+chrome. This component continues to own the chronological tool-activity projection, transient
+current-action summary, and inline ActivityInspector. Project surfaces may open that owner but MUST NOT render a second command detail
 surface. Accepted project/workspace/endpoint identities are inputs to a conversation, not facts
 inferred from transcript content.

@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { selectConversationPresentation } from "../model/presentation";
 import type { ConversationTurn } from "../model/types";
 import { CLOSED_WORK, TurnWork } from "./TurnWork";
@@ -83,15 +83,91 @@ it("expands command details inline under the selected work row", () => {
     [...work.querySelectorAll("[data-work-segment]")].map((element) =>
       element.getAttribute("data-work-segment"),
     ),
-  ).toEqual(["reasoning", "tool", "reasoning"]);
+  ).toEqual(["tool"]);
   expect(within(work as HTMLElement).getByTestId("activity-inspector")).toBeTruthy();
   expect(within(work as HTMLElement).getByText("workspace/")).toBeTruthy();
-  const reasoning = within(work as HTMLElement).getAllByRole("button", {
-    name: "Reasoning",
-  });
-  fireEvent.click(reasoning[0]);
-  expect(within(work as HTMLElement).getByText("Before")).toBeTruthy();
-  expect(within(work as HTMLElement).queryByText("After")).toBeNull();
+  expect(within(work as HTMLElement).queryByRole("button", { name: "Reasoning" })).toBeNull();
+});
+
+it("replaces the running label with the latest action and restores the terminal label", () => {
+  const runningPresentation = selectConversationPresentation({ phase: "running" });
+  const view = render(
+    <TurnWork
+      turn={{
+        ...turn,
+        phase: "running",
+        work: { ...turn.work, segments: [turn.work.segments[0]] },
+      }}
+      presentation={runningPresentation}
+      disclosure={CLOSED_WORK}
+      onDisclosure={() => {}}
+    />,
+  );
+
+  const summary = screen.getByTestId("work-summary");
+  expect(summary.textContent).toContain("Before");
+  expect(summary.querySelector(".work-summary-label")?.classList.contains("is-active")).toBe(true);
+
+  view.rerender(
+    <TurnWork
+      turn={{
+        ...turn,
+        phase: "running",
+        work: { ...turn.work, segments: turn.work.segments.slice(0, 2) },
+      }}
+      presentation={runningPresentation}
+      disclosure={CLOSED_WORK}
+      onDisclosure={() => {}}
+    />,
+  );
+  expect(summary.textContent).toContain("pwd");
+
+  view.rerender(
+    <TurnWork
+      turn={turn}
+      presentation={selectConversationPresentation({ phase: "completed" })}
+      disclosure={{ ...CLOSED_WORK, work: true }}
+      onDisclosure={() => {}}
+    />,
+  );
+  expect(summary.textContent).toContain("Completed");
+  expect(summary.querySelector(".work-summary-label")?.classList.contains("is-active")).toBe(false);
+  expect(screen.queryByRole("button", { name: "Reasoning" })).toBeNull();
+});
+
+it("shows only the latest reasoning sentence in the running action label", () => {
+  render(
+    <TurnWork
+      turn={{
+        ...turn,
+        phase: "running",
+        work: {
+          ...turn.work,
+          activities: [],
+          segments: [
+            {
+              segmentId: "reason-live",
+              kind: "reasoning",
+              state: "running",
+              safeTitle: "conversation.reasoning",
+              activityRefs: [],
+              text: "Weighing options. Comparing tradeoffs.",
+            },
+          ],
+        },
+      }}
+      presentation={selectConversationPresentation({ phase: "running" })}
+      disclosure={CLOSED_WORK}
+      onDisclosure={() => {}}
+    />,
+  );
+
+  expect(screen.getByTestId("work-summary").textContent).toContain(
+    "Comparing tradeoffs.",
+  );
+  expect(screen.getByTestId("work-summary").textContent).not.toContain(
+    "Weighing options.",
+  );
 });
 
 it("uses the command as the only collapsed label and reveals its complete value inline", () => {
@@ -125,6 +201,46 @@ it("uses the command as the only collapsed label and reveals its complete value 
   expect(screen.queryByText("Ran a command")).toBeNull();
   fireEvent.click(row);
   expect(screen.getByText(`$ ${command}`)).toBeTruthy();
+});
+
+it("does not move a terminal transcript when inline activity detail opens", async () => {
+  const original = Element.prototype.scrollIntoView;
+  const scrollIntoView = vi.fn();
+  Object.defineProperty(Element.prototype, "scrollIntoView", {
+    configurable: true,
+    value: scrollIntoView,
+  });
+  try {
+    function Subject() {
+      const [disclosure, setDisclosure] = useState({
+        ...CLOSED_WORK,
+        work: true,
+      });
+      return (
+        <TurnWork
+          turn={turn}
+          presentation={selectConversationPresentation({ phase: "completed" })}
+          disclosure={disclosure}
+          onDisclosure={setDisclosure}
+        />
+      );
+    }
+
+    render(<Subject />);
+    fireEvent.click(screen.getByRole("button", { name: /pwd/i }));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  } finally {
+    if (original) {
+      Object.defineProperty(Element.prototype, "scrollIntoView", {
+        configurable: true,
+        value: original,
+      });
+    } else {
+      delete (Element.prototype as Partial<Element>).scrollIntoView;
+    }
+  }
 });
 
 it("keeps failed activity hidden while work is collapsed", () => {
@@ -168,6 +284,31 @@ it("keeps failed activity hidden while work is collapsed", () => {
 
   expect(screen.queryByText(/sed -n/)).toBeNull();
   expect(screen.getByText("Read failed")).toBeTruthy();
+});
+
+it("places a terminal failure summary after expanded activity history", () => {
+  const failedTurn: ConversationTurn = {
+    ...turn,
+    phase: "failed",
+    work: {
+      ...turn.work,
+      segments: [turn.work.segments[1]],
+      activities: [{ ...turn.work.activities[0], status: "failed" }],
+    },
+    outcome: { phase: "failed", safeReason: "Command failed" },
+  };
+  render(
+    <TurnWork
+      turn={failedTurn}
+      presentation={selectConversationPresentation({ phase: "failed" })}
+      disclosure={{ ...CLOSED_WORK, work: true }}
+      onDisclosure={() => {}}
+    />,
+  );
+
+  const row = screen.getByRole("button", { name: /pwd/i });
+  const summary = screen.getByTestId("activity-task-error");
+  expect(row.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
 it("renders non-command activity with one primary label and no category subtitle", () => {

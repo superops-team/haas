@@ -216,7 +216,7 @@ describe("New session button", () => {
   });
 });
 
-describe("Project navigation management (MPW-022 through MPW-035)", () => {
+describe("Project navigation management (MPW-022 through MPW-039)", () => {
   const project: ProjectSummary = {
     projectId: "prj-haas",
     canonicalKey: "/repos/haas",

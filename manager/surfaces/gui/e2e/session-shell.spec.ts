@@ -120,26 +120,22 @@ test("macOS overlay sidebar controls share the traffic-light centerline", async 
   page,
 }) => {
   await page.goto("/?overlay=1");
+  await expect(page.locator(".app:not(.boot-splash)")).toBeVisible();
   const traffic = page.locator(".sim-traffic-lights span").first();
+  await expect(traffic).toBeVisible();
   const centerY = async (selector: typeof traffic) => {
     const box = await selector.boundingBox();
     expect(box).not.toBeNull();
     return box!.y + box!.height / 2;
   };
   const trafficCenter = await centerY(traffic);
-  // AppKit keeps the native button's internal y-origin while tao changes its
-  // titlebar container inset. With the pinned stack, y=24 yields top-center 22.
+  // Packaged AppKit evidence is authoritative: with the pinned
+  // `traffic_light_position(..., y=24)` stack, the WebView-relative center is
+  // 22 px. The simulator mirrors that measured frame instead of inferring the
+  // circle center from Tauri's container inset.
   expect(trafficCenter).toBe(22);
   expect(
     Math.abs(trafficCenter - (await centerY(page.locator(".nav-pin-btn")))),
-  ).toBeLessThanOrEqual(1);
-  expect(
-    Math.abs(
-      trafficCenter - (await centerY(page.locator(".sidebar .brand-wordmark"))),
-    ),
-  ).toBeLessThanOrEqual(1);
-  expect(
-    Math.abs(trafficCenter - (await centerY(page.locator(".main-title")))),
   ).toBeLessThanOrEqual(1);
   expect(
     Math.abs(

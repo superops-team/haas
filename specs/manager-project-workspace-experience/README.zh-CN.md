@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-状态：MPW-022 至 MPW-037 已实施；等待 owner 视觉验收
+状态：MPW-022 至 MPW-039 已实施；等待 owner 视觉验收
 最近评审：2026-09-28
 Change ID：`manager-project-workspace-experience`
 相关规格：[Manager 对话体验](../manager-conversation-experience/README.zh-CN.md)、[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager 产品身份](../manager-product-identity/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Stores](../stores/README.zh-CN.md)、[安全边界](../security-boundary/README.zh-CN.md)
@@ -89,7 +89,7 @@ harness 原生协议。
 7. 用户打开 project 尾部 overflow menu，执行 pin、edit、Finder reveal、创建永久
    worktree、归档 conversation 或从 active sidebar 移除，不删除数据。
 8. 用户打开 project section overflow menu 修改 project/conversation order；设置在 restart
-   后保留，pinned 与 active work 优先级不变。
+   后保留。Pinned project 保持优先，而 selection 只改变 active 样式与 expansion，不移动 project row。
 
 ## 4. 上下游关系
 
@@ -471,12 +471,13 @@ Remote workspace 的 `canonicalKey` 是
 - Section organization menu 拥有两个 submenu，并有 `Archived projects`，用于列出隐藏项目并
   原样恢复，不重建记录。Project order 支持 Manual、Recent activity 和 Name；
   Conversation order 支持 Recent update、Oldest update 和 Name。Pinned project/conversation 始终领先；
-  active/running work 在其余 conversation 中领先。Manual project movement 作为 project menu 中的
+  selection 与 liveness 只是展示状态，不得覆盖已选 conversation order。Manual project movement 作为 project menu 中的
   Move up/Move down，并在 server 持久化。
-- Project sort 必须确定：pinned explicit project 优先，其次为 active explicit project，然后按
-  已选 mode；tie 使用 persisted manual position，最后用 `projectId`。Personal 始终是最后一个
-  active group，且不参与 pin/reorder/archive。Conversation sort 先 pinned，再 active/running，
-  再按已选 mode；tie 使用 normalized `updated_at` 降序，最后用 `session_id`。Recent
+- Project sort 必须确定：pinned explicit project 优先，然后按已选 mode；tie 使用
+  persisted manual position，最后用 `projectId`。选择 project 不参与排序，因此不得移动其 row。Personal 始终是最后一个
+  active group，且不参与 pin/reorder/archive。Conversation sort 先 pinned，再按已选 mode；tie
+  使用 normalized `updated_at` 降序，最后用 `session_id`。选择 conversation 只改变 active 样式与
+  context；liveness transition 可以改变状态装饰，但 liveness 本身不是 sort key。Recent
   project activity 为所属 unarchived conversation 的最大 `updated_at`，没有时 fallback 到
   project `updatedAtMs`。
 - Conversation 在项目内按已选 stable order 排序，同一 session 只出现一次。
@@ -743,6 +744,8 @@ project name、branch、path、command、output 或 endpoint URL。
 | MPW-035 | P0 | 点击 project row 或 project hover card 的铅笔会且仅会创建一个绑定到该 Project 的 fresh conversation，不打开 Edit Project，也不改变 expansion；Project `...` menu 保持唯一 Edit project 入口，并具备正确 accessible name 与 keyboard path |
 | MPW-036 | P0 | 每个 Manager full-page surface——Settings、AI助手、Inbox、Automations list/detail、Connectors、Audit 与 persona detail——都提供与 conversation surface 一致的 native drag affordance。空白/title 区启动 native drag，双击只执行一次 maximize/restore；button、link、input、menu、可选文本与 scrollbar 保持 no-drag。Browser overlay check 与 packaged macOS movement/maximize 覆盖全部 surface family |
 | MPW-037 | P0 | 每个折叠 TurnWork activity row，无论 command/read/search/file/tool kind，都严格使用一条不换行视觉行：icon/status/disclosure 固定在两端，primary safe summary 按可用宽度 ellipsis；category metadata 不生成第二行。点击后由唯一 inline detail owner 展示完整 safe summary/command 与 bounded evidence；mixed kind 在双主题 390/760/1440 px 下保持行高与对齐一致 |
+| MPW-038 | P0 | 选择 project 只改变 active 样式、expansion 与 conversation context，绝不改变 project row 顺序。Pinned project 仍优先；Manual/Recent/Name 在依次选择每个 project 前后均保持稳定，包括相同 sort key 的 tie 场景 |
+| MPW-039 | P0 | 选择任一 conversation 只改变 active 样式与 conversation context，并保持其所属 project 下所有 conversation 的 DOM 顺序。Pinned 是唯一优先层；Recent/Oldest/Name 与确定性 tie-breaker 不因 selection 或 liveness 装饰改变。点击前、点击后、reload 后，以及另一行显示 working 期间，只要所选排序字段本身未变化，顺序必须一致 |
 
 要求执行：
 

@@ -1307,6 +1307,9 @@ export function App() {
           break;
         }
         case "tool_proposed":
+          // A tool proposal starts a new visible action. Do not keep the preceding
+          // reasoning text as the current-action label while the tool is running.
+          setReasoningStream("");
           if (d.name === "todo_write" && (d.arguments?.todos || d.arguments?.items))
             setTodo(normalizeTodos(d.arguments.todos ?? d.arguments.items));
           setItems((p) => {
@@ -1790,7 +1793,7 @@ export function App() {
       if (
         target instanceof Element &&
         target.closest(
-          ".work-summary, .reasoning-toggle, .work-tool, .work-evidence",
+          ".work-summary, .work-tool, .work-evidence",
         )
       )
         disableFollowing();

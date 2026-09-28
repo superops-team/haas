@@ -44,16 +44,19 @@ const session = (
 });
 
 describe("project navigation ordering", () => {
-  it("keeps pinned then active ahead of the selected mode and Personal last", () => {
+  it("orders pinned projects before the selected name order and Personal last", () => {
     const projects = [
       project("prj_personal", "Personal", 0),
       project("prj_z", "Zulu", 1),
       project("prj_a", "Alpha", 2),
       project("prj_pinned", "Pinned", 3, true),
     ];
-    expect(
-      sortProjects(projects, [], "prj_z", "name").map((item) => item.projectId),
-    ).toEqual(["prj_pinned", "prj_z", "prj_a", "prj_personal"]);
+    expect(sortProjects(projects, [], "name").map((item) => item.projectId)).toEqual([
+      "prj_pinned",
+      "prj_a",
+      "prj_z",
+      "prj_personal",
+    ]);
   });
 
   it("uses unarchived session activity for recent project order", () => {
@@ -65,22 +68,32 @@ describe("project navigation ordering", () => {
         archived: true,
       }),
     ];
-    expect(sortProjects(projects, sessions, undefined, "recent")[0].projectId).toBe(
+    expect(sortProjects(projects, sessions, "recent")[0].projectId).toBe(
       "prj_b",
     );
   });
 
-  it("orders conversations by pinned, active, selected mode and stable id", () => {
+  it("keeps selection and liveness out of pinned, selected-mode, and stable-id ordering", () => {
     const sessions = [
       session("b", "prj", "2026-02-01T00:00:00Z"),
       session("a", "prj", "2026-02-01T00:00:00Z"),
       session("active", "prj", "2026-01-01T00:00:00Z"),
+      session("working", "prj", "2025-06-01T00:00:00Z", {
+        liveness: "working",
+      }),
       session("pinned", "prj", "2025-01-01T00:00:00Z", { pinned: true }),
     ];
-    expect(
-      sortProjectSessions(sessions, "active", "recent").map(
-        (item) => item.session_id,
+    const withWorking = sortProjectSessions(sessions, "recent").map(
+      (item) => item.session_id,
+    );
+    const withoutWorking = sortProjectSessions(
+      sessions.map((item) =>
+        item.session_id === "working" ? { ...item, liveness: "idle" } : item,
       ),
-    ).toEqual(["pinned", "active", "a", "b"]);
+      "recent",
+    ).map((item) => item.session_id);
+
+    expect(withWorking).toEqual(["pinned", "a", "b", "active", "working"]);
+    expect(withoutWorking).toEqual(withWorking);
   });
 });
