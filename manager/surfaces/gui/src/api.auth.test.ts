@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { getHealth, Session } from "./api";
+import { getHealth, getSessionMessages, Session } from "./api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -35,4 +35,20 @@ it("authenticates REST and session WebSocket calls with the launch token", async
   const session = new Session("s1", "/workspace", "code", { onEvent: vi.fn() });
   const socket = (session as unknown as { ws: FakeWebSocket }).ws;
   expect(socket.protocols).toEqual(["openworker", "launch-token"]);
+});
+
+it("rejects a failed session-history response instead of treating it as empty", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      new Response(JSON.stringify({ error: "unavailable" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ),
+  );
+
+  await expect(getSessionMessages("session-1")).rejects.toThrow(
+    "Unable to load conversation history.",
+  );
 });

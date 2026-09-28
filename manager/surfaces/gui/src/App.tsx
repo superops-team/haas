@@ -117,6 +117,10 @@ import { LiveProjectionStore } from "./conversation/store/liveProjectionStore";
 import { selectConversationPresentation, type ExecutionState } from "./conversation/model/presentation";
 import { ConversationView } from "./conversation/components/ConversationView";
 import {
+  SessionHistoryTransition,
+  type SessionHistoryPhase,
+} from "./conversation/components/SessionHistoryTransition";
+import {
   deleteConversationDraft,
   conversationDraftScopeKey,
   pruneOrphanedConversationDrafts,
@@ -333,6 +337,10 @@ export function App() {
   const [taskPhase, setTaskPhase] = useState<string | undefined>();
   const [taskOutcome, setTaskOutcome] = useState<TaskOutcome | undefined>();
   const [sessionId, setSessionId] = useState<string>(newId());
+  const [sessionHistory, setSessionHistory] = useState<{
+    sessionId: string;
+    phase: SessionHistoryPhase;
+  }>({ sessionId, phase: "ready" });
   const activeSessionIdRef = useRef(sessionId);
   activeSessionIdRef.current = sessionId;
   const sessionLoadGenerationRef = useRef(0);
@@ -987,6 +995,11 @@ export function App() {
   // (re)connect when workspace, session, or agent changes
   useEffect(() => {
     if (booting) return; // wait until boot/resume settles the session before connecting
+    if (
+      sessionHistory.sessionId === sessionId &&
+      sessionHistory.phase === "loading"
+    )
+      return; // history is the activation barrier; do not let live events race its replace
     if (gatesWorkspace(agent) && !workspace) return; // Code needs a folder (gate handles it)
     const connectionGeneration = ++sessionConnectionGenerationRef.current;
     const handleEvent = (ev: WsEvent) => {
@@ -1707,6 +1720,7 @@ export function App() {
     workspaceBindingId,
     endpointId,
     remoteWorkspaceRef,
+    sessionHistory,
   ]);
 
   // Stream-following (FB-004): auto-scroll only while the user is AT the bottom, so scrolling
@@ -2273,8 +2287,42 @@ export function App() {
     [sessions],
   );
   const openSessionFromInbox = (sid: string, ws: string, ag: string) => selectSession(sid, ws, ag);
-  const selectSession = async (id: string, ws: string, ag: string) => {
+  const loadSessionHistory = async (id: string, loadGeneration: number) => {
+    try {
+      const messages = await getSessionMessages(id);
+      if (
+        loadGeneration !== sessionLoadGenerationRef.current ||
+        activeSessionIdRef.current !== id
+      )
+        return;
+      conversationStore.replaceSession(id, itemsFromMessages(messages));
+      setUsage(usageFromMessages(messages));
+      setSessionHistory({ sessionId: id, phase: "ready" });
+    } catch {
+      if (
+        loadGeneration !== sessionLoadGenerationRef.current ||
+        activeSessionIdRef.current !== id
+      )
+        return;
+      setSessionHistory({ sessionId: id, phase: "error" });
+    }
+  };
+  const beginSessionHistoryLoad = (id: string): number => {
     const loadGeneration = ++sessionLoadGenerationRef.current;
+    conversationStore.activateSession(id);
+    setUsage(emptyUsage());
+    setSessionHistory({ sessionId: id, phase: "loading" });
+    setConnected(false);
+    setSessionId(id);
+    return loadGeneration;
+  };
+  const retrySessionHistory = () => {
+    const loadGeneration = ++sessionLoadGenerationRef.current;
+    setSessionHistory({ sessionId, phase: "loading" });
+    setConnected(false);
+    void loadSessionHistory(sessionId, loadGeneration);
+  };
+  const selectSession = async (id: string, ws: string, ag: string) => {
     setSurface("session"); // selecting a conversation always returns to the conversation view
     setTodo([]);
     setStreaming("");
@@ -2298,20 +2346,11 @@ export function App() {
     setWorkspaceBindingId(selected?.workspaceBindingId || null);
     setEndpointId(selected?.endpointId || "hep_local_managed");
     setRemoteWorkspaceRef(selected?.remoteWorkspaceRef || null);
-    setSessionId(id);
-    try {
-      const messages = await getSessionMessages(id);
-      if (loadGeneration !== sessionLoadGenerationRef.current) return;
-      conversationStore.replaceSession(id, itemsFromMessages(messages));
-      setUsage(usageFromMessages(messages));
-    } catch {
-      if (loadGeneration !== sessionLoadGenerationRef.current) return;
-      conversationStore.replaceSession(id, []);
-      setUsage(emptyUsage());
-    }
+    const loadGeneration = beginSessionHistoryLoad(id);
+    await loadSessionHistory(id, loadGeneration);
   };
   const switchAgent = async (name: string) => {
-    const loadGeneration = ++sessionLoadGenerationRef.current;
+    ++sessionLoadGenerationRef.current;
     setSurface("session");
     if (name === agent) return;
     setDraftFolderPicked(false); // leaving the draft — any pick belonged to it
@@ -2321,7 +2360,6 @@ export function App() {
     const target = resumeTargetForAgent(name, knownSessions);
 
     setAgent(name);
-    setItems([]);
     setUsage(emptyUsage());
     setStreaming("");
     setReasoningStream("");
@@ -2351,25 +2389,14 @@ export function App() {
       if (!gatesWorkspace(name)) setShowGate(false);
       else if (targetWorkspace) setShowGate(false);
       else setShowGate(true);
-      setSessionId(target.sessionId);
-      try {
-        const messages = await getSessionMessages(target.sessionId);
-        if (loadGeneration !== sessionLoadGenerationRef.current) return;
-        conversationStore.replaceSession(
-          target.sessionId,
-          itemsFromMessages(messages),
-        );
-        setUsage(usageFromMessages(messages));
-      } catch {
-        if (loadGeneration !== sessionLoadGenerationRef.current) return;
-        conversationStore.replaceSession(target.sessionId, []);
-        setUsage(emptyUsage());
-      }
+      const targetLoadGeneration = beginSessionHistoryLoad(target.sessionId);
+      await loadSessionHistory(target.sessionId, targetLoadGeneration);
       return;
     }
 
     const id = newId();
     ++sessionLoadGenerationRef.current;
+    setItems([]);
     const fallback = gatesWorkspace(name) ? fallbackWorkspace(inheritable, knownProjects) : "";
     if (fallback && fallback !== workspace) {
       setWorkspace(fallback);
@@ -2674,9 +2701,14 @@ export function App() {
   });
   const displayRunning = ["running", "pausing", "resuming", "stopping", "waiting"].includes(presentation.phase);
   const rightRailActive = surface === "session" && agent !== "chat" && !railHidden;
+  const activeHistoryPhase =
+    sessionHistory.sessionId === sessionId ? sessionHistory.phase : "ready";
+  const historyBlocksEmptyState =
+    items.length === 0 && activeHistoryPhase !== "ready";
   // `displayRunning` too: a mid-turn reconnect may land before any item is rebuilt — a live
   // session must show the transcript (waiting row, Stop), never the intro hero.
-  const idle = items.length === 0 && !displayRunning;
+  const idle =
+    items.length === 0 && !displayRunning && activeHistoryPhase === "ready";
   const activeTitle = activeInfo?.title || t("sidebar.new_session");
 
   const desktop = isTauri();
@@ -3110,8 +3142,13 @@ export function App() {
             <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{t(presentation.statusLabel)}</span>
             <div className="conversation-body">
             <div className="conversation-reading-pane">
+            <SessionHistoryTransition
+              phase={activeHistoryPhase}
+              hasContent={items.length > 0}
+              onRetry={retrySessionHistory}
+            />
             <div className="main-scroll" ref={scrollRef} onScroll={handleScroll}>
-              {idle ? (
+              {historyBlocksEmptyState ? null : idle ? (
                 agent === "cowork" ? (
                   <SessionIntro
                     sessionId={sessionId}
@@ -3264,7 +3301,7 @@ export function App() {
               presentation={presentation}
               onSubmissionChange={setSubmission}
               submissionResolution={submissionResolution}
-              connected={connected}
+              connected={connected && activeHistoryPhase === "ready"}
               onConnectModel={openModelSetup}
               onOpenMemory={() => openSettings("memory")}
               onConfigureVoiceInput={() => openSettings("voice")}

@@ -28,18 +28,42 @@ describe("ConversationStore", () => {
     expect(store.getSnapshot()).toBe(first);
   });
 
-  it("resets all session-scoped state when the identity changes", () => {
+  it("activates a cached session atomically and restores its scoped transcript and queue", () => {
     const store = new ConversationStore("session-1");
     store.updateItems([{ kind: "user", text: "session one" }]);
     store.replaceQueue([queued]);
 
-    store.reset("session-2");
+    expect(store.activateSession("session-2")).toBe(false);
 
     expect(store.getSnapshot()).toMatchObject({
       sessionId: "session-2",
       items: [],
       queue: [],
     });
+
+    store.updateItems([{ kind: "user", text: "session two" }]);
+    expect(store.activateSession("session-1")).toBe(true);
+    expect(store.getSnapshot()).toMatchObject({
+      sessionId: "session-1",
+      items: [{ kind: "user", text: "session one" }],
+      queue: [queued],
+    });
+  });
+
+  it("bounds inactive session projections to the five most recently activated sessions", () => {
+    const store = new ConversationStore("session-0");
+    store.updateItems([{ kind: "user", text: "zero" }]);
+    for (let index = 1; index <= 5; index += 1) {
+      store.activateSession(`session-${index}`);
+      store.updateItems([{ kind: "user", text: String(index) }]);
+    }
+
+    expect(store.activateSession("session-0")).toBe(false);
+    expect(store.getSnapshot().items).toEqual([]);
+    expect(store.activateSession("session-1")).toBe(true);
+    expect(store.getSnapshot().items).toMatchObject([
+      { kind: "user", text: "1" },
+    ]);
   });
 
   it("owns transcript writes and preserves item identity across queue-only updates", () => {

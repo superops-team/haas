@@ -231,6 +231,10 @@
     "paused": "paused"
   },
   "conversation": {
+    "history_loading": "Loading conversation…",
+    "history_refreshing": "Refreshing conversation…",
+    "history_load_failed": "Couldn't load this conversation.",
+    "history_refresh_failed": "Couldn't refresh this conversation.",
     "interaction": {
       "label": "Action required"
     },

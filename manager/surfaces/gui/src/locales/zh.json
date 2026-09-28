@@ -229,6 +229,10 @@
     "paused": "已暂停"
   },
   "conversation": {
+    "history_loading": "正在加载会话…",
+    "history_refreshing": "正在刷新会话…",
+    "history_load_failed": "无法加载此会话。",
+    "history_refresh_failed": "无法刷新此会话。",
     "interaction": {
       "label": "需要处理"
     },

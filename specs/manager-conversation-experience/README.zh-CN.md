@@ -2,8 +2,8 @@
 
 [English](README.md) | **简体中文**
 
-状态：MCX-001 至 MCX-052 已实施；等待 owner 视觉验收
-最近评审：2026-09-28
+状态：MCX-001 至 MCX-053 已实施；等待 owner 视觉验收
+最近评审：2026-09-29
 Change ID：`manager-conversation-interaction-v2`
 相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Manager GUI Performance](../manager-gui-performance/README.zh-CN.md)、[Event Log & SSE](../event-log-sse/README.zh-CN.md)、[Session Runtime](../session-runtime/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
 
@@ -181,6 +181,7 @@ P0、P1、P2 表示实现顺序，不表示可选范围。
 | MCX-R16 Canonical lifecycle presentation | P0 | Timeline、header、loading、interaction dock 与 Composer action 使用同一 selector，不能互相矛盾 |
 | MCX-R17 安全 work disclosure | P0 | Work 默认紧凑；最新 reasoning/tool action 使用一条安全短暂文案，tool detail 与 telemetry 使用有界语义 disclosure |
 | MCX-R18 动效与密度纪律 | P1 | 每个状态只有一个动画 owner；稳定几何、semantic token 与可度量信息密度共同约束页面 |
+| MCX-R19 Session activation 完整性 | P0 | 选择已有 session 时原子激活其 identity 与有界缓存 projection，再与权威 history 对账；绝不能展示新会话 empty state，也不能让过期 response 覆盖当前 session |
 
 ## 5. 信息架构与响应式布局
 
@@ -222,6 +223,8 @@ DOM 与视觉顺序为：header context、durable timeline、current live tail�
 | 状态 | 主要可见表现 | 主要动作 | 次级详情 |
 |---|---|---|---|
 | empty/idle | 聚焦 prompt 与三条任务相关建议 | Send | Header 或 composer control 中的 harness/model/workspace |
+| 切换 session，cache hit | 立即显示目标 session 最近一次 canonical projection，同时刷新权威 history | Composer 等待目标 history 与 socket barrier | 一个不改变布局的克制刷新状态 |
+| 切换 session，cache miss | Conversation measure 内显示有界加载 skeleton；绝不展示新会话 prompt | Composer 等待目标 history 与 socket barrier | History 加载失败时提供可重试安全错误 |
 | submitting | 冻结用户意图，composer dock 显示 `Submitting` | 仅在安全时停止等待 | 不展示 optimistic success 或伪造 turn |
 | running | 一个紧凑 activity summary 与 live tail | Stop；仅 capability 可用时展示 Pause | 展开当前工作或打开 evidence |
 | waiting for user | Interaction Dock 替代活动 composer control surface | 与决策对应的动作 | 有界详情与后续 request 数量 |
@@ -890,6 +893,7 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-050 | P0 | 终态 disclosure 滚动所有权 | 在 completed、failed、cancelled 或 paused turn 中展开 activity、evidence 或 work disclosure 时，不得调度 `scrollIntoView`，也不得重新开启 transcript auto-follow。用户将有界 work 区域滚到任意位置后，延迟详情渲染与父级重渲染在至少 1 秒内必须使 work 区域与 transcript 滚动偏移都保持在 2 CSS px 内。只有新的前台 turn、session 切换或用户显式点击 Jump to latest 才可恢复 transcript following |
 | MCX-051 | P0 | 单行当前动作 | Work 活跃时，work header 用最新的安全 reasoning/tool action 替换通用的“执行中”，严格保持一行 ellipsis；step 切换时在原位更新。克制的渐变文字是唯一持续 motion owner，reduced-motion 下禁用动画。Work 进入终态后停止渐变，恢复 terminal label，不显示 reasoning row，失败/outcome summary 放在展开 activity 详情之后，并让最终 assistant summary 成为 turn 最后一段实质内容 |
 | MCX-052 | P0 | Desktop 根滚动隔离 | `html`、`body`、`#root` 与 application shell 不得成为滚动容器，也不得出现 WebView rubber-band 位移。在非滚动空白 chrome 上使用双指/wheel 时 document 偏移始终为零。Transcript、sidebar、settings 与有界 work-detail 区域仍各自可滚动，并在边界停止 overscroll chaining |
+| MCX-053 | P0 | 原子 session 内容激活 | 选择已有 session 时，如存在缓存，必须同步激活该 session 的 canonical transcript，再通过 `GET /v1/sessions/{id}/messages` 刷新。Cache miss 只渲染一个有界的“正在加载会话”状态，且新会话 Hero/Setup surface 数量为零。目标 history 与 socket 未 ready 前 Composer 不得提交。快速 `A -> B -> A` 切换必须忽略过期 response，并从最多保留五个 session projection 的有界 MRU cache 立即恢复 A；refresh 失败时保留缓存内容，或展示唯一安全 retry state，且不得清空其他 session |
 
 ### 14.3 需求到用例追溯
 
@@ -913,6 +917,7 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-R16 | MCX-011、MCX-012、MCX-031、MCX-039、MCX-047 |
 | MCX-R17 | MCX-023、MCX-029、MCX-032、MCX-033、MCX-034、MCX-046 |
 | MCX-R18 | MCX-016、MCX-018、MCX-019、MCX-035、MCX-036、MCX-037、MCX-045 |
+| MCX-R19 | MCX-004、MCX-009、MCX-010、MCX-012、MCX-020、MCX-053 |
 
 ### 14.4 命令
 
@@ -955,6 +960,7 @@ Packaged desktop 证据使用 `manager/packaging/build_dmg.sh` 与 `manager/pack
 | 9 | 切换 interaction dock/composer | 统一 pending state 与稳定输入 | MCX-011/014/015 | 5-8 |
 | 10 | 切换 product-turn component | Turn/work/reasoning/tool/response/completion/inspector；无 model-call card | MCX-009/012/013/023/029-034 | 3,5 |
 | 11 | 增加 virtualization/稳定 live tail | 有界 history、first-delta response owner 与 scroll anchoring | MCX-020-022/030/038 | 10 |
+| 11a | 增加原子 session activation | 有界 per-session MRU projection cache、显式 loading/error state、stale-request guard 与 cached refresh | MCX-004/010/020/053 | 3,11 |
 | 12 | 增加 conversation navigation 与 semantic context | Search/turn navigation 与 typed context chip | MCX-027/028 | 10-11 |
 | 13 | Responsive、hierarchy 与 motion polish | 全目标宽度/主题的 Focused Workbench | MCX-016/018/019/024/035-037/039/045 | 9-12 |
 | 14 | 删除 legacy | 移除旧 owner、stream heuristic、model-stage UI/CSS/copy、过时 test 与 migration flag | MCX-026/030/031 | 2-13 |
@@ -995,6 +1001,7 @@ Task 1 完成后，Task 2-4 可拆成小提交。Task 5 是完成的必要条件
 | 组件 | 影响 | 必须动作 | 兼容结论 |
 |---|---|---|---|
 | Manager GUI Performance | 新 projection/selector、virtual history 与 component boundary | 扩展 profiler、DOM、scroll 与 bundle gate | 保留现有 budget，要求更严格 |
+| Conversation Store | Session switch 当前会在 history 返回前清空唯一 snapshot | 增加最多五个 session 的有界 MRU projection cache 与显式 activation result；仍保持单一 active writer | 仅内部 GUI state；不改变持久 schema 或协议 |
 | Manager HaaS Sidecar Backend | 带 ACK command、queue persistence、normalized projection 与仅供 evidence 的 model-call correlation | 增加内部 command receipt；投影 product turn/work；停止把 model stage 当作 GUI row | HaaS public protocol 不变；内部 GUI snapshot 可随 packaged asset 原子升级 |
 | Manager Delegation | Durable local send queue 变为可见可操作 | 保留 policy-application gate 与 accepted invocation 语义 | 澄清现有 delegation 合同，不削弱 |
 | Event Log & SSE | 提供 canonical correlation 与 replay fact | 复用现有 event/turn/invocation/tool id；进入 GUI projection 前分类 user-visible assistant text | 初始 cutover 不需要新 public event；不向 northbound 泄漏 model-native event |
@@ -1019,6 +1026,7 @@ Task 1 完成后，Task 2-4 可拆成小提交。Task 5 是完成的必要条件
 | 折叠 work 隐藏可操作 failure | Active interaction 与第一个可操作 failure 保持在默认折叠的成功详情之外 |
 | 删除 stage UI 降低诊断能力 | Model-call correlation、per-call usage 与有界原始 evidence 保留在 Inspector/diagnostics，不进入主 timeline |
 | Stable answer DOM 与 virtualization 冲突 | Active turn 留在非虚拟 live tail，完成时原子封存进 history |
+| 缓存 history 过期或内存无界增长 | Cache 只负责即时展示，始终向权威 history 刷新；最多保留五个 session projection，并继续使用 request generation 丢弃过期 response |
 
 以下事项推迟到独立批准的 spec：
 

@@ -13,6 +13,13 @@ export interface ConversationStoreSnapshot {
 
 type Listener = () => void;
 
+const MAX_CACHED_SESSION_PROJECTIONS = 5;
+
+type CachedSessionProjection = Pick<
+  ConversationStoreSnapshot,
+  "items" | "queue" | "queuePaused"
+>;
+
 function sameQueue(
   left: FollowUpQueueItem[],
   right: FollowUpQueueItem[],
@@ -37,6 +44,7 @@ function sameQueue(
 export class ConversationStore {
   private snapshot: ConversationStoreSnapshot;
   private listeners = new Set<Listener>();
+  private sessionCache = new Map<string, CachedSessionProjection>();
 
   constructor(sessionId: string) {
     this.snapshot = {
@@ -54,6 +62,29 @@ export class ConversationStore {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
+
+  /**
+   * Atomically switch the active projection to a previously observed session when possible.
+   * The cache is intentionally memory-only and bounded; authoritative history still refreshes
+   * after every activation.
+   */
+  activateSession(sessionId: string): boolean {
+    if (this.snapshot.sessionId === sessionId) return true;
+    this.remember(this.snapshot);
+    const cached = this.sessionCache.get(sessionId);
+    if (cached) {
+      this.sessionCache.delete(sessionId);
+      this.sessionCache.set(sessionId, cached);
+    }
+    this.publish({
+      sessionId,
+      revision: this.snapshot.revision + 1,
+      items: cached?.items ?? [],
+      queue: cached?.queue ?? [],
+      queuePaused: cached?.queuePaused ?? false,
+    });
+    return cached !== undefined;
+  }
 
   reset(sessionId: string) {
     if (this.snapshot.sessionId === sessionId) return;
@@ -80,13 +111,15 @@ export class ConversationStore {
   };
 
   replaceSession(sessionId: string, items: Item[]) {
-    this.publish({
+    const snapshot = {
       sessionId,
       revision: this.snapshot.revision + 1,
       items: normalizeHistory(items, sessionId),
       queue: [],
       queuePaused: false,
-    });
+    };
+    this.publish(snapshot);
+    this.remember(snapshot);
   }
 
   replaceQueue(items: FollowUpQueueItem[], paused = this.snapshot.queuePaused) {
@@ -106,6 +139,28 @@ export class ConversationStore {
   private publish(snapshot: ConversationStoreSnapshot) {
     this.snapshot = snapshot;
     for (const listener of this.listeners) listener();
+  }
+
+  private remember(snapshot: ConversationStoreSnapshot) {
+    if (
+      snapshot.items.length === 0 &&
+      snapshot.queue.length === 0 &&
+      !snapshot.queuePaused
+    ) {
+      this.sessionCache.delete(snapshot.sessionId);
+      return;
+    }
+    this.sessionCache.delete(snapshot.sessionId);
+    this.sessionCache.set(snapshot.sessionId, {
+      items: snapshot.items,
+      queue: snapshot.queue,
+      queuePaused: snapshot.queuePaused,
+    });
+    while (this.sessionCache.size > MAX_CACHED_SESSION_PROJECTIONS) {
+      const oldest = this.sessionCache.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.sessionCache.delete(oldest);
+    }
   }
 }
 

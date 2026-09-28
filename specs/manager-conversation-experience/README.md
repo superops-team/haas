@@ -2,8 +2,8 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: MCX-001 through MCX-052 implemented; owner visual acceptance pending
-Last reviewed: 2026-09-28
+Status: MCX-001 through MCX-053 implemented; owner visual acceptance pending
+Last reviewed: 2026-09-29
 Change ID: `manager-conversation-interaction-v2`
 Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager GUI Performance](../manager-gui-performance/README.md), [Event Log & SSE](../event-log-sse/README.md), [Session Runtime](../session-runtime/README.md), [Manager Product Identity](../manager-product-identity/README.md), [Security Boundary](../security-boundary/README.md)
 
@@ -252,6 +252,7 @@ P0, P1, and P2 define implementation order, not optional scope.
 | MCX-R16 Canonical lifecycle presentation | P0 | Timeline, header, loading, interaction dock, and Composer actions use one selector and cannot contradict |
 | MCX-R17 Safe work disclosure | P0 | Work is compact by default; the latest reasoning/tool action uses one safe transient line while tool details and telemetry use bounded semantic disclosures |
 | MCX-R18 Motion and density discipline | P1 | One animation owner per state, stable geometry, semantic tokens, and measured information density govern the surface |
+| MCX-R19 Session activation integrity | P0 | Selecting an existing session atomically activates its identity and bounded cached projection, then reconciles authoritative history without ever presenting the new-session empty state or allowing stale responses to overwrite the active session |
 
 ## 5. Information Architecture and Responsive Layout
 
@@ -303,6 +304,8 @@ interrupt the timeline's semantic heading order.
 | State | Primary visible treatment | Primary action | Secondary detail |
 |---|---|---|---|
 | empty/idle | Focused prompt and three task-relevant suggestions | Send | Harness/model/workspace in header or composer controls |
+| switching session, cache hit | Target session's last canonical projection remains visible while authoritative history refreshes | Composer waits for the target connection/history barrier | One quiet, non-layout-shifting refresh status |
+| switching session, cache miss | Bounded conversation-loading skeleton in the transcript measure; never the new-session prompt | Composer waits for the target connection/history barrier | Retryable safe error if history loading fails |
 | submitting | Frozen user intent plus `Submitting` in composer dock | Stop waiting only when safe | No optimistic success or fabricated turn |
 | running | One compact activity summary and live tail | Stop; Pause only when capability is available | Expand current work or open evidence |
 | waiting for user | Interaction Dock replaces the active composer control surface | Decision-specific action | Bounded details and queued-request count |
@@ -1193,6 +1196,7 @@ the primary timeline.
 | MCX-050 | P0 | Terminal disclosure scroll ownership | Expanding an activity, evidence, or work disclosure in a completed, failed, cancelled, or paused turn MUST NOT schedule `scrollIntoView` or re-enable transcript auto-follow. After the user scrolls the bounded work region to any position, late detail rendering and parent re-renders preserve both the work-region and transcript scroll offsets within 2 CSS px for at least 1 second. Only a new foreground turn, a session switch, or an explicit Jump to latest action may resume transcript following |
 | MCX-051 | P0 | Single-line current action | While work is active, the work header replaces the generic running label with the latest safe reasoning/tool action in one ellipsized line. Step changes update that line in place. A restrained gradient text treatment is the sole continuous motion owner and is disabled under reduced motion. Terminal work stops the gradient, uses the terminal label, omits reasoning rows, places a failure/outcome summary after expanded activity detail, and leaves the final assistant summary as the turn's last substantive content |
 | MCX-052 | P0 | Desktop root scroll containment | `html`, `body`, `#root`, and the application shell never become scroll containers or expose WebView rubber-band movement. Trackpad/wheel input over non-scrollable blank chrome leaves the document at offset zero. Transcript, sidebar, settings, and bounded work-detail containers remain independently scrollable and stop overscroll chaining at their boundaries |
+| MCX-053 | P0 | Atomic session content activation | Selecting an existing session activates that session's cached canonical transcript synchronously when available, then refreshes it from `GET /v1/sessions/{id}/messages`. A cache miss renders one bounded `Loading conversation` state and zero new-session Hero/Setup surfaces. The Composer cannot submit until the target history and socket are ready. Rapid `A -> B -> A` switching ignores stale responses, restores A immediately from a bounded MRU cache of at most five session projections, and a failed refresh retains cached content or exposes one safe retry state without clearing another session |
 
 ### 14.3 Requirement-to-case traceability
 
@@ -1216,6 +1220,7 @@ the primary timeline.
 | MCX-R16 | MCX-011, MCX-012, MCX-031, MCX-039, MCX-047 |
 | MCX-R17 | MCX-023, MCX-029, MCX-032, MCX-033, MCX-034, MCX-046 |
 | MCX-R18 | MCX-016, MCX-018, MCX-019, MCX-035, MCX-036, MCX-037, MCX-045 |
+| MCX-R19 | MCX-004, MCX-009, MCX-010, MCX-012, MCX-020, MCX-053 |
 
 ### 14.4 Commands
 
@@ -1260,6 +1265,7 @@ content only.
 | 9 | Cut over interaction dock/composer | Unified pending state and stable input | MCX-011/014/015 | 5-8 |
 | 10 | Cut over product-turn components | Turn/work/reasoning/tool/response/completion/inspector; no model-call cards | MCX-009/012/013/023/029-034 | 3,5 |
 | 11 | Add virtualization/stable live tail | Bounded history, first-delta response owner and scroll anchoring | MCX-020-022/030/038 | 10 |
+| 11a | Add atomic session activation | Bounded per-session MRU projection cache, explicit loading/error state, stale-request guard, and cached refresh | MCX-004/010/020/053 | 3,11 |
 | 12 | Add conversation navigation and semantic context | Search/turn navigation plus typed context chips | MCX-027/028 | 10-11 |
 | 13 | Responsive, hierarchy, and motion polish | Focused Workbench at all target widths/themes | MCX-016/018/019/024/035-037/039/045 | 9-12 |
 | 14 | Delete legacy | Remove old owners, stream heuristic, model-stage UI/CSS/copy, obsolete tests and migration flag | MCX-026/030/031 | 2-13 |
@@ -1307,6 +1313,7 @@ hierarchy or word-threshold stream behavior.
 | Component | Impact | Required action | Compatibility conclusion |
 |---|---|---|---|
 | Manager GUI Performance | New projection/selectors, virtual history and component boundaries | Extend profiler, DOM, scroll and bundle gates | Existing budgets remain; requirements become stricter |
+| Conversation Store | Session switch currently resets the sole snapshot before history arrives | Add a bounded five-session MRU projection cache and explicit activation result; keep one active writer | Internal GUI state only; no persisted schema or protocol change |
 | Manager HaaS Sidecar Backend | Acknowledged commands, queue persistence, normalized projection, and evidence-only model-call correlation | Add internal command receipts; project product turns/work; stop treating model stages as GUI rows | HaaS public protocol unchanged; internal GUI snapshot may change atomically with packaged assets |
 | Manager Delegation | Durable local send queue becomes visible and operable | Keep policy-application gate and accepted invocation semantics | Existing delegation contract clarified, not weakened |
 | Event Log & SSE | Supplies canonical correlation and replay facts | Reuse existing event/turn/invocation/tool ids; classify user-visible assistant text before GUI projection | No new public event required for initial cutover; no model-native event leaks northbound |
@@ -1331,6 +1338,7 @@ hierarchy or word-threshold stream behavior.
 | Collapsing work hides actionable failure | Keep the active interaction and first actionable failure outside default-collapsed successful detail |
 | Removing stage UI reduces diagnostics | Preserve model-call correlation, per-call usage, and raw bounded evidence in Inspector/diagnostics, not the primary timeline |
 | Stable answer DOM conflicts with virtualization | Keep active turn in the non-virtual live tail and atomically seal it into history |
+| Cached history becomes stale or memory grows without bound | Treat cache as immediate presentation only, always refresh from authoritative history, cap it at five session projections, and preserve request-generation rejection |
 
 Deferred until a separate approved spec:
 

@@ -500,6 +500,7 @@ export interface ConversationMessage {
 
 export async function getSessionMessages(sessionId: string): Promise<ConversationMessage[]> {
   const res = await fetch(`${httpBase()}/v1/sessions/${sessionId}/messages`);
+  if (!res.ok) throw new Error("Unable to load conversation history.");
   return (await res.json()).messages ?? [];
 }
 
