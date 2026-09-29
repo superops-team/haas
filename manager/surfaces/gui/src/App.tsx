@@ -73,6 +73,7 @@ import { fullPersonaName, isProjectScoped } from "./personaScope";
 import { baseName } from "./paths";
 import { itemsFromMessages } from "./itemsFromMessages";
 import { addTurnUsage, emptyUsage, usageFromMessages } from "./usage";
+import { normalizeHistory } from "./conversation/model/normalizeHistory";
 import {
   appendBoundedActivityText,
   canReconcileReadback,
@@ -114,6 +115,7 @@ import {
   useConversationItems,
 } from "./conversation/store/conversationStore";
 import { LiveProjectionStore } from "./conversation/store/liveProjectionStore";
+import { SessionHistoryLoader } from "./conversation/store/sessionHistoryLoader";
 import { selectConversationPresentation, type ExecutionState } from "./conversation/model/presentation";
 import { ConversationView } from "./conversation/components/ConversationView";
 import {
@@ -148,6 +150,11 @@ const AuditView = lazy(() =>
 const InboxView = lazy(() =>
   import("./components/InboxView").then((module) => ({ default: module.InboxView })),
 );
+
+interface LoadedSessionHistory {
+  items: Item[];
+  usage: SessionUsage;
+}
 const RightRail = lazy(() =>
   import("./components/RightRail").then((module) => ({ default: module.RightRail })),
 );
@@ -346,6 +353,16 @@ export function App() {
   const sessionLoadGenerationRef = useRef(0);
   const sessionConnectionGenerationRef = useRef(0);
   const [conversationStore] = useState(() => new ConversationStore(sessionId));
+  const [sessionHistoryLoader] = useState(
+    () =>
+      new SessionHistoryLoader<LoadedSessionHistory>(async (id, signal) => {
+        const messages = await getSessionMessages(id, signal);
+        return {
+          items: normalizeHistory(itemsFromMessages(messages), id),
+          usage: usageFromMessages(messages),
+        };
+      }),
+  );
   const items = useConversationItems(conversationStore);
   const setItems = conversationStore.updateItems;
   const [liveProjectionStore] = useState(() => new LiveProjectionStore());
@@ -371,6 +388,12 @@ export function App() {
     liveProjectionStore.updateModelStages(value);
   };
   useEffect(() => () => liveProjectionStore.destroy(), [liveProjectionStore]);
+  useEffect(() => () => sessionHistoryLoader.dispose(), [sessionHistoryLoader]);
+  useEffect(() => {
+    // A settled response cache is only valid until the active projection changes. The bounded
+    // ConversationStore keeps the newest UI snapshot; a later revisit still refreshes from REST.
+    sessionHistoryLoader.invalidate(sessionId);
+  }, [items, sessionHistoryLoader, sessionId]);
   const seenHaasEventsRef = useRef(new Set<string>());
   const pendingLocalRunRef = useRef(false);
   const [todo, setTodo] = useState<TodoItem[]>([]);
@@ -2289,14 +2312,14 @@ export function App() {
   const openSessionFromInbox = (sid: string, ws: string, ag: string) => selectSession(sid, ws, ag);
   const loadSessionHistory = async (id: string, loadGeneration: number) => {
     try {
-      const messages = await getSessionMessages(id);
+      const history = await sessionHistoryLoader.load(id);
       if (
         loadGeneration !== sessionLoadGenerationRef.current ||
         activeSessionIdRef.current !== id
       )
         return;
-      conversationStore.replaceSession(id, itemsFromMessages(messages));
-      setUsage(usageFromMessages(messages));
+      conversationStore.replaceSession(id, history.items);
+      setUsage(history.usage);
       setSessionHistory({ sessionId: id, phase: "ready" });
     } catch {
       if (
@@ -2307,6 +2330,17 @@ export function App() {
       setSessionHistory({ sessionId: id, phase: "error" });
     }
   };
+  const prefetchSessionHistory = useCallback(
+    (id: string) => {
+      if (id === activeSessionIdRef.current) return;
+      const request = sessionHistoryLoader.prefetch(id);
+      if (!request) return;
+      void request
+        .then((history) => conversationStore.primeSession(id, history.items))
+        .catch(() => {});
+    },
+    [conversationStore, sessionHistoryLoader],
+  );
   const beginSessionHistoryLoad = (id: string): number => {
     const loadGeneration = ++sessionLoadGenerationRef.current;
     conversationStore.activateSession(id);
@@ -2896,6 +2930,7 @@ export function App() {
         onSwitchAgent={switchAgent}
         onNewSession={startNewSession}
         onSelectSession={selectSession}
+        onPrefetchSession={prefetchSessionHistory}
         onNewProject={newProject}
         projectOrder={sidebarOrder.projectOrder}
         conversationOrder={sidebarOrder.conversationOrder}

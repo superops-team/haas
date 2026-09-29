@@ -387,6 +387,45 @@ test("selecting a conversation never changes its project row order", async ({ pa
   expect(await ids()).toEqual(before);
 });
 
+test("selecting the first conversation keeps its manually expanded project open", async ({
+  page,
+}) => {
+  await page.route(/\/v1\/sessions$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          ...projectSessions,
+          {
+            ...projectSessions[1],
+            session_id: "project-mpa",
+            title: "Inspect mpa-agent",
+            projectId: "prj_mpa",
+            workspace: "/Users/test/workspace/mpa-agent",
+            updated_at: "2026-09-25 09:00:00",
+          },
+        ],
+      }),
+    }),
+  );
+  await page.goto("/");
+
+  const project = page.getByTestId("project-row-prj_mpa");
+  const disclosure = project.locator(".project-sidebar-disclosure");
+  await expect(disclosure).toHaveAttribute("aria-expanded", "false");
+  await disclosure.click();
+  await expect(disclosure).toHaveAttribute("aria-expanded", "true");
+
+  await page
+    .getByTestId("conversation-row-project-mpa")
+    .locator(".sidebar-conversation-primary")
+    .click();
+
+  await expect(disclosure).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTestId("conversation-row-project-mpa")).toBeVisible();
+});
+
 test("new project dialog creates a remote workspace binding", async ({ page }) => {
   await page.goto("/");
   const sidebar = page.locator(".sidebar");

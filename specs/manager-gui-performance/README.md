@@ -2,8 +2,8 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: Reviewed; blockers resolved; baseline validated; hardening delta added
-Last reviewed: 2026-09-23
+Status: Reviewed; blockers resolved; cold-session activation delta implemented
+Last reviewed: 2026-09-29
 Change ID: manager-gui-performance-convergence
 Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Conversation Experience](../manager-conversation-experience/README.md), [Manager Product Identity](../manager-product-identity/README.md)
 
@@ -261,6 +261,34 @@ session/path switch -> cancelled -> loading(new_request)
 - Remote HaaS artifacts continue to offer only protocol-safe actions: preview when readable,
   download when allowed, and no local reveal/open shell-out.
 
+### P0-5: Cold-session first-content latency
+
+- The existing `GET /v1/sessions/{id}/messages` remains authoritative. On the current local data
+  set it responds in 5-18 ms for 23-126-message histories, including a 1.8 MiB response, so the
+  first optimization targets request timing and frontend work rather than adding a new backend
+  protocol prematurely.
+- Pointer intent and keyboard focus may prefetch a visible conversation. Prefetch is keyed by
+  session id, deduplicates an active request, keeps at most two requests in flight, and reuses a
+  result for five seconds. It never opens a session WebSocket or changes selection.
+- A clicked cache miss starts the same single-flight request immediately. A prefetched or recently
+  loaded result primes the bounded five-session projection cache owned by the conversation store.
+  Once that session becomes active, any transcript mutation invalidates the short-lived network
+  response cache so a later refresh cannot overwrite newer in-memory content with stale history.
+- Persisted history is normalized once at the store boundary. Transcript rendering must not create
+  another full normalized array, and a remount with the same immutable item-array identity reuses
+  its historical turn projection instead of rebuilding every turn.
+- For histories up to 500 messages, packaged-local click-to-first-content P95 is <=120 ms. The
+  production-preview fixture subtracts its explicit route-interception time and budgets <=102 ms
+  from response end to first content. For a synthetic 10,000-message history, post-response
+  projection-to-first-window is <=232 ms, mounted rows remain <=200, and no main-thread long task
+  exceeds 50 ms. Cache-hit first content is visible within two animation frames (<=32 ms at 60 Hz).
+- If the 10,000-message budget cannot be met without dropping history, an additive recent-window
+  plus cursor API is the next separately reviewed slice. Pagination is not introduced unless the
+  measured P0 client path still misses the budget.
+- The implemented production-preview baseline is 14.5 ms for a prefetched cache hit, 43.7 ms from
+  response end to first content for 500 messages, and 43.1 ms for 10,000 messages, with zero
+  observed long tasks. The measured client path meets the budget, so pagination remains deferred.
+
 ### P1-3: Complexity budget for session and artifact surfaces
 
 - Refactors must reduce risk in small, behavior-preserving slices. A change that touches
@@ -466,6 +494,7 @@ analysis, the runtime result still wins and this spec must be updated before imp
 | FV-GUI-PERF-09 | P0 | P0-4 reusable production-preview smoke | Remove or invalidate `manager/surfaces/gui/dist`, then run the stable preview smoke command | The command rebuilds or rejects stale `dist`, starts `vite preview`, runs focused Playwright, reports request/chunk/error metrics and cleans up the server | Command output, Playwright output and cleanup evidence |
 | FV-GUI-PERF-10 | P0 | P0-4 artifact viewer state resilience | Vitest renders `RightRail`, opens one artifact, delays its read, switches to another artifact/session, then resolves both success and failure paths | stale completions are ignored; failed current reads render an explicit unavailable/download-only state; remote HaaS artifacts never reveal/open locally | Vitest output and mocked API call assertions |
 | FV-GUI-PERF-11 | P1 | P1-3 complexity boundary budget | Fallow health plus focused tests for any extracted boundary touched by the change | no new large session/artifact owner is introduced without a named boundary and tests; extracted boundaries preserve observable behavior | Fallow summary, focused test output and changed-file review |
+| FV-GUI-PERF-12 | P0 | P0-5 cold-session first content | Production-preview Playwright drives uncached, prefetched, cached, rapid-switch and 10,000-message fixtures while recording transport and post-response render time separately, request concurrency, long tasks and mounted rows | packaged-local <=120 ms for <=500 messages; preview post-response <=102 ms for 500 and <=232 ms for 10,000 messages; cache hit <=32 ms; request concurrency <=2; mounted rows <=200; stale responses ignored; zero new-session Hero frames | Playwright timing/counter output without transcript content |
 
 Functional validation uses only count, timing, route label and component label evidence. It must not store prompt text, transcript content, tool arguments, credentials or signed URLs.
 
@@ -484,7 +513,8 @@ Functional validation uses only count, timing, route label and component label e
 | 9 | P0 | Add reusable production-preview smoke | Checked-in preview config/command with fresh-build guard and cleanup | FV-GUI-PERF-09 |
 | 10 | P0 | Harden artifact viewer read state | Request guard, explicit unavailable state and remote-action constraints | FV-GUI-PERF-10 |
 | 11 | P1 | Establish complexity-boundary refactor budget | Named session/transcript/artifact boundaries with tests for touched code | FV-GUI-PERF-11 |
-| 12 | P0 | Regression and release review | Browser/package evidence and required reviews | Tasks 2-11; all FV-GUI-PERF cases |
+| 12 | P0 | Optimize cold-session activation | Intent prefetch, single-flight request reuse, canonical normalization and immutable projection reuse | FV-GUI-PERF-12 |
+| 13 | P0 | Regression and release review | Browser/package evidence and required reviews | Tasks 2-12; all FV-GUI-PERF cases |
 
 Alignment review result: every P0/P1 requirement has at least one executable case, every task has
 an acceptance reference, and no task requires public API/schema changes. The first implementation
@@ -515,6 +545,7 @@ Run the cases in this order:
 | Manager Product Identity | None; the GUI remains local-first and no-login | Keep the coordinator inside the current WebView/API-client lifetime | No cloud identity or login dependency is introduced |
 | ADK and `/v1/haas/*` | None | No route or schema work in phase one | Fully unchanged |
 | Session/event projection | Live React ownership moves, canonical event ordering does not | Preserve canonical refs, terminal flush and replay parity | Additive internal refactor only |
+| Session history activation | Intent prefetch and immutable projection reuse reduce cold-switch latency | Keep history authoritative, cache at most five projections, cap prefetch concurrency at two, and record content-free timing only | Manager-local implementation only; no public API or persisted schema change |
 | Artifact viewer | Optional route loading may change; artifact protocol does not | Retain PDF/XLSX on-demand loading and first-click artifact behavior | Artifact URLs, metadata and security headers are unchanged |
 | Root development gates | GUI evidence becomes part of root release readiness | Add GUI Makefile targets and align README/skills | No runtime compatibility impact; release signal becomes stricter |
 | Production preview automation | Temporary performance scripts become a stable repo command | Add checked-in preview config/command with fresh-build guard and cleanup | No shipped code path changes |

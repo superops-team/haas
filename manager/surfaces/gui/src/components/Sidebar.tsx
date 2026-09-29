@@ -134,6 +134,7 @@ interface Props {
   onSwitchAgent: (agent: string) => void;
   onNewSession: (agent: string) => void;
   onSelectSession: (id: string, workspace: string, agent: string) => void;
+  onPrefetchSession?: (id: string) => void;
   onNewProject: (persona: string) => void;
   projectOrder?: ProjectOrder;
   conversationOrder?: ConversationOrder;
@@ -508,10 +509,12 @@ export function Sidebar(props: Props) {
   useEffect(() => setOpenKey(props.agent), [props.agent]);
   const browseKey = openKey ?? props.agent; // the persona whose sessions the body shows
 
-  // Per-project collapse + "Show more". The active workspace's folder is open by default; toggling
-  // any folder flips it (XOR). `projShowAll` lifts the peek cap for a given folder;
+  // Per-project expansion + "Show more". An explicit choice remains stable when the active
+  // conversation changes. `projShowAll` lifts the peek cap for a given folder;
   // `personaShowAll` does the same for a (non-project) persona's flat session list.
-  const [projToggled, setProjToggled] = useState<Set<string>>(new Set());
+  const [projectOpenOverrides, setProjectOpenOverrides] = useState<
+    Map<string, boolean>
+  >(new Map());
   const [projShowAll, setProjShowAll] = useState<Set<string>>(new Set());
   const [personaShowAll, setPersonaShowAll] = useState<Set<string>>(new Set());
   const toggleSet = (set: Set<string>, key: string) => {
@@ -755,9 +758,11 @@ export function Sidebar(props: Props) {
             : "hover:bg-panel")
         }
         data-testid={`conversation-row-${s.session_id}`}
-        onMouseEnter={(event) =>
-          !editing && scheduleConversationHover(s.session_id, event.currentTarget)
-        }
+        onMouseEnter={(event) => {
+          props.onPrefetchSession?.(s.session_id);
+          if (!editing)
+            scheduleConversationHover(s.session_id, event.currentTarget);
+        }}
         onMouseLeave={scheduleHoverClose}
         onBlur={(event) => keepOrCloseHover(event.relatedTarget)}
       >
@@ -788,9 +793,10 @@ export function Sidebar(props: Props) {
                   ? `conversation-hover-${s.session_id}`
                   : undefined
               }
-              onFocus={(event) =>
-                showConversationHover(s.session_id, event.currentTarget)
-              }
+              onFocus={(event) => {
+                props.onPrefetchSession?.(s.session_id);
+                showConversationHover(s.session_id, event.currentTarget);
+              }}
               onClick={() =>
                 props.onSelectSession(s.session_id, s.workspace, s.agent)
               }
@@ -846,9 +852,11 @@ export function Sidebar(props: Props) {
             : "hover:bg-chromeHover")
         }
         data-testid={`conversation-row-${s.session_id}`}
-        onMouseEnter={(event) =>
-          !editing && scheduleConversationHover(s.session_id, event.currentTarget)
-        }
+        onMouseEnter={(event) => {
+          props.onPrefetchSession?.(s.session_id);
+          if (!editing)
+            scheduleConversationHover(s.session_id, event.currentTarget);
+        }}
         onMouseLeave={scheduleHoverClose}
         onBlur={(event) => keepOrCloseHover(event.relatedTarget)}
       >
@@ -877,9 +885,10 @@ export function Sidebar(props: Props) {
                 "sidebar-conversation-primary min-w-0 flex-1 block truncate " +
                 (active ? "is-active" : "is-inactive")
               }
-              onFocus={(event) =>
-                showConversationHover(s.session_id, event.currentTarget)
-              }
+              onFocus={(event) => {
+                props.onPrefetchSession?.(s.session_id);
+                showConversationHover(s.session_id, event.currentTarget);
+              }}
               onClick={() =>
                 props.onSelectSession(s.session_id, s.workspace, s.agent)
               }
@@ -1577,7 +1586,8 @@ export function Sidebar(props: Props) {
                 // persona), open the most-recent folder so the accordion isn't all-collapsed.
                 const activeInOrder = !!activeProjectId && projectOrder.includes(activeProjectId);
                 const defaultOpen = isActive || (!activeInOrder && proj === projectOrder[0]);
-                const open = !!normalizedQuery || defaultOpen !== projToggled.has(proj);
+                const persistedOpen = projectOpenOverrides.get(proj) ?? defaultOpen;
+                const open = !!normalizedQuery || persistedOpen;
                 const showAll = !!normalizedQuery || projShowAll.has(proj);
                 const shown = showAll ? list : list.slice(0, peek);
                 return (
@@ -1606,7 +1616,14 @@ export function Sidebar(props: Props) {
                         onFocus={(event) =>
                           project && showProjectHover(project.projectId, event.currentTarget)
                         }
-                        onClick={() => setProjToggled((s) => toggleSet(s, proj))}
+                        onClick={() => {
+                          if (normalizedQuery) return;
+                          setProjectOpenOverrides((current) => {
+                            const next = new Map(current);
+                            next.set(proj, !persistedOpen);
+                            return next;
+                          });
+                        }}
                       >
                         <Icon name="folder" size={15} className="shrink-0" />
                         <span

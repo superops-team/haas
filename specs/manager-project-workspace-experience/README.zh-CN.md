@@ -2,8 +2,8 @@
 
 [English](README.md) | **简体中文**
 
-状态：MPW-022 至 MPW-039 已实施；等待 owner 视觉验收
-最近评审：2026-09-28
+状态：MPW-022 至 MPW-040 已实施；等待 owner 视觉验收
+最近评审：2026-09-29
 Change ID：`manager-project-workspace-experience`
 相关规格：[Manager 对话体验](../manager-conversation-experience/README.zh-CN.md)、[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager 产品身份](../manager-product-identity/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Stores](../stores/README.zh-CN.md)、[安全边界](../security-boundary/README.zh-CN.md)
 
@@ -481,6 +481,9 @@ Remote workspace 的 `canonicalKey` 是
   project activity 为所属 unarchived conversation 的最大 `updated_at`，没有时 fallback 到
   project `updatedAtMs`。
 - Conversation 在项目内按已选 stable order 排序，同一 session 只出现一次。
+- Project expansion 必须是显式状态，不能与“当前哪个 project 变为 active”的默认值做 XOR。
+  用户手动展开的 project 在选择其中任一 conversation 后保持展开；active conversation 只改变
+  样式与 context。搜索可以临时展开匹配 group，但不得改写用户保存的展开选择。
 - Project/conversation row 使用 stable id，每个展开 project 受配置的 peek limit 限制；一个
   turn streaming 不得让无关 project header rerender。
 - Project group 展示 task count 与安全 display path 或 remote endpoint label，不暴露 endpoint
@@ -746,6 +749,7 @@ project name、branch、path、command、output 或 endpoint URL。
 | MPW-037 | P0 | 每个折叠 TurnWork activity row，无论 command/read/search/file/tool kind，都严格使用一条不换行视觉行：icon/status/disclosure 固定在两端，primary safe summary 按可用宽度 ellipsis；category metadata 不生成第二行。点击后由唯一 inline detail owner 展示完整 safe summary/command 与 bounded evidence；mixed kind 在双主题 390/760/1440 px 下保持行高与对齐一致 |
 | MPW-038 | P0 | 选择 project 只改变 active 样式、expansion 与 conversation context，绝不改变 project row 顺序。Pinned project 仍优先；Manual/Recent/Name 在依次选择每个 project 前后均保持稳定，包括相同 sort key 的 tie 场景 |
 | MPW-039 | P0 | 选择任一 conversation 只改变 active 样式与 conversation context，并保持其所属 project 下所有 conversation 的 DOM 顺序。Pinned 是唯一优先层；Recent/Oldest/Name 与确定性 tie-breaker 不因 selection 或 liveness 装饰改变。点击前、点击后、reload 后，以及另一行显示 working 期间，只要所选排序字段本身未变化，顺序必须一致 |
+| MPW-040 | P0 | 用户显式展开的 project 在首次或后续点击其中 conversation 后保持展开。Project disclosure 的 `aria-expanded`、row geometry 与 sibling project expansion 均保持稳定；仅由搜索产生的临时展开不得改写保存的选择 |
 
 要求执行：
 

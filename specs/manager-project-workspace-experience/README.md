@@ -2,8 +2,8 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: MPW-022 through MPW-039 implemented; owner visual acceptance pending
-Last reviewed: 2026-09-28
+Status: MPW-022 through MPW-040 implemented; owner visual acceptance pending
+Last reviewed: 2026-09-29
 Change ID: `manager-project-workspace-experience`
 Related specs: [Manager Conversation Experience](../manager-conversation-experience/README.md), [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Product Identity](../manager-product-identity/README.md), [Manager Delegation](../manager-delegation/README.md), [Stores](../stores/README.md), [Security Boundary](../security-boundary/README.md)
 
@@ -522,6 +522,10 @@ For a remote workspace, `canonicalKey` is an opaque digest of
   exists.
 - Conversations render under their owning project with the selected stable ordering. The same
   session appears once.
+- Project expansion is explicit state, not an XOR against whichever project becomes active. A
+  manually expanded project remains expanded when one of its conversations is selected; changing
+  active conversation updates styling and context only. Search may temporarily reveal matching
+  groups without overwriting the stored expansion choice.
 - Project and conversation rows use stable ids and each expanded project is bounded by the
   configured peek limit. Streaming a turn MUST NOT rerender unrelated project headers.
 - The project group shows task count and safe display path or remote endpoint label. It never
@@ -817,6 +821,7 @@ They do not include project names, branch names, paths, commands, output, or end
 | MPW-037 | P0 | Every collapsed TurnWork activity row, regardless of command/read/search/file/tool kind, uses one non-wrapping visual line with icon/status/disclosure fixed at the edges and the primary safe summary ellipsized by available width. Category metadata does not create a second line. Clicking expands one inline detail owner containing the complete safe summary/command and bounded evidence; mixed kinds preserve row height and alignment in both themes at 390/760/1440 px |
 | MPW-038 | P0 | Selecting a project changes only active styling, expansion, and conversation context. It never changes project row order. Pinned projects remain first; Manual/Recent/Name ordering remains stable before and after selecting each project, including equal-key tie cases |
 | MPW-039 | P0 | Selecting any conversation changes only active styling and conversation context and preserves the DOM order of every conversation in its project. Pinned remains the only priority tier; Recent/Oldest/Name and deterministic tie-breakers are unchanged by selection or liveness decoration. The order is identical before click, after click, after reload, and while another row reports working unless its selected ordering field itself changes |
+| MPW-040 | P0 | A project expanded explicitly by the user remains expanded after the first or any later conversation selection inside it. The project disclosure `aria-expanded`, row geometry and sibling project expansion remain stable; search-only expansion does not mutate the stored choice |
 
 Required evidence:
 

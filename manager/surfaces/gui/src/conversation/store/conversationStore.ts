@@ -86,6 +86,17 @@ export class ConversationStore {
     return cached !== undefined;
   }
 
+  primeSession(sessionId: string, items: Item[]) {
+    if (this.snapshot.sessionId === sessionId) return;
+    this.remember({
+      sessionId,
+      revision: 0,
+      items: normalizeHistory(items, sessionId),
+      queue: [],
+      queuePaused: false,
+    });
+  }
+
   reset(sessionId: string) {
     if (this.snapshot.sessionId === sessionId) return;
     this.publish({

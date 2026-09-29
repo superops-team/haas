@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Item, ModelCallStage } from "../../types";
-import { projectConversationTurns } from "./projection";
+import {
+  projectCachedConversationTurns,
+  projectConversationTurns,
+} from "./projection";
 
 const stages: ModelCallStage[] = Array.from({ length: 8 }, (_, i) => ({
   modelCallId: `model-${i}`,
@@ -30,6 +33,15 @@ const fixture: Item[] = [
 ];
 
 describe("MCX-029 product turn projection", () => {
+  it("reuses the historical projection for the same immutable item identity", () => {
+    const input = { phase: "completed" as const };
+    const first = projectCachedConversationTurns(fixture, input);
+    const second = projectCachedConversationTurns(fixture, { ...input });
+
+    expect(second).toBe(first);
+    expect(projectCachedConversationTurns([...fixture], input)).not.toBe(first);
+  });
+
   it("projects eight model calls as one work owner and one answer", () => {
     const turns = projectConversationTurns(fixture, { phase: "completed" });
     expect(turns).toHaveLength(1);

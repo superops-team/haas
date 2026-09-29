@@ -21,6 +21,34 @@ export interface TurnProjectionInput {
   activeTurnId?: string;
 }
 
+const cachedHistoryProjections = new WeakMap<
+  Item[],
+  Map<string, ConversationTurn[]>
+>();
+
+export function projectCachedConversationTurns(
+  items: Item[],
+  input: TurnProjectionInput,
+): ConversationTurn[] {
+  if (
+    input.text ||
+    input.reasoning ||
+    input.activeTurnId ||
+    input.outcome ||
+    (input.modelStages?.length ?? 0) > 0
+  )
+    return projectConversationTurns(items, input);
+  const key = input.phase;
+  const byPhase = cachedHistoryProjections.get(items);
+  const cached = byPhase?.get(key);
+  if (cached) return cached;
+  const projected = projectConversationTurns(items, input);
+  const next = byPhase ?? new Map<string, ConversationTurn[]>();
+  next.set(key, projected);
+  if (!byPhase) cachedHistoryProjections.set(items, next);
+  return projected;
+}
+
 export function projectConversationTurns(
   items: Item[],
   live: TurnProjectionInput,

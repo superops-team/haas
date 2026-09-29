@@ -2,8 +2,8 @@
 
 [English](README.md) | **简体中文**
 
-状态：已评审；阻塞项已清零；基线已验证；已补充加固 delta
-最近评审：2026-09-23
+状态：已评审；阻塞项已清零；冷 session activation delta 已实施
+最近评审：2026-09-29
 Change ID：manager-gui-performance-convergence
 相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)
 
@@ -231,6 +231,30 @@ session/path switch -> cancelled -> loading(new_request)
 - Remote HaaS artifact 只保留协议安全动作：可读时预览、允许时下载，不执行本地 reveal/open
   shell-out。
 
+### P0-5：冷 session 首屏延迟
+
+- 现有 `GET /v1/sessions/{id}/messages` 继续作为权威数据源。本机当前数据集中，23-126 条
+  history（包含 1.8 MiB response）的接口耗时为 5-18 ms，因此第一阶段优先优化请求时机与
+  前端工作，不提前增加 backend protocol。
+- Pointer intent 与 keyboard focus 可以预取可见 conversation。Prefetch 按 session id 去重，
+  同时最多两个请求，结果复用五秒；不得打开 session WebSocket，也不得改变 selection。
+- 点击 cache miss 时立即复用同一个 single-flight request。预取或近期加载的结果用于填充
+  Conversation Store 持有的最多五个 session projection cache。Session 成为 active 后，任何
+  transcript mutation 都必须使其短期 network response cache 失效，防止后续 refresh 用旧 history
+  覆盖更新后的内存内容。
+- Persisted history 只在 store boundary 归一化一次。Transcript render 不得再次创建完整
+  normalized array；相同 immutable item-array identity 重新 mount 时复用历史 turn projection。
+- 500 条以内 history 的 packaged-local click-to-first-content P95 必须 <=120 ms；
+  production-preview fixture 需扣除显式 route interception 时间，并保证 response end 到首个内容
+  <=102 ms。合成 10,000 条 history 的 response 后 projection-to-first-window 必须 <=232 ms，
+  mounted row <=200，且无超过 50 ms 的 main-thread long task。Cache hit 必须在两个 animation
+  frame 内（60 Hz 下 <=32 ms）显示。
+- 如果完成 P0 client path 后 10,000 条预算仍不达标，下一独立评审切片才引入 additive
+  recent-window + cursor API；未测得超预算前不提前引入 pagination。
+- 已实施的 production-preview baseline 为：prefetch cache hit 14.5 ms；500 条 history 从
+  response end 到首个内容 43.7 ms；10,000 条为 43.1 ms；观测到的 long task 为零。Client path
+  已满足预算，因此 pagination 继续延后。
+
 ### P1-3：session 与 artifact surface 复杂度预算
 
 - 重构必须以小的、行为保持的切片降低风险。触碰顶层 session streaming、transcript replay、
@@ -416,6 +440,7 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 | FV-GUI-PERF-09 | P0 | P0-4 可复用 production-preview smoke | 删除或失效 `manager/surfaces/gui/dist` 后执行稳定 preview smoke 命令 | 命令会重建或拒绝 stale `dist`，启动 `vite preview`，运行专项 Playwright，报告 request/chunk/error 指标并清理 server | 命令输出、Playwright 输出与清理证据 |
 | FV-GUI-PERF-10 | P0 | P0-4 artifact viewer 状态韧性 | Vitest 渲染 `RightRail`，打开一个 artifact，延迟读取，切换到另一 artifact/session，再分别 resolve 成功与失败路径 | 过期完成被忽略；当前读取失败展示明确 unavailable/download-only 状态；remote HaaS artifact 不执行本地 reveal/open | Vitest 输出与 mocked API 调用断言 |
 | FV-GUI-PERF-11 | P1 | P1-3 复杂度边界预算 | 对触碰的抽取边界运行 Fallow health 与聚焦测试 | 不新增无具名边界和测试的大型 session/artifact owner；抽取边界保持可观测行为 | Fallow summary、聚焦测试输出和 changed-file review |
+| FV-GUI-PERF-12 | P0 | P0-5 冷 session 首屏 | Production-preview Playwright 驱动 uncached、prefetched、cached、快速切换与 10,000-message fixture，并分别记录 transport 与 response 后 render 时间、请求并发、long task 与 mounted row | packaged-local 500 条以内 <=120 ms；preview response 后 500 条 <=102 ms、10,000 条 <=232 ms；cache hit <=32 ms；请求并发 <=2；mounted row <=200；过期 response 被忽略；新会话 Hero frame 为零 | 不含 transcript 内容的 Playwright timing/counter 输出 |
 
 功能验证只记录 count、timing、route label 与 component label 证据，不记录 prompt、transcript
 内容、工具参数、credential 或 signed URL。
@@ -435,7 +460,8 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 | 9 | P0 | 增加可复用 production-preview smoke | 带 fresh-build guard 与清理逻辑的 checked-in preview config/command | FV-GUI-PERF-09 |
 | 10 | P0 | 加固 artifact viewer read state | Request guard、明确 unavailable state、remote action 约束 | FV-GUI-PERF-10 |
 | 11 | P1 | 建立复杂度边界重构预算 | 为具名 session/transcript/artifact 边界补测试 | FV-GUI-PERF-11 |
-| 12 | P0 | 回归与发布审查 | browser/package 证据及强制 review | 任务 2-11；全部 FV-GUI-PERF case |
+| 12 | P0 | 优化冷 session activation | Intent prefetch、single-flight request reuse、canonical normalization 与 immutable projection reuse | FV-GUI-PERF-12 |
+| 13 | P0 | 回归与发布审查 | browser/package 证据及强制 review | 任务 2-12；全部 FV-GUI-PERF case |
 
 对齐复核结论：每个 P0/P1 需求至少有一个可执行 Case 覆盖，每个任务都有验收引用，且没有
 任务要求修改 public API/schema。第一段实施选择 S1 有界对账，因为它在保留 FV-33 正确性的
@@ -464,6 +490,7 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 | Manager Product Identity | 无；GUI 继续 local-first、no-login | coordinator 只存在于当前 WebView/API-client 生命周期 | 不引入 cloud identity 或 login 依赖 |
 | ADK 与 `/v1/haas/*` | 无 | 第一阶段不新增 route 或 schema | 完全不变 |
 | Session/event projection | live React owner 移动，canonical event 顺序不变 | 保留 canonical ref、terminal flush 与 replay parity | 仅内部加法式重构 |
+| Session history activation | Intent prefetch 与 immutable projection reuse 降低冷切换延迟 | 保持 history 权威、最多缓存五个 projection、prefetch 并发最多二，并只记录无内容 timing | 仅 Manager 本地实现；不修改 public API 或持久 schema |
 | Artifact viewer | 可选页面加载方式可能变化，artifact 协议不变 | 保留 PDF/XLSX 按需加载与 artifact 首次点击行为 | artifact URL、metadata、安全 header 不变 |
 | 根目录研发门禁 | GUI 证据纳入根 release readiness | 增加 GUI Makefile target，并对齐 README/skills | 无运行时兼容影响；release 信号更严格 |
 | Production preview 自动化 | 临时性能脚本沉淀为稳定仓库命令 | 增加带 fresh-build guard 与清理逻辑的 preview config/command | 不改变 shipped code path |

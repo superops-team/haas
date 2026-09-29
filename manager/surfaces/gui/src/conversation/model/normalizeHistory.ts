@@ -7,6 +7,7 @@ export function normalizeHistory(
   items: Item[],
   scope = "conversation",
 ): Item[] {
+  if (items.every((item) => item.rowId && item.turnId)) return items;
   let ordinal = 0;
   let turnId = `${scope}:turn:0`;
   return items.map((item, index) => {

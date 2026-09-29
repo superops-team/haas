@@ -14,7 +14,10 @@ import { TurnWork, CLOSED_WORK, type WorkDisclosureState } from "./TurnWork";
 import { TurnCompletion } from "./TurnCompletion";
 import { BubbleMeta, ClampedUserText } from "./MessageContent";
 import { McpNotice } from "./ConversationNotice";
-import { projectConversationTurns } from "../model/projection";
+import {
+  projectCachedConversationTurns,
+  projectConversationTurns,
+} from "../model/projection";
 import { normalizeHistory } from "../model/normalizeHistory";
 import { selectConversationPresentation } from "../model/presentation";
 import type {
@@ -282,7 +285,7 @@ export function ConversationTranscript({
   const normalized = useMemo(() => normalizeHistory(items), [items]);
   const turns = useMemo(
     () =>
-      projectConversationTurns(normalized, {
+      projectCachedConversationTurns(normalized, {
         phase: presentation.phase,
         outcome,
       }),
