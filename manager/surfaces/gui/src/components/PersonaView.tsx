@@ -133,7 +133,7 @@ export function PersonaView({
 
   if (error || !detail) {
     return (
-      <main className="flex-1 min-w-0 flex flex-col bg-paper">
+      <main className="flex-1 min-w-0 flex flex-col bg-paper" data-page-window-surface>
         {header}
         <div className="p-12 text-center text-faint text-[13px]">{error || t("persona.loading")}</div>
       </main>
@@ -175,15 +175,19 @@ export function PersonaView({
   }
 
   return (
-    <main className="flex-1 min-w-0 flex flex-col bg-paper">
+    <main className="flex-1 min-w-0 flex flex-col bg-paper" data-page-window-surface>
       {header}
       <div className="flex-1 overflow-y-auto hairline-scroll">
         <div className="max-w-3xl mx-auto px-7 py-6 space-y-6">
           {/* identity + enable (no coworker glyph — owner 2026-08-21) */}
-          <header className="flex items-start gap-3.5">
+          <header className="flex items-start gap-3.5" data-page-drag-region>
             <div className="min-w-0">
               <h1 className="text-[20px] font-semibold tracking-tight">
-                {fullPersonaName(detail.name, personaId)}
+                {fullPersonaName(
+                  detail.name,
+                  personaId,
+                  t("common.ai_assistant"),
+                )}
               </h1>
               <p className="text-[13px] text-muted mt-0.5">{detail.tagline}</p>
             </div>

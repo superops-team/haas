@@ -6,7 +6,7 @@ import { test } from "./fixtures";
 
 async function ask(page: import("@playwright/test").Page) {
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("scan for secrets");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("scan for secrets");
   await page.getByRole("button", { name: "Send" }).click();
 }
 
@@ -37,7 +37,7 @@ test("an event without install metadata fails CLOSED — Install disabled, skip 
   // Owner-hit 2026-08-14: the card offered "pinned build, checksum-verified" for a tool
   // with no pinned build; approval could only produce an error. Absence of metadata is NO.
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("request an unpinned tool");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("request an unpinned tool");
   await page.getByRole("button", { name: "Send" }).click();
   const card = page.locator(".dirreq-card");
   await expect(card).toContainText("somescanner");
@@ -51,7 +51,7 @@ test("installing runs the check; skipping still reports coverage", async ({ page
   await page.getByTestId("toolreq-install").click();
   await expect(page.locator(".main-scroll")).toContainText("Installed gitleaks");
 
-  await page.getByPlaceholder(/Ask the coworker/).fill("scan for secrets");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("scan for secrets");
   await page.getByRole("button", { name: "Send" }).click();
   await page.getByTestId("toolreq-skip").click();
   // The whole point: the skipped check is disclosed, not invisible.

@@ -5,7 +5,7 @@
 Status: Draft
 Last reviewed: 2026-09-15
 Change ID: long-task-model-proxy-stability
-Related specs: [Session Runtime](../session-runtime/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md)
+Related specs: [Session Runtime](../session-runtime/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Harness Registry](../harness-registry/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Admission Control](../admission-control/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -369,3 +369,11 @@ Logs：
 ### Manager 自动化恢复边界
 
 Manager automation.db 保留既有 task/run JSON schema，执行前持久化本次计划消耗。启动时在同一事务内将未知 running 记录标记为带 recovery_required 的 error 并停用所属计划，原 session ID 保留用于核对。不删除历史、不重放执行。HaaS store 接口不变。
+
+### Manager project/workspace record
+
+Manager persistence 新增 Project、WorkspaceBinding record 与 additive session binding field。
+Project + initial workspace 原子提交，canonical-key unique constraint 防止重复。Legacy session
+migration 幂等，不改写 transcript 或移动文件。Endpoint record 只存 token ref/fingerprint。
+Backup/restore 包含这些 record，但不含 endpoint secret value；rollback 保留未知 additive table，
+不执行 destructive down migration。

@@ -184,6 +184,38 @@ def test_command_lifecycle_has_stable_safe_metadata() -> None:
     }
 
 
+def test_command_output_uses_semantic_workspace_paths_before_redaction() -> None:
+    event = normalize_notification(
+        _notification(
+            "item/completed",
+            {
+                "item": {
+                    "id": "call_pwd",
+                    "type": "commandExecution",
+                    "command": "pwd",
+                    "cwd": "/Users/example/project",
+                    "status": "completed",
+                    "exitCode": 0,
+                    "aggregatedOutput": (
+                        "/Users/example/project\n"
+                        "/Users/example/project/reports/result.txt\n"
+                        "/Users/example/private.txt\n"
+                        "https://example.com/Users/example/project/report\n"
+                    ),
+                }
+            },
+        ),
+        **CTX,
+    )
+    assert event is not None
+    assert event.actions["artifactDelta"]["outputPreview"].splitlines() == [
+        "workspace/",
+        "workspace/reports/result.txt",
+        "[REDACTED_PATH]",
+        "https://example.com/Users/example/project/report",
+    ]
+
+
 def test_command_array_uses_shell_payload_as_safe_preview() -> None:
     event = normalize_notification(
         _notification(
@@ -291,7 +323,7 @@ def test_nonzero_command_exit_is_a_failed_tool_even_when_status_says_completed()
     assert event.actions["artifactDelta"]["exitCode"] == 7
 
 
-def test_file_change_and_mcp_have_presentation_neutral_activity_kinds() -> None:
+def test_file_change_and_mcp_have_semantic_activity_kinds() -> None:
     changed = normalize_notification(
         _notification(
             "item/started",
@@ -329,8 +361,12 @@ def test_file_change_and_mcp_have_presentation_neutral_activity_kinds() -> None:
         "safeSummary": "Apply 1 file change",
         "activityKind": "edit",
     }
-    assert mcp.actions["artifactDelta"]["activityKind"] == "tool"
-    assert "calendar" not in mcp.actions["artifactDelta"]["safeSummary"]
+    assert mcp.actions["artifactDelta"] == {
+        "toolCallId": "call_mcp",
+        "toolName": "calendar.list_events",
+        "safeSummary": "List events",
+        "activityKind": "read",
+    }
 
 
 def test_agent_message_completion_supplies_authoritative_phase_without_text() -> None:

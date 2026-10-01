@@ -10,7 +10,7 @@ import { test } from "./fixtures";
 
 async function planTheWork(page: import("@playwright/test").Page) {
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("plan the work");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("plan the work");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText(/filed 5 work items/)).toBeVisible();
 }
@@ -24,7 +24,7 @@ async function openBoardSection(page: import("@playwright/test").Page) {
 
 test("plain sessions carry zero board chrome", async ({ page }) => {
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("hello");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("hello");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Echo: hello")).toBeVisible();
   await expect(page.getByTestId("board-rail")).toHaveCount(0);

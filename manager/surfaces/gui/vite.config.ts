@@ -39,6 +39,19 @@ export default defineConfig(({ command }) => {
     // Tauri CLI looks for these; harmless for the browser build.
     clearScreen: false,
     envPrefix: ["VITE_", "TAURI_"],
+    worker: {
+      // react-xlsx's parser worker imports its local WASM module and therefore requires an
+      // ES-module worker bundle. Vite's IIFE worker default cannot represent that split graph.
+      format: "es",
+    },
+    optimizeDeps: {
+      // The package constructs its worker relative to import.meta.url. Pre-bundling moves the
+      // module into .vite/deps without copying xlsx-worker.js, so dev/test WebViews cannot load it.
+      exclude: ["@extend-ai/react-xlsx"],
+      // react-xlsx imports regl's CommonJS build as a default export. Once the viewer itself is
+      // excluded, force this leaf through Vite's CJS interop instead of serving it as raw ESM.
+      include: ["regl"],
+    },
     build: {
       manifest: true,
     },

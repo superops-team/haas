@@ -1,4 +1,18 @@
-import type { GroupedQuestion, QuestionOption, SessionInfo, WsEvent } from "./types";
+import { decodeConversationEvent } from "./conversation/model/events";
+import type { ContextReference } from "./conversation/model/context";
+import type { CommandAck, GroupedQuestion, QuestionOption, SessionInfo, WsEvent } from "./types";
+import {
+  deletePendingCommand,
+  deletePendingQueueEdit,
+  listPendingCommands,
+  listPendingQueueEdits,
+  savePendingCommand,
+  savePendingQueueEdit,
+} from "./conversation/store/commandReceiptStore";
+import {
+  conversationDraftScopeKey,
+  deleteConversationDraftIfRevision,
+} from "./conversation/store/draftStore";
 
 declare const __COWORKER_DEV_TOKEN__: string;
 
@@ -49,6 +63,68 @@ export interface RecentWorkspace {
   exists: boolean;
 }
 
+export interface ProjectWorkspaceBinding {
+  workspaceBindingId: string;
+  projectId: string;
+  location: "local" | "remote";
+  endpointId: string;
+  localPath: string | null;
+  remoteWorkspaceRef: string | null;
+  displayPath: string;
+  state: "available" | "missing" | "reconnecting" | "unavailable";
+}
+
+export interface ProjectSummary {
+  projectId: string;
+  canonicalKey: string;
+  name: string;
+  primaryWorkspaceBindingId: string | null;
+  defaultEndpointId: string;
+  pinned?: boolean;
+  order: number;
+  archived: boolean;
+  createdAtMs?: number;
+  updatedAtMs?: number;
+  workspaceCount: number;
+  sessionCount: number;
+  activeSessionCount?: number;
+  archivedSessionCount?: number;
+  workspaces: ProjectWorkspaceBinding[];
+  sessions: import("./types").SessionInfo[];
+  capabilities?: {
+    reveal: { enabled: boolean; reasonCode?: string | null };
+    createWorktree: { enabled: boolean; reasonCode?: string | null };
+  };
+}
+
+export interface ProjectListProjection {
+  projects: ProjectSummary[];
+  orderRevision: number;
+}
+
+export interface SidebarOrderPreferences {
+  projectOrder: "manual" | "recent" | "name";
+  conversationOrder: "recent" | "oldest" | "name";
+}
+
+export interface HaasEndpointSummary {
+  endpointId: string;
+  mode: "local_managed" | "remote";
+  serverIdentity: string;
+  urlFingerprint: string | null;
+  state: "ready" | "configured" | "unavailable";
+}
+
+export interface GitWorkspaceSummary {
+  isRepository: boolean;
+  readOnly: boolean;
+  headRefType?: "branch" | "detached";
+  branchName?: string | null;
+  dirtyFileCount?: number;
+  branches?: string[];
+  observedRevision?: string | null;
+}
+
 export interface WorkspaceCommandTrust {
   workspace: string;
   requested_commands: string[];
@@ -65,6 +141,236 @@ export async function getHealth(): Promise<Health> {
 export async function getRecentWorkspaces(): Promise<RecentWorkspace[]> {
   const res = await fetch(`${httpBase()}/v1/workspaces/recent`);
   return (await res.json()).workspaces ?? [];
+}
+
+export async function getProjects(): Promise<ProjectSummary[]> {
+  return (await getProjectProjection()).projects;
+}
+
+export async function getProjectProjection(): Promise<ProjectListProjection> {
+  const res = await fetch(`${httpBase()}/v1/projects`);
+  const body = await res.json();
+  return {
+    projects: body.projects ?? [],
+    orderRevision: Number(body.orderRevision ?? 0),
+  };
+}
+
+export async function updateProject(
+  projectId: string,
+  patch: {
+    name?: string;
+    defaultEndpointId?: string;
+    pinned?: boolean;
+    archived?: boolean;
+  },
+): Promise<{ project: ProjectSummary; orderRevision: number }> {
+  const response = await fetch(
+    `${httpBase()}/v1/projects/${encodeURIComponent(projectId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `project-update-${crypto.randomUUID()}`,
+      },
+      body: JSON.stringify(patch),
+    },
+  );
+  const body = await response.json();
+  if (!response.ok)
+    throw new Error(body?.error?.safeMessage || "Unable to update project.");
+  return body;
+}
+
+export async function reorderProjects(
+  projectIds: string[],
+  observedRevision: number,
+): Promise<ProjectListProjection> {
+  const response = await fetch(`${httpBase()}/v1/projects/reorder`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `project-reorder-${crypto.randomUUID()}`,
+    },
+    body: JSON.stringify({ projectIds, observedRevision }),
+  });
+  const body = await response.json();
+  if (!response.ok)
+    throw new Error(body?.error?.safeMessage || "Unable to reorder projects.");
+  return body;
+}
+
+export async function setSidebarOrder(
+  preferences: SidebarOrderPreferences,
+): Promise<SidebarOrderPreferences> {
+  const response = await fetch(`${httpBase()}/v1/settings/sidebar-order`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `sidebar-order-${crypto.randomUUID()}`,
+    },
+    body: JSON.stringify(preferences),
+  });
+  const body = await response.json();
+  if (!response.ok)
+    throw new Error(body?.error?.safeMessage || "Unable to update sidebar order.");
+  return body;
+}
+
+export async function archiveProjectSessions(
+  projectId: string,
+): Promise<{ archivedSessionIds: string[]; archivedCount: number }> {
+  const response = await fetch(
+    `${httpBase()}/v1/projects/${encodeURIComponent(projectId)}/sessions/archive`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": `project-archive-${crypto.randomUUID()}` },
+    },
+  );
+  const body = await response.json();
+  if (!response.ok)
+    throw new Error(body?.error?.safeMessage || "Unable to archive conversations.");
+  return body;
+}
+
+export async function revealProject(projectId: string): Promise<void> {
+  const response = await fetch(
+    `${httpBase()}/v1/projects/${encodeURIComponent(projectId)}/reveal`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": `project-reveal-${crypto.randomUUID()}` },
+    },
+  );
+  const body = await response.json();
+  if (!response.ok)
+    throw new Error(body?.error?.safeMessage || "Unable to reveal project.");
+}
+
+export async function createProjectWorktree(
+  projectId: string,
+  branchName: string,
+): Promise<{
+  project: ProjectSummary;
+  workspace: ProjectWorkspaceBinding;
+  git: GitWorkspaceSummary;
+  orderRevision: number;
+}> {
+  const response = await fetch(
+    `${httpBase()}/v1/projects/${encodeURIComponent(projectId)}/worktrees`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `project-worktree-${crypto.randomUUID()}`,
+      },
+      body: JSON.stringify({ branchName }),
+    },
+  );
+  const body = await response.json();
+  if (!response.ok)
+    throw new Error(body?.error?.safeMessage || "Unable to create worktree.");
+  return body;
+}
+
+export async function previewProjectWorktree(
+  projectId: string,
+  branchName: string,
+): Promise<{ displayPath: string }> {
+  const response = await fetch(
+    `${httpBase()}/v1/projects/${encodeURIComponent(projectId)}/worktrees/preview` +
+      `?branchName=${encodeURIComponent(branchName)}`,
+  );
+  const body = await response.json();
+  if (!response.ok)
+    throw new Error(body?.error?.safeMessage || "Unable to preview worktree.");
+  return body;
+}
+
+export async function createProject(input: {
+  name: string;
+  workspace:
+    | { location: "local"; path: string }
+    | {
+        location: "remote";
+        endpointId: string;
+        remoteWorkspaceRef: string;
+        displayPath: string;
+      };
+  defaultEndpointId: string;
+}): Promise<{ project: ProjectSummary; workspace: ProjectWorkspaceBinding }> {
+  const response = await fetch(`${httpBase()}/v1/projects`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `project-${crypto.randomUUID()}`,
+    },
+    body: JSON.stringify(input),
+  });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body?.error?.safeMessage || "Unable to create project.");
+  return body;
+}
+
+export async function addRemoteProjectWorkspace(
+  projectId: string,
+  input: {
+    endpointId: string;
+    remoteWorkspaceRef: string;
+    displayPath: string;
+  },
+): Promise<ProjectWorkspaceBinding> {
+  const response = await fetch(
+    `${httpBase()}/v1/projects/${encodeURIComponent(projectId)}/workspaces`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `workspace-${crypto.randomUUID()}`,
+      },
+      body: JSON.stringify({ location: "remote", ...input }),
+    },
+  );
+  const body = await response.json();
+  if (!response.ok)
+    throw new Error(body?.error?.safeMessage || "Unable to add remote workspace.");
+  return body.workspace;
+}
+
+export async function getHaasEndpoints(): Promise<HaasEndpointSummary[]> {
+  const response = await fetch(`${httpBase()}/v1/haas/endpoints`);
+  return (await response.json()).endpoints ?? [];
+}
+
+export async function getWorkspaceGit(
+  workspaceBindingId: string,
+): Promise<GitWorkspaceSummary> {
+  const response = await fetch(
+    `${httpBase()}/v1/workspaces/${encodeURIComponent(workspaceBindingId)}/git`,
+  );
+  if (!response.ok) return { isRepository: false, readOnly: true };
+  return (await response.json()).git;
+}
+
+export async function mutateWorkspaceGit(
+  workspaceBindingId: string,
+  branchName: string,
+  observedRevision: string,
+  create = false,
+): Promise<GitWorkspaceSummary> {
+  const response = await fetch(
+    `${httpBase()}/v1/workspaces/${encodeURIComponent(workspaceBindingId)}/git/${create ? "branches" : "switch"}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `git-${crypto.randomUUID()}`,
+      },
+      body: JSON.stringify({ branchName, observedRevision }),
+    },
+  );
+  const body = await response.json();
+  if (!response.ok) throw new Error(body?.error?.safeMessage || "Git operation failed.");
+  return body.git;
 }
 
 /** Ask the LOCAL sidecar to open the OS folder picker — the browser GUI can't obtain absolute
@@ -192,9 +498,34 @@ export interface ConversationMessage {
   [key: string]: any;
 }
 
-export async function getSessionMessages(sessionId: string): Promise<ConversationMessage[]> {
-  const res = await fetch(`${httpBase()}/v1/sessions/${sessionId}/messages`);
+export async function getSessionMessages(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<ConversationMessage[]> {
+  const res = await fetch(`${httpBase()}/v1/sessions/${sessionId}/messages`, {
+    signal,
+  });
+  if (!res.ok) throw new Error("Unable to load conversation history.");
   return (await res.json()).messages ?? [];
+}
+
+export async function getConversationCommandReceipt(
+  sessionId: string,
+  idempotencyKey: string,
+): Promise<CommandAck | null> {
+  const response = await fetch(
+    `${httpBase()}/v1/sessions/${encodeURIComponent(sessionId)}/conversation-commands/${encodeURIComponent(idempotencyKey)}`,
+    { cache: "no-store" },
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error("Unable to reconcile message acceptance.");
+  const decoded = decodeConversationEvent({
+    type: "command_ack",
+    data: (await response.json()) as unknown,
+  });
+  if (!decoded || decoded.type !== "command_ack" || decoded.data.status === "rejected")
+    throw new Error("Invalid message receipt response.");
+  return decoded.data;
 }
 
 export interface ExecutionEvidenceLink {
@@ -975,6 +1306,8 @@ export interface ModelSettings {
   nav_layout?: "flat" | "grouped";
   // Sidebar: sessions shown per group before "Show more" (default 5, 1–50).
   sessions_peek?: number;
+  project_order?: "manual" | "recent" | "name";
+  conversation_order?: "recent" | "oldest" | "name";
   // Composer: show the context-window fill bar (default FALSE; absent → the chip shows
   // the session total). The usage popover keeps both numbers regardless.
   context_bar?: boolean;
@@ -2492,18 +2825,92 @@ export type Handlers = {
   onClose?: () => void;
 };
 
+function clientIdentitySuffix(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
 export class Session {
   private ws: WebSocket;
+  private readonly sessionId: string;
+  private readonly handlers: Handlers;
   // Payloads sent before the socket finished opening, replayed on `onopen`. Belt-and-suspenders
   // against the first message being dropped if the user sends in the connect window.
   private outbox: object[] = [];
+  private commandTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private pendingCommands = new Map<
+    string,
+    {
+      clientCommandId: string;
+      idempotencyKey: string;
+      draftRevision: number;
+      resolve: (ack: CommandAck) => void;
+      reject: (error: Error) => void;
+    }
+  >();
 
-  constructor(sessionId: string, workspace: string, agent: string, handlers: Handlers) {
-    const q = `?workspace=${encodeURIComponent(workspace)}&agent=${encodeURIComponent(agent)}`;
+  constructor(
+    sessionId: string,
+    workspace: string,
+    agent: string,
+    handlers: Handlers,
+    binding?: {
+      projectId?: string | null;
+      workspaceBindingId?: string | null;
+      endpointId?: string | null;
+      remoteWorkspaceRef?: string | null;
+    },
+  ) {
+    this.sessionId = sessionId;
+    this.handlers = handlers;
+    const params = new URLSearchParams({ workspace, agent });
+    if (binding?.projectId) params.set("projectId", binding.projectId);
+    if (binding?.workspaceBindingId)
+      params.set("workspaceBindingId", binding.workspaceBindingId);
+    if (binding?.endpointId) params.set("endpointId", binding.endpointId);
+    if (binding?.remoteWorkspaceRef)
+      params.set("remoteWorkspaceRef", binding.remoteWorkspaceRef);
+    const q = `?${params.toString()}`;
     this.ws = openWebSocket(`${wsBase()}/ws/session/${sessionId}${q}`);
     this.ws.onmessage = (e) => {
       try {
-        handlers.onEvent(JSON.parse(e.data));
+        const event = decodeConversationEvent(JSON.parse(e.data) as unknown);
+        if (!event) return;
+        if (event.type === "command_ack") {
+          const commandId = String(event.data?.clientCommandId || "");
+          const pending = this.pendingCommands.get(commandId);
+          if (pending) {
+            this.pendingCommands.delete(commandId);
+            clearTimeout(this.commandTimers.get(commandId));
+            this.commandTimers.delete(commandId);
+            void deletePendingCommand(this.sessionId, commandId).catch(() => {});
+            if (event.data?.status === "rejected") {
+              pending.reject(
+                new Error(String(event.data?.error?.safeMessage || "The message was rejected.")),
+              );
+            } else {
+              void deleteConversationDraftIfRevision(
+                conversationDraftScopeKey(this.sessionId),
+                pending.draftRevision,
+              ).catch(() => false);
+              pending.resolve(event.data);
+            }
+          }
+        }
+        if (
+          (event.type === "queue_restored" || event.type === "queue_error") &&
+          event.data.mutationIdempotencyKey
+        ) {
+          // Apply the restored payload only after its local pending marker is
+          // durably removed. A failed delete leaves it replayable on reconnect.
+          void deletePendingQueueEdit(
+            this.sessionId,
+            event.data.mutationIdempotencyKey,
+          )
+            .then(() => handlers.onEvent(event))
+            .catch(() => {});
+          return;
+        }
+        handlers.onEvent(event);
       } catch {
         /* malformed frame — ignore */
       }
@@ -2511,8 +2918,111 @@ export class Session {
     this.ws.onopen = () => {
       this.flush();
       handlers.onOpen?.();
+      void this.reconcilePersistedCommands(handlers);
+      void this.replayPendingQueueEdits();
     };
-    this.ws.onclose = () => handlers.onClose?.();
+    this.ws.onclose = () => {
+      for (const timer of this.commandTimers.values()) clearTimeout(timer);
+      this.commandTimers.clear();
+      const pendingCommands = [...this.pendingCommands.values()];
+      this.pendingCommands.clear();
+      handlers.onClose?.();
+      for (const pending of pendingCommands) {
+        void this.reconcileCommand(pending, handlers);
+      }
+    };
+  }
+
+  private async reconcileCommand(
+    pending: {
+      clientCommandId: string;
+      idempotencyKey: string;
+      draftRevision: number;
+      resolve: (ack: CommandAck) => void;
+      reject: (error: Error) => void;
+    },
+    handlers: Handlers,
+  ) {
+    for (const delay of [0, 250, 750]) {
+      if (delay) await new Promise((resolve) => globalThis.setTimeout(resolve, delay));
+      try {
+        const receipt = await getConversationCommandReceipt(
+          this.sessionId,
+          pending.idempotencyKey,
+        );
+        if (receipt) {
+          await deletePendingCommand(this.sessionId, pending.clientCommandId);
+          await deleteConversationDraftIfRevision(
+            conversationDraftScopeKey(this.sessionId),
+            pending.draftRevision,
+          ).catch(() => false);
+          pending.resolve(receipt);
+          handlers.onEvent({
+            type: "command_ack",
+            data: {
+              ...receipt,
+              reconciledDraftRevision: pending.draftRevision,
+            },
+          });
+          return;
+        }
+        await deletePendingCommand(this.sessionId, pending.clientCommandId);
+        const error = new Error(
+          "The message was not accepted. Your draft is still here.",
+        );
+        pending.reject(error);
+        handlers.onEvent({
+          type: "command_ack",
+          data: {
+            clientCommandId: pending.clientCommandId,
+            status: "rejected",
+            error: {
+              code: "command_not_found",
+              safeMessage: error.message,
+              retryable: true,
+            },
+            reconciledDraftRevision: pending.draftRevision,
+          },
+        });
+        return;
+      } catch {
+        // Retry bounded readback. A transport failure is not proof of rejection.
+      }
+    }
+    pending.reject(
+      new CommandAcceptanceUnknownError(
+        "Message acceptance is still unknown. Reconnect before trying again.",
+      ),
+    );
+  }
+
+  private async reconcilePersistedCommands(handlers: Handlers) {
+    const records = await listPendingCommands(this.sessionId).catch(() => []);
+    for (const record of records) {
+      if (this.pendingCommands.has(record.clientCommandId)) continue;
+      await this.reconcileCommand(
+        {
+          clientCommandId: record.clientCommandId,
+          idempotencyKey: record.idempotencyKey,
+          draftRevision: record.draftRevision,
+          resolve: () => {},
+          reject: () => {},
+        },
+        handlers,
+      );
+    }
+  }
+
+  private async replayPendingQueueEdits() {
+    const records = await listPendingQueueEdits(this.sessionId).catch(() => []);
+    for (const record of records) {
+      this.send({
+        type: "queue_edit",
+        queueItemId: record.queueItemId,
+        expectedRevision: record.expectedRevision,
+        idempotencyKey: record.idempotencyKey,
+      });
+    }
   }
 
   private flush() {
@@ -2522,25 +3032,139 @@ export class Session {
     for (const p of pending) this.ws.send(JSON.stringify(p));
   }
 
-  private send(payload: object) {
+  private send(payload: object): boolean {
     if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(payload));
     // Still connecting: queue and flush on open rather than silently dropping.
     else if (this.ws.readyState === WebSocket.CONNECTING) this.outbox.push(payload);
+    else return false;
+    return true;
   }
 
   /** `model` = the composer's CURRENT selection, carried on every message so the turn uses
    * exactly what the user sees — immune to set_model races across reconnects (a new cowork
    * session always reconnects once to adopt its scratch dir, which could drop a queued
    * set_model and leave the engine on a stale/resumed model; found 2026-07-04). */
-  userMessage(text: string, attachments?: unknown[], model?: string, skill?: string) {
-    this.send({
+  userMessage(
+    text: string,
+    attachments?: unknown[],
+    model?: string,
+    skill?: string,
+    delivery: "start_now" | "enqueue" | "interrupt_then_start" = "start_now",
+    draftRevision = 0,
+    contextRefs: ContextReference[] = [],
+  ) {
+    const suffix = clientIdentitySuffix();
+    const clientCommandId = `cmd_${suffix}`;
+    const payload = {
       type: "user_message",
+      clientCommandId,
+      idempotencyKey: `idem_${suffix}`,
+      delivery,
       text,
       ...(model ? { model } : {}),
       ...(attachments?.length ? { attachments } : {}),
       // Force-run (SKILLS-SPEC §4.1): the composer's /skill pick rides as its own field;
       // the server validates it against the session's effective menu and frames the turn.
       ...(skill ? { skill } : {}),
+      ...(contextRefs.length ? { contextRefs } : {}),
+    };
+    return new Promise<CommandAck>((resolve, reject) => {
+      void savePendingCommand({
+        sessionId: this.sessionId,
+        clientCommandId,
+        idempotencyKey: payload.idempotencyKey,
+        draftRevision,
+        createdAtMs: Date.now(),
+      })
+        .then(() => {
+          const pending = {
+            clientCommandId,
+            idempotencyKey: payload.idempotencyKey,
+            draftRevision,
+            resolve,
+            reject,
+          };
+          this.pendingCommands.set(clientCommandId, pending);
+          this.commandTimers.set(clientCommandId, setTimeout(() => {
+            if (!this.pendingCommands.delete(clientCommandId)) return;
+            this.commandTimers.delete(clientCommandId);
+            void this.reconcileCommand(pending, this.handlers);
+          }, 10_000));
+          if (!this.send(payload)) {
+            this.pendingCommands.delete(clientCommandId);
+            clearTimeout(this.commandTimers.get(clientCommandId));
+            this.commandTimers.delete(clientCommandId);
+            void this.reconcileCommand(pending, this.handlers);
+          }
+        })
+        .catch(() =>
+          reject(new Error("The message could not be prepared for reliable delivery.")),
+        );
+    });
+  }
+
+  deleteQueuedMessage(queueItemId: string, expectedRevision: number) {
+    this.send({
+      type: "queue_delete",
+      queueItemId,
+      expectedRevision,
+      idempotencyKey: `queue-mutation-${clientIdentitySuffix()}`,
+    });
+  }
+
+  editQueuedMessage(queueItemId: string, expectedRevision: number) {
+    const idempotencyKey = `queue-mutation-${clientIdentitySuffix()}`;
+    void savePendingQueueEdit({
+      sessionId: this.sessionId,
+      queueItemId,
+      expectedRevision,
+      idempotencyKey,
+      createdAtMs: Date.now(),
+    }).then(() => {
+      this.send({
+        type: "queue_edit",
+        queueItemId,
+        expectedRevision,
+        idempotencyKey,
+      });
+    }).catch(() => {
+      this.handlers.onEvent({
+        type: "queue_error",
+        data: {
+          code: "queue_edit_persistence_failed",
+          safeMessage: "The queued message could not be prepared for reliable editing.",
+        },
+      });
+    });
+  }
+
+  sendQueuedMessageNow(queueItemId: string, expectedRevision: number) {
+    this.send({
+      type: "queue_send_now",
+      queueItemId,
+      expectedRevision,
+      idempotencyKey: `queue-mutation-${clientIdentitySuffix()}`,
+    });
+  }
+
+  moveQueuedMessage(
+    queueItemId: string,
+    expectedRevision: number,
+    targetPosition: number,
+  ) {
+    this.send({
+      type: "queue_move",
+      queueItemId,
+      expectedRevision,
+      targetPosition,
+      idempotencyKey: `queue-mutation-${clientIdentitySuffix()}`,
+    });
+  }
+
+  resumeQueue() {
+    this.send({
+      type: "queue_resume",
+      idempotencyKey: `queue-resume-${clientIdentitySuffix()}`,
     });
   }
 
@@ -2641,8 +3265,19 @@ export class Session {
     this.ws.onopen = null;
     this.ws.onmessage = null;
     this.ws.onclose = null;
+    for (const timer of this.commandTimers.values()) clearTimeout(timer);
+    this.commandTimers.clear();
+    const pendingCommands = [...this.pendingCommands.values()];
+    this.pendingCommands.clear();
     this.ws.close();
+    for (const pending of pendingCommands) {
+      void this.reconcileCommand(pending, this.handlers);
+    }
   }
+}
+
+export class CommandAcceptanceUnknownError extends Error {
+  readonly acceptanceUnknown = true;
 }
 
 // -- project bindings (pass 20 / UX-044) ---------------------------------------

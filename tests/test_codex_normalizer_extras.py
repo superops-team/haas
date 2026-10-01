@@ -198,6 +198,67 @@ def test_mcp_tool_completed_failed_maps_to_safe_reason() -> None:
     assert artifact["safeReason"] == "MCP tool failed"
 
 
+def test_mcp_resource_tools_publish_specific_started_and_completed_actions() -> None:
+    item = {
+        "id": "mcp_resources",
+        "type": "mcpToolCall",
+        "server": "codex",
+        "tool": "list_mcp_resources",
+        "status": "inProgress",
+        "arguments": {},
+    }
+    started = normalize_notification(
+        _notification("item/started", {"item": item}),
+        **CTX,
+    )
+    completed = normalize_notification(
+        _notification("item/completed", {"item": {**item, "status": "completed"}}),
+        **CTX,
+    )
+
+    assert started is not None and completed is not None
+    assert started.actions["artifactDelta"] == {
+        "toolCallId": "mcp_resources",
+        "toolName": "codex.list_mcp_resources",
+        "safeSummary": "List MCP resources",
+        "activityKind": "read",
+    }
+    assert completed.actions["artifactDelta"] == {
+        "toolCallId": "mcp_resources",
+        "toolName": "codex.list_mcp_resources",
+        "safeSummary": "Listed MCP resources",
+        "status": "completed",
+        "activityKind": "read",
+    }
+
+
+def test_builtin_recall_tool_uses_a_specific_safe_action() -> None:
+    event = normalize_notification(
+        _notification(
+            "item/started",
+            {
+                "item": {
+                    "id": "mcp_recall",
+                    "type": "mcpToolCall",
+                    "server": "manager-cowork-recall",
+                    "tool": "recall",
+                    "status": "inProgress",
+                    "arguments": {"query": "private"},
+                }
+            },
+        ),
+        **CTX,
+    )
+
+    assert event is not None
+    assert event.actions["artifactDelta"] == {
+        "toolCallId": "mcp_recall",
+        "toolName": "manager-cowork-recall.recall",
+        "safeSummary": "Recall context",
+        "activityKind": "read",
+    }
+
+
 def test_dynamic_tool_completed_failed() -> None:
     event = normalize_notification(
         _notification(

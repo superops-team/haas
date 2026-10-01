@@ -299,6 +299,7 @@ Log fields MUST use safe route ids, fingerprints, and status codes, and MUST NOT
 | Harness has no provider bound to this session (no frozen/effective profile, e.g. a turn started without a manager-synced delegated profile) | Persist `haas.turn.failed` with `haas.code=haas_provider_not_configured`, non-retryable. Deterministic operator/config condition (GUI/manager must configure and delegate a provider), distinct from generic `haas_provider_error`/`SecretResolutionError` (present-but-unresolvable credential). A present-but-invalid provider (bad wire api) keeps `haas_provider_error`. |
 | Provider unreachable | Before invocation acceptance, return `502 haas_provider_error`; after acceptance, persist `haas.turn.failed` with `haas.code=haas_provider_error`, retain partial events, and keep `/run`/`/run_sse` HTTP 200 |
 | Upstream 429/502/503/504 or connect/read timeout before output | Retry with bounded exponential backoff and jitter while the invocation deadline allows it; default retry count is 2 and total retry sleep is bounded |
+| Streaming request rebuild after a retryable response | Recreate `httpx.Timeout` from the route's scalar total/read values. Never pass the previous request's `extensions["timeout"]` mapping as a timeout value; every transport extension remains a numeric scalar or `None` |
 | Stream idle timeout | Retry according to provider policy before output; after acceptance or after bytes have been emitted, exhaustion persists `haas.turn.failed` or `haas.turn.incomplete` with a stable timeout code/reason and HTTP 200 |
 | Loopback listener port changes after Manager/HaaS restart | Reconstruct session capability through the owned credential channel and rebind the native profile before the next model request; never attach to an unowned listener |
 | Unsupported tool schema | Fail with safe `haas_tool_schema_unsupported`; do not silently drop the tool |
@@ -311,6 +312,7 @@ Log fields MUST use safe route ids, fingerprints, and status codes, and MUST NOT
 - Integration: the loopback proxy receives a harness request and injects the provider credential only outbound.
 - Integration: a delegated Codex container uses only the loopback model proxy and never observes the raw manager/provider key.
 - Streaming: SSE/chunked upstream relay is progressive and handles idle timeout.
+- Streaming retry: a real-network or transport-inspecting 503-to-200 test proves the rebuilt request keeps scalar timeout extensions and completes without an uncaught `TypeError`.
 - Security: the provider key never appears in harness env/config/log/event/artifact/report.
 - Negative: unsupported provider, missing key, expired token, disallowed URL, and malformed upstream response. Tests distinguish pre-acceptance HTTP errors from accepted HTTP-200 terminal failures and retain partial output.
 - Lifecycle: a real or clock-controlled task crosses the configured stream-idle interval, the former 900-second boundary, and at least one tool round-trip without losing its token; refresh/rebind preserves exact session/provider scope; stale, cross-session and post-session-revocation/deletion tokens fail.

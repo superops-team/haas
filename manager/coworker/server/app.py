@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 # Origins allowed to talk to the local sidecar. It binds to 127.0.0.1, but a page in the
 # user's own browser can still reach loopback — so without an origin gate, any website they
@@ -54,6 +54,7 @@ _WS_RATE_LIMIT_COUNT = 30
 _WS_RATE_LIMIT_WINDOW_SECONDS = 10.0
 _MAX_MESSAGE_TEXT_CHARS = 200_000
 _MAX_ATTACHMENTS_BYTES = 15_000_000  # leaves JSON overhead below the 16 MiB frame cap
+_CONVERSATION_PROTOCOL_VERSION = 2
 
 
 def _json_value_size(value: Any) -> int:
@@ -160,10 +161,12 @@ from ..attachments import (
     MAX_TEXT_CHARS,
     build_user_content,
 )
+from ..conversation_commands import ConversationCommandConflict
 from ..engine import ApprovalOutcome
 from ..inbox import VIS_INBOX, VIS_INLINE
 from ..delegation import HaasDelegationError
 from ..haas import HaasClientError
+from ..project_workbench import LOCAL_ENDPOINT_ID, ProjectStoreConflict, ProjectStoreError
 from ..permissions import Mode
 from ..providers import AssistantTurn
 from .. import toolchain
@@ -251,8 +254,23 @@ def create_app(manager: SessionManager) -> FastAPI:
             "model": manager.model,
         }
 
+    @app.post("/v1/lifecycle/prepare-restart")
+    async def prepare_restart(
+        body: dict[str, Any] | None = None,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        requested = (body or {}).get("timeoutSeconds", 8.0)
+        try:
+            timeout_seconds = min(10.0, max(0.05, float(requested)))
+        except (TypeError, ValueError):
+            timeout_seconds = 8.0
+        return await manager.prepare_restart(
+            idempotency_key=idempotency_key,
+            timeout_seconds=timeout_seconds,
+        )
+
     @app.post("/mcp/cowork-recall")
-    async def cowork_recall_mcp(request: Request) -> JSONResponse:
+    async def cowork_recall_mcp(request: Request) -> Response:
         body = await request.json()
         if not isinstance(body, dict):
             return JSONResponse(
@@ -263,6 +281,8 @@ def create_app(manager: SessionManager) -> FastAPI:
             )
         request_id = body.get("id")
         method = body.get("method")
+        if method == "notifications/initialized" and request_id is None:
+            return Response(status_code=202)
         if method == "initialize":
             result = {
                 "protocolVersion": "2025-06-18",
@@ -703,6 +723,431 @@ def create_app(manager: SessionManager) -> FastAPI:
     def recent_workspaces() -> dict[str, Any]:
         return {"workspaces": manager.recent_workspaces()}
 
+    @app.get("/v1/projects")
+    def projects() -> dict[str, Any]:
+        return manager.project_projection()
+
+    @app.post("/v1/projects")
+    def create_project(
+        body: dict,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        if not idempotency_key:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "idempotency_key_required",
+                        "safeMessage": "Idempotency-Key is required.",
+                        "retryable": True,
+                    }
+                },
+                status_code=400,
+            )
+        try:
+            return JSONResponse(
+                manager.create_project(body or {}, idempotency_key=idempotency_key),
+                status_code=201,
+            )
+        except ProjectStoreConflict as exc:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "project_workspace_exists",
+                        "safeMessage": "This workspace already belongs to a project.",
+                        "retryable": False,
+                        "projectId": exc.project_id,
+                    }
+                },
+                status_code=409,
+            )
+        except ProjectStoreError as exc:
+            code = (
+                "endpoint_unavailable"
+                if "endpoint" in str(exc).lower()
+                else "workspace_unavailable"
+                if "workspace" in str(exc).lower()
+                else "project_invalid"
+            )
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": code,
+                        "safeMessage": str(exc),
+                        "retryable": code == "endpoint_unavailable",
+                    }
+                },
+                status_code=422,
+            )
+
+    @app.patch("/v1/projects/{project_id}")
+    def update_project(
+        project_id: str,
+        body: dict,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        if not idempotency_key:
+            return JSONResponse(
+                {"error": {"code": "idempotency_key_required", "retryable": True}},
+                status_code=400,
+            )
+        try:
+            return manager.update_project(
+                project_id, body or {}, idempotency_key=idempotency_key
+            )
+        except ProjectStoreConflict as exc:
+            code = (
+                "project_sessions_busy"
+                if "busy" in str(exc).lower()
+                else "project_order_stale"
+                if "stale" in str(exc).lower()
+                else "project_conflict"
+            )
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": code,
+                        "safeMessage": str(exc),
+                        "retryable": code == "project_order_stale",
+                    }
+                },
+                status_code=409,
+            )
+        except ProjectStoreError as exc:
+            code = (
+                "project_not_found"
+                if "not found" in str(exc).lower()
+                else "project_protected"
+                if "protected" in str(exc).lower()
+                else "endpoint_unavailable"
+                if "endpoint" in str(exc).lower()
+                else "project_invalid"
+            )
+            return JSONResponse(
+                {"error": {"code": code, "safeMessage": str(exc), "retryable": False}},
+                status_code=404 if code == "project_not_found" else 422,
+            )
+
+    @app.post("/v1/projects/reorder")
+    def reorder_projects(
+        body: dict,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        if not idempotency_key:
+            return JSONResponse(
+                {"error": {"code": "idempotency_key_required", "retryable": True}},
+                status_code=400,
+            )
+        try:
+            return manager.reorder_projects(
+                [str(value) for value in (body or {}).get("projectIds", [])],
+                observed_revision=int((body or {}).get("observedRevision", -1)),
+                idempotency_key=idempotency_key,
+            )
+        except ProjectStoreConflict as exc:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "project_order_stale",
+                        "safeMessage": str(exc),
+                        "retryable": True,
+                    }
+                },
+                status_code=409,
+            )
+        except (ProjectStoreError, TypeError, ValueError) as exc:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "project_invalid",
+                        "safeMessage": str(exc),
+                        "retryable": False,
+                    }
+                },
+                status_code=422,
+            )
+
+    @app.post("/v1/projects/{project_id}/sessions/archive")
+    def archive_project_sessions(
+        project_id: str,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        if not idempotency_key:
+            return JSONResponse(
+                {"error": {"code": "idempotency_key_required", "retryable": True}},
+                status_code=400,
+            )
+        try:
+            return manager.archive_project_sessions(
+                project_id, idempotency_key=idempotency_key
+            )
+        except ProjectStoreConflict as exc:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "project_sessions_busy",
+                        "safeMessage": str(exc),
+                        "retryable": True,
+                    }
+                },
+                status_code=409,
+            )
+        except ProjectStoreError:
+            return JSONResponse(
+                {"error": {"code": "project_not_found", "retryable": False}},
+                status_code=404,
+            )
+
+    @app.post("/v1/projects/{project_id}/reveal")
+    def reveal_project(
+        project_id: str,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        if not idempotency_key:
+            return JSONResponse(
+                {"error": {"code": "idempotency_key_required", "retryable": True}},
+                status_code=400,
+            )
+        try:
+            return manager.reveal_project(project_id, idempotency_key=idempotency_key)
+        except ProjectStoreError as exc:
+            code = (
+                "project_not_found"
+                if "not found" in str(exc).lower()
+                else "project_capability_unsupported"
+            )
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": code,
+                        "safeMessage": str(exc),
+                        "retryable": False,
+                    }
+                },
+                status_code=404 if code == "project_not_found" else 422,
+            )
+
+    @app.post("/v1/projects/{project_id}/worktrees")
+    def create_project_worktree(
+        project_id: str,
+        body: dict,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        if not idempotency_key:
+            return JSONResponse(
+                {"error": {"code": "idempotency_key_required", "retryable": True}},
+                status_code=400,
+            )
+        try:
+            return JSONResponse(
+                manager.create_project_worktree(
+                    project_id,
+                    branch_name=str((body or {}).get("branchName") or ""),
+                    idempotency_key=idempotency_key,
+                ),
+                status_code=201,
+            )
+        except ProjectStoreConflict as exc:
+            code = (
+                "project_sessions_busy"
+                if "busy" in str(exc).lower()
+                else "git_checkout_blocked"
+            )
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": code,
+                        "safeMessage": str(exc),
+                        "retryable": False,
+                    }
+                },
+                status_code=409,
+            )
+        except ProjectStoreError as exc:
+            code = (
+                "project_not_found"
+                if "not found" in str(exc).lower()
+                else "project_invalid"
+                if "branch" in str(exc).lower()
+                else "project_capability_unsupported"
+            )
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": code,
+                        "safeMessage": str(exc),
+                        "retryable": False,
+                    }
+                },
+                status_code=404 if code == "project_not_found" else 422,
+            )
+
+    @app.get("/v1/projects/{project_id}/worktrees/preview")
+    def preview_project_worktree(
+        project_id: str,
+        branch_name: str = Query(alias="branchName"),
+    ):
+        try:
+            return manager.preview_project_worktree(
+                project_id, branch_name=branch_name
+            )
+        except ProjectStoreError as exc:
+            code = (
+                "project_not_found"
+                if "not found" in str(exc).lower()
+                else "project_invalid"
+                if "branch" in str(exc).lower()
+                else "project_capability_unsupported"
+            )
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": code,
+                        "safeMessage": str(exc),
+                        "retryable": False,
+                    }
+                },
+                status_code=404 if code == "project_not_found" else 422,
+            )
+
+    @app.get("/v1/projects/{project_id}/workspaces")
+    def project_workspaces(project_id: str):
+        try:
+            return {"workspaces": manager.project_workspaces(project_id)}
+        except ProjectStoreError:
+            return JSONResponse(
+                {"error": {"code": "project_not_found", "retryable": False}},
+                status_code=404,
+            )
+
+    @app.post("/v1/projects/{project_id}/workspaces")
+    def add_project_workspace(
+        project_id: str,
+        body: dict,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        if not idempotency_key:
+            return JSONResponse(
+                {"error": {"code": "idempotency_key_required", "retryable": True}},
+                status_code=400,
+            )
+        try:
+            return JSONResponse(
+                manager.add_project_workspace(
+                    project_id, body or {}, idempotency_key=idempotency_key
+                ),
+                status_code=201,
+            )
+        except ProjectStoreConflict as exc:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "project_workspace_exists",
+                        "safeMessage": str(exc),
+                        "projectId": exc.project_id,
+                        "retryable": False,
+                    }
+                },
+                status_code=409,
+            )
+        except ProjectStoreError as exc:
+            code = (
+                "endpoint_unavailable"
+                if "endpoint" in str(exc).lower()
+                else "workspace_unavailable"
+            )
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": code,
+                        "safeMessage": str(exc),
+                        "retryable": code == "endpoint_unavailable",
+                    }
+                },
+                status_code=422,
+            )
+
+    @app.get("/v1/projects/{project_id}/sessions")
+    def project_sessions(project_id: str):
+        try:
+            return {"sessions": manager.project_sessions(project_id)}
+        except ProjectStoreError:
+            return JSONResponse(
+                {"error": {"code": "project_not_found", "retryable": False}},
+                status_code=404,
+            )
+
+    @app.get("/v1/haas/endpoints")
+    def haas_endpoints() -> dict[str, Any]:
+        return {"endpoints": manager.list_haas_endpoints()}
+
+    @app.get("/v1/workspaces/{workspace_binding_id}/git")
+    def workspace_git(workspace_binding_id: str):
+        try:
+            return {"git": manager.workspace_git(workspace_binding_id)}
+        except ProjectStoreError:
+            return JSONResponse(
+                {"error": {"code": "workspace_not_found", "retryable": False}},
+                status_code=404,
+            )
+
+    def mutate_workspace_git(
+        workspace_binding_id: str,
+        body: dict,
+        idempotency_key: str | None,
+        *,
+        create: bool,
+    ):
+        if not idempotency_key:
+            return JSONResponse(
+                {"error": {"code": "idempotency_key_required", "retryable": True}},
+                status_code=400,
+            )
+        try:
+            return manager.mutate_workspace_git(
+                workspace_binding_id,
+                branch_name=str((body or {}).get("branchName") or ""),
+                observed_revision=str((body or {}).get("observedRevision") or ""),
+                create=create,
+                idempotency_key=idempotency_key,
+            )
+        except ProjectStoreConflict as exc:
+            code = "git_state_stale" if "stale" in str(exc) else "git_checkout_blocked"
+            return JSONResponse(
+                {"error": {"code": code, "safeMessage": str(exc), "retryable": True}},
+                status_code=409,
+            )
+        except ProjectStoreError as exc:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "project_invalid",
+                        "safeMessage": str(exc),
+                        "retryable": False,
+                    }
+                },
+                status_code=422,
+            )
+
+    @app.post("/v1/workspaces/{workspace_binding_id}/git/switch")
+    def switch_workspace_git(
+        workspace_binding_id: str,
+        body: dict,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        return mutate_workspace_git(
+            workspace_binding_id, body, idempotency_key, create=False
+        )
+
+    @app.post("/v1/workspaces/{workspace_binding_id}/git/branches")
+    def create_workspace_git_branch(
+        workspace_binding_id: str,
+        body: dict,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        return mutate_workspace_git(
+            workspace_binding_id, body, idempotency_key, create=True
+        )
+
     @app.post("/v1/workspaces/open")
     def open_workspace(body: dict) -> dict[str, Any]:
         return manager.open_workspace(body.get("path", ""), create=bool(body.get("create")))
@@ -746,6 +1191,34 @@ def create_app(manager: SessionManager) -> FastAPI:
     @app.get("/v1/sessions/{session_id}/messages")
     def session_messages(session_id: str) -> dict[str, Any]:
         return {"messages": manager.session_messages(session_id)}
+
+    @app.get("/v1/sessions/{session_id}/conversation-commands/{idempotency_key}")
+    def conversation_command_receipt(session_id: str, idempotency_key: str) -> JSONResponse:
+        receipt = manager.conversation_commands.find_by_idempotency(session_id, idempotency_key)
+        if receipt is None:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "command_not_found",
+                        "safeMessage": "The message was not accepted.",
+                        "retryable": True,
+                    }
+                },
+                status_code=404,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(
+            {
+                "clientCommandId": receipt.client_command_id,
+                "status": "duplicate",
+                "disposition": receipt.disposition,
+                "turnId": receipt.turn_id,
+                "queueItemId": receipt.queue_item_id,
+                "outcomeRef": receipt.outcome_ref,
+                "error": None,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/v1/sessions/{session_id}/execution-evidence")
     async def session_execution_evidence(
@@ -1777,6 +2250,45 @@ def create_app(manager: SessionManager) -> FastAPI:
     def settings_set_nav_layout(body: dict) -> dict[str, Any]:
         return manager.set_nav_layout(str((body or {}).get("nav_layout", "")))
 
+    @app.post("/v1/settings/sidebar-order")
+    def settings_set_sidebar_order(
+        body: dict,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        if not idempotency_key:
+            return JSONResponse(
+                {"error": {"code": "idempotency_key_required", "retryable": True}},
+                status_code=400,
+            )
+        try:
+            return manager.set_sidebar_order(
+                str((body or {}).get("projectOrder", "")),
+                str((body or {}).get("conversationOrder", "")),
+                idempotency_key=idempotency_key,
+            )
+        except ProjectStoreConflict as exc:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "idempotency_conflict",
+                        "safeMessage": str(exc),
+                        "retryable": False,
+                    }
+                },
+                status_code=409,
+            )
+        except ProjectStoreError as exc:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "project_invalid",
+                        "safeMessage": str(exc),
+                        "retryable": False,
+                    }
+                },
+                status_code=422,
+            )
+
     @app.post("/v1/settings/sessions-peek")
     def settings_set_sessions_peek(body: dict) -> dict[str, Any]:
         # Sidebar: sessions shown per group before "Show more" (owner ask, 2026-07-03).
@@ -2253,6 +2765,30 @@ def create_app(manager: SessionManager) -> FastAPI:
                 manager.inbox.resolve(pend[0].id, resolution)
 
         workspace = ws.query_params.get("workspace")
+        try:
+            manager.bind_session_project_context(
+                session_id,
+                workspace=workspace or None,
+                project_id=ws.query_params.get("projectId"),
+                workspace_binding_id=ws.query_params.get("workspaceBindingId"),
+                endpoint_id=ws.query_params.get("endpointId") or LOCAL_ENDPOINT_ID,
+                remote_workspace_ref=ws.query_params.get("remoteWorkspaceRef"),
+            )
+        except (ProjectStoreError, ValueError) as exc:
+            await ws.send_json(
+                {
+                    "type": "error",
+                    "data": {
+                        "error": str(exc),
+                        "error_type": "ProjectBindingError",
+                        "code": "project_binding_unavailable",
+                        "retryable": False,
+                        "recoveryAction": "restore_workspace",
+                    },
+                }
+            )
+            await ws.close(code=1008)
+            return
         mcp_tools = await manager.prepare_mcp_tools(session_id, workspace=workspace, agent=agent)
         engine = manager.get_engine(
             session_id,
@@ -2271,10 +2807,15 @@ def create_app(manager: SessionManager) -> FastAPI:
             await ws.send_json(
                 {
                     "type": "error",
-                    "data": {"error": "no valid workspace — choose a project folder first"},
+                    "data": {
+                        "error": "no valid workspace — choose a project folder first",
+                        "code": "workspace_unavailable",
+                        "retryable": False,
+                        "recoveryAction": "restore_workspace",
+                    },
                 }
             )
-            await ws.close()
+            await ws.close(code=1008)
             return
         # MCP servers that failed to start while preparing this session's tools:
         # leave a quiet, persistent notice instead of the session silently lacking
@@ -2302,6 +2843,9 @@ def create_app(manager: SessionManager) -> FastAPI:
                 "type": "ready",
                 "data": {
                     "session_id": session_id,
+                    "conversationProtocolVersion": _CONVERSATION_PROTOCOL_VERSION,
+                    "queue": manager.conversation_commands.queue_snapshot(session_id),
+                    "queuePaused": manager.conversation_commands.queue_status(session_id)["paused"],
                     # A reconnect can land MID-TURN (sidebar revisit, app relaunch, WS
                     # drop). Without server truth the GUI never learns a turn is live —
                     # no Stop button, no waiting row (owner catch 2026-08-24).
@@ -2333,9 +2877,7 @@ def create_app(manager: SessionManager) -> FastAPI:
             }
         )
         for replay_event in await manager.replay_haas_process_events(session_id):
-            await ws.send_json(
-                {"type": replay_event.type.value, "data": replay_event.data}
-            )
+            await ws.send_json({"type": replay_event.type.value, "data": replay_event.data})
         for pending_event in pending_haas_events:
             await ws.send_json({"type": pending_event.type.value, "data": pending_event.data})
 
@@ -2352,14 +2894,46 @@ def create_app(manager: SessionManager) -> FastAPI:
             "iteration_end",
         }
 
-        async def run_turn(content, *, retry: bool = False, display=None) -> None:
+        async def run_turn(
+            content,
+            *,
+            retry: bool = False,
+            display=None,
+            turn_id: str | None = None,
+            model_name: str | None = None,
+            context_refs: list[dict[str, Any]] | None = None,
+        ) -> None:
             # The receive loop atomically claims this session before scheduling the task.
             # Keeping the claim outside prevents two back-to-back frames from both starting.
+            turn_id = turn_id or f"turn_{uuid.uuid4().hex}"
+            projection_cursor = len(engine.messages)
+
+            def stamp_messages() -> None:
+                nonlocal projection_cursor
+                for message in engine.messages[projection_cursor:]:
+                    if message.get("role") == "system":
+                        continue
+                    message.setdefault("_managerTurnId", turn_id)
+                    message.setdefault("_managerRowId", f"row_{uuid.uuid4().hex}")
+                    if message.get("role") == "user" and context_refs:
+                        message.setdefault("_managerContext", context_refs)
+                projection_cursor = len(engine.messages)
+
             haas_turn_started = False
             execution_terminal = False
             execution_failed = False
             turn_token = manager.active_turn_token(session_id)
             try:
+                if model_name:
+                    notice = engine.switch_model(model_name)
+                    if notice:
+                        await manager.broadcast_session(
+                            session_id,
+                            {
+                                "type": "model_changed",
+                                "data": {"model": model_name, "text": notice},
+                            },
+                        )
                 events = manager.run_turn_events(
                     session_id,
                     engine,
@@ -2377,8 +2951,28 @@ def create_app(manager: SessionManager) -> FastAPI:
                         execution_failed = execution_failed or not execution_terminal
                     # Broadcast to every socket viewing this session (this socket included — it's a
                     # registered client), so a second view of the same session stays in sync too.
+                    stamp_messages()
+                    event_data = dict(event.data)
+                    role = {"turn_start": "user", "assistant_message": "assistant"}.get(
+                        event.type.value
+                    )
+                    if role:
+                        message = next(
+                            (
+                                m
+                                for m in reversed(engine.messages)
+                                if m.get("role") == role and m.get("_managerTurnId") == turn_id
+                            ),
+                            None,
+                        )
+                        if message:
+                            event_data["rowId"] = message["_managerRowId"]
+                    if event.type.value == "turn_start" and context_refs:
+                        event_data["contextRefs"] = context_refs
+                    if turn_id:
+                        event_data.setdefault("turnId", turn_id)
                     await manager.broadcast_session(
-                        session_id, {"type": event.type.value, "data": event.data}
+                        session_id, {"type": event.type.value, "data": event_data}
                     )
                     if event.type.value == "turn_start" and event.data.get("delegated"):
                         haas_turn_started = True
@@ -2394,6 +2988,24 @@ def create_app(manager: SessionManager) -> FastAPI:
                         )
                     if event.type.value in _CHECKPOINTS:
                         manager.save(session_id, engine)
+                        if event.type.value == "turn_start" and turn_id:
+                            delegated = event.data.get("delegated")
+                            invocation_id = (
+                                delegated.get("invocation")
+                                if isinstance(delegated, dict)
+                                else None
+                            )
+                            if isinstance(invocation_id, str) and invocation_id.startswith("inv_"):
+                                manager.conversation_commands.checkpoint_execution(
+                                    session_id,
+                                    turn_id,
+                                    execution_ref=invocation_id,
+                                    allow_rebind=True,
+                                )
+                            else:
+                                manager.conversation_commands.mark_checkpointed(
+                                    session_id, turn_id
+                                )
                     if event.type.value == "turn_start" and not event.data.get("delegated"):
                         # Title on the user's words the moment they land — never behind
                         # a long agentic turn (owner catch 2026-08-24).
@@ -2412,25 +3024,48 @@ def create_app(manager: SessionManager) -> FastAPI:
                     },
                 )
             finally:
+                stamp_messages()
                 manager.mark_idle(session_id, token=turn_token)
+                if turn_id:
+                    manager.conversation_commands.mark_terminal(
+                        session_id, turn_id, outcome_ref=f"outcome_{turn_id}"
+                    )
+                    await manager.broadcast_session(
+                        session_id,
+                        {
+                            "type": "queue_updated",
+                            "data": {
+                                "items": manager.conversation_commands.queue_snapshot(session_id),
+                                "paused": manager.conversation_commands.queue_status(session_id)[
+                                    "paused"
+                                ],
+                            },
+                        },
+                    )
                 manager.save(session_id, engine)
                 if session_id.startswith("__run__"):
-                    run_id = session_id[len("__run__"):]
+                    run_id = session_id[len("__run__") :]
                     run = manager.task_store.find_run(run_id)
                     if run and run.trigger == "manual":
                         result = manager.finalize_manual_run(
-                            run.task_id, run.run_id,
+                            run.task_id,
+                            run.run_id,
                             execution_ok=execution_terminal and not execution_failed,
                         )
                         task = manager.task_store.get(run.task_id)
                         final_run = manager.task_store.find_run(run_id)
-                        if task and final_run and result.get("ok") and (
-                            task.notify_on_completion or final_run.status != "ok"
+                        if (
+                            task
+                            and final_run
+                            and result.get("ok")
+                            and (task.notify_on_completion or final_run.status != "ok")
                         ):
                             try:
                                 await manager._notify_task_done(task, final_run)
                             except Exception:
-                                logging.getLogger(__name__).warning("Automation notification delivery failed")
+                                logging.getLogger(__name__).warning(
+                                    "Automation notification delivery failed"
+                                )
                 terminal_control = manager.haas_control_state(session_id)
                 # Pause already publishes its authoritative `paused` readback in
                 # the control request path. Other terminal paths (notably Stop)
@@ -2440,7 +3075,87 @@ def create_app(manager: SessionManager) -> FastAPI:
                         session_id,
                         {"type": "execution_control", "data": terminal_control},
                     )
-                await manager.broadcast_session(session_id, {"type": "turn_done", "data": {}})
+                await manager.broadcast_session(
+                    session_id,
+                    {
+                        "type": "turn_done",
+                        "data": {**({"turnId": turn_id} if turn_id else {})},
+                    },
+                )
+                force_drain = manager.consume_queue_drain_after_stop(session_id)
+                turn_succeeded = execution_terminal and not execution_failed
+                if (
+                    not turn_succeeded
+                    and not force_drain
+                    and manager.conversation_commands.queue_snapshot(session_id)
+                ):
+                    manager.conversation_commands.pause_queue(
+                        session_id, "previous_turn_not_completed"
+                    )
+                    await manager.broadcast_session(
+                        session_id,
+                        {
+                            "type": "queue_updated",
+                            "data": {
+                                "items": manager.conversation_commands.queue_snapshot(session_id),
+                                "paused": True,
+                            },
+                        },
+                    )
+                if turn_succeeded or force_drain:
+                    await start_next_queued()
+
+        async def start_next_queued() -> bool:
+            if not manager.try_mark_running(session_id):
+                return False
+            try:
+                claimed = manager.conversation_commands.claim_next(session_id)
+                if claimed is None:
+                    manager.mark_idle(session_id)
+                    return False
+                queued_receipt, queued_payload = claimed
+                await manager.broadcast_session(
+                    session_id,
+                    {
+                        "type": "queue_updated",
+                        "data": {"items": manager.conversation_commands.queue_snapshot(session_id)},
+                    },
+                )
+                task = asyncio.create_task(
+                    run_turn(
+                        build_user_content(
+                            str(queued_payload.get("text") or ""),
+                            queued_payload.get("attachments") or [],
+                        ),
+                        display=queued_payload.get("display"),
+                        turn_id=queued_receipt.turn_id,
+                        model_name=queued_payload.get("model"),
+                        context_refs=queued_payload.get("contextRefs"),
+                    )
+                )
+
+                def report_queued_turn_failure(completed: asyncio.Task) -> None:
+                    if completed.cancelled():
+                        return
+                    failure = completed.exception()
+                    if failure is not None:
+                        logging.getLogger(__name__).error(
+                            "Queued conversation turn failed",
+                            exc_info=(
+                                type(failure),
+                                failure,
+                                failure.__traceback__,
+                            ),
+                        )
+
+                task.add_done_callback(report_queued_turn_failure)
+                return True
+            except Exception:
+                manager.conversation_commands.pause_queue(
+                    session_id, "dispatch_uncertain", restore_dispatching=True
+                )
+                manager.mark_idle(session_id)
+                raise
 
         async def continue_turn(additional_instruction: str | None = None) -> None:
             turn_token = manager.active_turn_token(session_id)
@@ -2505,6 +3220,31 @@ def create_app(manager: SessionManager) -> FastAPI:
             # or flush an in-progress assistant stream in the GUI.
             await ws.send_json({"type": "input_rejected", "data": {"error": reason}})
 
+        async def send_command_ack(
+            client_command_id: str,
+            *,
+            status: str,
+            disposition: str | None = None,
+            turn_id: str | None = None,
+            queue_item_id: str | None = None,
+            outcome_ref: str | None = None,
+            error: dict[str, Any] | None = None,
+        ) -> None:
+            await ws.send_json(
+                {
+                    "type": "command_ack",
+                    "data": {
+                        "clientCommandId": client_command_id,
+                        "status": status,
+                        "disposition": disposition,
+                        "turnId": turn_id,
+                        "queueItemId": queue_item_id,
+                        "outcomeRef": outcome_ref,
+                        "error": error,
+                    },
+                }
+            )
+
         def spawn_control(coro) -> None:
             task = asyncio.create_task(coro)
             control_tasks.add(task)
@@ -2542,13 +3282,155 @@ def create_app(manager: SessionManager) -> FastAPI:
                 )
                 await reject_input(f"Could not pause HaaS execution: {exc}")
 
-        async def claim_turn(*, retry: bool = False, content=None, display=None) -> None:
-            if not manager.try_mark_running(session_id):
-                await reject_input(
-                    "This session is already running a turn. Wait for it to finish or stop it."
+        async def claim_turn(
+            *,
+            retry: bool = False,
+            content=None,
+            display=None,
+            client_command_id: str | None = None,
+            idempotency_key: str | None = None,
+            delivery: str = "start_now",
+            command_payload: dict[str, Any] | None = None,
+        ) -> None:
+            if client_command_id and idempotency_key:
+                duplicate = manager.conversation_commands.find_by_idempotency(
+                    session_id, idempotency_key
                 )
+                if duplicate is not None:
+                    await send_command_ack(
+                        client_command_id,
+                        status="duplicate",
+                        disposition=duplicate.disposition,
+                        turn_id=duplicate.turn_id,
+                        queue_item_id=duplicate.queue_item_id,
+                        outcome_ref=duplicate.outcome_ref,
+                    )
+                    return
+                project_binding = manager.project_store.get_session_binding(session_id)
+                if (
+                    project_binding is not None
+                    and project_binding.endpoint_id != LOCAL_ENDPOINT_ID
+                ):
+                    preflight = manager.delegation_decision(
+                        session_id,
+                        workspace=workspace,
+                        agent=agent,
+                        content=content,
+                    )
+                    if preflight.backend == "blocked":
+                        await send_command_ack(
+                            client_command_id,
+                            status="rejected",
+                            error={
+                                "code": preflight.reason,
+                                "safeMessage": (
+                                    "The selected remote HaaS target is unavailable."
+                                ),
+                                "retryable": True,
+                                "recoveryAction": "retry",
+                            },
+                        )
+                        return
+            if not manager.try_mark_running(session_id):
+                error = "This session is already running a turn. Wait for it to finish or stop it."
+                if client_command_id and idempotency_key and delivery == "enqueue":
+                    try:
+                        receipt = manager.conversation_commands.accept(
+                            session_id=session_id,
+                            client_command_id=client_command_id,
+                            idempotency_key=idempotency_key,
+                            delivery="enqueue",
+                            payload=command_payload or {},
+                            busy=True,
+                        )
+                    except ConversationCommandConflict as exc:
+                        await send_command_ack(
+                            client_command_id,
+                            status="rejected",
+                            error={
+                                "code": "command_conflict",
+                                "safeMessage": str(exc),
+                                "retryable": False,
+                            },
+                        )
+                        return
+                    await send_command_ack(
+                        client_command_id,
+                        status=receipt.status,
+                        disposition=receipt.disposition,
+                        queue_item_id=receipt.queue_item_id,
+                    )
+                    await manager.broadcast_session(
+                        session_id,
+                        {
+                            "type": "queue_updated",
+                            "data": {
+                                "items": manager.conversation_commands.queue_snapshot(session_id)
+                            },
+                        },
+                    )
+                elif client_command_id:
+                    await send_command_ack(
+                        client_command_id,
+                        status="rejected",
+                        error={
+                            "code": "session_busy",
+                            "safeMessage": error,
+                            "retryable": True,
+                            "recoveryAction": "enqueue",
+                        },
+                    )
+                else:
+                    await reject_input(error)
                 return
-            asyncio.create_task(run_turn(content, retry=retry, display=display))
+            turn_id: str | None = None
+            if client_command_id:
+                assert idempotency_key is not None
+                try:
+                    receipt = manager.conversation_commands.accept(
+                        session_id=session_id,
+                        client_command_id=client_command_id,
+                        idempotency_key=idempotency_key,
+                        delivery="start_now",
+                        payload=command_payload or {},
+                        busy=False,
+                    )
+                except ConversationCommandConflict as exc:
+                    manager.mark_idle(session_id)
+                    await send_command_ack(
+                        client_command_id,
+                        status="rejected",
+                        error={
+                            "code": "command_conflict",
+                            "safeMessage": str(exc),
+                            "retryable": False,
+                        },
+                    )
+                    return
+                turn_id = receipt.turn_id
+                try:
+                    await send_command_ack(
+                        client_command_id,
+                        status=receipt.status,
+                        disposition=receipt.disposition,
+                        turn_id=receipt.turn_id,
+                        queue_item_id=receipt.queue_item_id,
+                        outcome_ref=receipt.outcome_ref,
+                    )
+                finally:
+                    # Persistence accepted the task. Socket delivery cannot revoke it.
+                    asyncio.create_task(
+                        run_turn(
+                            content,
+                            retry=retry,
+                            display=display,
+                            turn_id=turn_id,
+                            model_name=(command_payload or {}).get("model"),
+                            context_refs=(command_payload or {}).get("contextRefs"),
+                        )
+                    )
+                return
+            asyncio.create_task(run_turn(content, retry=retry, display=display, turn_id=turn_id))
 
         try:
             while True:
@@ -2651,6 +3533,170 @@ def create_app(manager: SessionManager) -> FastAPI:
                         await reject_input("Invalid allow_anyway: arguments must be an object.")
                     else:
                         engine.approve_action_once(name, arguments or {})
+                elif kind in {
+                    "queue_delete",
+                    "queue_edit",
+                    "queue_move",
+                    "queue_send_now",
+                }:
+                    queue_item_id = message.get("queueItemId")
+                    expected_revision = message.get("expectedRevision")
+                    mutation_idempotency_key = message.get("idempotencyKey")
+                    if (
+                        not isinstance(queue_item_id, str)
+                        or not isinstance(expected_revision, int)
+                        or not isinstance(mutation_idempotency_key, str)
+                        or not (mutation_idempotency_key.strip())
+                        or len(mutation_idempotency_key) > 256
+                    ):
+                        await reject_input("Invalid queued message request.")
+                        continue
+                    try:
+                        if kind == "queue_delete":
+                            manager.conversation_commands.delete_queue_item(
+                                session_id,
+                                queue_item_id,
+                                expected_revision=expected_revision,
+                                idempotency_key=mutation_idempotency_key,
+                            )
+                        elif kind == "queue_edit":
+                            payload = manager.conversation_commands.restore_queue_item(
+                                session_id,
+                                queue_item_id,
+                                expected_revision=expected_revision,
+                                idempotency_key=mutation_idempotency_key,
+                            )
+                            await ws.send_json(
+                                {
+                                    "type": "queue_restored",
+                                    "data": {
+                                        "payload": payload,
+                                        "mutationIdempotencyKey": mutation_idempotency_key,
+                                    },
+                                }
+                            )
+                        elif kind == "queue_move":
+                            target_position = message.get("targetPosition")
+                            if not isinstance(target_position, int):
+                                raise ValueError("queue target position must be an integer")
+                            manager.conversation_commands.move_queue_item(
+                                session_id,
+                                queue_item_id,
+                                expected_revision=expected_revision,
+                                target_position=target_position,
+                                idempotency_key=mutation_idempotency_key,
+                            )
+                        else:
+                            should_interrupt = manager.conversation_commands.prioritize_queue_item(
+                                session_id,
+                                queue_item_id,
+                                expected_revision=expected_revision,
+                                idempotency_key=mutation_idempotency_key,
+                            )
+                            if should_interrupt and manager.is_running(session_id):
+                                manager.request_queue_drain_after_stop(session_id)
+                                try:
+                                    await manager.request_interrupt(session_id, engine)
+                                except Exception as exc:
+                                    manager.consume_queue_drain_after_stop(session_id)
+                                    manager.conversation_commands.pause_queue(
+                                        session_id, "send_now_interrupt_failed"
+                                    )
+                                    if isinstance(exc, (HaasClientError, HaasDelegationError)):
+                                        raise
+                                    logging.getLogger(__name__).exception(
+                                        "Queue send-now stop failed unexpectedly"
+                                    )
+                                    raise HaasDelegationError(
+                                        "stop could not be confirmed"
+                                    ) from exc
+                            elif should_interrupt:
+                                await start_next_queued()
+                        await manager.broadcast_session(
+                            session_id,
+                            {
+                                "type": "queue_updated",
+                                "data": {
+                                    "items": manager.conversation_commands.queue_snapshot(
+                                        session_id
+                                    ),
+                                    "paused": manager.conversation_commands.queue_status(
+                                        session_id
+                                    )["paused"],
+                                },
+                            },
+                        )
+                    except (
+                        KeyError,
+                        ValueError,
+                        HaasClientError,
+                        HaasDelegationError,
+                    ) as exc:
+                        await ws.send_json(
+                            {
+                                "type": "queue_error",
+                                "data": {
+                                    "code": (
+                                        "queue_send_now_failed"
+                                        if kind == "queue_send_now"
+                                        else "queue_conflict"
+                                    ),
+                                    "safeMessage": str(exc),
+                                    "items": manager.conversation_commands.queue_snapshot(
+                                        session_id
+                                    ),
+                                    "paused": manager.conversation_commands.queue_status(
+                                        session_id
+                                    )["paused"],
+                                    "mutationIdempotencyKey": mutation_idempotency_key,
+                                },
+                            }
+                        )
+                elif kind == "queue_resume":
+                    mutation_idempotency_key = message.get("idempotencyKey")
+                    if (
+                        not isinstance(mutation_idempotency_key, str)
+                        or not mutation_idempotency_key.strip()
+                        or len(mutation_idempotency_key) > 256
+                    ):
+                        await reject_input("Invalid queue resume request.")
+                        continue
+                    try:
+                        resumed = manager.conversation_commands.resume_queue(
+                            session_id, idempotency_key=mutation_idempotency_key
+                        )
+                    except (KeyError, ValueError) as exc:
+                        await ws.send_json(
+                            {
+                                "type": "queue_error",
+                                "data": {
+                                    "code": "queue_conflict",
+                                    "safeMessage": str(exc),
+                                    "items": manager.conversation_commands.queue_snapshot(
+                                        session_id
+                                    ),
+                                    "paused": manager.conversation_commands.queue_status(
+                                        session_id
+                                    )["paused"],
+                                    "mutationIdempotencyKey": mutation_idempotency_key,
+                                },
+                            }
+                        )
+                        continue
+                    await manager.broadcast_session(
+                        session_id,
+                        {
+                            "type": "queue_updated",
+                            "data": {
+                                "items": manager.conversation_commands.queue_snapshot(session_id),
+                                "paused": manager.conversation_commands.queue_status(session_id)[
+                                    "paused"
+                                ],
+                            },
+                        },
+                    )
+                    if resumed:
+                        await start_next_queued()
                 elif kind == "interrupt":
                     try:
                         stop_readback = await manager.request_interrupt(session_id, engine)
@@ -2775,11 +3821,69 @@ def create_app(manager: SessionManager) -> FastAPI:
                     else:
                         await _apply_model(model)
                 elif kind == "user_message":
+                    client_command_id = message.get("clientCommandId")
+                    if client_command_id is None:
+                        await ws.send_json(
+                            {
+                                "type": "client_upgrade_required",
+                                "data": {
+                                    "code": "client_upgrade_required",
+                                    "safeMessage": (
+                                        "This OpenHarness client is out of date. Reload to continue."
+                                    ),
+                                    "recoveryAction": "reload",
+                                },
+                            }
+                        )
+                        continue
+                    if (
+                        not isinstance(client_command_id, str)
+                        or not client_command_id.strip()
+                        or len(client_command_id) > 128
+                    ):
+                        await reject_input("Invalid client command id.")
+                        continue
+                    client_command_id = client_command_id.strip()
+
+                    async def reject_user_message(
+                        code: str,
+                        reason: str,
+                        command_id: str = client_command_id,
+                    ) -> None:
+                        await send_command_ack(
+                            command_id,
+                            status="rejected",
+                            error={
+                                "code": code,
+                                "safeMessage": reason,
+                                "retryable": False,
+                            },
+                        )
+
+                    idempotency_key = message.get("idempotencyKey")
+                    if (
+                        not isinstance(idempotency_key, str)
+                        or not idempotency_key.strip()
+                        or len(idempotency_key) > 256
+                    ):
+                        await reject_user_message(
+                            "invalid_idempotency_key",
+                            "A valid idempotency key is required.",
+                        )
+                        continue
+                    if isinstance(idempotency_key, str):
+                        idempotency_key = idempotency_key.strip()
+                    delivery = message.get("delivery", "start_now")
+                    if delivery not in {"start_now", "enqueue", "interrupt_then_start"}:
+                        await reject_user_message("invalid_delivery", "Invalid delivery mode.")
+                        continue
                     raw_text = message.get("text")
                     if raw_text is None:
                         raw_text = ""
                     if not isinstance(raw_text, str):
-                        await reject_input("Invalid message text: expected a string.")
+                        await reject_user_message(
+                            "invalid_message", "Invalid message text: expected a string."
+                        )
                         continue
                     text = raw_text.strip()
                     raw_attachments = message.get("attachments")
@@ -2787,7 +3891,9 @@ def create_app(manager: SessionManager) -> FastAPI:
                     # Reject an oversized frame instead of buffering it into a turn. Send a
                     # visible error so the surface can tell the user, and drop the message.
                     if not isinstance(attachments, list):
-                        await reject_input("Invalid attachments: expected a list.")
+                        await reject_user_message(
+                            "invalid_attachments", "Invalid attachments: expected a list."
+                        )
                         continue
                     reject = None
                     if len(text) > _MAX_MESSAGE_TEXT_CHARS:
@@ -2842,14 +3948,16 @@ def create_app(manager: SessionManager) -> FastAPI:
                             if reject is not None:
                                 break
                     if reject is not None:
-                        await reject_input(reject)
+                        await reject_user_message("invalid_message", reject)
                         continue
                     # The composer sends its visible model with every message — the FIRST
                     # one binds the session (race-proof across reconnects; see api.ts
                     # Session.userMessage), later ones may switch it (notice persisted).
                     model = message.get("model")
                     if model is not None and not isinstance(model, str):
-                        await reject_input("Invalid model: expected a string.")
+                        await reject_user_message(
+                            "invalid_model", "Invalid model: expected a string."
+                        )
                         continue
                     # Force-run (SKILLS-SPEC §4.1 #3): the composer's `/skill` pick rides as a
                     # separate field. Validated against the session's effective menu — a muted
@@ -2857,26 +3965,98 @@ def create_app(manager: SessionManager) -> FastAPI:
                     # The model-facing framing goes into `content`; the transcript shows the
                     # user's literal "/name …" line via the `_display` sidecar (one bubble).
                     skill = message.get("skill")
+                    raw_context_refs = message.get("contextRefs", [])
+                    context_refs: list[dict[str, Any]] = []
+                    if not isinstance(raw_context_refs, list) or len(raw_context_refs) > 16:
+                        await reject_user_message("invalid_context", "Invalid context references.")
+                        continue
+                    context_valid = True
+                    for reference in raw_context_refs:
+                        if (
+                            not isinstance(reference, dict)
+                            or reference.get("kind") not in {"file", "session"}
+                            or not isinstance(reference.get("id"), str)
+                            or not isinstance(reference.get("label"), str)
+                            or len(reference["id"]) > 512
+                            or len(reference["label"]) > 512
+                            or (
+                                reference.get("path") is not None
+                                and (
+                                    not isinstance(reference["path"], str)
+                                    or len(reference["path"]) > 4096
+                                )
+                            )
+                        ):
+                            context_valid = False
+                            break
+                        context_refs.append(
+                            {
+                                "kind": reference["kind"],
+                                "id": reference["id"],
+                                "label": reference["label"],
+                                **(
+                                    {"path": reference["path"]}
+                                    if isinstance(reference.get("path"), str)
+                                    else {}
+                                ),
+                            }
+                        )
+                    if not context_valid:
+                        await reject_user_message("invalid_context", "Invalid context references.")
+                        continue
+                    for attachment_index, attachment in enumerate(attachments):
+                        attachment_name = attachment.get("name")
+                        if not isinstance(attachment_name, str) or any(
+                            reference["kind"] == "file" and reference["label"] == attachment_name
+                            for reference in context_refs
+                        ):
+                            continue
+                        context_refs.append(
+                            {
+                                "kind": "file",
+                                "id": f"attachment-{attachment_index}",
+                                "label": attachment_name,
+                            }
+                        )
                     display = None
                     if skill is not None:
                         if not isinstance(skill, str) or not skill.strip():
-                            await reject_input("Invalid skill: expected a name.")
+                            await reject_user_message(
+                                "invalid_skill", "Invalid skill: expected a name."
+                            )
                             continue
                         skill = skill.strip()
                         menu = manager.effective_skill_names(session_id, workspace)
                         if skill not in menu:
-                            await reject_input(f"Skill '{skill}' is not available in this session.")
+                            await reject_user_message(
+                                "skill_unavailable",
+                                f"Skill '{skill}' is not available in this session.",
+                            )
                             continue
                         display = f"/{skill}" + (f" {text}" if text else "")
+                        context_refs.insert(0, {"kind": "skill", "id": skill, "label": skill})
                         text = (
                             f'Use the skill "{skill}" for this request: first call '
                             f'load_skill("{skill}") and follow its instructions.'
                             + (f"\n\n{text}" if text else "")
                         )
-                    await _apply_model(model)
                     if text or attachments:
                         content = build_user_content(text, attachments)
-                        await claim_turn(content=content, display=display)
+                        await claim_turn(
+                            content=content,
+                            display=display,
+                            client_command_id=client_command_id,
+                            idempotency_key=idempotency_key,
+                            delivery=delivery,
+                            command_payload={
+                                "text": text,
+                                "attachments": attachments,
+                                "model": model,
+                                "skill": skill,
+                                "display": display,
+                                "contextRefs": context_refs,
+                            },
+                        )
                 else:
                     await reject_input(f"Unknown WebSocket message type: {kind}.")
         except WebSocketDisconnect:

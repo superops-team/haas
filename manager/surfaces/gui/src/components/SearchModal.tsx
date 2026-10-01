@@ -38,7 +38,11 @@ export function SearchModal({
   const tagFor = (s: SessionInfo) =>
     s.workspace && isProjectScoped(personaOf(s.agent))
       ? baseName(s.workspace)
-      : shortPersonaName(personaOf(s.agent)?.name, s.agent);
+      : shortPersonaName(
+          personaOf(s.agent)?.name,
+          s.agent,
+          t("common.ai_assistant"),
+        );
 
   const q = query.trim().toLowerCase();
   const real = sessions.filter((s) => !s.session_id.startsWith("__") && !s.archived);
@@ -91,10 +95,7 @@ export function SearchModal({
     return (
       <button
         key={s.session_id}
-        className={
-          "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left " +
-          (isActive ? "bg-accentSoft" : "hover:bg-paper")
-        }
+        className={`search-result${isActive ? " is-active" : ""}`}
         onMouseEnter={() => setActive(idx)}
         onClick={() => choose(s)}
       >
@@ -114,19 +115,21 @@ export function SearchModal({
   return (
     <div className="fixed inset-0 z-50" onKeyDown={onKey}>
       <div className="absolute inset-0 bg-black/30 backdrop-blur-[1px]" onClick={onClose} />
-      <div className="absolute left-1/2 top-[14vh] -translate-x-1/2 w-[640px] max-w-[92vw] rounded-xl2 border border-line bg-panel shadow-2xl overflow-hidden">
-        <div className="px-4 pt-3.5 pb-2.5 border-b border-line flex items-center gap-2.5">
-          <Icon name="search" size={16} className="text-faint shrink-0" />
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={t("search.placeholder")}
-            className="flex-1 bg-transparent outline-none text-[14px] text-ink placeholder:text-faint"
-          />
-          <kbd className="text-[11px] text-faint bg-paper border border-line rounded px-1.5 py-0.5 font-sans">
-            Esc
-          </kbd>
+      <div className="search-modal-panel">
+        <div className="search-modal-head">
+          <div className="search-modal-input-shell">
+            <Icon name="search" size={16} className="text-faint shrink-0" />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t("search.placeholder")}
+              className="search-modal-input"
+            />
+            <kbd className="text-[11px] text-faint bg-paper border border-line rounded px-1.5 py-0.5 font-sans">
+              Esc
+            </kbd>
+          </div>
         </div>
         <div className="max-h-[52vh] overflow-y-auto hairline-scroll py-2">
           {ordered.length === 0 ? (

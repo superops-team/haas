@@ -17,7 +17,7 @@ import { PILL_ACCENT, PILL_LINE, TAG_ACCENT } from "./ui";
 // existing ConnectSetup directly (Gmail's managed flow skips the modal entirely).
 
 const INPUT =
-  "w-full px-3 py-2 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none focus:border-accent";
+  "w-full px-3 py-2 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none";
 
 export function AddConnectionModal({
   c,

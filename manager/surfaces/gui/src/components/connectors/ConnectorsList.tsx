@@ -57,7 +57,7 @@ export function ConnectorsList({
           placeholder={t("connector.search")}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          className="w-44 px-3.5 py-1.5 rounded-full border border-line bg-panel text-[13px] outline-none focus:border-accent"
+          className="w-44 px-3.5 py-1.5 rounded-full border border-line bg-panel text-[13px] outline-none"
         />
       </div>
 

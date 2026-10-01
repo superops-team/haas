@@ -114,7 +114,7 @@ export function ModelsTab() {
             provider={ps.sel}
             knownProviders={knownNames}
             suggested={info?.suggested_models || []}
-            curated={settings.models}
+            enabledModels={settings.models}
             defaultModel={settings.model}
             labels={settings.model_labels}
             onChanged={(next) => setSettings((s) => (s ? { ...s, models: next.models, model: next.model } : s))}
@@ -150,7 +150,7 @@ export function ModelsTab() {
   );
 }
 
-// The gallery view's "In the composer's picker" card: every curated model across providers,
+// The gallery view's "In the composer's picker" card: every enabled model across providers,
 // with its provider tag. Unticking removes it from the picker; adding happens from a
 // provider's card (the ModelChecklist there has the suggested list + free-type add).
 function ComposerPickerCard({
@@ -181,8 +181,9 @@ function ComposerPickerCard({
       <div className="mlist">
         {settings.models.map((id) => {
           const isDefault = id === settings.model;
+          const providerLabel = tag(id);
           return (
-            <div className="mlist-row" key={id}>
+            <div className="mlist-row mlist-picker-row" key={id}>
               <label className="mlist-main">
                 <input
                   type="checkbox"
@@ -195,11 +196,13 @@ function ComposerPickerCard({
                   {settings.model_labels?.[id] || id}
                 </span>
               </label>
-              <span className="text-[11px] text-faint mr-2 shrink-0">{tag(id)}</span>
+              <span className="mlist-provider" title={providerLabel}>
+                {providerLabel}
+              </span>
               {isDefault ? (
-                <span className="mlist-default">{t("models.default_badge")}</span>
+                <span className="mlist-default mlist-picker-action">{t("models.default_badge")}</span>
               ) : (
-                <button className="mlist-make" onClick={() => setDefaultModel(id).then(() => onChanged())}>
+                <button className="mlist-make mlist-picker-action" onClick={() => setDefaultModel(id).then(() => onChanged())}>
                   {t("models.make_default")}
                 </button>
               )}

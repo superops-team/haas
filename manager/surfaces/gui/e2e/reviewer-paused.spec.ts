@@ -12,7 +12,7 @@ test("reviewer pause shows a transcript notice and marks the mode chip", async (
   await page.getByRole("button", { name: "Mode", exact: true }).click();
   await page.getByTestId("mode-menu").getByText("Auto-approve").click();
 
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("trip the reviewer");
   await box.press("Enter");
 
@@ -25,7 +25,7 @@ test("reviewer pause shows a transcript notice and marks the mode chip", async (
 test("an unsure escalation shows the reviewer's hesitation on the card", async ({ page }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("run an unsure tool");
   await box.press("Enter");
 

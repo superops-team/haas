@@ -147,6 +147,7 @@ def test_denied_tool_yields_error_and_continues(tmp_path):
     assert not (tmp_path / "new.py").exists()
     finished = next(e for e in events if e.type == EventType.TOOL_FINISHED)
     assert finished.data["status"] == "denied"
+    assert finished.data["toolCallId"] == "call_1"
     assert _types(events)[-1] == EventType.TURN_END
     assert any(
         m.get("role") == "tool" and "not executed" in m["content"]

@@ -22,7 +22,7 @@ test("zip import: trust warning leads, tools collapse behind a chevron, replaces
   await page.goto("/");
   await page.getByTestId("account-row").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Coworkers", exact: true }).click();
+  await page.getByRole("button", { name: "AI Assistants", exact: true }).click();
 
   // Open the installer disclosure, pick the Bundle zip mode, feed a file through
   // the hidden input.
@@ -37,7 +37,7 @@ test("zip import: trust warning leads, tools collapse behind a chevron, replaces
   const review = page.getByTestId("consent-review");
   await expect(review).toBeVisible();
   // The trust warning comes FIRST (owner design).
-  await expect(review.getByText(/Only enable coworkers from someone you trust/)).toBeVisible();
+  await expect(review.getByText(/Only enable AI assistants from someone you trust/)).toBeVisible();
 
   const card = page.getByTestId("consent-team-sec");
   await expect(card.getByText("Team Security Coworker").first()).toBeVisible();
@@ -58,7 +58,7 @@ test("zip import: trust warning leads, tools collapse behind a chevron, replaces
   const row = page.locator(".divide-y > div").filter({ hasText: "Team Security Coworker" });
   await expect(row.getByRole("switch")).toHaveAttribute("aria-checked", "false");
   await card.getByTestId("consent-enable-team-sec").click();
-  await expect(card.getByTestId("consent-enabled")).toContainText("it's in your coworker picker");
+  await expect(card.getByTestId("consent-enabled")).toContainText("it's in your AI assistant picker");
   await expect(row.getByRole("switch")).toHaveAttribute("aria-checked", "true");
 });
 
@@ -66,7 +66,7 @@ test("Export… zips an installed coworker's bundle to a chosen folder", async (
   await page.goto("/");
   await page.getByTestId("account-row").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Coworkers", exact: true }).click();
+  await page.getByRole("button", { name: "AI Assistants", exact: true }).click();
 
   // Export moved to the coworker detail page (UX-035); the native folder pick is
   // server-mocked → /tmp/picked-folder.

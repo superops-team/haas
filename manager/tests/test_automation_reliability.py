@@ -223,7 +223,15 @@ def test_manual_ws_run_finishes_without_browser_finalize(tmp_path, monkeypatch):
         f"/ws/session/{prepared['session_id']}?workspace={tmp_path}&agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": prepared["prompt"]})
+        ws.send_json(
+            {
+                "type": "user_message",
+                "clientCommandId": "cmd-manual-run",
+                "idempotencyKey": "idem-manual-run",
+                "delivery": "start_now",
+                "text": prepared["prompt"],
+            }
+        )
         while ws.receive_json()["type"] != "turn_done":
             pass
     assert manager.task_store.find_run(prepared["run_id"]).status == "ok"

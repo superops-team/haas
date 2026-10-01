@@ -8,7 +8,7 @@ import { test } from "./fixtures";
 
 async function proposeTeam(page: import("@playwright/test").Page) {
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("staff the team");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("staff the team");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByTestId("teamreq-card")).toBeVisible();
 }
@@ -17,7 +17,7 @@ test("the decomposition gate shows items with criteria; approval lands them on t
   page,
 }) => {
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("propose the split");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("propose the split");
   await page.getByRole("button", { name: "Send" }).click();
   const card = page.getByTestId("itemsreq-card");
   await expect(card).toBeVisible();
@@ -65,7 +65,7 @@ test("a board wake renders collapsed; expanding reveals rows, hand-offs stay one
   page,
 }) => {
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("board wake");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("board wake");
   await page.getByRole("button", { name: "Send" }).click();
   const card = page.getByTestId("boardwake-card");
   await expect(card).toBeVisible();
@@ -87,7 +87,7 @@ test("a board wake renders collapsed; expanding reveals rows, hand-offs stay one
 
 test("declining the split returns feedback to the lead", async ({ page }) => {
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("propose the split");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("propose the split");
   await page.getByRole("button", { name: "Send" }).click();
   await page.getByTestId("itemsreq-card").waitFor();
   await page.getByRole("button", { name: "Not now" }).click();

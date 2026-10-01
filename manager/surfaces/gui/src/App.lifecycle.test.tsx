@@ -1,7 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { App, LIVE_PROJECTION_FLUSH_MS } from "./App";
-import { getSessionMessages } from "./api";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { App } from "./App";
+import {
+  getHaasEndpoints,
+  getHealth,
+  getProjectProjection,
+  getRecentWorkspaces,
+  getSessionMessages,
+  getSessions,
+  PERSONAS_CHANGED,
+} from "./api";
+import { PROJECT_SIDEBAR_SHELL_KEY } from "./projectSidebarShell";
 import type { WsEvent } from "./types";
 
 const mockState = vi.hoisted(() => {
@@ -9,14 +25,22 @@ const mockState = vi.hoisted(() => {
   let withHistorySessions = false;
 
   class FakeSession {
-    handlers: { onEvent: (event: WsEvent) => void; onOpen?: () => void; onClose?: () => void };
+    handlers: {
+      onEvent: (event: WsEvent) => void;
+      onOpen?: () => void;
+      onClose?: () => void;
+    };
     sent: any[] = [];
 
     constructor(
       _sessionId: string,
       _workspace: string,
       _agent: string,
-      handlers: { onEvent: (event: WsEvent) => void; onOpen?: () => void; onClose?: () => void },
+      handlers: {
+        onEvent: (event: WsEvent) => void;
+        onOpen?: () => void;
+        onClose?: () => void;
+      },
     ) {
       this.handlers = handlers;
       mockState.lastSession = this;
@@ -39,8 +63,29 @@ const mockState = vi.hoisted(() => {
       });
     }
 
-    userMessage(text: string, attachments?: unknown[], model?: string, skill?: string) {
-      this.sent.push({ type: "user_message", text, attachments, model, skill });
+    userMessage(
+      text: string,
+      attachments?: unknown[],
+      model?: string,
+      skill?: string,
+      delivery = "start_now",
+    ) {
+      this.sent.push({
+        type: "user_message",
+        text,
+        attachments,
+        model,
+        skill,
+        delivery,
+      });
+      return Promise.resolve({
+        clientCommandId: "cmd-test",
+        status: "accepted" as const,
+        disposition: "running" as const,
+        turnId: "turn-test",
+        queueItemId: null,
+        outcomeRef: null,
+      });
     }
 
     interrupt() {
@@ -61,6 +106,9 @@ const mockState = vi.hoisted(() => {
   }
 
   return {
+    commits: { sidebar: 0, composer: 0 },
+    sidebarMounts: 0,
+    sidebarUnmounts: 0,
     FakeSession,
     lastSession: null as FakeSession | null,
     get livenessOnly() {
@@ -78,13 +126,71 @@ const mockState = vi.hoisted(() => {
   };
 });
 
+vi.mock("./components/Sidebar", async () => {
+  const actual = await vi.importActual<typeof import("./components/Sidebar")>(
+    "./components/Sidebar",
+  );
+  const { createElement, Profiler, useEffect } = await import("react");
+  const ProfiledSidebar = (
+    props: React.ComponentProps<typeof actual.Sidebar>,
+  ) => {
+    useEffect(() => {
+      mockState.sidebarMounts += 1;
+      return () => {
+        mockState.sidebarUnmounts += 1;
+      };
+    }, []);
+    return createElement(
+      Profiler,
+      {
+        id: "sidebar",
+        onRender: () => {
+          mockState.commits.sidebar += 1;
+        },
+      },
+      createElement(actual.Sidebar, props),
+    );
+  };
+  return {
+    ...actual,
+    Sidebar: ProfiledSidebar,
+  };
+});
+
+vi.mock("./conversation/components/ConversationComposer", async () => {
+  const actual = await vi.importActual<
+    typeof import("./conversation/components/ConversationComposer")
+  >("./conversation/components/ConversationComposer");
+  const { createElement, Profiler } = await import("react");
+  return {
+    ...actual,
+    ConversationComposer: (
+      props: React.ComponentProps<typeof actual.ConversationComposer>,
+    ) =>
+      createElement(
+        Profiler,
+        {
+          id: "composer",
+          onRender: () => {
+            mockState.commits.composer += 1;
+          },
+        },
+        createElement(actual.ConversationComposer, props),
+      ),
+  };
+});
+
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
   return {
     ...actual,
     Session: mockState.FakeSession,
     connectEvents: vi.fn(() => () => {}),
-    getHealth: vi.fn(async () => ({ status: "ok", default_workspace: null, model: "gpt-5.6-sol" })),
+    getHealth: vi.fn(async () => ({
+      status: "ok",
+      default_workspace: null,
+      model: "gpt-5.6-sol",
+    })),
     getSettings: vi.fn(async () => ({
       provider: "openai",
       model: "gpt-5.6-sol",
@@ -136,22 +242,27 @@ vi.mock("./api", async () => {
             },
           ]
         : mockState.livenessOnly
-        ? [
-            {
-              session_id: "s1",
-              title: "Activity still running",
-              workspace: "",
-              agent: "cowork",
-              model: "gpt-5.6-sol",
-              mode: "interactive",
-              updated_at: "2026-09-17T00:00:00Z",
-              messages: 1,
-              liveness: "working",
-            },
-          ]
-        : [],
+          ? [
+              {
+                session_id: "s1",
+                title: "Activity still running",
+                workspace: "",
+                agent: "cowork",
+                model: "gpt-5.6-sol",
+                mode: "interactive",
+                updated_at: "2026-09-17T00:00:00Z",
+                messages: 1,
+                liveness: "working",
+              },
+            ]
+          : [],
     ),
+    getProjectProjection: vi.fn(async () => ({
+      projects: [],
+      orderRevision: 0,
+    })),
     getRecentWorkspaces: vi.fn(async () => []),
+    getHaasEndpoints: vi.fn(async () => []),
     getSessionMessages: vi.fn(async (sessionId: string) =>
       mockState.withHistorySessions
         ? [
@@ -163,7 +274,11 @@ vi.mock("./api", async () => {
     getArtifacts: vi.fn(async () => []),
     getInbox: vi.fn(async () => []),
     getUnattended: vi.fn(async () => false),
-    getSessionConnections: vi.fn(async () => ({ connected: [], recommended: [], attention: 0 })),
+    getSessionConnections: vi.fn(async () => ({
+      connected: [],
+      recommended: [],
+      attention: 0,
+    })),
     getConnectors: vi.fn(async () => []),
     getRoots: vi.fn(async () => []),
   };
@@ -186,8 +301,143 @@ afterEach(() => {
   mockState.lastSession = null;
   mockState.livenessOnly = false;
   mockState.withHistorySessions = false;
+  mockState.sidebarMounts = 0;
+  mockState.sidebarUnmounts = 0;
   vi.clearAllMocks();
   resetGetSessionMessagesMock();
+  localStorage.removeItem(PROJECT_SIDEBAR_SHELL_KEY);
+});
+
+describe("App two-phase project bootstrap", () => {
+  it("uses the fixed project skeleton when the shell cache is invalid", async () => {
+    let resolveHealth!: (value: {
+      status: string;
+      default_workspace: null;
+      model: string;
+    }) => void;
+    vi.mocked(getHealth).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHealth = resolve;
+        }),
+    );
+    localStorage.setItem(
+      PROJECT_SIDEBAR_SHELL_KEY,
+      JSON.stringify({ version: 999, projects: [{ name: "Unsafe stale row" }] }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByTestId("project-navigation-loading")).toBeTruthy();
+    expect(screen.queryByText("Unsafe stale row")).toBeNull();
+    expect(getProjectProjection).not.toHaveBeenCalled();
+
+    resolveHealth({ status: "ok", default_workspace: null, model: "gpt-5.6-sol" });
+    await waitFor(() => expect(getProjectProjection).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows the cached canonical sidebar before health and hydrates each resource once", async () => {
+    let resolveHealth!: (value: {
+      status: string;
+      default_workspace: null;
+      model: string;
+    }) => void;
+    vi.mocked(getHealth).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHealth = resolve;
+        }),
+    );
+    let resolveProjects!: (value: {
+      projects: [];
+      orderRevision: number;
+    }) => void;
+    vi.mocked(getProjectProjection).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveProjects = resolve;
+        }),
+    );
+    localStorage.setItem(
+      PROJECT_SIDEBAR_SHELL_KEY,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {
+            projectId: "prj_cached",
+            name: "Cached project",
+            pinned: false,
+            order: 0,
+          },
+        ],
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("Cached project")).toBeTruthy();
+    expect(screen.getByTestId("project-navigation-shell")).toBeTruthy();
+    expect(screen.getByTestId("startup-center-pane")).toBeTruthy();
+    expect(getProjectProjection).not.toHaveBeenCalled();
+    expect(getSessions).not.toHaveBeenCalled();
+    expect(getRecentWorkspaces).not.toHaveBeenCalled();
+    expect(getHaasEndpoints).not.toHaveBeenCalled();
+
+    resolveHealth({ status: "ok", default_workspace: null, model: "gpt-5.6-sol" });
+
+    await waitFor(() => expect(getProjectProjection).toHaveBeenCalledTimes(1));
+    expect(getSessions).toHaveBeenCalledTimes(1);
+    expect(getRecentWorkspaces).toHaveBeenCalledTimes(1);
+    expect(getHaasEndpoints).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event(PERSONAS_CHANGED));
+    await act(async () => Promise.resolve());
+    expect(getProjectProjection).toHaveBeenCalledTimes(1);
+    expect(getSessions).toHaveBeenCalledTimes(1);
+
+    resolveProjects({ projects: [], orderRevision: 0 });
+    await waitFor(() =>
+      expect(screen.queryByTestId("project-navigation-shell")).toBeNull(),
+    );
+    await waitFor(() => expect(screen.queryByTestId("startup-center-pane")).toBeNull());
+    expect(mockState.sidebarMounts).toBe(1);
+    expect(mockState.sidebarUnmounts).toBe(0);
+  });
+
+  it("retries an authoritative projection failure without waiting for polling", async () => {
+    vi.mocked(getProjectProjection)
+      .mockRejectedValueOnce(new TypeError("sidecar startup race"))
+      .mockResolvedValueOnce({
+        orderRevision: 1,
+        projects: [
+          {
+            projectId: "prj_recovered",
+            canonicalKey: "/repos/recovered",
+            name: "Recovered project",
+            primaryWorkspaceBindingId: null,
+            defaultEndpointId: "hep_local_managed",
+            pinned: false,
+            order: 0,
+            archived: false,
+            workspaceCount: 0,
+            sessionCount: 0,
+            workspaces: [],
+            sessions: [],
+          },
+        ],
+      });
+
+    render(<App />);
+
+    expect(await screen.findByText("Recovered project", {}, { timeout: 1000 })).toBeTruthy();
+    expect(getProjectProjection).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      const cached = localStorage.getItem(PROJECT_SIDEBAR_SHELL_KEY) || "";
+      expect(cached).toContain("Recovered project");
+      expect(cached).not.toContain("/repos/recovered");
+      expect(cached).not.toContain("hep_local_managed");
+    });
+  });
 });
 
 describe("App execution lifecycle controls", () => {
@@ -204,10 +454,56 @@ describe("App execution lifecycle controls", () => {
     });
   });
 
+  it("blocks repeated workspace setup errors without retrying or fabricating a result", async () => {
+    render(<App />);
+    const input = await findReadyComposer();
+    fireEvent.change(input, { target: { value: "keep this draft" } });
+    const session = mockState.lastSession!;
+    vi.useFakeTimers();
+    await act(async () => {
+      for (let i = 0; i < 3; i += 1) session.handlers.onEvent({
+        type: "error",
+        data: { error: "no valid workspace", code: "workspace_unavailable", retryable: false, recoveryAction: "restore_workspace" },
+      });
+      session.handlers.onClose?.();
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(21_000); });
+    expect(mockState.lastSession).toBe(session);
+    expect(screen.getAllByRole("alert").filter(el => el.textContent?.includes("workspace"))).toHaveLength(1);
+    expect(screen.queryByText("Completed", { exact: true })).toBeNull();
+    expect((input as HTMLTextAreaElement).value).toBe("keep this draft");
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(mockState.lastSession).not.toBe(session);
+    expect(screen.queryByRole("button", { name: "Check again" })).toBeNull();
+  });
+
+  it("reconnects ordinary transport failures and does not turn rejected tasks into success", async () => {
+    render(<App />);
+    await findReadyComposer();
+    const session = mockState.lastSession!;
+    vi.useFakeTimers();
+    await act(async () => { session.handlers.onClose?.(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3001); });
+    expect(mockState.lastSession).not.toBe(session);
+    vi.useRealTimers();
+    const input = await findReadyComposer();
+    fireEvent.change(input, { target: { value: "rejected task" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await expectStopOnly();
+    await act(async () => {
+      mockState.lastSession!.handlers.onEvent({ type: "error", data: { error: "Cannot execute", retryable: false } });
+      mockState.lastSession!.handlers.onEvent({ type: "turn_done", data: {} });
+    });
+    expect(screen.queryByText("Completed", { exact: true })).toBeNull();
+    expect(screen.getByText(/Cannot execute/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
   it("shows Stop immediately after sending before the server sends turn_start", async () => {
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     fireEvent.change(input, { target: { value: "run a slow task" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -222,7 +518,7 @@ describe("App execution lifecycle controls", () => {
   it("restores Send when a locally submitted turn is rejected before turn_start", async () => {
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     fireEvent.change(input, { target: { value: "run invalid task" } });
     fireEvent.keyDown(input, { key: "Enter" });
     await expectStopOnly();
@@ -239,7 +535,7 @@ describe("App execution lifecycle controls", () => {
   it("keeps Stop visible when a stale idle ready frame races after local send", async () => {
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     fireEvent.change(input, { target: { value: "run before stale ready" } });
     fireEvent.keyDown(input, { key: "Enter" });
     await expectStopOnly();
@@ -262,6 +558,76 @@ describe("App execution lifecycle controls", () => {
     await expectStopOnly();
   });
 
+  it("does not revive an idle historical session from a stale running outcome", async () => {
+    mockState.withHistorySessions = true;
+    vi.mocked(getSessionMessages).mockImplementation(async (sessionId: string) => [
+      {
+        role: "user",
+        content: `question for ${sessionId}`,
+        _managerTurnId: "turn-historical",
+      },
+      {
+        role: "assistant",
+        content: "historical answer",
+        _managerTurnId: "turn-historical",
+        _haas_task_outcome: {
+          phase: "incomplete",
+          code: "haas_terminal_integrity_error",
+          retryable: true,
+        },
+      },
+    ]);
+    render(<App />);
+    await screen.findByText("historical answer");
+    await waitFor(() => expect(screen.getByLabelText("Send")).toBeTruthy());
+
+    act(() => {
+      mockState.lastSession?.handlers.onEvent({
+        type: "ready",
+        data: {
+          session_id: "s1",
+          running: false,
+          execution_control: { controlState: "idle", pauseSupported: false },
+          haas_task_outcome: { phase: "running" },
+          agent: "cowork",
+          model: "gpt-5.6-sol",
+          mode: "interactive",
+          haas_interaction_supported: true,
+          workspace: "",
+          temp_workspace: false,
+        },
+      });
+    });
+
+    await waitFor(() => expect(screen.getByLabelText("Send")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: /Stop/ })).toBeNull();
+  });
+
+  it("restores running controls from an authoritative active ready snapshot", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getByLabelText("Send")).toBeTruthy());
+
+    act(() => {
+      mockState.lastSession?.handlers.onEvent({
+        type: "ready",
+        data: {
+          session_id: "s1",
+          running: true,
+          execution_control: { controlState: "running", pauseSupported: true },
+          haas_task_outcome: { phase: "running" },
+          agent: "cowork",
+          model: "gpt-5.6-sol",
+          mode: "interactive",
+          haas_interaction_supported: true,
+          workspace: "",
+          temp_workspace: false,
+        },
+      });
+    });
+
+    await expectStopOnly();
+  });
+
   it("uses session-list working liveness when the ready snapshot is stale idle", async () => {
     mockState.livenessOnly = true;
     render(<App />);
@@ -272,7 +638,7 @@ describe("App execution lifecycle controls", () => {
   it("does not poll the full transcript during healthy running WebSocket silence", async () => {
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     vi.mocked(getSessionMessages).mockClear();
     vi.useFakeTimers();
 
@@ -291,10 +657,56 @@ describe("App execution lifecycle controls", () => {
     expect(mockState.lastSession?.sent).toHaveLength(1);
   });
 
+  it("upserts multiple assistant facts into one authoritative turn response", async () => {
+    render(<App />);
+    await screen.findByPlaceholderText(/Ask the AI assistant/);
+    act(() => {
+      mockState.lastSession?.handlers.onEvent({
+        type: "turn_start",
+        data: {
+          input: "synthetic request",
+          turnId: "turn-response-owner",
+          rowId: "user-response-owner",
+        },
+      });
+      mockState.lastSession?.handlers.onEvent({
+        type: "assistant_message",
+        data: {
+          text: "Provisional response",
+          turnId: "turn-response-owner",
+          rowId: "assistant-model-call-1",
+        },
+      });
+      mockState.lastSession?.handlers.onEvent({
+        type: "assistant_message",
+        data: {
+          text: "Authoritative response",
+          turnId: "turn-response-owner",
+          rowId: "assistant-model-call-2",
+        },
+      });
+    });
+
+    const response = await waitFor(() => {
+      const element = document.querySelector(
+        '[data-response-id="turn-response-owner:response"]',
+      );
+      expect(element).toBeTruthy();
+      return element!;
+    });
+    expect(response.textContent).toContain("Authoritative response");
+    expect(response.textContent).not.toContain("Provisional response");
+    expect(
+      document.querySelectorAll(
+        '[data-response-id="turn-response-owner:response"]',
+      ),
+    ).toHaveLength(1);
+  });
+
   it("recovers a missed terminal transcript after disconnect with single-flight readback", async () => {
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     vi.mocked(getSessionMessages).mockClear();
 
     let inFlight = 0;
@@ -316,6 +728,9 @@ describe("App execution lifecycle controls", () => {
 
     fireEvent.change(input, { target: { value: "recover terminal" } });
     fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {
+      await Promise.resolve();
+    });
     mockState.lastSession?.handlers.onEvent({
       type: "turn_start",
       data: { input: "recover terminal" },
@@ -340,11 +755,21 @@ describe("App execution lifecycle controls", () => {
     Element.prototype.scrollTo = scrollTo;
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
-    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
-    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
-    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 800 });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 1000,
+    });
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      value: 200,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 800,
+    });
     fireEvent.change(input, { target: { value: "stream a detailed answer" } });
     fireEvent.keyDown(input, { key: "Enter" });
     await expectStopOnly();
@@ -365,9 +790,11 @@ describe("App execution lifecycle controls", () => {
     expect(screen.queryByText(/word44/)).toBeNull();
 
     await waitFor(() => expect(screen.getByText(/word44/)).toBeTruthy(), {
-      timeout: LIVE_PROJECTION_FLUSH_MS + 1000,
+      timeout: 17 + 1000,
     });
-    expect(document.querySelector(".stream-cursor")?.getAttribute("aria-hidden")).toBe("true");
+    expect(
+      document.querySelector(".work-status-slot")?.getAttribute("aria-hidden"),
+    ).toBe("true");
 
     expect(scrollTo).toHaveBeenCalled();
     expect(scrollTo).toHaveBeenLastCalledWith(
@@ -382,9 +809,12 @@ describe("App execution lifecycle controls", () => {
       type: "assistant_delta",
       data: { text: "after-user-scroll " },
     });
-    await waitFor(() => expect(screen.getByText(/after-user-scroll/)).toBeTruthy(), {
-      timeout: LIVE_PROJECTION_FLUSH_MS + 1000,
-    });
+    await waitFor(
+      () => expect(screen.getByText(/after-user-scroll/)).toBeTruthy(),
+      {
+        timeout: 17 + 1000,
+      },
+    );
     expect(screen.getByTestId("jump-to-latest")).toBeTruthy();
   });
 
@@ -398,12 +828,24 @@ describe("App execution lifecycle controls", () => {
     }));
     render(<App />);
 
-    const input = await screen.findByPlaceholderText(/Ask the coworker/);
+    const input = await findReadyComposer();
     const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
-    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
-    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
-    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 800 });
-    fireEvent.change(input, { target: { value: "stream with reduced motion" } });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 1000,
+    });
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      value: 200,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 800,
+    });
+    fireEvent.change(input, {
+      target: { value: "stream with reduced motion" },
+    });
     fireEvent.keyDown(input, { key: "Enter" });
     await expectStopOnly();
 
@@ -415,7 +857,7 @@ describe("App execution lifecycle controls", () => {
       });
     }
     await waitFor(() => expect(screen.getByText(/motion44/)).toBeTruthy(), {
-      timeout: LIVE_PROJECTION_FLUSH_MS + 1000,
+      timeout: 17 + 1000,
     });
 
     scroller.scrollTop = 500;
@@ -427,6 +869,45 @@ describe("App execution lifecycle controls", () => {
     );
   });
 
+  it("30 distinct live publications cause zero Sidebar or Composer profiler commits", async () => {
+    render(<App />);
+    const input = await findReadyComposer();
+    fireEvent.change(input, { target: { value: "measure stream isolation" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await expectStopOnly();
+    act(() => {
+      mockState.lastSession?.handlers.onEvent({
+        type: "turn_start",
+        data: { input: "measure stream isolation" },
+      });
+      mockState.lastSession?.handlers.onEvent({
+        type: "assistant_delta",
+        data: { text: "Start " },
+      });
+    });
+    await screen.findByText("Start");
+    // Finish the independent draft-save debounce before measuring stream-driven work.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    expect(mockState.commits.sidebar).toBeGreaterThan(0);
+    expect(mockState.commits.composer).toBeGreaterThan(0);
+    mockState.commits.sidebar = 0;
+    mockState.commits.composer = 0;
+
+    for (let index = 0; index < 30; index += 1) {
+      act(() => {
+        mockState.lastSession?.handlers.onEvent({
+          type: "assistant_delta",
+          data: { text: `publication-${index} ` },
+        });
+      });
+      // Observe every publication separately; a single batched update is insufficient.
+      await screen.findByText(new RegExp(`publication-${index}(?:\\s|$)`));
+    }
+    expect(mockState.commits).toEqual({ sidebar: 0, composer: 0 });
+  });
+
   it("opens restored sessions at the latest content even after the previous session was scrolled up", async () => {
     mockState.withHistorySessions = true;
     const scrollTo = vi.fn();
@@ -435,9 +916,19 @@ describe("App execution lifecycle controls", () => {
 
     expect(await screen.findByText("answer for s2")).toBeTruthy();
     const scroller = document.querySelector(".main-scroll") as HTMLDivElement;
-    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1200 });
-    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 300 });
-    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 200 });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 200,
+    });
     fireEvent.scroll(scroller);
 
     scrollTo.mockClear();
@@ -449,6 +940,64 @@ describe("App execution lifecycle controls", () => {
     );
     expect(screen.queryByTestId("jump-to-latest")).toBeNull();
   });
+
+  it("does not let a stale session readback overwrite a newer selection", async () => {
+    mockState.withHistorySessions = true;
+    let resolveOlder:
+      | ((messages: Array<{ role: string; content: string }>) => void)
+      | undefined;
+    vi.mocked(getSessionMessages).mockImplementation((sessionId: string) => {
+      if (sessionId === "s1")
+        return new Promise((resolve) => {
+          resolveOlder = resolve;
+        });
+      return Promise.resolve([
+        { role: "user", content: `question for ${sessionId}` },
+        { role: "assistant", content: `answer for ${sessionId}` },
+      ]);
+    });
+    render(<App />);
+
+    expect(await screen.findByText("answer for s2")).toBeTruthy();
+    fireEvent.click(screen.getByText("Earlier conversation"));
+    fireEvent.click(screen.getByText("Long previous conversation"));
+    expect(await screen.findByText("answer for s2")).toBeTruthy();
+
+    await act(async () => {
+      resolveOlder?.([
+        { role: "user", content: "stale question" },
+        { role: "assistant", content: "stale answer" },
+      ]);
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("stale answer")).toBeNull();
+    expect(screen.getByText("answer for s2")).toBeTruthy();
+  });
+
+  it("projects a reconciled command receipt back into the active Composer", async () => {
+    render(<App />);
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "accepted during reconnect" } });
+
+    act(() => {
+      mockState.lastSession?.handlers.onEvent({
+        type: "command_ack",
+        data: {
+          clientCommandId: "cmd-reconciled",
+          status: "duplicate",
+          disposition: "running",
+          turnId: "turn-reconciled",
+          queueItemId: null,
+          outcomeRef: null,
+          reconciledDraftRevision: 1,
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect((input as HTMLTextAreaElement).value).toBe(""),
+    );
+  });
 });
 
 async function expectStopOnly() {
@@ -456,4 +1005,17 @@ async function expectStopOnly() {
     expect(screen.getByRole("button", { name: /Stop/ })).toBeTruthy();
     expect(screen.queryByLabelText("Send")).toBeNull();
   });
+}
+
+async function findReadyComposer() {
+  const input = await screen.findByPlaceholderText(/Ask the AI assistant/);
+  await waitFor(() => {
+    expect(mockState.lastSession).not.toBeNull();
+    expect(screen.queryByTestId("models-loading")).toBeNull();
+    expect(document.querySelector(".composer-trailing-cluster .dd")).toBeTruthy();
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  return input;
 }

@@ -27,6 +27,19 @@ function baseKeys(keys: string[]): string[] {
   return [...new Set(keys.map((k) => k.replace(/_(zero|one|two|few|many|other)$/, "")))].sort();
 }
 
+function flattenStrings(
+  obj: Record<string, unknown>,
+  prefix = "",
+): Array<{ key: string; value: string }> {
+  return Object.entries(obj).flatMap(([key, value]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return flattenStrings(value as Record<string, unknown>, path);
+    }
+    return typeof value === "string" ? [{ key: path, value }] : [];
+  });
+}
+
 describe("locale completeness", () => {
   it("en.json and zh.json declare the same key set", () => {
     const enKeys = baseKeys(flatten(en as Record<string, unknown>));
@@ -35,5 +48,19 @@ describe("locale completeness", () => {
     const missingInEn = zhKeys.filter((k) => !enKeys.includes(k));
     expect(missingInZh, `keys missing in zh.json: ${missingInZh.join(", ")}`).toEqual([]);
     expect(missingInEn, `keys missing in en.json: ${missingInEn.join(", ")}`).toEqual([]);
+  });
+
+  it("uses AI Assistant terminology for every user-facing persona reference", () => {
+    const legacyEnglish = flattenStrings(en as Record<string, unknown>)
+      .filter(({ value }) => /\bcoworkers?\b/i.test(value.replace(/\.coworker\//g, "")))
+      .map(({ key }) => key);
+    const legacyChinese = flattenStrings(zh as Record<string, unknown>)
+      .filter(({ value }) => value.replace(/人类同事/g, "").includes("同事"))
+      .map(({ key }) => key);
+
+    expect(legacyEnglish, `legacy Coworker copy: ${legacyEnglish.join(", ")}`).toEqual([]);
+    expect(legacyChinese, `legacy 同事 copy: ${legacyChinese.join(", ")}`).toEqual([]);
+    expect(en.settings.tab.personas).toBe("AI Assistants");
+    expect(zh.settings.tab.personas).toBe("AI助手");
   });
 });

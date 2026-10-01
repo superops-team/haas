@@ -144,7 +144,15 @@ def test_messages_endpoint_returns_ts(tmp_path):
     client = TestClient(create_app(manager))
     with client.websocket_connect("/ws/session/ts1") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hello world"})
+        ws.send_json(
+            {
+                "type": "user_message",
+                "clientCommandId": "cmd-timestamp",
+                "idempotencyKey": "idem-timestamp",
+                "delivery": "start_now",
+                "text": "hello world",
+            }
+        )
         while ws.receive_json()["type"] != "turn_done":
             pass
     msgs = client.get("/v1/sessions/ts1/messages").json()["messages"]

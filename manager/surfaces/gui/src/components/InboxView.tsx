@@ -111,9 +111,13 @@ export function InboxView({
     const ids = [...new Set(items.map((i) => i.session_agent).filter(Boolean))] as string[];
     return ids.map((id) => ({
       id,
-      label: shortPersonaName(personas?.find((p) => p.id === id)?.name, id),
+      label: shortPersonaName(
+        personas?.find((p) => p.id === id)?.name,
+        id,
+        tt("common.ai_assistant"),
+      ),
     }));
-  }, [items, personas]);
+  }, [items, personas, tt]);
 
   const visible = items.filter(
     (it) =>
@@ -150,7 +154,7 @@ export function InboxView({
   const routingLabel = routingName ? `#${routingName}` : routing;
 
   return (
-    <main className="flex-1 min-w-0 flex bg-paper">
+    <main className="flex-1 min-w-0 flex bg-paper" data-page-window-surface>
       <div className="flex-1 min-w-0 overflow-y-auto hairline-scroll">
         <div className="max-w-4xl mx-auto px-7 py-6">
           <PanelHead

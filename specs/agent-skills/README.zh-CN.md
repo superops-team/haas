@@ -422,3 +422,117 @@ Skills 由编码 Agent 运行时根据 frontmatter `description` 匹配加载。
 4. 添加 `agents/openai.yaml`、精简超长 SKILL.md，并迁移/删除辅助文件。
 5. 更新来源记录，执行全部验收用例，再完成 code-review、brooks-review 与
    brooks-test，处置每项 finding。
+
+## 16. 2026-09-27 项目级代码审查与开发闭环 Delta
+
+### 16.1 背景与证据
+
+仓库已包含 `code-review` 与 `dev-loop`，但项目化程度不一致：`dev-loop` 已编排大部分
+HaaS 交付门禁，`code-review` 仍主要是仓库无关的通用流程，没有显式覆盖 HaaS 协议、
+secretless、adapter、恢复、GUI 与容器审查面。两个 skill 还需要明确与
+`parallel-code-review`、`brooks-review`、`brooks-test` 的边界，避免 Agent 跳过强制
+门禁或重复报告 finding。
+
+变更 ID：`project-level-code-review-dev-loop`。
+
+### 16.2 目标与非目标
+
+目标：
+
+1. 保持 `$code-review` 与 `$dev-loop` canonical 调用不变，同时明确两者均为 HaaS 本地
+   skill。
+2. 将审查范围、项目专属风险检查、finding 处置、生命周期门禁和准出证据固化到足以让
+   其他 Agent 确定性执行。
+3. 用户要求 review-only 时保持只读；阻止擅自 commit、push、release、推送镜像或修改
+   无关工作区内容。
+4. 保持 skill 简洁、通过仓库 validator，并与根 `AGENTS.md` 对齐。
+
+非目标：
+
+- 不新增重复的 `haas-code-review` 或 `haas-dev-loop` 名称。
+- 不修改运行时代码、公共 API、事件、session 状态、artifact、镜像或用户可见产品行为。
+- 不取代 `parallel-code-review`、`brooks-review`、`brooks-test`、
+  `requirement-spec`、`review-spec` 或 `code-automation`；按职责协调这些 skill。
+- 除非最终指令无法在渐进披露行数上限内表达，否则不新增 scripts 或 references。
+
+### 16.3 `code-review` 合同
+
+`code-review` 必须：
+
+1. 优先使用用户指定 diff/range 确定范围，否则使用任务所有的工作区变更；必须隔离无关的
+   既有变更，并让两轮审查共享稳定的范围清单。
+2. 判断正确性前读取根和最近层级的 `AGENTS.md`、治理该变更的组件 spec 与相关验收用例。
+3. 执行两轮审查：第一轮检查确定的正确性、构建、接口缺陷并做最小修复；第二轮对抗式检查
+   边界、失败、并发、清理、兼容性与回归。
+4. 相关时应用 HaaS 审查矩阵：
+   - ADK 与 `/v1/haas/*` schema、幂等、SSE parity 和结构化错误；
+   - session/response/event 单调性、终态、replay、cancel、timeout 与重启恢复；
+   - harness adapter 隔离及 Codex app-server 初始化/续接边界；
+   - 日志、事件、metrics、artifact 的 secretless，以及 URL/path 安全和 caller-owned 内容；
+   - Manager 浏览器/桌面 parity、队列/重连、无障碍及安装包生命周期；
+   - Lite/AIO 平台、启动、health/readiness 与镜像 pin 合同。
+5. 大型跨组件第一轮可用 `parallel-code-review` 加速，但不得取代两轮 finding 处置合同；
+   `brooks-review` 与 `brooks-test` 仍是独立强制生命周期门禁。
+6. 每条 finding 记录单一位置、严重度、证据、影响和最终状态：`fixed`、
+   `false_positive` 或 `accepted_risk`。`accepted_risk` 必须在组件 spec 或交付证据中
+   明确说明理由。
+7. 用户要求 review-only 时只输出 findings，不修改代码。默认修复模式只能修改任务所有的
+   文件，并在每次审查修复后重新执行受影响检查。
+
+### 16.4 `dev-loop` 合同
+
+`dev-loop` 必须按以下顺序编排完整的非平凡 HaaS 变更：
+
+1. 建立稳定 change ID、任务范围清单、脏工作区边界、当前证据、治理 spec 和组件影响分析。
+2. 创建或更新中英文组件 spec，执行 `review-spec`，并在修改生产代码前清零全部 blocker。
+3. 将每个实现 slice 映射到需求和验收用例 ID，再执行 TDD：聚焦红灯证据、最小实现、绿灯
+   证据和重构。
+4. 只选择相关领域 skill，并保留明确职责：后端合同使用
+   `fastapi-backend`/`pydantic-modeling`，adapter 使用 `adapter-extension`，Manager
+   使用 `react-typescript-kit` 和 UI skills，验证选择使用 `code-automation`。
+5. 按影响升级验证并保留根门禁：聚焦测试、要求的 unit/integration/E2E 或 smoke、
+   `make pre-commit`，以及跨组件、最终合入或发布范围的 `make full-check`。跳过检查必须
+   标记为 `not_run`，不能算通过。
+6. 依次执行 `code-review`、`brooks-review`、`brooks-test`；修复后重新执行所有受影响
+   验证门禁。
+7. 准出说明包含：变更 spec、验收映射、实现范围、ADK/HaaS 兼容性、安全/脱敏/事件/
+   artifact/容器结论、精确命令和结果、跳过检查、findings、残余风险及用户要求的交付状态。
+
+除非用户明确要求，skill 不得创建 commit、推送分支、发布镜像、安装产物或修改外部系统。
+镜像推送始终需要用户明确确认。
+
+### 16.5 兼容性、安全与回滚
+
+- ADK 与 `/v1/haas/*`：无运行时影响；skills 只审查这些合同，不修改合同。
+- 既有 skill 调用：完全追加；`$code-review` 与 `$dev-loop` 保持 canonical name，既有
+  `agents/openai.yaml` 入口继续有效。
+- 安全：指令强化 secretless 证据，禁止在报告中暴露 raw prompt、credential、cookie、
+  Authorization 值、presigned URL 或完整工具参数。
+- 工作区安全：任务范围仅包含两个 skill 目录与本双语 spec delta；既有 Manager 与 runtime
+  变更仍归用户所有。
+- 回滚：整体回退本双语 delta 与两个 skill/metadata 修改。
+
+### 16.6 验收用例
+
+| ID | 用例 | 命令或检查 | 预期结果 |
+|---|---|---|---|
+| AS-RD01 | 官方 skill 校验 | 对两个 skill 目录运行 `quick_validate.py` | 两者均输出 `Skill is valid!` |
+| AS-RD02 | 仓库 skill 校验 | `uv run python scripts/quality/check_agent_skills.py` | 退出 0；两个 skill 均通过 metadata、命名、大小、布局与链接检查 |
+| AS-RD03 | validator 回归 | `uv run pytest -q tests/test_check_agent_skills.py` | 全部 validator 测试通过 |
+| AS-RD04 | 审查项目化检查 | 检查 `code-review/SKILL.md` | 明确两轮审查、HaaS 矩阵、范围隔离、review-only 与 finding 状态 |
+| AS-RD05 | 生命周期项目化检查 | 检查 `dev-loop/SKILL.md` | 明确 spec review、TDD、领域路由、验证升级、有序 review 与交付权限 |
+| AS-RD06 | metadata 对齐 | 检查两个 `agents/openai.yaml` | 展示名、描述和 `$skill-name` prompt 与各 SKILL.md 一致 |
+| AS-RD07 | 仓库门禁 | `make pre-commit` | skill 校验、空白/conflict 检查与 secret scan 通过 |
+| AS-RD08 | 无关变更保护 | `git diff --name-only` 与范围 diff 检查 | 本变更未修改既有 Manager/runtime 变更 |
+
+### 16.7 实现顺序与退出条件
+
+1. 评审并批准本双语合同 delta。
+2. 更新 `code-review/SKILL.md` 及其 UI metadata。
+3. 更新 `dev-loop/SKILL.md` 及其 UI metadata。
+4. 按适用范围执行 AS-RD01 至 AS-RD08。
+5. 执行有序 review 门禁并处置每项 finding。
+
+退出条件：两个 skill 通过结构校验、符合本合同、保留无关变更且不存在未解决 review
+blocker。本变更不引入 runtime、API、event、session、artifact、container 或终端用户行为
+变化。

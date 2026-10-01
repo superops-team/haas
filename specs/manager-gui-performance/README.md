@@ -2,10 +2,10 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: Reviewed; blockers resolved; baseline validated; hardening delta added
-Last reviewed: 2026-09-23
+Status: Reviewed; blockers resolved; project-shell cold-start delta implemented
+Last reviewed: 2026-09-29
 Change ID: manager-gui-performance-convergence
-Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Product Identity](../manager-product-identity/README.md)
+Related specs: [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Conversation Experience](../manager-conversation-experience/README.md), [Manager Product Identity](../manager-product-identity/README.md)
 
 ## 1. Component Role
 
@@ -261,6 +261,114 @@ session/path switch -> cancelled -> loading(new_request)
 - Remote HaaS artifacts continue to offer only protocol-safe actions: preview when readable,
   download when allowed, and no local reveal/open shell-out.
 
+### P0-5: Cold-session first-content latency
+
+- The existing `GET /v1/sessions/{id}/messages` remains authoritative. On the current local data
+  set it responds in 5-18 ms for 23-126-message histories, including a 1.8 MiB response, so the
+  first optimization targets request timing and frontend work rather than adding a new backend
+  protocol prematurely.
+- Pointer intent and keyboard focus may prefetch a visible conversation. Prefetch is keyed by
+  session id, deduplicates an active request, keeps at most two requests in flight, and reuses a
+  result for five seconds. It never opens a session WebSocket or changes selection.
+- A clicked cache miss starts the same single-flight request immediately. A prefetched or recently
+  loaded result primes the bounded five-session projection cache owned by the conversation store.
+  Once that session becomes active, any transcript mutation invalidates the short-lived network
+  response cache so a later refresh cannot overwrite newer in-memory content with stale history.
+- Persisted history is normalized once at the store boundary. Transcript rendering must not create
+  another full normalized array, and a remount with the same immutable item-array identity reuses
+  its historical turn projection instead of rebuilding every turn.
+- For histories up to 500 messages, packaged-local click-to-first-content P95 is <=120 ms. The
+  production-preview fixture subtracts its explicit route-interception time and budgets <=102 ms
+  from response end to first content. For a synthetic 10,000-message history, post-response
+  projection-to-first-window is <=232 ms, mounted rows remain <=200, and no main-thread long task
+  exceeds 50 ms. Cache-hit first content is visible within two animation frames (<=32 ms at 60 Hz).
+- If the 10,000-message budget cannot be met without dropping history, an additive recent-window
+  plus cursor API is the next separately reviewed slice. Pagination is not introduced unless the
+  measured P0 client path still misses the budget.
+- The implemented production-preview baseline is 14.5 ms for a prefetched cache hit, 43.7 ms from
+  response end to first content for 500 messages, and 43.1 ms for 10,000 messages, with zero
+  observed long tasks. The measured client path meets the budget, so pagination remains deferred.
+
+### P0-6: Lazy syntax-aware file preview
+
+- The ordinary code/text viewer uses the contract in
+  [Manager File Preview](../manager-file-preview/README.md). CodeMirror core and every language
+  parser must remain outside the initial synchronous entry graph.
+- A bounded known-language file mounts a plain read-only viewport as soon as core is ready, then
+  reconfigures that same view when its one selected parser arrives. Parser loading must not replace
+  the document, selection, scroll position, artifact header, or session shell.
+- Syntax parsing is skipped for content at or above 256 KiB UTF-8 or marked truncated. A 10,000-line
+  fixture below that ceiling and a parser-skipped 512 KiB fixture produce no long task above 100 ms
+  during open/initial scroll. Cold content-ready-to-viewport is <=200 ms and warm is <=100 ms in the
+  production-preview fixture.
+
+### P0-7: Safe lazy spreadsheet preview
+
+- Spreadsheet rendering follows [Manager Office Preview](../manager-office-preview/README.md).
+  `@extend-ai/react-xlsx`, its worker and local WASM remain outside the initial synchronous graph;
+  the vulnerable `xlsx` package is removed rather than hidden behind an audit exception.
+- Worker/WASM parsing receives an existing bounded `ArrayBuffer`, never a URL. The small-workbook
+  first grid is <=1.5 seconds, sheet switching creates no main-thread long task above 200 ms, and
+  the emitted WASM is <=5 MiB raw.
+- Rich rendering must not trade performance for unsafe side effects: workbook images and external
+  navigation are disabled, while HaaS-owned sheet tabs remain keyboard accessible.
+
+### P0-8: Two-phase project navigation cold start
+
+- The current mount starts `getProjectProjection()` before the packaged sidecar is healthy. A
+  rejected first request leaves `projectProjectionReady=false`, and health recovery does not
+  refresh project data; the next ordinary five-second poll becomes the accidental first successful
+  load. Startup correctness MUST NOT depend on that polling interval.
+- A versioned `ProjectSidebarShell` cache is read synchronously during React state initialization.
+  A usable shell contains 1-50 active project rows and only `projectId`, display `name`, `pinned`,
+  and deterministic last-rendered `order` (a display rank, not the server's mutable project
+  position). It excludes workspace paths, remote references, endpoint identities,
+  session titles/counts, capabilities, prompt/content, credentials, and arbitrary server fields.
+- The project sidebar and application chrome remain visible while sidecar health and last-session
+  restoration are pending. The former full-window boot splash becomes a center-pane startup state;
+  it MUST NOT hide a valid shell or introduce a second sidebar renderer.
+- A valid cached shell renders the first project level in the initial two animation frames. Shell
+  rows reuse the canonical project-row primitive, reserve the final row geometry, expose
+  `aria-busy=true`, and disable expansion, hover cards, menus, and mutations until authoritative
+  hydration. This is one renderer with a state variant, not a second legacy project list.
+- Mount starts the health probe and local shell read only. Project projection, sessions, recent
+  workspaces, and endpoint reads MUST NOT be sent before health is ready. Immediately after health
+  succeeds, one bootstrap owner starts those reads concurrently and deduplicates restore, mutation
+  refresh, persona events, and the five-second baseline poll per resource.
+- Last-session restoration reuses the same sessions promise. Once the target session is known,
+  active history/socket work proceeds in parallel with project projection. Project hydration never
+  blocks the center session shell, and transcript hydration never blocks cached project rows. The
+  ordinary five-second refresh timer starts only after the first authoritative bootstrap settles.
+- Authoritative project data replaces shell fields by `projectId` without changing the order or
+  width/height of rows whose authoritative sort inputs are unchanged. If pin/order/name/activity
+  changed out of band, the authoritative commit may apply the new deterministic order once; the UI
+  must not pass through an intermediate flat, empty, or partially resorted list. Conversation
+  children and capability-dependent actions appear in place. A project absent from the
+  authoritative response is removed only at that boundary; stale async responses cannot restore it.
+- A successful authoritative projection rewrites the shell cache after the authoritative React
+  commit, outside render and outside the measured first-paint path. Project create,
+  rename, pin, reorder, archive/remove, and restore update or invalidate the shell only after their
+  authoritative mutation succeeds. The reader rejects the entire shell when the payload exceeds
+  32 KiB, the version/shape is wrong, the list is empty or above 50 rows, ids are empty/duplicated,
+  names are empty/above 256 UTF-16 code units, or ranks are non-finite/duplicated. Parse, validation,
+  version, read, or write failures are silent and fall back to the existing fixed skeleton; they
+  never block the application.
+- Cached first-level project rows are visible <=32 ms after React mount. Without a cache, health
+  readiness to first authoritative project level is P95 <=100 ms. The complete visible project
+  hierarchy is P95 <=400 ms after health readiness, with no main-thread task above 50 ms. A
+  post-health bootstrap transport failure retains the shell/skeleton and enters bounded backoff
+  (100/250/500 ms) before the ordinary poll; it never waits five seconds for its first retry. Project
+  hydration causes at most two meaningful sidebar commits (`shell`, `authoritative`) and zero
+  Profiler commits in Composer, transcript, inactive route, or right rail.
+- Production-preview and packaged macOS cold-start gates run at least ten launches and report
+  content-free P50/P95 for app shell, first project level, and visible hierarchy; they also assert
+  one request owner per resource, one shared sessions request for restore/sidebar, no flat-list or
+  empty-list flash, no row-order change when authoritative sort inputs are unchanged, and no
+  width/height delta above 2 CSS px for unchanged visible project rows. Expected vertical movement
+  from inserting newly hydrated conversation children is measured separately and is not row-size
+  instability. Existing FV-GUI-PERF-12 remains the
+  active-session content budget in the same run.
+
 ### P1-3: Complexity budget for session and artifact surfaces
 
 - Refactors must reduce risk in small, behavior-preserving slices. A change that touches
@@ -300,6 +408,24 @@ interface RefreshState<T> {
   lastSuccessAt: number | null;
   consecutiveFailures: number;
 }
+
+interface ProjectSidebarShell {
+  version: 1;
+  projects: Array<{
+    projectId: string;
+    name: string;
+    pinned: boolean;
+    order: number; // last authoritative display rank; not ProjectSummary.order
+  }>;
+}
+
+type ProjectBootstrapPhase = "unresolved" | "shell" | "authoritative" | "degraded";
+type ProjectBootstrapRequestState =
+  | "awaiting-health"
+  | "hydrating"
+  | "backoff"
+  | "baseline"
+  | "cancelled";
 ```
 
 The coordinator is an internal GUI mechanism owned by one in-memory API-client lifetime. It is not
@@ -309,7 +435,9 @@ before new consumers subscribe. An application/WebView reload therefore also cre
 coordinator. This contract does not require a new credential-generation API. Session ids and other
 effective parameters are encoded in `canonicalParameters` with deterministic ordering. The
 coordinator must not persist response bodies, credentials, authorization URLs or raw prompts.
-Existing browser storage keys are unchanged.
+The P0-8 project shell is the sole exception to in-memory-only query data: it uses a new versioned
+browser-storage key containing only the bounded `ProjectSidebarShell` allowlist above. It is not a
+coordinator snapshot and cannot restore authoritative project/session state.
 
 ## 7. Runtime Model and State Machine
 
@@ -325,6 +453,23 @@ relevant event/focus      -> active
 
 Only one `request` state may exist for a query key. An active fast interval replaces the baseline
 timer; it does not create another timer. Unmount aborts or ignores completion safely.
+
+Project bootstrap view/request transitions are:
+
+```text
+mount + valid non-empty shell -> phase=shell, request=awaiting-health
+mount + missing/invalid shell -> phase=unresolved, request=awaiting-health
+health ready -> request=hydrating (one shared request per resource; retain current view)
+hydration success -> phase=authoritative, request=baseline (persist next shell after commit)
+hydration failure -> phase=degraded, request=backoff (retain previous shell/skeleton view)
+degraded success -> phase=authoritative, request=baseline
+authoritative refresh failure -> phase=authoritative (retain last settled projection)
+unmount/new generation -> request=cancelled (ignore stale completions)
+```
+
+`hydrating` is request ownership, not a third visual tree: it preserves either `shell` or
+`unresolved` until the authoritative boundary. The ordinary five-second poll starts after the
+initial bootstrap succeeds or exhausts its bounded backoff. It never becomes the first retry.
 
 Terminal reconciliation is separately scoped per session:
 
@@ -342,10 +487,15 @@ Event silence alone leaves a healthy transport in `dormant`. A qualifying trigge
 ## 8. Security and Permissions
 
 - Existing authentication, session scope, redaction and no-store behavior are unchanged.
-- Shared caches are in-memory, scoped to one API-client/WebView lifetime, and keyed by endpoint plus
+- Query-coordinator caches are in-memory, scoped to one API-client/WebView lifetime, and keyed by endpoint plus
   canonical effective parameters. API-client reconstruction, endpoint change or WebView reload
   disposes the coordinator before new consumers subscribe; connector/account mutations invalidate
   their affected keys. No data may cross session or endpoint boundaries.
+- The versioned project-shell cache contains only the explicit first-level allowlist, never paths,
+  remote refs, endpoint/server identity, session data, capabilities, credentials, prompts, tool
+  arguments, or arbitrary response fields. It is a projection of the Manager's aggregate local
+  project catalog, not a remote-endpoint response cache. Parse, validation, or storage failure
+  behaves like a cache miss; React text escaping remains mandatory.
 - Performance instrumentation records counts, timings and component labels only. It must not record
   prompt text, transcript content, tool arguments, credentials or signed URLs.
 - Lazy loading must not create unauthenticated alternate routes or fetch protected data before the
@@ -444,6 +594,10 @@ analysis, the runtime result still wins and this spec must be updated before imp
   with residual risk.
 - Artifact viewer read failures and stale async completions render deterministic unavailable or
   current-content states; no previous read overwrites a newer selection.
+- Ordinary code/text previews keep CodeMirror core and language parsers out of the synchronous
+  entry graph, skip parsers for large/truncated content, and satisfy FV-GUI-PERF-13.
+- Spreadsheet preview keeps its JS/worker/WASM outside the synchronous graph, removes SheetJS, and
+  satisfies FV-GUI-PERF-14 without external requests or navigation.
 - Complexity work leaves the session streaming, transcript replay and artifact viewer behavior
   covered by focused tests before any large component extraction is accepted.
 - `npm test -- --run`, `npm run build`, focused Playwright tests, `make pre-commit`, and for final
@@ -466,6 +620,10 @@ analysis, the runtime result still wins and this spec must be updated before imp
 | FV-GUI-PERF-09 | P0 | P0-4 reusable production-preview smoke | Remove or invalidate `manager/surfaces/gui/dist`, then run the stable preview smoke command | The command rebuilds or rejects stale `dist`, starts `vite preview`, runs focused Playwright, reports request/chunk/error metrics and cleans up the server | Command output, Playwright output and cleanup evidence |
 | FV-GUI-PERF-10 | P0 | P0-4 artifact viewer state resilience | Vitest renders `RightRail`, opens one artifact, delays its read, switches to another artifact/session, then resolves both success and failure paths | stale completions are ignored; failed current reads render an explicit unavailable/download-only state; remote HaaS artifacts never reveal/open locally | Vitest output and mocked API call assertions |
 | FV-GUI-PERF-11 | P1 | P1-3 complexity boundary budget | Fallow health plus focused tests for any extracted boundary touched by the change | no new large session/artifact owner is introduced without a named boundary and tests; extracted boundaries preserve observable behavior | Fallow summary, focused test output and changed-file review |
+| FV-GUI-PERF-12 | P0 | P0-5 cold-session first content | Production-preview Playwright drives uncached, prefetched, cached, rapid-switch and 10,000-message fixtures while recording transport and post-response render time separately, request concurrency, long tasks and mounted rows | packaged-local <=120 ms for <=500 messages; preview post-response <=102 ms for 500 and <=232 ms for 10,000 messages; cache hit <=32 ms; request concurrency <=2; mounted rows <=200; stale responses ignored; zero new-session Hero frames | Playwright timing/counter output without transcript content |
+| FV-GUI-PERF-13 | P0 | P0-6 lazy syntax-aware file preview | Build with manifest traversal, then use production-preview Playwright to open a bounded 10,000-line source file and parser-skipped 512 KiB text fixture | CodeMirror is absent from the synchronous graph; cold <=200 ms, warm <=100 ms; no long task >100 ms; large/truncated content loads no parser and remains scrollable | Manifest graph plus content-free timing/chunk/long-task counters |
+| FV-GUI-PERF-14 | P0 | P0-7 safe lazy spreadsheet preview | Build with manifest traversal, audit dependencies, and open a synthetic two-sheet workbook in production preview | no `xlsx` dependency/advisory; viewer/worker/WASM are async local assets; first grid <=1.5 s; no long task >200 ms or workbook-originated network/navigation | Audit, manifest and content-free Playwright counters |
+| FV-GUI-PERF-15 | P0 | P0-8 two-phase project cold start | Vitest seeds valid, empty, oversized, malformed, duplicate-id/rank and version-mismatched shell cache; delays health/project/session responses; forces one post-health failure; and verifies startup chrome plus single-flight ownership. Production-preview and packaged runs execute ten cold launches with request, Profiler, paint, bounding-box and long-task observers | valid cache renders the canonical sidebar while center startup state remains visible and all actions are disabled; invalid cache uses one skeleton; no data read starts before health; first failure retries at 100/250/500 ms; cache hit first level <=32 ms; no-cache health-to-first-level P95 <=100 ms; visible hierarchy P95 <=400 ms; max one in-flight request per resource; restore shares the sessions request; sidebar meaningful commits <=2; unrelated Profiler commits 0; long task <=50 ms; unchanged row width/height delta <=2 CSS px; no empty/flat-list flash or reorder when sort inputs are unchanged | Vitest plus content-free preview/packaged P50/P95 evidence |
 
 Functional validation uses only count, timing, route label and component label evidence. It must not store prompt text, transcript content, tool arguments, credentials or signed URLs.
 
@@ -484,7 +642,11 @@ Functional validation uses only count, timing, route label and component label e
 | 9 | P0 | Add reusable production-preview smoke | Checked-in preview config/command with fresh-build guard and cleanup | FV-GUI-PERF-09 |
 | 10 | P0 | Harden artifact viewer read state | Request guard, explicit unavailable state and remote-action constraints | FV-GUI-PERF-10 |
 | 11 | P1 | Establish complexity-boundary refactor budget | Named session/transcript/artifact boundaries with tests for touched code | FV-GUI-PERF-11 |
-| 12 | P0 | Regression and release review | Browser/package evidence and required reviews | Tasks 2-11; all FV-GUI-PERF cases |
+| 12 | P0 | Optimize cold-session activation | Intent prefetch, single-flight request reuse, canonical normalization and immutable projection reuse | FV-GUI-PERF-12 |
+| 13 | P0 | Add the lazy syntax-aware file viewer | CodeMirror boundary, parser registry, large-file degradation and runtime evidence | FV-GUI-PERF-13; FV-MFP-01 through FV-MFP-10 |
+| 14 | P0 | Replace SheetJS with the safe lazy spreadsheet viewer | Worker/WASM viewer, read-only tabs, trust boundary and audit evidence | FV-GUI-PERF-14; FV-MOP-01 through FV-MOP-08 |
+| 15 | P0 | Add two-phase project startup | Versioned safe shell cache, single-flight post-health bootstrap, canonical shell-row state, progressive child hydration and cold-start counters | FV-GUI-PERF-15; MPW-041 |
+| 16 | P0 | Regression and release review | Browser/package evidence and required reviews | Tasks 2-15; all FV-GUI-PERF cases |
 
 Alignment review result: every P0/P1 requirement has at least one executable case, every task has
 an acceptance reference, and no task requires public API/schema changes. The first implementation
@@ -506,16 +668,26 @@ Run the cases in this order:
    surfaces.
 8. Import graph, `npm test -- --run`, `npm run build`, `make pre-commit` and final
    `make full-check` for FV-GUI-PERF-07 and release readiness.
+9. Manifest traversal and focused file-preview Playwright timing/long-task evidence for
+   FV-GUI-PERF-13.
+10. Dependency audit, manifest traversal and focused spreadsheet Playwright evidence for
+    FV-GUI-PERF-14.
+11. Focused shell-cache/App lifecycle tests plus ten-run production-preview and packaged cold-start
+    measurements for FV-GUI-PERF-15.
 
 ## 13. Component Impact Analysis
 
 | Component | Impact | Required action | Compatibility conclusion |
 |---|---|---|---|
 | Manager HaaS Sidecar Backend | Terminal readback scheduling and GUI projection ownership change; FV-33 semantics do not | Reuse the existing full-message endpoint and existing intent-occurrence guard | No API, event, session or persisted-binding change |
+| Manager Project Workbench | Sidebar gains a transient shell phase before the existing authoritative hierarchy | Cache only safe first-level display fields and keep project mutation authority in existing APIs | No Project/WorkspaceBinding/session schema change; cache is disposable and versioned |
 | Manager Product Identity | None; the GUI remains local-first and no-login | Keep the coordinator inside the current WebView/API-client lifetime | No cloud identity or login dependency is introduced |
 | ADK and `/v1/haas/*` | None | No route or schema work in phase one | Fully unchanged |
 | Session/event projection | Live React ownership moves, canonical event ordering does not | Preserve canonical refs, terminal flush and replay parity | Additive internal refactor only |
+| Session history activation | Intent prefetch and immutable projection reuse reduce cold-switch latency | Keep history authoritative, cache at most five projections, cap prefetch concurrency at two, and record content-free timing only | Manager-local implementation only; no public API or persisted schema change |
 | Artifact viewer | Optional route loading may change; artifact protocol does not | Retain PDF/XLSX on-demand loading and first-click artifact behavior | Artifact URLs, metadata and security headers are unchanged |
+| File preview | CodeMirror introduces optional viewport and parser chunks | Keep core/languages dynamically imported, skip parsers above 256 KiB or when truncated, and destroy the view on unmount | GUI-only; artifact API and stored content are unchanged |
+| Spreadsheet preview | SheetJS is replaced by a larger optional JS/worker/WASM viewer | Keep all assets lazy/local, enforce 25 MiB and document trust boundaries, and measure first-grid/long-task budgets | GUI implementation and `.xlsm` classification only; public artifact schema unchanged |
 | Root development gates | GUI evidence becomes part of root release readiness | Add GUI Makefile targets and align README/skills | No runtime compatibility impact; release signal becomes stricter |
 | Production preview automation | Temporary performance scripts become a stable repo command | Add checked-in preview config/command with fresh-build guard and cleanup | No shipped code path changes |
 | Frontend maintainability | Large session/artifact owners gain extraction budget | Refactor only behind focused tests and named boundaries | Behavior-preserving internal changes only |

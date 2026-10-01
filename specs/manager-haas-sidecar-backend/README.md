@@ -3,13 +3,15 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-15
-Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface
-Related specs: [HaaS Protocol](../haas-protocol/README.md), [Manager Delegation](../manager-delegation/README.md), [Harness Profile](../harness-profile/README.md), [Container Runtime](../container-runtime/README.md), [Config](../config/README.md), [Security Boundary](../security-boundary/README.md)
+Last reviewed: 2026-09-26
+Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface, manager-conversation-interaction-v2
+Related specs: [HaaS Protocol](../haas-protocol/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager Conversation Experience](../manager-conversation-experience/README.md), [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md), [Harness Profile](../harness-profile/README.md), [Container Runtime](../container-runtime/README.md), [Config](../config/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
 
 OpenHarness defaults to embedded, non-containerized HaaS `local_managed` with autostart enabled. The packaged app launches the local HaaS sidecar and executes ordinary desktop turns through HaaS `/run_sse` (`execution_mode=local_api`). Remote HaaS and delegated container sessions are selectable product capabilities, but they are not the default desktop execution path. One `HaasClient` uses only HaaS HTTP/SSE in all HaaS-backed modes; Manager must not import HaaS service objects or call Codex/providers/MCP directly for HaaS-backed sessions.
+
+This specification owns transport, binding, persistence, and normalized Manager facts. [Manager Conversation Experience](../manager-conversation-experience/README.md) owns their user-visible placement, interaction hierarchy, React component boundaries, and visual behavior; it cannot reinterpret the facts defined here.
 
 ```text
 GUI -> Manager local API/session owner -> HaasClient -> HaaS control sidecar
@@ -236,6 +238,98 @@ cancel request cannot be confirmed, Manager exposes a safe `cancel_failed`/recov
 readback action instead of fabricating `interrupted`. Partial reasoning, output and tool evidence
 remain attached to the cancelled turn.
 
+### 5.5.1 Acknowledged Conversation Commands and Follow-up Queue
+
+The Manager conversation surface follows the product and React contracts in Manager Conversation
+Experience. A GUI `user_message` carries a stable `clientCommandId`, operation-scoped idempotency
+key, and explicit delivery intent. Manager persists an accepted or duplicate command receipt before
+acknowledging `running` or `queued`; rejection returns a structured safe error without fabricating a
+turn. An unknown post-send transport result is reconciled by receipt and session projection and is
+never resolved by automatic resubmission.
+
+The content-free Manager readback
+`GET /v1/sessions/{sessionId}/conversation-commands/{idempotencyKey}` returns the original durable
+receipt or `404 command_not_found`; it never returns the queued prompt or attachment payload.
+
+Command persistence is private execution data. Before SQLite opens the store on POSIX, create
+the owned database with mode 0600 and tighten any owned existing database, WAL, SHM, or rollback
+journal to 0600. SQLite must inherit private database permissions when creating new sidecars;
+chmod after schema/payload writes is insufficient. New store directories use 0700, without
+changing unrelated existing parent-directory permissions or the process-wide umask. Reject
+symlink, non-regular, multiply linked, or foreign-owned database/sidecar files before touching
+their contents or permissions. Permission-preparation failure aborts store opening, not silent
+fallback. Windows retains the existing managed-profile ACL boundary; POSIX mode tests do not
+claim Windows ACL verification. A1 acceptance uses an isolated umask-022 subprocess, a live WAL
+connection, reopen/migration with retained receipts, and permission/type failure cases.
+This changes no public protocol or SQLite schema; rollback retains private file permissions.
+
+An accepted immediate command is initially a durable `running` receipt with no command
+checkpoint. After Manager persists the first `turn_start` carrying the same Manager turn id, it
+marks that receipt checkpointed. At process startup, Manager reconciles every uncheckpointed
+running receipt before serving clients. If the persisted transcript already contains the same
+turn id (a crash between the two durable writes), Manager marks the receipt checkpointed and
+keeps the canonical session recovery path. Otherwise it atomically converts the original command
+and payload into one paused `restart_uncertain` follow-up item, clears its obsolete turn id, and
+never starts it automatically. Receipt readback then reports `queued`; the snapshot exposes the
+same queue identity and safe preview. The user may edit/delete it or explicitly resume the paused
+queue, which is new authorization to attempt the work. Repeated startup reconciliation is
+idempotent and cannot create a second item. This is a Manager-private additive schema migration;
+it does not add or reinterpret an ADK or HaaS native event. Checkpointed HaaS invocations continue
+through their existing same-invocation readback/replay path and are not converted to new work.
+
+Manager owns the durable per-session follow-up queue. Queue mutations are revisioned and
+idempotent; only queued items can be edited, deleted, reordered, or promoted to send-now.
+`queue_move` carries `targetPosition`; send-now stop failure returns `queue_send_now_failed` while
+preserving the queued item and paused drain policy. A
+configuration barrier, workspace lock, running turn, or recovering binding may keep an item queued
+without changing its user intent. HaaS deployment admission and workspace-lock queues remain
+separate backend facts and are never projected as user follow-up items.
+
+`queue_send_now` is one idempotent queue mutation. Its first accepted application moves the
+selected queued item to the head and clears a pre-existing queue pause so an idle session can
+claim it. If foreground work is active, Manager records the one-shot drain intent before sending
+Stop. A failed/unconfirmed Stop consumes that intent, atomically pauses the queue with
+`send_now_interrupt_failed`, and returns `queue_error` with the authoritative items and
+`paused:true`; completion of the old turn cannot drain it. Reusing the mutation key never moves
+the item or sends Stop a second time.
+
+`queue_resume` is also a persisted idempotent mutation. It only changes the queue pause flag; it
+never moves a `dispatching` item back to editable `queued` state. The first effective resume may
+claim the next queued item when the session is idle. Reusing its key returns the original result
+without another claim or execution. Within a session, a key reused across mutation kinds is rejected.
+Every queue update/error carries the authoritative pause value so reconnect and failure cannot
+leave the GUI assuming drain is enabled.
+
+Before sending `queue_edit`, the GUI persists only its session id, queue item id, expected
+revision, mutation idempotency key, and creation time. It does not duplicate prompt or attachment
+content in the mutation store. `queue_restored` and definitive `queue_error` echo that key.
+If delivery or the reply is lost, reconnect replays the same edit mutation; Manager returns the
+persisted original result without requiring the removed queue row. The GUI deletes the pending
+mutation only after receiving either correlated result. Thus an accepted payload is not lost just
+because the first socket closed after the server commit.
+
+The internal Manager conversation WebSocket snapshot carries `queue` plus content-free
+`queuePaused`; later `queue_updated` events carry `items` and `paused`. `queue_resume` requires an
+operation idempotency key and is the only action that restarts a paused drain. A claimed item stays
+`dispatching` until its turn becomes terminal. If Manager restarts or cannot schedule after claim,
+that item returns to `queued`, its revision advances, and the durable queue enters
+`restart_uncertain`/`dispatch_uncertain` pause instead of replaying. Failure or ordinary Stop pauses
+remaining items; successful completion drains normally, while explicit send-now may complete its
+already-authorized interrupt-and-drain action.
+
+`user_message.contextRefs` contains bounded typed display references (`skill`, `file`, `session`).
+Manager validates and persists them as `_managerContext` for live/replayed GUI parity, and strips
+that sidecar before every local provider request. It does not expose provider framing or silently
+turn a display reference into model input.
+
+The GUI receives one normalized conversation snapshot plus ordered changes with stable Manager row,
+interaction, queue, and command identities correlated to canonical HaaS event, turn, invocation,
+and tool identities. Local execution projects equivalent identities. UI components do not parse
+HaaS or harness-native payloads and do not infer turn boundaries from adjacent display items.
+The snapshot is product-turn-first: one turn owns one work projection and at most one assistant
+response. Model-call identities and usage boundaries remain evidence correlation only; they never
+create GUI rows, progress phases, cards, headings, or counts.
+
 ### 5.6 Streaming Bridge and Completion Barrier
 
 Manager persists accepted headers, then opens native invocation replay from the beginning while continuing to drain the ADK stream. ADK text and native typed facts have independent durable cursors and consumption flags. Native events MUST be delivered live rather than fetched only after ADK closes. Deduplication is scoped by `(endpointId, full session key, invocationId, eventId, projection)`; an ADK projection cannot suppress processing of the native projection of the same record. Native session lifecycle events outside invocations are consumed with a separate session cursor, or reconstructed through delegated GET; invocation-only subscriptions cannot report idle configuration changes.
@@ -246,9 +340,10 @@ Native type determines outcome, not stream closure. Receiving native terminal do
 
 The completion barrier is bounded by authoritative readback, not by permanent agreement between two transports. If ADK closes, stalls, or omits its terminal projection, Manager drains canonical pages through the terminal event and attempts to reconcile the invocation GET. Once every preceding canonical page has been consumed, the persisted canonical terminal is sufficient authoritative evidence to finish even when invocation GET is temporarily unavailable. When invocation readback is available, its terminal status and any exposed terminal event id MUST agree before completion. Manager then emits the matching error/task outcome and exactly one `turn_end`, and moves the local binding out of `running`; it MUST NOT wait forever for an ADK claim of the same event id. A terminal invocation readback without a canonical terminal is an explicit recoverable integrity error, never a perpetual running state.
 
-Map non-thought ADK text to `assistant_delta`; `haas.output.reasoning.delta` to a typed `reasoning_delta`; `haas.usage.updated` to measured model-call usage; native tool facts to `tool_proposed/tool_started/tool_output_delta/tool_finished`; `haas.approval.required` to `permission_required`; `haas.input.required` to `question_requested`; delegated lifecycle to status; accepted headers to one `turn_start`; reconciled terminal to one `turn_end`. Heartbeat comments produce no transcript items. Preserve native sequence order; do not append final accumulated text as a second delta. Process events are checkpointed so reconnect reconstructs the same ordered model-call stages, item boundaries, tool cards, usage, pending interaction, partial answer, and terminal status. Reasoning is never appended to commentary or final answer text.
+Map non-thought ADK text to `assistant_delta`; `haas.output.reasoning.delta` to a typed `reasoning_delta`; `haas.usage.updated` to measured model-call usage; native tool facts to `tool_proposed/tool_started/tool_output_delta/tool_finished`; `haas.approval.required` to `permission_required`; `haas.input.required` to `question_requested`; delegated lifecycle to status; accepted headers to one `turn_start`; reconciled terminal to one `turn_end`. Heartbeat comments produce no transcript items. Preserve native sequence order; do not append final accumulated text as a second delta. Process events are checkpointed so reconnect reconstructs the same product turn, work segments, evidence correlation, usage, pending interaction, partial answer, and terminal status. Reasoning is never appended to commentary or final answer text. The first classified user-visible assistant delta creates the stable response row; later deltas, tool arrival, usage updates, and terminal sealing update that row without moving it between GUI containers.
 
-Manager additionally folds correlated native facts into an ordered `ModelCallStageProjection`:
+Manager may retain correlated native facts in an internal `ModelCallEvidenceProjection` for replay,
+usage accounting, and Inspector lookup. This is evidence data, not a GUI layout contract:
 
 ```json
 {
@@ -275,11 +370,25 @@ Manager additionally folds correlated native facts into an ordered `ModelCallSta
 }
 ```
 
-`kind` is `output_pending|commentary|reasoning_summary|tool|result`; `output_pending` is a transient live state and MUST NOT remain after an authoritative phase arrives. Steps retain canonical event order. Consecutive deltas merge only when their `itemId` (and reasoning `summaryIndex`) match; different items or model calls never merge. An agent-message delta without an authoritative phase starts as `output_pending` and is reclassified in place when the matching item lifecycle supplies `commentary|final_answer`; Manager never guesses from prose. When a legacy provider omits that item phase, a reconciled successful invocation terminal is authoritative for the remaining output of the final model-call stage: Manager reclassifies its `output_pending` steps to `result` before publishing or persisting the terminal assistant message. A failed, incomplete, or cancelled terminal MUST NOT use this successful-result fallback. A model-call usage event meters that stage but does not complete it while correlated tools remain non-terminal. Tool lifecycle carrying the same `modelCallId` remains in the triggering stage even when its start follows the usage event. A stage completes after all known correlated tools are terminal, or when model output opens the next stage; model output after tool completion opens the next stage. Missing correlation creates one explicitly `legacy` stage and missing usage is represented as unavailable, never zero.
+`kind` is `output_pending|commentary|reasoning_summary|tool|result`; `output_pending` is a transient evidence state and MUST NOT remain after an authoritative phase arrives. Steps retain canonical event order. Consecutive deltas merge only when their `itemId` (and reasoning `summaryIndex`) match; different items or model calls never merge in evidence. An agent-message delta without an authoritative phase starts as `output_pending` and is reclassified in place when the matching item lifecycle supplies `commentary|final_answer`; Manager never guesses from prose. When a legacy provider omits that item phase, a reconciled successful invocation terminal is authoritative for remaining user-visible output and seals the one assistant response. A failed, incomplete, or cancelled terminal MUST NOT use this successful-result fallback. Model-call usage and tool correlation remain measured evidence facts. Missing correlation uses an explicit unknown evidence bucket and missing usage is represented as unavailable, never zero. None of these boundaries may determine primary timeline grouping.
 
-A reasoning-summary step is identified by `(modelCallId, itemId, summaryIndex)`. Its `text` retains the complete canonical provider-supplied summary for the expandable detail surface, while `previewText` is a bounded first-screen projection. While that step is the active tail, `previewText` may grow only to 240 Unicode characters and is visually clamped to two lines; reaching the character bound freezes it. It also becomes immutable (`previewFrozen=true`) when a distinct later step is inserted, an item-completed event with the same `itemId` arrives (covering every summary index for that item), or the stage reaches a terminal state. Later deltas for the same reasoning identity may still complete `text` but MUST NOT mutate a frozen preview. The canonical summary remains subject to the normal safe-content boundary: it is not raw reasoning or hidden chain-of-thought. Manager does not split summaries at punctuation or invent intermediate reasoning steps. Replay and persistence MUST reconstruct the same preview and frozen state. Existing persisted steps without `previewText` remain compatible: the GUI derives the first 240 Unicode characters from `text` without rewriting history.
+A reasoning-summary evidence item is identified by `(modelCallId, itemId, summaryIndex)`. Its `text`
+retains the complete canonical provider-supplied summary for bounded Inspector detail, while
+`previewText` is a sanitized projection capped at 240 Unicode characters. The canonical summary
+remains subject to the normal safe-content boundary: it is not raw reasoning or hidden
+chain-of-thought. Manager does not split summaries at punctuation or invent intermediate reasoning
+steps. Replay and persistence reconstruct the same evidence. The product-turn projector may fold
+one or more evidence items into one reasoning `WorkSegment`, but it MUST NOT use their prose as a
+work title or expose model-call boundaries in the primary timeline.
 
-Stage usage is the only per-step-area token claim. It displays measured `inputTokens`, `outputTokens`, optional `reasoningOutputTokens`, and cache counters from `scope=model_call`. Cache-read is shown as an input subset and reasoning-output as an output subset; neither is added again to the stage total. Child commentary, reasoning-summary, tool and result rows say they are included in the stage; they MUST NOT receive allocated or estimated token numbers. Tool execution itself has no model token usage unless HaaS supplies a separately scoped measured record. `cumulativeUsage` updates the task/session total but is not summed with model-call usage.
+Measured per-model-call `inputTokens`, `outputTokens`, optional `reasoningOutputTokens`, and cache
+counters remain evidence/Inspector data. Cache-read is an input subset and reasoning-output is an
+output subset; neither is added again to aggregate totals. Child commentary, reasoning-summary,
+tool, and result facts never receive allocated or estimated token numbers. Tool execution itself
+has no model token usage unless HaaS supplies a separately scoped measured record.
+`cumulativeUsage` updates the task/session total but is not summed with model-call usage. Only an
+authoritative aggregate may enter the quiet turn completion footer; missing or pending usage emits
+no primary-timeline warning.
 
 Before publishing GUI state, Manager folds those transport actions into an internal
 `ActivityProjection`. This is not a HaaS public API and MUST NOT be sent back to HaaS:
@@ -347,6 +456,18 @@ the transient detail. Manager carries `evidenceRef` and its expiry through lifec
 but never resolves or persists the evidence body in the transcript. A terminal event cannot
 erase an evidence reference, command preview or working-directory hint learned at start.
 
+For explicitly selected Manager-local execution, the owned `run_shell` tool emits the actual
+tool-call id and a `commandPreview` through the same GUI display fields. The preview uses the shared
+HaaS bounded redactor (one line, at most 512 UTF-8 bytes); the GUI never derives it from raw arguments.
+The desktop bundle includes this redactor. Standalone Manager installations without the optional
+HaaS package must still start and execute tools; they omit command previews instead of inventing
+an unsafe fallback or failing the turn. Verify this dependency-absence path with isolated imports.
+Manager session readback adds equivalent `_managerDisplay` metadata to copied tool-call objects,
+without mutating engine/provider messages or storing another transcript. Other tools stay generic
+until their owned schema defines safe facts. Tests cover live/replay identity, command visibility,
+credential masking, multi-line/oversized input, and malformed/non-command inputs. This is additive
+Manager-local display metadata, not a change to ADK/HaaS events, execution policy, or evidence access.
+
 `facts` is an additive, typed map assembled only from canonical plan, artifact, tool
 terminal, and verification records. Manager MUST NOT derive a changed-file count, test
 result, or risk state from assistant prose. Unknown facts remain null/absent rather than
@@ -398,13 +519,12 @@ principle of separating mutable in-flight work from committed transcript history
 
 - while a task is active, one compact activity region shows bounded progress plus
   running/waiting activities, updating each lifecycle in place;
-- reasoning is a bounded redacted progress summary, never chain-of-thought; an active row shows
-  at most two preview lines, stops changing once a later step appears, and exposes the complete
-  provider summary only through that row's explicit detail disclosure;
-- commentary, provider reasoning summary, tool action, and stage result are distinct ordered
-  row kinds; reasoning is never concatenated after commentary or answer text;
-- the model-call stage header, not each child row, shows actual input/output/reasoning/cache
-  token usage; missing native usage reads `Token usage not reported` rather than an estimate;
+- reasoning is one bounded redacted disclosure per product turn, never chain-of-thought; it defaults
+  collapsed and exposes canonical safe detail only through explicit user action;
+- commentary/progress, reasoning summary, and tool action become typed work segments; none may
+  displace or concatenate with the stable assistant response;
+- per-model-call input/output/reasoning/cache usage is Inspector-only; authoritative aggregate turn
+  usage may appear once in completion, while missing/pending usage is omitted rather than warned;
 - each tool call is one semantic activity, not separate started/output/completed rows;
 - approval and structured questions remain inline blocking cards and are the only place
   where the user decides or answers; the Inspector is read-only;
@@ -418,38 +538,26 @@ principle of separating mutable in-flight work from committed transcript history
   presented under a tool-detail heading as though the tool itself returned that error;
 - partial output and recovery guidance remain distinct for non-success task outcomes.
 
-When task phase becomes `completed`, the turn collapses by default to the final answer,
-a result summary made only from structured facts, and compact rows for the actual tool
-activities. Each compact row keeps its concrete action, bounded key result and status visible;
-it does not expose full arguments or output. `Show activity` expands reasoning and the complete
-ordered model-stage stream, not raw protocol events. Failed/recovered attempts, skipped
-verification, unresolved risk, and any non-success fact remain visually prominent in either
-state. User expansion is local presentation state and does not change task/session state.
+When task phase becomes `completed`, the product turn keeps the final answer primary and changes its
+single work summary to a quiet completed state. Successful work detail defaults collapsed. The
+first actionable failure, skipped verification, unresolved risk, and non-success facts remain
+reachable without opening model-call evidence. User disclosure is local presentation state and is
+not reset by reasoning, model-call, usage, tool, or terminal updates.
 
-Runtime activity projection MUST avoid a blank handoff between `Waiting for agent` and the
-first model/tool stage. The same compact activity container carries the transition from
-waiting to active stage. Model-call stages default to collapsed, including the running stage,
-and the collapsed title SHOULD use the stage's task name: first meaningful tool/activity
-summary, command preview, action summary, reasoning/output preview, then only as a fallback
-`Stage N`. The user can expand any stage without changing task state. Failed stages remain
-visually prominent and keep the failed action easy to inspect. A running stage uses a subtle
-active treatment, such as an accent gradient border or background, while preserving readable
-text and explicit status copy; reduced-motion mode keeps that active treatment static. A
-stage waiting for its usage event shows `Token usage not reported yet`; if it terminates
-without one, the copy becomes `Token usage not reported`. The turn footer sums model-call
-usage once and may show the latest cumulative snapshot as a separately labelled value.
-Legacy history with only turn-level usage shows that total at turn scope and never
-synthesizes stage numbers.
+Runtime projection MUST avoid a blank handoff between `Working` and the first assistant delta. A
+single compact 16 px status slot may represent pre-answer work; the first user-visible delta mounts
+the stable assistant-response row after the next coalesced publication and removes redundant
+loading. The response row is never delayed by a word threshold and never moved into or out of an
+activity container. The default work surface renders one safe summary and, only when immediately
+relevant, the active tool or actionable failure. Model-call stages, reasoning chunks, and usage
+arrival are not cards, headings, progress counts, or automatic disclosures.
 
-For change ID stream-stage-status-performance, headers MUST expose localized visible status
-for running/completed/failed/incomplete/cancelled, also in accessible names. Gradients supplement
-text. Cache historical grouping by items identity and running boundary; live text, reasoning
-and stage snapshots must not invalidate it. Reuse unchanged Markdown rendering while preserving
-text updates, localization, disclosure and terminal semantics. GUI-only: ADK/native API,
-persistence, usage, event ordering and other component contracts are unaffected. Virtualization
-is outside this patch. Acceptance: tests prove status transitions, disclosure preservation,
-no historical regrouping/reparsing on live updates, and refresh on history changes. Tasks:
-tests, implementation, GUI build/browser checks, correctness/maintainability/test-quality reviews.
+Activity titles use an explicit localized product action, safe tool/object summary, bounded command
+preview, then a neutral localized fallback. Raw/internal commentary, reasoning prose,
+provider/model text, and model-call ordinals are prohibited fallbacks. Missing or pending usage is
+omitted from ordinary conversation UI. Running state uses one persistent text label and at most one
+motion owner; gradients, animated card borders/backgrounds, repeated spinners, and simultaneous
+streaming motion are prohibited.
 
 On desktop viewports at least 1100 CSS pixels wide, selecting an activity opens a
 right-side Inspector sized `clamp(320px, 30vw, 400px)`. On narrower viewports the same
@@ -494,7 +602,7 @@ otherwise selection clears without opening a different activity.
 Submitting a new foreground prompt explicitly starts a new transcript-follow epoch. After
 React commits the local user message, the viewport MUST move to the latest content even if
 the reader was previously inspecting older history. It MUST then follow height changes from
-turn start, waiting state, reasoning, model stages, tool activity and streamed answer text so
+turn start, waiting state, reasoning/work evidence, tool activity and streamed answer text so
 the user can immediately see that the accepted task is making progress. Only a new explicit
 upward scroll after submission disengages that epoch; background/replayed updates MUST NOT
 take over a reader-pinned viewport. Programmatic scrolling MUST occur after layout and MUST
@@ -506,7 +614,7 @@ the newly opened session. After that initial alignment, the normal reader-pinned
 applies until the user switches sessions again or explicitly jumps to latest.
 
 High-frequency GUI projection updates from assistant text deltas, reasoning deltas, and
-model-stage updates MUST be coalesced before publishing React state. A live render tick may
+work/evidence updates MUST be coalesced before publishing React state. A live render tick may
 combine multiple transport frames but MUST preserve append order, terminal flush semantics,
 and the canonical persisted transcript. Stream coalescing is a GUI back-pressure rule only; it
 MUST NOT alter ADK/HaaS event ordering, response ids, task status, durable cursors, usage, or
@@ -664,18 +772,19 @@ do not become assistant text, success, approval UI, or guessed activities.
 
 Transcript projection changes during initial load, history restore, replay, or live event
 reconciliation MUST NOT change the React hook order of an existing keyed turn. Routing
-between legacy and HaaS turn renderers therefore occurs in a hook-stable wrapper, while
-branch-specific state belongs to the selected child renderer. A turn may gain or lose
-`modelStages` or HaaS activity metadata without unmounting the transcript root, producing a
-blank window, or losing the remaining conversation. A regression test MUST rerender the same
-turn identity across both legacy-to-HaaS and HaaS-to-legacy projection changes.
+uses one product-turn renderer; source-specific state belongs to transport/projector adapters. A
+turn may gain or lose model-call evidence or HaaS activity metadata without unmounting the turn,
+assistant response, or transcript root, producing a blank window, or losing the remaining
+conversation. A regression test MUST rerender the same turn identity across missing, partial, and
+complete evidence without introducing a legacy renderer branch.
 
-Compatibility is additive. ADK `/run` and `/run_sse` are unchanged. HaaS native tool
-events retain their existing required fields and add only optional semantic facts. Output and
-usage events likewise add optional correlation/scope facts. An older server or stored event
-therefore renders as one `legacy` stage with generic tool activities and only the usage scope it
-actually reported; an older consumer continues to ignore the added fields. No stored-event
-migration, session replacement, or protocol-version negotiation is required for this UI projection.
+Compatibility is additive. ADK `/run` and `/run_sse` are unchanged. HaaS native tool events retain
+their existing required fields and add only optional semantic facts. Output and usage events
+likewise add optional correlation/scope facts. An older server or stored event therefore projects
+one product turn with a neutral work summary, generic tool activities, and only the aggregate usage
+it actually reported; it never creates a `legacy` stage card. Older consumers continue to ignore
+added fields. No stored-event migration or session replacement is required; packaged Manager GUI
+assets and the internal snapshot version change atomically.
 
 Transport disconnect never cancels execution. Reconnect ADK with the same key and Last-Event-ID, native with its own after_event_id; bounded exponential backoff with jitter respects attempt/turn limits. Cursor expiry requires invocation/page readback and never by itself triggers new work. ADK Session 413 falls back to bounded native pages without silent history truncation. Slow/disconnected GUI clients do not block HaaS consumption; reconnect receives persisted transcript and reconciled state. The same vectors must produce equivalent Manager projections locally and remotely.
 
@@ -906,13 +1015,24 @@ the turn may continue, but Manager records the degraded capability through the H
 and ordinary task outcome path. External arbitrary MCP materialization remains unsupported
 for the local Codex path until the full MCP runtime contract is implemented.
 
+The built-in source implements the stateless Streamable HTTP lifecycle needed by the pinned Codex
+client. `initialize`, `tools/list`, and `tools/call` return JSON-RPC responses; the
+`notifications/initialized` notification returns HTTP 202 with an empty body and MUST NOT be
+converted into `-32601 Method not found`. Unknown requests with an `id` still return a structured
+JSON-RPC error. Tests execute the complete initialize-notification-list-call sequence rather than
+calling `tools/call` in isolation.
+Because `recall` is Manager-owned, read-only, loopback-only, session-scoped, and independently
+authenticated, its generated Codex MCP config sets `default_tools_approval_mode="approve"` so the
+call cannot stall behind an unprojected generic MCP approval. No external MCP server inherits this
+exception.
+
 Retry and recovery recall MUST merge the persisted transcript with the latest HaaS
 `stream_bridge` checkpoint before filtering. This covers the window where a failed or
 interrupted HaaS turn has persisted its visible user message, terminal notice, and bridge
 state, but the assistant projection has not yet been committed to the transcript because
 the Manager process, browser connection, or stream loop ended early. The synthesized recall
 row is still a transcript fact, not a new user prompt: it may include assistant text,
-task outcome, reasoning summary, model-stage summaries, and bounded activity facts from
+task outcome, reasoning summary, product work summaries, and bounded activity facts from
 `_haas_activity`, but only from already-sanitized projection fields such as status,
 safeSummary/summary, commandPreview, outputPreview/preview, exitCode, safeReason and
 durationMs. Query filtering MUST search those safe fields as well as assistant text so an
@@ -946,7 +1066,7 @@ rules. Quit cancels supervision; unknown listeners are never killed. Exhausted r
 visible with restart guidance; no execution replay is implied by process restart.
 6. Narrow conversation layouts overlay panels within the available area, with an accessible
 close path and usable composer. Active task status remains visible throughout waiting,
-reasoning, tools and finalization; never show Waiting alongside an active stage.
+reasoning, tools and finalization; never show Waiting alongside active work or a visible tool.
 
 Compatibility: additive Manager events, retained run statuses and session identities. HaaS
 ADK/native schemas, container images, provider proxy, MCP, policies and credentials unchanged.
@@ -968,3 +1088,194 @@ Desktop WebSocket reconnect is bounded and does not resend user messages. Startu
 show recovery guidance even before the normal conversation shell mounts.
 
 Native result notifications accept only ok/error and use fixed text; OS delivery denial leaves Inbox as fallback. Scheduled HaaS interactions currently require approval in the original conversation: legacy name/target grants are not translated into broader HaaS permissions. Recovery deliberately freezes unknown runs rather than claiming seamless execution resume. Backup/restore, automatic retention, 10k transcript windowing and trusted release manifest/key migration remain unimplemented product work, tracked in Beads.
+
+### Manager conversation display identities
+
+The Manager transcript may carry `_managerTurnId` and `_managerRowId` sidecars. Manager-local
+WebSocket envelopes expose the same identities as `turnId` and `rowId`; these are additive internal
+display metadata and never change ADK/HaaS invocation identity. The provider outbound encoder
+strips both sidecars. Older history is normalized once at the GUI persistence boundary using
+user/connector intent boundaries, with no model-stage or tool-adjacency inference in rendering.
+
+### Project workbench endpoint binding
+
+The project workbench consumes the existing endpoint registry and freezes `endpointId`, URL
+fingerprint, workspace binding, harness/profile/policy revisions, and remote workspace reference
+at first acceptance. Remote selection never serializes a Manager local path or host mount. A failed
+remote endpoint remains a structured blocked target and MUST NOT fall back to `local_managed`.
+Changing project defaults affects drafts/new sessions only; accepted sessions retain their binding.
+
+## Desktop Restart and Reinstall Task Recovery (`manager-restart-task-recovery-v1`)
+
+### Background and product boundary
+
+The desktop currently terminates its owned Manager child immediately on exit. After a restart or
+local reinstall, HaaS can reconcile a persisted local `running` invocation that no longer has a
+live adapter owner to `incomplete(sidecar_restart_execution_lost)`, but Manager only repairs
+commands that never reached a transcript checkpoint. A checkpointed command can therefore remain
+`accepted/running` while its HaaS invocation is terminal and no Codex app-server owns the work. The
+session then renders a false running state and a Stop action that cannot stop anything.
+
+This design has two distinct guarantees:
+
+1. A desktop-owned update/restart is a graceful recovery path. Manager pauses each pause-capable
+   HaaS invocation, waits for the authoritative `interrupted` terminal, and persists a
+   restart-owned continuation marker before the desktop terminates its children. The next launch
+   automatically continues the same logical task through HaaS native resume semantics.
+2. A crash, force kill, power loss, or external replacement that did not complete the pause barrier
+   is fail closed. Startup reconciles the exact accepted invocation and persisted events; it never
+   resubmits the prompt or invents a new idempotency key. If live ownership or native continuation
+   cannot be proven, the task becomes visible `incomplete` with a safe retry/continue action rather
+   than remaining falsely running.
+
+P0 goals are to reconcile every checkpointed `accepted/running` conversation command after the
+owned HaaS endpoint is ready; reattach the same invocation when authoritative readback proves a
+live owner; atomically converge terminal events, task outcome, binding control and command receipt;
+gracefully pause and automatically continue pause-capable local HaaS work across desktop-driven
+restart/update/reinstall; and expose Stop only for a currently bound active invocation owner.
+
+Non-goals are automatic prompt replay after a crash or `sidecar_restart_execution_lost`, claiming
+instruction-pointer continuation when a harness only supports durable session/thread continuation,
+and recovering non-HaaS in-process providers in this slice. ADK, HaaS invocation/canonical-event,
+container, model-proxy, MCP and credential schemas do not change.
+
+### Durable state and startup reconciliation
+
+Manager stores only additive secretless facts in the existing HaaS binding:
+
+```json
+{
+  "restartRecovery": {
+    "generation": "restart_<opaque>",
+    "state": "preparing|paused|reattaching|continued|recovery_required",
+    "sourceInvocationId": "inv_...",
+    "requestedAtMs": 1786400000000,
+    "reasonCode": "desktop_restart|sidecar_restart_execution_lost|backend_unavailable"
+  }
+}
+```
+
+The generation is one opaque local idempotency identity per desktop restart request, not a
+credential. This object MUST NOT contain the prompt, complete tool arguments or output, bearer
+token, provider credential, signed URL, or host path.
+
+`conversation_commands` gains one nullable additive `execution_ref`. When the normal turn path
+observes an accepted delegated `turn_start`, it checkpoints the Manager `turn_id` and binds the
+latest exact HaaS `invocationId` in the same command-store transaction. A structured-plan
+continuation within that same Manager turn may advance the reference only in observed acceptance
+order; unrelated callers cannot replace it. Startup primarily joins receipt to bridge by this
+reference. For
+legacy rows without it, Manager may reconcile only when the session single-writer ordering proves
+there is one current bridge and no newer accepted command; older running rows are then terminalized
+as stale predecessors after the current authoritative terminal is persisted. Ambiguous legacy rows
+become `recovery_required` rather than being guessed or replayed.
+
+`running` is an ownership fact, not a historical receipt. After process start, Manager MUST NOT
+derive running state from persisted `control_state=running` alone. A session is actionable as
+running only after exact invocation readback and `_bind_active_haas_turn` establish a live recovery
+pump. While proof is pending, Manager projects additive local recovery state `recovering` with no
+Stop action. This does not extend the six-value HaaS execution-control contract or ADK state.
+Queue recovery follows the same boundary: a `dispatching` item with no checkpoint returns to a
+paused queue, while a checkpointed item remains attached to its accepted invocation and MUST NOT be
+requeued. Terminal reconciliation removes that queue item exactly once.
+
+After the owned HaaS endpoint passes execution readiness, Manager scans all checkpointed command
+receipts whose disposition is `running`. Reconciliation is single-flight per Manager session and
+bounded across sessions so one remote endpoint cannot delay first paint or project hydration.
+
+| Authoritative readback | Required Manager action |
+|---|---|
+| Invocation is terminal | Consume canonical events after the saved cursor, reconcile the terminal barrier, merge or append one assistant/task-outcome projection, persist `idle` or authoritative `paused`, and terminalize matching stale running receipts. |
+| Invocation is non-terminal and HaaS proves a live owner | Start one background recovery pump for the same invocation, register Manager busy/control ownership, continue from saved cursors, and never POST `/run_sse` again. |
+| Local invocation has no live owner | Let HaaS fencing reconcile it once to retryable `incomplete` with `code=safeReason=sidecar_restart_execution_lost`; consume that terminal and clear false running/Stop state. |
+| Backend is unavailable or ownership is indeterminate | Persist `restartRecovery.state=recovery_required` with safe `backend_unavailable`; expose retryable recovery, not running/completed/failed execution; create no work. |
+| Binding, attempt, bridge, session, or invocation identities disagree | Fail closed as `recovery_required`, emit a safe diagnostic, and do not read or mutate another invocation. |
+
+Repeated process starts, invocation GETs, and WebSocket opens MUST NOT duplicate an assistant row,
+task outcome, tool activity, terminal event, `turn_done`, or command terminalization. Stable Manager
+turn/row identities and bridge invocation/cursors are merge keys. Once the recovered invocation is
+terminal, only receipts that cannot represent a newer active invocation may be terminalized; an
+older recovery result never overwrites a newer accepted invocation.
+
+### Graceful restart and automatic continuation
+
+The authenticated Manager-local mutation `POST /v1/lifecycle/prepare-restart` supports an optional
+`Idempotency-Key` and returns only aggregate safe results:
+
+```json
+{"state":"ready|partial|blocked","generation":"restart_<opaque>","paused":1,"recoveryRequired":0}
+```
+
+It first blocks new foreground sends and queue dispatch, then concurrently requests Pause for each
+Manager-owned pause-capable HaaS invocation with a bounded per-item deadline. Automatic continuation
+is allowed only after HaaS persists the source invocation as `interrupted` and returns
+`sessionControl.controlState=paused`, `supportsResume=true`, and the exact
+`resumableInvocationId`. Manager then persists `restartRecovery.state=paused` for that source.
+Pause timeout, unsupported pause, a pre-acceptance turn, an in-process provider turn, identity
+mismatch, or persistence failure remains `partial|blocked` and is never promoted to auto-resumable.
+
+The Tauri updater and explicit desktop Quit path call this endpoint before child termination and
+wait only for its bounded response. They may still exit after a partial result, but MUST NOT label
+unpaused work recoverable. A crash remains outside this graceful contract.
+
+On the next launch, terminal/readback reconciliation runs first. If a `paused` restart marker still
+matches the authoritative resumable source invocation, Manager atomically claims the session,
+changes the marker to `reattaching`, and invokes existing HaaS Continue once. Continue creates one
+linked invocation on the same durable native session/thread; it does not append a synthetic user
+message or replay the original request. It supplies one fixed Manager-owned continuation instruction
+to inspect current state, avoid repeating completed side effects, finish remaining work, and return
+the final result. Events use the normal bridge. Terminal completion sets the
+marker to `continued`; pre-acceptance failure restores `paused` for manual resume. Repeated startup
+reuses an already accepted linked attempt instead of creating another invocation.
+
+### UX, compatibility, tests, and acceptance
+
+- Project/session shells remain immediate. During readback, the conversation may show a muted
+  localized “Recovering task state…” row. `recovery_required` has no active spinner; no owner means
+  no Stop.
+- A graceful continuation remains in the same conversation and logical user turn. It may add an
+  inference round but never duplicates the user message.
+- A crash orphan ends with a localized interruption explanation and retryable action. Partial
+  reasoning/tool/final evidence remains, and terminal activities stop animating.
+- History without `restartRecovery` is lazily reconciled. No bulk rewrite or legacy renderer is
+  introduced.
+- ADK REST/SSE and `/v1/haas/*` are unchanged. The lifecycle endpoint and recovery projection are
+  authenticated Manager-local additive contracts. Routing, artifact, policy, container and
+  secretless credential contracts are unchanged.
+
+TDD proceeds in seven vertical slices: (1) additive `execution_ref`, deterministic
+`checkpointed_running` command-store scan and idempotent session terminalization; (2) orphan startup reconciliation to one persisted
+`incomplete` outcome, `idle`, and terminal receipt; (3) proven live-owner same-invocation pump with
+no profile sync or `/run_sse`; (4) bounded idempotent prepare-restart with mixed pause capability and
+queue freeze; (5) paused marker to exactly one linked Continue invocation, with pre-acceptance
+failure remaining paused; (6) Tauri updater/Quit preparation before child kill without indefinite
+exit blocking; and (7) packaged restart plus force-kill acceptance.
+
+Packaged acceptance starts a long pause-capable local Codex turn, triggers desktop restart, launches
+the newly installed `.app`, and proves automatic continuation to one canonical terminal result in
+the same conversation with no duplicate user row. A force-kill variant must instead converge to one
+safe `incomplete`, perform no automatic replay, and expose no false running/Stop.
+
+Component impact: Manager command store, session/binding projection, startup lifecycle, desktop
+shutdown, transcript recovery, and packaged smoke are affected. Session Runtime already owns the
+required fenced-orphan and Pause/Continue semantics, so no ADK or HaaS native schema delta is
+required. Harness adapter, model proxy, MCP, artifact store, policy, container runtime, and
+credential schemas are unaffected; their existing secretless/native-resume contracts remain
+prerequisites.
+
+### Restart review corrections
+
+Updater failure before installation commits must leave Manager admission open. macOS/Linux
+prepare only after successful installation immediately before restart; Windows uses the updater
+before-exit hook after verified download/extraction. Explicit Quit retains bounded drain.
+
+Continued product turns may span more than two invocations. Merge all assistant snapshots,
+retain first row/turn/timestamp identity and latest answer/outcome, and preserve predecessor
+activity/model-stage facts. Current invocation readback replaces its fact collection, removing
+stale entries without erasing predecessor facts. Reused ids across invocations stay distinct;
+repeated readback is idempotent.
+
+Tasks/acceptance: failing tests for three continuations followed by current bridge readback,
+stale replacement and stable identity; updater error/success ordering; implement and second-round
+review. Only Manager projection and desktop shutdown ordering change; ADK/HaaS endpoints,
+container, permissions and secret contracts are unaffected.

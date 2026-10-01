@@ -361,10 +361,8 @@ def test_manager_provider_config(tmp_path, monkeypatch):
     assert mgr.set_provider("nope", {})["ok"] is False  # unknown provider rejected
 
 
-def test_manager_curated_models(tmp_path, monkeypatch):
-    """No seed list: the picker is the curated matrix filtered to key-holding providers,
-    plus user-added custom ids. A fresh install shows only the (not-yet-usable) default.
-    """
+def test_manager_enabled_models(tmp_path, monkeypatch):
+    """The picker contains only explicitly enabled models on executable providers."""
     monkeypatch.setenv("COWORKER_STATE_DIR", str(tmp_path / "state"))
     from coworker.providers.registry import provider_descriptors
 
@@ -380,14 +378,21 @@ def test_manager_curated_models(tmp_path, monkeypatch):
     monkeypatch.setattr(SessionManager, "_ollama_alive", lambda self: True)
 
     mgr = SessionManager(data_dir=tmp_path)
-    # no provider keys → nothing but the always-selectable default
-    assert mgr.get_settings()["models"] == [mgr.model]
+    # A default or static matrix entry is not implicitly enabled.
+    assert mgr.get_settings()["models"] == []
 
-    # a provider key unlocks exactly that provider's matrix models
+    # Configuring a provider enables only its explicit recommended model, not
+    # every model that happens to exist in the static suggestion matrix.
     mgr.set_provider("anthropic", {"api_key": "sk-ant-test"})
     models = mgr.get_settings()["models"]
-    assert "anthropic:claude-opus-4-8" in models
-    assert "gpt-4o" not in models  # no OpenAI seed anywhere
+    assert models == ["anthropic:claude-fable-5"]
+
+    added_matrix = mgr.add_model("anthropic:claude-opus-4-8")
+    assert added_matrix["ok"]
+    assert added_matrix["models"] == [
+        "anthropic:claude-fable-5",
+        "anthropic:claude-opus-4-8",
+    ]
 
     added = mgr.add_model("ollama:qwen2.5-coder:32b")  # keyless provider → selectable
     assert added["ok"] and "ollama:qwen2.5-coder:32b" in added["models"]
@@ -396,7 +401,7 @@ def test_manager_curated_models(tmp_path, monkeypatch):
     mgr.add_model("ollama:qwen2.5-coder:32b")  # idempotent
     assert len(mgr.get_settings()["models"]) == n
 
-    # removing a matrix model hides it persistently; re-adding unhides it
+    # Removing a matrix model disables it persistently; re-adding enables it.
     removed = mgr.remove_model("anthropic:claude-haiku-4-5")
     assert "anthropic:claude-haiku-4-5" not in removed["models"]
     mgr2 = SessionManager(data_dir=tmp_path)  # survives a restart
@@ -408,11 +413,33 @@ def test_manager_curated_models(tmp_path, monkeypatch):
     mgr.remove_model("ollama:qwen2.5-coder:32b")
     assert "ollama:qwen2.5-coder:32b" not in mgr.get_settings()["models"]
 
-    # the active default stays selectable even if removed from the curated list
+    # The active default remains a session fact but is not injected into choices.
     mgr.remove_model(mgr.model)
-    assert mgr.model in mgr.get_settings()["models"]
+    assert mgr.model not in mgr.get_settings()["models"]
 
     assert mgr.add_model("  ")["ok"] is False  # empty rejected
+
+
+def test_configured_providers_do_not_unlock_unenabled_matrix_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("COWORKER_STATE_DIR", str(tmp_path / "state"))
+    from coworker.providers.registry import provider_descriptors
+
+    for descriptor in provider_descriptors():
+        if descriptor.env_key:
+            monkeypatch.delenv(descriptor.env_key, raising=False)
+    from coworker.server.manager import SessionManager
+
+    mgr = SessionManager(data_dir=tmp_path)
+    mgr.secrets.put("provider:openai", {"api_key": "test-openai-key"})
+    mgr.secrets.put("provider:openrouter", {"api_key": "test-openrouter-key"})
+    mgr.secrets.put("provider:volcengine-ark", {"api_key": "test-ark-key"})
+    mgr.add_model("volcengine-ark:deepseek-v4-pro-260425")
+
+    settings = mgr.get_settings()
+
+    assert settings["models"] == ["volcengine-ark:deepseek-v4-pro-260425"]
+    assert "gpt-5.6-sol" not in settings["models"]
+    assert "openrouter:z-ai/glm-5.2" not in settings["models"]
 
 
 def test_set_provider_auto_adds_recommended_when_pulled(tmp_path, monkeypatch):

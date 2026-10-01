@@ -3,13 +3,15 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-15
-Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface
-Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Config](../config/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
+Last reviewed: 2026-09-26
+Change ID: manager-haas-sidecar-spec, unified-runtime-approval-policy, long-task-model-proxy-stability, haas-artifact-product-surface, manager-conversation-interaction-v2
+Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md), [Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md), [Config](../config/README.zh-CN.md), [Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件定位
 
 OpenHarness 默认内置非容器化 HaaS `local_managed`，且 autostart 开启。打包 App 启动本地 HaaS sidecar，并通过 HaaS `/run_sse` 执行普通桌面 turn（`execution_mode=local_api`）。Remote HaaS 与 delegated container session 是可选产品能力，但不是默认桌面执行路径。所有 HaaS-backed 模式共用只走 HTTP/SSE 的 `HaasClient`；Manager 不允许 import HaaS service object 或直接调用 Codex/provider/MCP。
+
+本规格负责 transport、binding、persistence 与 normalized Manager fact。[Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md) 负责这些事实的用户可见位置、交互层级、React component boundary 与视觉行为，且不得重新解释本规格定义的事实。
 
 ```text
 GUI -> Manager local API/session owner -> HaasClient -> HaaS control sidecar
@@ -221,6 +223,42 @@ Cancel request 发出后 Manager 继续消费/回放权威事件，task 保持 `
 条件。若 cancel 无法确认，Manager 显示安全的 `cancel_failed`/recovery 状态和 readback 动作，
 不能伪造 `interrupted`。Partial reasoning、output 与 tool evidence 继续归属于 cancelled turn。
 
+### 5.5.1 带确认的对话命令与追问队列
+
+Manager conversation surface 遵循 Manager Conversation Experience 中的产品与 React 合同。GUI `user_message` 携带稳定 `clientCommandId`、operation-scoped idempotency key 与显式 delivery intent。Manager 在确认 `running` 或 `queued` 前先持久化 accepted/duplicate command receipt；拒绝返回结构化安全错误，不伪造 turn。Send 后传输结果不确定时，通过 receipt 与 session projection 对账，绝不自动重发。
+
+不含内容的 Manager 读回接口
+`GET /v1/sessions/{sessionId}/conversation-commands/{idempotencyKey}` 返回原持久 receipt，
+或返回 `404 command_not_found`；它绝不返回 queued prompt 或 attachment payload。
+
+命令持久化属于私有执行数据。POSIX 下必须在 SQLite 打开前，以 0600 创建自有数据库，并将已有自有 database、WAL、SHM、rollback journal 收紧为 0600。新 sidecar 必须继承私有数据库权限；schema/payload 写入后才 chmod 不足以满足要求。新 store 目录使用 0700，不修改无关已有父目录权限或进程全局 umask。数据库/sidecar 为符号链接、非普通文件、多硬链接或其他用户所有时，在接触内容或权限前拒绝。权限准备失败直接中止打开，不静默降级。Windows 保留现有 managed-profile ACL 边界；POSIX mode 测试不表示验证了 Windows ACL。A1 验收使用隔离 umask-022 子进程、活动 WAL 连接、保留 receipt 的重开/迁移以及权限/文件类型失败用例。不改变公共协议或 SQLite schema；回滚保留私有文件权限。
+
+已接受的立即执行命令最初持久化为尚无 command checkpoint 的 `running` receipt。Manager 持久化带有同一 Manager turn id 的第一条 `turn_start` 后，将 receipt 标记为已 checkpoint。进程启动时，Manager 必须在服务客户端前核对所有未 checkpoint 的 running receipt。若持久 transcript 已包含同一 turn id（两次持久写之间崩溃），则只补记 checkpoint 并继续 canonical session 恢复；否则原子地把原 command 和 payload 转成一个暂停的 `restart_uncertain` 追问项，清除已失效 turn id，绝不自动启动。此后 receipt readback 返回 `queued`，snapshot 暴露同一 queue identity 与安全预览。用户可编辑/删除，或显式恢复暂停队列；显式恢复构成再次尝试该工作的授权。重复启动核对必须幂等，不得产生第二个 item。该变更只增加 Manager 私有 schema，不新增或改义 ADK/HaaS native event。已有 checkpoint 的 HaaS invocation 继续使用既有同 invocation readback/replay，不转成新工作。
+
+Manager 拥有持久化的 per-session follow-up queue。Queue mutation 必须 revisioned 且 idempotent；只有 queued item 可编辑、删除、排序或提升为 send-now。`queue_move` 携带 `targetPosition`；send-now 停止失败返回 `queue_send_now_failed`，同时保持 item queued 与 drain paused。Configuration barrier、workspace lock、running turn 或 recovering binding 可让 item 继续排队，但不得改变用户意图。HaaS deployment admission 与 workspace-lock queue 继续作为独立 backend fact，绝不投影成用户 follow-up item。
+
+`queue_send_now` 是一次幂等队列 mutation。第一次有效应用会将选定 queued item 移到队首，并解除已有 queue pause，使空闲 session 可以领取它。若前台工作仍在运行，Manager 在发出 Stop 前记录一次性 drain intent。Stop 失败或无法确认时，必须消费该 intent，以 `send_now_interrupt_failed` 原子暂停队列，并返回包含权威 items 与 `paused:true` 的 `queue_error`；旧 turn 随后完成也不能 drain。复用 mutation key 不得再次移动 item 或再次发送 Stop。
+
+`queue_resume` 同样是持久化幂等 mutation。它只修改 queue pause flag，绝不能把 `dispatching` item 退回可编辑 `queued`。第一次有效 resume 在 session 空闲时可领取下一项；复用 key 返回原结果，不再次领取或执行。同一 session 内 mutation key 跨 kind 复用必须拒绝。每条 queue update/error 都携带权威 pause 值，避免重连或失败后 GUI 错误认为 drain 已启用。
+
+GUI 在发送 `queue_edit` 前只持久化 session id、queue item id、expected revision、mutation idempotency key 和创建时间，不在 mutation store 复制 prompt 或附件内容。`queue_restored` 与确定性 `queue_error` 回显该 key。投递或回包丢失时，重连使用同一 mutation 重放；Manager 返回已持久化的原始结果，不要求已删除的 queue row 仍存在。GUI 只在收到对应结果后删除 pending mutation。因此，已接受 payload 不会因服务端提交后首个 socket 关闭而丢失。
+
+Manager 内部 conversation WebSocket 的 snapshot 携带 `queue` 与不含内容的
+`queuePaused`，后续 `queue_updated` 携带 `items` 与 `paused`。`queue_resume` 必须携带
+operation idempotency key，并且是恢复 paused drain 的唯一动作。Item 被领取后保持
+`dispatching`，直到对应 turn 终态。若 Manager 重启或领取后无法调度，该 item 回到
+`queued`、revision 递增，持久队列进入 `restart_uncertain`/`dispatch_uncertain` 暂停，
+不得盲目重放。失败或普通 Stop 会暂停剩余 item；成功完成正常 drain；显式 send-now
+可完成用户已经授权的 interrupt-and-drain 动作。
+
+`user_message.contextRefs` 只包含有界的 typed display reference（`skill`、`file`、
+`session`）。Manager 校验后以 `_managerContext` 持久化，保证 live/replay GUI 一致，
+并在每次 local provider 请求前剥离该 sidecar。它不暴露 provider framing，也不会把
+展示引用静默改写为模型输入。
+
+GUI 接收一个 normalized conversation snapshot 与有序 change，其中 Manager row、interaction、queue 与 command identity 保持稳定，并关联 canonical HaaS event、turn、invocation 与 tool identity。Local execution 投影等价 identity。UI component 不解析 HaaS 或 harness-native payload，也不根据相邻 display item 推断 turn 边界。
+Snapshot 必须以 product turn 为中心：一个 turn 只拥有一个 work projection 与最多一个 assistant response。Model-call identity 与 usage boundary 只作为 evidence correlation，绝不得生成 GUI row、progress phase、card、heading 或 count。
+
 ### 5.6 双流桥接与完成屏障
 
 Manager 持久化 accepted header 后，从头订阅 native invocation replay，同时继续 drain ADK 流。ADK 文本和 native typed fact 使用独立持久 cursor/消费标记；native event 必须实时交付，不能等 ADK 关闭后才读取。去重 scope 为 `(endpointId, full session key, invocationId, eventId, projection)`；同记录 ADK 投影不能抑制 native 处理。Turn 外 native session lifecycle 使用独立 session cursor 或 delegated GET 重建；invocation-only 订阅无法显示空闲配置更新。
@@ -231,9 +269,9 @@ Native type 判定结果，stream close 不代表成功。Native terminal 到达
 
 完成屏障由权威 readback 有界收敛，不能永久依赖两个 transport 同时确认。若 ADK 关闭、停滞或遗漏 terminal projection，Manager 必须把 canonical page 消费到 terminal event，并尝试与 invocation GET 对账。此前 canonical pages 全部消费后，已持久化的 canonical terminal 本身就是足够的权威证据，即使 invocation GET 暂时不可用也必须完成；readback 可用时，其 terminal status 以及若暴露的 terminal event id 必须一致后才能完成。随后 Manager 投影匹配的错误/task outcome 与唯一 `turn_end`，并把本地 binding 移出 `running`；不得无限等待 ADK 对同一 event id 的 claim。若 invocation readback 已终态但 canonical terminal 缺失，必须显示可恢复的完整性错误，绝不能永久显示执行中。
 
-非 thought 的 ADK text → `assistant_delta`；`haas.output.reasoning.delta` → 类型化 `reasoning_delta`；`haas.usage.updated` → 实测 model-call usage；native tool fact → `tool_proposed/tool_started/tool_output_delta/tool_finished`；`haas.approval.required` → `permission_required`；`haas.input.required` → `question_requested`；delegated lifecycle → status；accepted header → 单次 `turn_start`；对账后 terminal → 单次 `turn_end`。Heartbeat 不创建 transcript。Native sequence 有序，不把最终聚合文本再当第二份 delta。过程事件必须 checkpoint，使重连后还原相同的有序 model-call stage、item 边界、tool card、usage、pending interaction、partial answer 与终态。Reasoning 绝不追加到 commentary 或 final-answer 文本。
+非 thought 的 ADK text → `assistant_delta`；`haas.output.reasoning.delta` → 类型化 `reasoning_delta`；`haas.usage.updated` → 实测 model-call usage；native tool fact → `tool_proposed/tool_started/tool_output_delta/tool_finished`；`haas.approval.required` → `permission_required`；`haas.input.required` → `question_requested`；delegated lifecycle → status；accepted header → 单次 `turn_start`；对账后 terminal → 单次 `turn_end`。Heartbeat 不创建 transcript。Native sequence 有序，不把最终聚合文本再当第二份 delta。过程事件必须 checkpoint，使重连后还原相同 product turn、work segment、evidence correlation、usage、pending interaction、partial answer 与终态。Reasoning 绝不追加到 commentary 或 final-answer 文本。第一段被分类为 user-visible 的 assistant delta 创建稳定 response row；后续 delta、tool arrival、usage update 与 terminal sealing 只更新该 row，不得在 GUI container 间移动。
 
-Manager 还将已关联 native fact 折叠为有序 `ModelCallStageProjection`：
+Manager 可把已关联 native fact 保存在内部 `ModelCallEvidenceProjection`，用于 replay、usage accounting 与 Inspector lookup。它是 evidence data，不是 GUI layout contract：
 
 ```json
 {
@@ -260,11 +298,11 @@ Manager 还将已关联 native fact 折叠为有序 `ModelCallStageProjection`�
 }
 ```
 
-`kind` 为 `output_pending|commentary|reasoning_summary|tool|result`；`output_pending` 只是实时临时状态，权威 phase 到达后不得继续保留。Step 保留 canonical event 顺序。只有 `itemId`（reasoning 还包括 `summaryIndex`）相同的连续 delta 才合并；不同 item 或 model call 绝不合并。Agent-message delta 没有权威 phase 时先成为 `output_pending`，等对应 item lifecycle 提供 `commentary|final_answer` 后原地分类；Manager 不得从自然语言猜测。若 legacy provider 缺少 item phase，对账完成的成功 invocation terminal 可作为最后 model-call stage 剩余输出的权威信号：Manager 必须在发布或持久化终态 assistant message 前，将其 `output_pending` step 重分类为 `result`。Failed、incomplete 或 cancelled terminal 不得使用这个成功结果 fallback。Model-call usage event 为该 stage 计量，但关联 tool 尚未终态时不能单独结束 stage。具有相同 `modelCallId` 的 tool lifecycle 即使在 usage event 后才 start，仍保留在触发它的 stage；全部已知关联 tool 终态或 model output 开启下一 stage 后，当前 stage 才完成；tool 完成后的新 model output 开启下一 stage。缺少关联字段时只创建明确的 `legacy` stage；缺 usage 表示 unavailable，绝不补零。
+`kind` 为 `output_pending|commentary|reasoning_summary|tool|result`；`output_pending` 只是临时 evidence 状态，权威 phase 到达后不得继续保留。Step 保留 canonical event 顺序。只有 `itemId`（reasoning 还包括 `summaryIndex`）相同的连续 delta 才在 evidence 内合并；不同 item 或 model call 绝不合并。Agent-message delta 没有权威 phase 时先成为 `output_pending`，等对应 item lifecycle 提供 `commentary|final_answer` 后原地分类；Manager 不得从自然语言猜测。若 legacy provider 缺少 item phase，对账完成的 successful invocation terminal 对剩余 user-visible output 具有权威性，并封存唯一 assistant response；failed、incomplete 或 cancelled terminal 不得使用该成功 fallback。Model-call usage 与 tool correlation 保持实测 evidence fact。缺少 correlation 时进入明确 unknown evidence bucket；缺失 usage 表示 unavailable，绝不是零。这些 boundary 都不得决定主 timeline grouping。
 
-Reasoning-summary step 以 `(modelCallId, itemId, summaryIndex)` 为身份。`text` 为可展开详情保留 provider 提供的完整 canonical summary，`previewText` 则是有界的首屏投影。该 step 仍是当前尾部时，`previewText` 最多增长到 240 个 Unicode 字符，并在视觉上最多展示两行；达到字符上限即冻结。插入不同的后续 step、收到相同 `itemId` 的 item-completed event（冻结该 item 的全部 summary index），或 stage 进入终态后，预览也必须冻结（`previewFrozen=true`）。同一 reasoning identity 的迟到 delta 仍可补全 `text`，但不得改变已冻结预览。Canonical summary 仍受安全内容边界约束，不是 raw reasoning 或隐藏 chain-of-thought。Manager 不按标点拆分 summary，也不伪造中间推导步骤。Replay 与持久恢复必须重建完全相同的 preview 和冻结状态。旧持久记录若没有 `previewText`，GUI 从 `text` 派生前 240 个 Unicode 字符即可，不回写历史。
+Reasoning-summary evidence item 以 `(modelCallId, itemId, summaryIndex)` 为身份。`text` 为有界 Inspector detail 保留 provider 提供的完整 canonical summary，`previewText` 是最多 240 个 Unicode 字符的脱敏投影。Canonical summary 仍受安全内容边界约束，不是 raw reasoning 或隐藏 chain-of-thought。Manager 不按标点拆分 summary，也不伪造中间推导步骤。Replay 与持久恢复必须重建相同 evidence。Product-turn projector 可把一个或多个 evidence item 折叠成一个 reasoning `WorkSegment`，但绝不得把其中 prose 用作 work title，也不得在主 timeline 暴露 model-call boundary。
 
-Stage usage 是 step 区域唯一的 token 声明位置，展示 `scope=model_call` 的实测 `inputTokens`、`outputTokens`、可选 `reasoningOutputTokens` 与 cache counter。Cache-read 作为 input 子集、reasoning-output 作为 output 子集展示，不能再次计入 stage total。Commentary、reasoning-summary、tool、result 子行只说明其计入该 stage，不得分摊或估算 token。Tool 执行自身没有模型 token，除非 HaaS 提供另一个带 scope 的实测 record。`cumulativeUsage` 只更新 task/session total，不能再次与 model-call usage 相加。
+实测 per-model-call `inputTokens`、`outputTokens`、可选 `reasoningOutputTokens` 与 cache counter 只属于 evidence/Inspector。Cache-read 是 input 子集，reasoning-output 是 output 子集，都不能再次计入 aggregate total。Commentary、reasoning-summary、tool 与 result fact 不得分摊或估算 token。Tool 执行自身没有模型 token，除非 HaaS 提供另一个带 scope 的实测 record。`cumulativeUsage` 只更新 task/session total，不能再次与 model-call usage 相加。只有权威 aggregate 可进入安静的 turn completion footer；missing/pending usage 不产生主 timeline warning。
 
 发布 GUI 状态前，Manager 将上述 transport action 折叠为内部 `ActivityProjection`。它不是 HaaS 公共 API，也不得回传 HaaS：
 
@@ -311,6 +349,16 @@ Event Log 脱敏规则，因此 signed URL 在列表中可以显示为不可用�
 也不把它持久化进 transcript。Terminal event 不得擦除 start 阶段得到的 evidence ref、
 command preview 或 working-directory hint。
 
+显式选择 Manager 本地执行时，所拥有的 `run_shell` 工具通过同一 GUI 展示字段提供真实
+tool-call id 与 `commandPreview`。预览复用 HaaS 共享有界脱敏器，限制单行及最多 512 UTF-8
+字节；GUI 不从 raw arguments 推导命令。Manager 会话回读只在复制的 tool-call 对象上增加
+等价 `_managerDisplay` 元数据，不修改 engine/provider 消息，也不持久化第二份 transcript。
+其他工具在其自有 schema 定义安全事实前保持通用展示。测试覆盖 live/replay identity、命令
+可见性、credential 脱敏、多行/超长输入、畸形及非命令输入。这是 Manager 内部展示元数据的
+加法扩展，不改变 ADK/HaaS event、执行策略或 evidence 访问权限。
+桌面 bundle 必须包含共享脱敏器。独立安装的 Manager 缺少可选 HaaS 包时仍须正常启动和执行
+工具；只省略命令预览，不提供不安全回退，也不能中断 turn。通过隔离 import 验证依赖缺失路径。
+
 `facts` 是只从 canonical plan、artifact、tool terminal 与 verification record 组装的可扩展 typed map。Manager 不得从 assistant prose 推导修改文件数、测试结果或风险状态；未知事实保持 null/缺失，不能猜测。收敛后的结果摘要使用同一组 facts 与 task terminal state，确保 live view、replay、automation history 与完成态密度不会互相矛盾。
 Source event id 与 dedupe key 保留在投影旁的 Manager 私有 checkpoint 中，不进入 GUI payload。
 
@@ -347,9 +395,9 @@ Task transition 必须先持久化，再发布对应 GUI event。`waiting_for_in
 Transcript 是每个 task 有序 activity stream 的唯一 owner。右侧 Activity Inspector 仅显示选中 activity 的详情，不是第二条时间线，也不得重复完整 activity 列表。交互遵循 Codex 将可变运行中工作与已提交 transcript history 分离的原则：
 
 - task 活动期间，一个紧凑 activity 区域展示有界进度与 running/waiting activity，并原地更新生命周期；
-- reasoning 只展示有界脱敏进度摘要，绝不展示 chain-of-thought；活动行最多展示两行预览，出现后续 step 后停止变化，完整 provider summary 只能通过该行的显式详情展开查看；
-- commentary、provider reasoning summary、tool action 与 stage result 是不同的有序 row kind；reasoning 绝不拼接在 commentary 或 answer 文本之后；
-- model-call stage header（而非每个子 row）展示真实 input/output/reasoning/cache token；native 未报告 usage 时显示“Token 未报告”，不估算；
+- 每个 product turn 只有一个有界脱敏 reasoning disclosure，绝不展示 chain-of-thought；默认收起，仅在用户显式操作后展示 canonical safe detail；
+- commentary/progress、reasoning summary 与 tool action 投影为 typed work segment；任何一项都不得挤走稳定 assistant response 或与其拼接；
+- per-model-call input/output/reasoning/cache usage 只在 Inspector；权威 aggregate turn usage 可在 completion 出现一次，missing/pending usage 直接省略，不显示 warning；
 - 每个 tool call 只有一个语义 activity，不为 started/output/completed 分别建行；
 - approval 与 structured question 保持 inline blocking card，是用户决策/回答的唯一入口；Inspector 只读；
 - 成功使用安静且不只依赖颜色的标记；红色只表示真实失败；失败展示安全原因，并在可用时展示 exit code 与 duration；
@@ -358,13 +406,11 @@ Transcript 是每个 task 有序 activity stream 的唯一 owner。右侧 Activi
 - turn-level provider/adapter/transport error 保持为独立失败提示，不得挂在 tool detail 标题下伪装成该 tool 返回的错误；
 - 非成功 task outcome 的 partial output 与恢复说明保持独立。
 
-Task phase 进入 `completed` 后，turn 默认收敛为 final answer、仅由结构化事实形成的
-结果摘要，以及实际 tool activity 的紧凑行。每条紧凑行保留具体动作、有界关键结果和
-状态，但不展开完整参数或输出。“查看活动”展开 reasoning 与完整有序 model-stage stream，
-不显示原始协议 event dump。失败/恢复尝试、跳过的验证、未解决风险及任何非成功事实在
-两种状态下都应保持醒目。用户展开状态仅属于本地展示状态，不改变 task/session。
+Task phase 进入 `completed` 后，product turn 保持 final answer 为主，并把唯一 work summary 切换为安静 completed 状态。成功 work detail 默认折叠；第一个可操作 failure、跳过的验证、未解决风险与非成功事实无需打开 model-call evidence 即可到达。用户 disclosure 是本地展示状态，不被 reasoning、model-call、usage、tool 或 terminal update 重置。
 
-运行时 activity projection 必须避免 `Waiting for agent` 到首个 model/tool stage 之间出现空白或生硬切换；同一个紧凑 activity 容器承载 waiting 到 active stage 的过渡。Model-call stage 默认折叠，包括 running stage。折叠标题应使用该 stage 的任务名称：优先取有意义的 tool/activity summary、command preview、action summary、reasoning/output preview，最后才回退到 `Stage N`。用户可展开任意 stage，且不改变 task state。失败 stage 保持醒目，并让失败 action 易于检查。Running stage 使用轻量 active 视觉，例如 accent 渐变边框或背景，同时保持文字可读和明确状态文案；reduced-motion 模式下该 active 视觉保持静态。等待 usage event 时显示“Token 尚未报告”；若 stage 终止仍未收到则变为“Token 未报告”。Turn footer 对 model-call usage 只求和一次，并可把最新 cumulative snapshot 作为单独标注值展示。只有 turn-level usage 的旧历史只在 turn scope 展示该总量，绝不补造 stage 数值。
+Runtime projection 必须避免 `Working` 到第一段 assistant delta 之间出现空白。第一段 answer 前可使用一个紧凑 16 px status slot；第一段 user-visible delta 在下一次合并 publication 后挂载稳定 assistant-response row，并移除重复 loading。Response row 不得被 word threshold 延迟，也不得移入或移出 activity container。默认 work surface 只渲染一个安全 summary；仅在需要立即关注时展示 active tool 或可操作 failure。Model-call stage、reasoning chunk 与 usage arrival 不能成为 card、heading、progress count 或自动展开项。
+
+Activity title 依次使用显式本地化 product action、安全 tool/object summary、有界 command preview 与中性本地化 fallback。禁止把 raw/internal commentary、reasoning prose、provider/model text 或 model-call ordinal 当作 fallback。Missing/pending usage 在普通 conversation UI 中省略。Running state 使用一个持久文字标签和最多一个 motion owner；禁止 gradient、animated card border/background、重复 spinner 与 streaming motion 并存。
 
 桌面 viewport 宽度至少 1100 CSS pixel 时，选择 activity 后打开右侧 Inspector，宽度为 `clamp(320px, 30vw, 400px)`。较窄 viewport 使用 chat 工作区内部、composer 上方的非模态底部抽屉，最多占可用 chat 高度的一半，不得覆盖 composer 或 active approval/input card。Inspector/抽屉展示语义标题与状态、时间、duration、安全操作摘要、适用时的 exit code、最多五行持久 preview、省略行数、安全 artifact 和完整 transcript 入口。存在未过期 `evidenceRef` 时，打开 Inspector 按 scope 即时读取，并补充实际命令、工作目录与有界 command output。普通 HTTP(S) URL 可复制、可点击；signed 用户授权 URL 在 evidence 过期前也保持完整可点击，打开时使用 `noopener,noreferrer`，且 URL 不经过 analytics、telemetry 或 Manager redirect log。完整 URL 以外的 credential value 仍脱敏。Codex 0.152.1 的合并输出标为“命令输出”；只有 adapter 提供权威 stream label 时才显示 stdout/stderr 分栏。
 
@@ -376,7 +422,7 @@ Activity row 和 control 必须支持键盘访问。在 row 上按 Enter 或 Spa
 
 用户提交新的前台 prompt 时显式开始一个新的 transcript 跟随周期。React 提交本地
 用户消息后，即使用户此前停留在较早历史位置，视口也必须移动到最新内容；随后必须
-持续跟随 turn start、waiting、reasoning、model stage、tool activity 与流式回答造成的
+持续跟随 turn start、waiting、reasoning/work evidence、tool activity 与流式回答造成的
 高度变化，让用户立即看到任务已被接受且正在推进。只有提交之后用户再次明确向上滚动
 才退出该轮跟随；后台或 replay 更新不得抢走用户主动固定的阅读位置。程序化滚动必须在
 布局提交后发生，且自身产生的中间 scroll event 不得被误判为用户操作。
@@ -385,7 +431,7 @@ Activity row 和 control 必须支持键盘访问。在 row 上按 Enter 或 Spa
 的 session。完成这次初始对齐后，普通的 reader-pinned 行为继续生效，直到用户再次切换
 session 或显式点击“跳到最新”。
 
-assistant text delta、reasoning delta 与 model-stage update 等高频 GUI 投影更新在发布
+assistant text delta、reasoning delta 与 work/evidence update 等高频 GUI 投影更新在发布
 React state 前必须合并。一次 live render tick 可以合并多个 transport frame，但必须保留
 追加顺序、terminal flush 语义和 canonical 持久 transcript。流式合并只属于 GUI
 背压规则，不得改变 ADK/HaaS event ordering、response id、task status、durable cursor、
@@ -531,13 +577,13 @@ this runtime yet.” UI 主标签不得暴露 `FileRecord`、`artifactDelta`、`
 Running indicator 来自 task/invocation state，不来自 WebSocket 是否连接。重连先恢复持久 activity projection 与 pending interaction，再续 live cursor。未知 event type 仅增加诊断计数并隐藏，不能转成 assistant text、success、approval UI 或猜测的 activity。
 
 首屏加载、历史恢复、replay 或 live event 对账期间，同一个 keyed turn 的 Transcript
-投影变化不得改变 React Hook 调用顺序。legacy 与 HaaS turn renderer 必须由 Hook
-顺序稳定的 wrapper 路由，分支专用 state 归属于对应 child renderer。Turn 即使新增或
-失去 `modelStages` 或 HaaS activity metadata，也不得卸载 transcript root、产生白屏或
-丢失剩余会话。回归测试必须以同一 turn identity 覆盖 legacy → HaaS 与 HaaS →
-legacy 两种 rerender。
+投影变化不得改变 React Hook 调用顺序。所有来源使用同一个 product-turn renderer，
+source-specific state 归属于 transport/projector adapter。Turn 即使新增或失去 model-call
+evidence 或 HaaS activity metadata，也不得卸载 turn、assistant response 或 transcript root，
+不得产生白屏或丢失剩余会话。回归测试必须以同一 turn identity 覆盖 missing、partial 与
+complete evidence，且不得引入 legacy renderer branch。
 
-兼容策略仅做加法。ADK `/run` 与 `/run_sse` 不变；HaaS native tool event 保留已有 required 字段，只增加可选语义事实；output/usage event 同样只增加可选 correlation/scope fact。因此旧 server 或旧存储 event 形成单个 `legacy` stage，使用通用 `tool` activity，并且只展示其实际报告的 usage scope；旧 consumer 继续忽略新增字段。本 UI 投影不要求 stored-event migration、替换 session 或协议版本协商。
+兼容策略仅做加法。ADK `/run` 与 `/run_sse` 不变；HaaS native tool event 保留已有 required 字段，只增加可选语义事实；output/usage event 同样只增加可选 correlation/scope fact。因此旧 server 或旧存储 event 投影为一个 product turn、一个中性 work summary、通用 `tool` activity，并且只展示其实际报告的 aggregate usage；绝不创建 `legacy` stage card。旧 consumer 继续忽略新增字段。本 UI 投影不要求 stored-event migration 或替换 session；packaged Manager GUI asset 与 internal snapshot version 原子升级。
 
 Transport disconnect 不取消执行。ADK 用原 key/Last-Event-ID 重连，native 用独立 after_event_id；exponential backoff+jitter 受 attempt/turn budget 限制。Cursor 过期查 invocation/page，本身不触发新工作。ADK Session 413 转有界 native page，不静默截断历史。GUI 慢/断线不阻塞 HaaS 消费，重连恢复持久 transcript/状态；本地远程相同向量产生等价 Manager 投影。
 
@@ -736,26 +782,36 @@ global memory、workspace memory，以及近期脱敏 session transcript facts�
 turn 可以继续，但 Manager 必须通过 HaaS profile 和普通 task outcome 路径记录降级。
 Local Codex 路径在完整 MCP runtime contract 实现前仍不支持任意外部 MCP materialization。
 
+内置 source 必须实现 pinned Codex client 所需的 stateless Streamable HTTP lifecycle。
+`initialize`、`tools/list` 与 `tools/call` 返回 JSON-RPC response；`notifications/initialized`
+notification 返回 HTTP 202 空 body，绝不得转换成 `-32601 Method not found`。带 `id` 的未知请求仍
+返回结构化 JSON-RPC error。测试必须执行完整 initialize-notification-list-call 顺序，不能只孤立调用
+`tools/call`。
+由于 `recall` 由 Manager 管理、只读、仅 loopback、绑定 session 且独立鉴权，其生成的 Codex MCP
+配置必须设置 `default_tools_approval_mode="approve"`，避免调用卡在未投影的通用 MCP 审批上。任何
+外部 MCP server 都不得继承该例外。
+
 Retry 与恢复场景的 recall 必须在过滤前合并已持久化 transcript 与最新 HaaS
 `stream_bridge` checkpoint。这覆盖一种窗口：失败或中断的 HaaS turn 已持久化可见
 user message、终态 notice 和 bridge state，但由于 Manager 进程、浏览器连接或 stream
 loop 提前结束，assistant 投影尚未提交进 transcript。合成的 recall 行仍是 transcript
 fact，不是新的 user prompt：它可以包含 assistant text、task outcome、reasoning
-summary、model-stage summary，以及来自 `_haas_activity` 的有界 activity facts，但只能
+summary、product work summary，以及来自 `_haas_activity` 的有界 activity facts，但只能
 使用已经脱敏的投影字段，例如 status、safeSummary/summary、commandPreview、
 outputPreview/preview、exitCode、safeReason 和 durationMs。Query filtering 必须同时
 搜索这些安全字段和 assistant text，确保 agent retry 能 recall 已经尝试过的步骤，
 避免盲目重复 side effect。
 
-### 流式阶段状态与性能增量
+### Product-turn 投影纠偏
 
-Change ID: stream-stage-status-performance。阶段标题必须以本地化可见文字展示运行中、
-已完成、失败、未完成、已取消，且写入无障碍名称。渐变仅辅助文字。历史分组按 items
-身份和 running 边界缓存；实时文本、reasoning、阶段快照不使缓存失效。复用未变化的
-Markdown 渲染，同时保留正文更新、本地化、展开状态与终态语义。仅影响 GUI：ADK/native
-API、持久化、usage、事件顺序及其他组件合同不变。虚拟列表不在本补丁内。验收：测试证明
-状态迁移、展开状态保留、实时更新不重扫/重解析历史、历史变化及时刷新。任务：回归测试、
-实现、GUI 构建/浏览器检查、正确性/可维护性/测试质量审查。
+Change ID: `manager-conversation-interaction-v2`。Manager 必须按 product turn 发布 work、
+assistant response 与 canonical presentation state；model-call stage 只保留 evidence
+correlation。运行/完成/失败/未完成/取消状态用本地化可见文字与无障碍名称表达。历史分组按
+turn/row identity 缓存；实时 text、reasoning、evidence 与 usage update 不得重建历史或重置
+disclosure。ADK/native API、持久 event ordering、usage fact 与其他 HaaS 公共合同不变。
+验收必须证明第一段 delta 可见且 owner 稳定、一个 turn 只有一个 work summary、running 与
+Composer action 不矛盾、主 timeline 无 stage card/usage warning，并完成 GUI build、浏览器与
+packaged desktop 检查及强制三轮 review。
 
 ### 自动化与桌面可靠性（automation-desktop-reliability）
 
@@ -776,7 +832,7 @@ EOF 不能表示成功。通知前持久化结果，finally 释放占用。
 5. 桌面检测自己拥有的 Manager 子进程退出，复用参数和鉴权身份，有界退避重启。保持凭据
 通道归属规则；退出停止监督，不杀未知端口进程。耗尽重试提供可见重启说明；进程重启不等于任务重跑。
 6. 窄屏面板在可用区域内覆盖呈现，保留关闭和 composer 操作路径。waiting、reasoning、工具、
-收尾期间始终有状态，不同时显示 Waiting 与活动阶段。
+收尾期间始终有状态，不同时显示 Waiting 与 active work 或可见 tool。
 
 兼容：Manager event 加法，保留 run status 和 session 身份；ADK/native schema、容器、proxy、
 MCP、policy、凭据不变。存储增加恢复操作，不删历史。测试覆盖错误/EOF/终态、路由、重启不重复、
@@ -791,3 +847,172 @@ MCP、policy、凭据不变。存储增加恢复操作，不删历史。测试�
 会话界面挂载前的启动失败也显示恢复说明。
 
 原生结果通知仅接受 ok/error 并使用固定文字；系统拒绝时 Inbox 仍可查看。定时 HaaS 交互当前在原会话审批，旧 name/target grant 不转换为更宽 HaaS 权限。未知运行恢复采用暂停核对，不声称无缝续跑。备份恢复、自动保留期、万条历史虚拟化、可信发布清单/签名密钥迁移仍未实现，已在 Beads 跟踪。
+
+### Manager 对话展示身份
+
+Manager 历史可携带 `_managerTurnId` 与 `_managerRowId` sidecar；内部 WebSocket 以
+`turnId`、`rowId` 暴露相同身份。它们是内部展示元数据的加法，不改变 ADK/HaaS invocation
+身份；provider 出站编码器必须剥离两项。旧历史只在 GUI 持久化边界按 user/connector
+意图边界归一化，渲染层不使用模型阶段或工具邻接推断。
+
+### 项目工作台 endpoint binding
+
+项目工作台消费既有 endpoint registry，并在首次 acceptance 冻结 `endpointId`、URL fingerprint、
+workspace binding、harness/profile/policy revision 与 remote workspace ref。Remote selection 不得
+序列化 Manager local path 或 host mount。Remote endpoint 失败时保持结构化 blocked target，绝不
+fallback 到 `local_managed`。Project default 变化只影响 draft/new session，accepted session 保留原 binding。
+
+## 桌面重启与重装任务恢复（`manager-restart-task-recovery-v1`）
+
+### 背景与产品边界
+
+当前桌面进程退出时会立即终止其拥有的 Manager 子进程。重启或本地重装后，HaaS 已能把
+持久化但失去 live adapter owner 的本地 `running` invocation 收敛为
+`incomplete(sidecar_restart_execution_lost)`，但 Manager 只修复从未到达 transcript
+checkpoint 的 command。已经 checkpoint 的 command 仍可能停留在 `accepted/running`，即使
+对应 HaaS invocation 已终态且没有 Codex app-server 继续执行。最终表现为会话虚假“执行中”，
+同时 Stop 无法终止任何真实任务。
+
+本设计提供两种边界清晰的保证：
+
+1. 由本桌面发起的更新/重启属于优雅恢复路径。Manager 对每个支持 Pause 的 HaaS invocation
+   发起暂停，等待权威 `interrupted` 终态，并在桌面终止子进程前持久化 restart-owned
+   continuation 标记。下次启动通过 HaaS 原生 resume 语义自动继续同一个逻辑任务。
+2. Crash、强杀、断电或未完成暂停屏障的外部覆盖安装属于 fail-closed 路径。启动时只对账精确的
+   accepted invocation 与持久事件；绝不重放 prompt，也不创建新的 idempotency key。无法证明
+   live owner/native continuation 时，任务显示为可安全重试/继续的 `incomplete`，不再虚假运行。
+
+P0 目标是：owned HaaS endpoint ready 后扫描全部已 checkpoint 且 disposition 为 `running` 的
+会话命令；权威 readback 证明 live owner 时重新挂接同一 invocation；把 terminal event、task
+outcome、binding control 与 command receipt 幂等收敛；桌面主动 restart/update/reinstall 时自动
+暂停并继续支持 Pause 的本地 HaaS 工作；仅在 Manager 当前绑定 active invocation owner 时展示 Stop。
+
+非目标包括：Crash 或 `sidecar_restart_execution_lost` 后自动重放 prompt；当 harness 仅支持从
+durable session/thread 边界继续时宣称精确恢复到指令指针；本切片恢复非 HaaS 进程内 provider。
+ADK、HaaS invocation/canonical event、container、model-proxy、MCP 与 credential schema 不变。
+
+### 持久状态与启动对账
+
+Manager 只在现有 HaaS binding 中保存 additive、secretless 的恢复事实：
+
+```json
+{
+  "restartRecovery": {
+    "generation": "restart_<opaque>",
+    "state": "preparing|paused|reattaching|continued|recovery_required",
+    "sourceInvocationId": "inv_...",
+    "requestedAtMs": 1786400000000,
+    "reasonCode": "desktop_restart|sidecar_restart_execution_lost|backend_unavailable"
+  }
+}
+```
+
+generation 是每次 desktop restart request 唯一的本机 opaque 幂等身份，不是 credential。该对象
+不得包含 prompt、完整 tool argument/output、bearer token、provider credential、signed URL 或
+host path。
+
+`conversation_commands` 增加一个 nullable additive `execution_ref`。普通 turn 路径观测到已 accepted
+的 delegated `turn_start` 时，必须在同一个 command-store transaction 中 checkpoint Manager
+`turn_id` 并绑定最新的精确 HaaS `invocationId`。同一 Manager turn 的 structured-plan continuation
+只能按实际 acceptance 顺序推进该 reference；其他调用方不得覆盖。启动对账优先按
+该 reference 连接 receipt 与 bridge。旧记录没有该字段时，只能在 session single-writer 顺序能够证明
+唯一 current bridge 且没有更新 accepted command 时对账；当前权威 terminal 持久化后，更旧 running
+row 才可作为 stale predecessor 终结。无法消歧的旧 row 必须进入 `recovery_required`，不得猜测或重放。
+
+`running` 是 owner 事实，不是历史 receipt。进程启动后，Manager 不得仅根据持久化的
+`control_state=running` 推断任务仍在运行。只有精确 invocation readback 与
+`_bind_active_haas_turn` 建立 live recovery pump 后，会话才可作为可操作的 running 展示。
+证明完成前使用 additive 的 Manager-local `recovering` 投影且不提供 Stop；它不扩展六值 HaaS
+execution-control 合同，也不改变 ADK state。
+Queue recovery 遵循同一边界：没有 checkpoint 的 `dispatching` item 回到 paused queue；已经
+checkpoint 的 item 必须继续关联已 accepted invocation，绝不能重新入队。Terminal reconciliation
+只删除一次对应 queue item。
+
+Owned HaaS endpoint 通过 execution readiness 后，Manager 扫描全部已 checkpoint 且 disposition
+为 `running` 的 command receipt。每个 Manager session 只有一个 single-flight 对账，跨 session
+采用有界并发，避免单个 remote endpoint 延迟 first paint 或 project hydration。
+
+| 权威 readback | Manager 必须执行的动作 |
+|---|---|
+| Invocation 已终态 | 从持久 cursor 后消费 canonical event，对齐 terminal barrier，合并或追加唯一 assistant/task-outcome 投影，持久化 `idle` 或权威 `paused`，并终结匹配的 stale running receipt。 |
+| Invocation 未终态且 HaaS 证明仍有 live owner | 为同一 invocation 启动唯一 background recovery pump，注册 Manager busy/control owner，从持久 cursor 继续，绝不再次 POST `/run_sse`。 |
+| 本地 invocation 已无 live owner | 由 HaaS fencing 唯一收敛为 retryable `incomplete`，`code=safeReason=sidecar_restart_execution_lost`；Manager 消费 terminal 并清除虚假 running/Stop。 |
+| Backend 不可用或 owner 无法判定 | 持久化 `restartRecovery.state=recovery_required` 与安全 `backend_unavailable`；展示可重试恢复态，不宣称 running/completed/failed execution，也不创建新工作。 |
+| Binding、attempt、bridge、session 或 invocation identity 不一致 | Fail closed 为 `recovery_required`，记录安全诊断，不读取或修改其他 invocation。 |
+
+重复进程启动、invocation GET 或 WebSocket 打开不得复制 assistant row、task outcome、tool
+activity、terminal event、`turn_done` 或 command terminalization。稳定的 Manager turn/row identity
+与 bridge invocation/cursor 是 merge key。恢复出的 invocation 已终态后，只能终结不可能代表更新
+active invocation 的 receipt；旧恢复结果不得覆盖更新 accepted invocation。
+
+### 优雅重启与自动继续
+
+受认证的 Manager-local mutation `POST /v1/lifecycle/prepare-restart` 支持可选
+`Idempotency-Key`，只返回聚合后的安全结果：
+
+```json
+{"state":"ready|partial|blocked","generation":"restart_<opaque>","paused":1,"recoveryRequired":0}
+```
+
+接口先阻止新的前台 send 与 queue dispatch，再以每项有界 deadline 并发 Pause 由 Manager 拥有且
+支持 Pause 的 HaaS invocation。只有 HaaS 已把 source invocation 持久化为 `interrupted`，并返回
+`sessionControl.controlState=paused`、`supportsResume=true` 与精确
+`resumableInvocationId` 后，才允许自动继续；Manager 随即持久化该 source 对应的
+`restartRecovery.state=paused`。Pause timeout、不支持 pause、pre-acceptance turn、进程内 provider
+turn、identity mismatch 或持久化失败必须保持 `partial|blocked`，不得升级为 auto-resumable。
+
+Tauri updater 与明确的桌面 Quit 路径必须在终止 Manager child 前调用该接口，只等待有界响应。
+即使 partial 后继续退出，也不得把未暂停工作标成可恢复。Crash 不属于该优雅合同。
+
+下次启动先进行 terminal/readback 权威对账。只有 `paused` restart marker 仍与 HaaS 权威 resumable
+source invocation 匹配时，Manager 才原子 claim session，把 marker 改为 `reattaching`，并且只调用
+一次现有 HaaS Continue。Continue 在同一个 durable native session/thread 上创建一个 linked
+invocation；不追加 synthetic user message，也不重放原请求。它必须携带一条固定的 Manager-owned
+continuation instruction，要求先检查当前状态、避免重复已完成
+副作用、完成剩余工作并返回最终结果。事件继续走普通 bridge。终态后 marker 变为 `continued`；
+acceptance 前失败则恢复 `paused`，保留手动恢复能力。重复启动必须复用已 accepted
+linked attempt，不能创建第二个 invocation。
+
+### UX、兼容性、测试与验收
+
+- Project/session shell 立即渲染。Readback 期间可显示弱化的本地化“正在恢复任务状态…”。进入
+  `recovery_required` 后不再展示 active spinner；没有 owner 就没有 Stop。
+- 优雅续接仍属于同一会话和同一逻辑 user turn；可以增加 inference round，但不得复制 user message。
+- Crash orphan 以本地化中断说明和 retryable action 结束；partial reasoning/tool/final evidence 保留，
+  terminal activity 停止动画。
+- 不含 `restartRecovery` 的历史数据惰性对账；不做 bulk rewrite，也不引入 legacy renderer。
+- ADK REST/SSE 与 `/v1/haas/*` 不变。Lifecycle endpoint 与 recovery projection 是受认证的
+  Manager-local additive contract；routing、artifact、policy、container 与 secretless credential
+  合同不变。
+
+TDD 分七个纵向切片推进：（1）additive `execution_ref`、确定性的 `checkpointed_running`
+command-store 扫描与幂等 session
+terminalization；（2）orphan 启动对账到唯一持久化 `incomplete` outcome、`idle` 与 terminal receipt；
+（3）可证明 live owner 的 same-invocation pump，且无 profile sync 或 `/run_sse`；（4）有界幂等
+prepare-restart，覆盖混合 Pause capability 与 queue freeze；（5）paused marker 到唯一 linked Continue
+invocation，acceptance 前失败仍为 paused；（6）Tauri updater/Quit 在 kill child 前 preparation，Manager
+不可用时不无限阻止退出；（7）packaged restart 与 force-kill 验收。
+
+打包验收启动一个长时间、支持 Pause 的本地 Codex turn，触发 desktop restart，启动新安装的
+`.app`，证明同一会话自动继续到唯一 canonical terminal 且无重复 user row。Force-kill 变体则必须
+收敛为唯一安全 `incomplete`、不自动重放，也不暴露虚假 running/Stop。
+
+组件影响：Manager command store、session/binding projection、startup lifecycle、desktop shutdown、
+transcript recovery 与 packaged smoke 受影响。Session Runtime 已拥有本设计依赖的 fenced orphan 与
+Pause/Continue 语义，因此无需修改 ADK 或 HaaS native schema。Harness adapter、model proxy、MCP、
+artifact store、policy、container runtime 与 credential schema 不受影响；现有 secretless/native
+resume 合同仍是前置条件。
+
+### 重启审查修正
+
+安装提交前更新失败必须保持 Manager 新任务准入。macOS/Linux 在安装成功后、重启前
+才准备退出；Windows 使用更新器 before-exit 回调，保证下载验证/解包完成后才 drain。
+主动退出仍保留原有有界 drain。
+
+产品任务可能跨越两个以上 invocation。合并所有 assistant 快照，保留首行/任务/时间
+身份与最新答复/结果，保留前序 activity/model-stage 事实。当前 invocation 回读替换
+本轮事实集合，删除过期项但不清除前序事实。跨 invocation 重用 id 保持独立，回读幂等。
+
+任务/验收：三次续接后当前 bridge 回读、过期替换及身份稳定失败测试；更新成功/失败
+顺序验证；实现及二轮复审。仅影响 Manager 投影与桌面退出顺序，不改 ADK/HaaS 接口、
+容器、权限和 secret 合同。

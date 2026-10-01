@@ -73,7 +73,7 @@ const CARD = "rounded-xl2 border border-line bg-panel";
 const FIELD_LABEL = "text-[13px] font-medium text-ink";
 const FIELD_HELP = "text-[12px] text-muted mt-1.5 leading-relaxed";
 const INPUT =
-  "flex-1 min-w-0 px-3 py-2 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none focus:border-accent";
+  "flex-1 min-w-0 px-3 py-2 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none";
 const BTN_ACCENT = "text-[13px] px-3 py-2 rounded-lg bg-accent text-white shrink-0 disabled:opacity-40";
 const BTN_BORDERED =
   "text-[13px] px-3 py-2 rounded-lg border border-line bg-paper hover:border-lineStrong shrink-0";
@@ -114,9 +114,9 @@ export function SettingsView({
   const [tab, setTab] = useState<SetTab>(wanted);
 
   return (
-    <main className="flex-1 min-w-0 flex bg-paper">
+    <main className="flex-1 min-w-0 flex bg-paper" data-page-window-surface>
       <nav className="page-subnav w-[208px] shrink-0 border-r border-line bg-panel/40 px-3 py-4">
-        <div className="px-2 text-[13px] font-semibold mb-3 flex items-center gap-2">
+        <div className="px-2 text-[13px] font-semibold mb-3 flex items-center gap-2" data-page-drag-region>
           <Icon name="gear" size={16} /> {t("nav.settings")}
         </div>
         {tabs.map((tb) => {
@@ -988,7 +988,7 @@ function TokenSavingsCard() {
             max={100}
             value={pdf.pdf_max_pages}
             data-testid="pdf-max-pages"
-            className="w-16 px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none focus:border-accent"
+            className="w-16 px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none"
             onChange={(e) => save({ pdf_max_pages: Math.max(1, Math.min(Number(e.target.value) || 20, 100)) })}
           />
         </label>
@@ -1000,7 +1000,7 @@ function TokenSavingsCard() {
             max={10}
             value={pdf.pdf_max_mb}
             data-testid="pdf-max-mb"
-            className="w-16 px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none focus:border-accent"
+            className="w-16 px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none"
             onChange={(e) => save({ pdf_max_mb: Math.max(1, Math.min(Number(e.target.value) || 10, 10)) })}
           />
           <span className="text-[13px] text-muted">MB</span>
@@ -1054,7 +1054,7 @@ function CompactionCard() {
       <div className={FIELD_LABEL}>Context compaction</div>
       <div className={FIELD_HELP}>
         Long sessions are compacted automatically: older turns are summarized so the
-        coworker keeps working instead of running out of context. Your visible transcript
+        AI assistant keeps working instead of running out of context. Your visible transcript
         is never changed — a small marker shows where compaction happened.
       </div>
 
@@ -1067,7 +1067,7 @@ function CompactionCard() {
             max={95}
             value={Math.round(cfg.compaction_threshold_pct * 100)}
             data-testid="compaction-threshold"
-            className="w-16 px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none focus:border-accent"
+            className="w-16 px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none"
             onChange={(e) =>
               save({
                 compaction_threshold_pct:
@@ -1086,7 +1086,7 @@ function CompactionCard() {
             step={10_000}
             value={cfg.compaction_cap_tokens}
             data-testid="compaction-cap"
-            className="w-28 px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none focus:border-accent"
+            className="w-28 px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none"
             onChange={(e) =>
               save({
                 compaction_cap_tokens: Math.max(
@@ -1109,7 +1109,7 @@ function CompactionCard() {
         <select
           value={cfg.compaction_model}
           data-testid="compaction-model"
-          className="px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none focus:border-accent"
+          className="px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none"
           onChange={(e) => save({ compaction_model: e.target.value })}
         >
           <option value="">Session&rsquo;s own model (default)</option>
@@ -1265,7 +1265,7 @@ function SidebarCard() {
           min={1}
           max={50}
           value={peek}
-          className="w-16 px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none focus:border-accent"
+          className="w-16 px-2 py-1.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none"
           onChange={(e) => save(Number(e.target.value))}
         />
       </label>

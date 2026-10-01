@@ -1,4 +1,8 @@
 import { test as base, expect, type Page } from "@playwright/test";
+import { spreadsheetFixture } from "./spreadsheet-fixture";
+
+export const HAAS_ACTIVITY_COMMAND =
+  "git status --short --branch && git diff --stat && git diff --cached --stat && git log --oneline --decorate --max-count=20 && git worktree list --porcelain";
 
 // The app-wide /ws/events socket each page opened (UX-026 toast et al.) — specs
 // push server events through it via sendAppEvent below.
@@ -373,13 +377,18 @@ const AUTOMATION_RUNS = [
 ];
 
 const PRIMARY_ROOT = { path: "/Users/test/OpenWorker/launch-note", writable: true, label: "scratch", primary: true, exists: true };
+const FILE_PREVIEW_SOURCE = Array.from(
+  { length: 10_000 },
+  (_, index) => `const value${index} = ${index};`,
+).join("\n");
+const FILE_PREVIEW_LARGE_TEXT = "x".repeat(512 * 1024);
 const baseName = (p: string) => p.split("/").filter(Boolean).pop() || p;
 
 const PROVIDERS = [
   // openai: configured + used (drives the "Last used" sub-line and the status dot).
-  { name: "openai", title: "OpenAI", needs_key: true, fields: [{ key: "api_key", label: "OpenAI API key", secret: true, required: true, help: "", placeholder: "sk-…" }], configured: true, values: {}, suggested_models: ["gpt-5.5"], key_set_at: "2026-06-12", last_used_at: Math.floor(Date.now() / 1000) - 7200 },
+  { name: "openai", title: "OpenAI", needs_key: true, fields: [{ key: "api_key", label: "OpenAI API key", secret: true, required: true, help: "", placeholder: "sk-…" }], configured: true, source: "store", values: {}, suggested_models: ["gpt-5.5"], key_set_at: "2026-06-12", last_used_at: Math.floor(Date.now() / 1000) - 7200 },
   // anthropic: configured but never used ("Not used yet").
-  { name: "anthropic", title: "Claude (Anthropic)", needs_key: true, fields: [{ key: "api_key", label: "API key", secret: true, required: true, help: "", placeholder: "sk-…" }], configured: true, values: {}, suggested_models: ["claude-opus-4-8"], key_set_at: null, last_used_at: null },
+  { name: "anthropic", title: "Claude (Anthropic)", needs_key: true, fields: [{ key: "api_key", label: "API key", secret: true, required: true, help: "", placeholder: "sk-…" }], configured: true, source: "store", values: {}, suggested_models: ["claude-opus-4-8"], key_set_at: null, last_used_at: null },
   // zai: an OpenAI-compatible vendor — unconfigured, with a prefilled editable endpoint + blurb.
   { name: "zai", title: "Z AI (GLM)", needs_key: true, blurb: "Uses Z AI's OpenAI-compatible API — the endpoint is prefilled, just add your key.", fields: [{ key: "api_key", label: "Z AI API key", secret: true, required: true, help: "", placeholder: "" }, { key: "base_url", label: "Endpoint", secret: false, required: false, help: "Prefilled with Z AI's international endpoint.", placeholder: "https://api.z.ai/api/paas/v4", default: "https://api.z.ai/api/paas/v4" }], configured: false, values: {}, suggested_models: ["glm-5.2"], key_set_at: null, last_used_at: null },
   // Ark uses two provider identities: BytePlus pay-as-you-go and Volcengine Agent Plan CN
@@ -695,13 +704,102 @@ export async function mockApi(page: import("@playwright/test").Page) {
     // The page's session id, from the socket URL — team approval stamps THIS session
     // as the lead (the active conversation IS the lead; workers hang off it).
     const sid = ws.url().split("/ws/session/")[1]?.split("?")[0] || "sess-lead";
-    send("ready", sid === "resume-live-1" ? { running: true } : {});
+    send("ready", {
+      conversationProtocolVersion: 2,
+      queue: [],
+      ...(sid === "resume-live-1"
+        ? {
+            running: true,
+            execution_control: {
+              controlState: "running",
+              pauseSupported: true,
+            },
+          }
+        : {}),
+    });
     let pendingTool = "run_shell"; // which proposal the next approval decision resolves
     let epicTimer: ReturnType<typeof setInterval> | null = null; // the slow stream, stoppable via interrupt
+    let queuedMessages: Array<{
+      text: string;
+      queueItemId: string;
+      clientCommandId: string;
+      revision: number;
+    }> = [];
+    const queueSnapshot = () =>
+      queuedMessages.map((item, index) => ({
+        queueItemId: item.queueItemId,
+        clientCommandId: item.clientCommandId,
+        position: index + 1,
+        state: "queued",
+        requestedDelivery: "enqueue",
+        revision: item.revision,
+        safePreview: item.text,
+        attachmentCount: 0,
+        contextCount: 0,
+        createdAtMs: Date.now() + index,
+      }));
     let hadTurn = false; // a user_message landed — set_model is now a mid-session switch
     ws.onMessage((raw) => {
       const msg = JSON.parse(String(raw));
+      if (["queue_delete", "queue_edit", "queue_move"].includes(msg.type)) {
+        const index = queuedMessages.findIndex(
+          (item) => item.queueItemId === msg.queueItemId,
+        );
+        if (index < 0 || queuedMessages[index].revision !== msg.expectedRevision) {
+          send("queue_error", {
+            code: "queue_conflict",
+            safeMessage: "The queued message changed.",
+            items: queueSnapshot(),
+          });
+          return;
+        }
+        const [item] = queuedMessages.splice(index, 1);
+        if (msg.type === "queue_edit") {
+          send("queue_restored", { payload: { text: item.text, attachments: [] } });
+        } else if (msg.type === "queue_move") {
+          const target = Math.max(
+            0,
+            Math.min(queuedMessages.length, Number(msg.targetPosition) - 1),
+          );
+          item.revision += 1;
+          queuedMessages.splice(target, 0, item);
+        }
+        send("queue_updated", { items: queueSnapshot() });
+        return;
+      }
       if (msg.type === "user_message") {
+        const turnId = `turn_${msg.clientCommandId || "legacy"}`;
+        if (epicTimer && msg.delivery === "enqueue" && msg.clientCommandId) {
+          const queueItemId = `queue_${msg.clientCommandId}`;
+          queuedMessages.push({
+            text: String(msg.text || ""),
+            queueItemId,
+            clientCommandId: msg.clientCommandId,
+            revision: 1,
+          });
+          send("command_ack", {
+            clientCommandId: msg.clientCommandId,
+            status: "accepted",
+            disposition: "queued",
+            turnId: null,
+            queueItemId,
+            outcomeRef: null,
+            error: null,
+          });
+          send("queue_updated", { items: queueSnapshot() });
+          return;
+        }
+        if (msg.clientCommandId) {
+          send("command_ack", {
+            clientCommandId: msg.clientCommandId,
+            status: "accepted",
+            disposition: "running",
+            turnId,
+            queueItemId: null,
+            outcomeRef: null,
+            error: null,
+          });
+        }
         hadTurn = true;
         if (/delay acceptance/i.test(msg.text)) {
           return;
@@ -710,6 +808,7 @@ export async function mockApi(page: import("@playwright/test").Page) {
         // literal "/name …" line as `display` so the client dedupes on what the user sees.
         send("turn_start", {
           input: msg.text,
+          turnId,
           ...(msg.skill ? { display: `/${msg.skill}${msg.text ? ` ${msg.text}` : ""}` } : {}),
         });
         if (/trip the reviewer/i.test(msg.text)) {
@@ -743,7 +842,7 @@ export async function mockApi(page: import("@playwright/test").Page) {
           send("permission_required", {
             name: "run_shell",
             arguments: { command: "ls" },
-            reason: "The coworker wants to run a command.",
+            reason: "The AI assistant wants to run a command.",
             readonly_ok: true, // `ls` classifies read-only server-side
           });
           return; // suspended on the approval
@@ -936,16 +1035,41 @@ export async function mockApi(page: import("@playwright/test").Page) {
         }
         if (/inspect haas activity/i.test(msg.text)) {
           const toolCallId = "haas_call_1";
+          const delegated = { backend: "haas", session: "haas-session", haas_session_id: "haas-session", execution_mode: "local_api" };
           send("reasoning_delta", {
             text: "Inspecting the package and choosing focused verification.",
             haasEventId: "evt_reasoning_1",
           });
+          for (let index = 0; index < 12; index += 1) {
+            const readCallId = `haas_read_${index}`;
+            send("tool_proposed", {
+              toolCallId: readCallId,
+              toolName: "read_file",
+              activityKind: "read",
+              safeSummary: `sed -n '${index * 80 + 1},${index * 80 + 80}p' manager/coworker/conversation_commands.py && inspect the remaining implementation boundaries`,
+              delegated,
+              haasEventId: `evt_read_start_${index}`,
+            });
+            send("tool_finished", {
+              toolCallId: readCallId,
+              toolName: "read_file",
+              activityKind: "read",
+              safeSummary: `sed -n '${index * 80 + 1},${index * 80 + 80}p' manager/coworker/conversation_commands.py && inspect the remaining implementation boundaries`,
+              status: "completed",
+              durationMs: 20 + index,
+              outputPreview: `chunk ${index}`,
+              omittedLineCount: 0,
+              delegated,
+              haasEventId: `evt_read_${index}`,
+            });
+          }
           send("tool_proposed", {
             toolCallId,
             toolName: "exec_command",
             activityKind: "command",
             safeSummary: "Run the focused test suite",
-            delegated: { backend: "haas", execution_mode: "local_api" },
+            commandPreview: HAAS_ACTIVITY_COMMAND,
+            delegated,
             haasEventId: "evt_tool_start_1",
           });
           send("tool_output_delta", {
@@ -953,7 +1077,7 @@ export async function mockApi(page: import("@playwright/test").Page) {
             activityKind: "command",
             outputPreview: "24 passed\n1 warning",
             omittedLineCount: 0,
-            delegated: { backend: "haas", execution_mode: "local_api" },
+            delegated,
             haasEventId: "evt_tool_output_1",
           });
           send("tool_finished", {
@@ -961,18 +1085,19 @@ export async function mockApi(page: import("@playwright/test").Page) {
             toolName: "exec_command",
             activityKind: "command",
             safeSummary: "Run the focused test suite",
+            commandPreview: HAAS_ACTIVITY_COMMAND,
             status: "completed",
             durationMs: 820,
             exitCode: 0,
             outputPreview: "24 passed\n1 warning",
             omittedLineCount: 0,
-            delegated: { backend: "haas", execution_mode: "local_api" },
+            delegated,
             haasEventId: "evt_tool_done_1",
           });
           send("assistant_message", {
             text: "The release checks passed.",
             reasoning: "Inspecting the package and choosing focused verification.",
-            delegated: { backend: "haas", execution_mode: "local_api" },
+            delegated,
           });
           send("turn_end", { status: "completed", taskPhase: "completed" });
           send("turn_done");
@@ -1010,6 +1135,13 @@ export async function mockApi(page: import("@playwright/test").Page) {
               epicTimer = null;
               send("assistant_message", { text: ("The epic concludes. " + line).repeat(20) });
               send("turn_done");
+              if (queuedMessages.length > 0) {
+                const next = queuedMessages.shift()!;
+                send("queue_updated", { items: queueSnapshot() });
+                send("turn_start", { input: next.text, turnId: `turn_${next.queueItemId}` });
+                send("assistant_message", { text: `Queued reply: ${next.text}` });
+                send("turn_done", { turnId: `turn_${next.queueItemId}` });
+              }
             }
           }, 120);
           return;
@@ -1266,6 +1398,10 @@ export async function mockApi(page: import("@playwright/test").Page) {
           entries: [
             { name: "reports", dir: true, size: 0 },
             { name: "notes.md", dir: false, size: 128 },
+            { name: "example.ts", dir: false, size: 76 },
+            { name: "performance.ts", dir: false, size: FILE_PREVIEW_SOURCE.length },
+            { name: "large.txt", dir: false, size: FILE_PREVIEW_LARGE_TEXT.length },
+            { name: "workbook.xlsx", dir: false, size: spreadsheetFixture.byteLength },
           ],
         });
       }
@@ -1279,6 +1415,28 @@ export async function mockApi(page: import("@playwright/test").Page) {
       }
       if (reqPath.endsWith("notes.md")) {
         return json({ ok: true, path: reqPath, kind: "markdown", content: "# Notes\n\nhello from the explorer" });
+      }
+      if (reqPath.endsWith("example.ts")) {
+        return json({
+          ok: true,
+          path: reqPath,
+          kind: "code",
+          content: "export const answer: number = 42;\nconsole.log(answer);",
+        });
+      }
+      if (reqPath.endsWith("performance.ts")) {
+        return json({ ok: true, path: reqPath, kind: "code", content: FILE_PREVIEW_SOURCE });
+      }
+      if (reqPath.endsWith("large.txt")) {
+        return json({ ok: true, path: reqPath, kind: "text", content: FILE_PREVIEW_LARGE_TEXT });
+      }
+      if (reqPath.endsWith("workbook.xlsx")) {
+        return json({
+          ok: true,
+          path: reqPath,
+          kind: "sheet",
+          data_url: `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${spreadsheetFixture.base64}`,
+        });
       }
       return json({
         ok: true,

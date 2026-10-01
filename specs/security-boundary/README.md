@@ -5,7 +5,7 @@
 Status: Draft
 Last reviewed: 2026-09-14
 Change ID: unified-runtime-approval-policy
-Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Profile](../harness-profile/README.md), [Model Proxy](../model-proxy/README.md), [MCP / Tool / Skill Runtime](../mcp-tool-skill-runtime/README.md), [Manager Delegation](../manager-delegation/README.md), [Container Runtime](../container-runtime/README.md)
+Related specs: [HaaS Protocol](../haas-protocol/README.md), [Harness Profile](../harness-profile/README.md), [Model Proxy](../model-proxy/README.md), [MCP / Tool / Skill Runtime](../mcp-tool-skill-runtime/README.md), [Manager Delegation](../manager-delegation/README.md), [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md), [Container Runtime](../container-runtime/README.md)
 
 ## 1. Component Role
 
@@ -152,6 +152,15 @@ For Lite, broker memory replaces the OpenSandbox runtime vault. Security Boundar
 
 For the embedded macOS local API, the private channel is an anonymous Unix socketpair inherited only by the owned HaaS child; possession of the inherited descriptor authenticates the peer, without a discoverable listener. `HAAS_CREDENTIAL_FD` carries only its number, is consumed on startup, and is never inherited by Codex. Manager grants bind reference/harness/session/model/exact URL, with monotonic request sequence and bounded frames. EOF, timeout, replay, malformed frames or an unknown grant deny resolution; only Manager SecretStore resolution can return key bytes on this channel. Grants and channel die with the supervisor; no arbitrary-secret lookup or remote forwarding is permitted.
 
+Manager command receipts and queued input are also private execution data. On POSIX, the owned
+SQLite database and its WAL/SHM/rollback journal must be owner-only (0600) before SQLite can read
+or write content. Newly created store directories use 0700. Repair owned legacy file modes
+before opening; reject symlinks, non-regular/multiply linked files, and foreign ownership without
+changing the referenced target. Permission failure fails closed. Do not change process umask or
+unrelated parent permissions. The Manager backend spec owns migration and A1 regression cases;
+Windows continues to rely on the managed profile ACL, not POSIX mode claims. These files remain
+excluded from artifacts, diagnostics, events, and logs; permissions do not relax content policy.
+
 Short-lived execution evidence is a separate, non-durable class of execution data. The
 HaaS process MAY retain one bounded evidence record in memory for each active command
 activity so the owning user can inspect the actual command, working directory and output.
@@ -251,6 +260,7 @@ container, but the mount contract is still subject to the Security Boundary:
 | `raw-prompt` | Input prompt when `trace_content=false` (default) | Do not write to logs/events |
 | `tool-payload` | Full tool args/result | Summarize by default; full payload requires an approved debug design |
 | `native-event` | Adapter/native type names, untyped metadata, internal event fields | Map to stable allowlisted `haas.*` type, validate type-specific `haas` metadata, and strip internal fields before public projection |
+| `authorized-workspace-path` | Command output path equal to or nested under that command's validated working directory | Replace only the validated prefix with `workspace/`, then apply normal redaction to the remainder |
 | `host-path` | Internal hosts and absolute paths | `[REDACTED_PATH]` |
 | `stack-trace` | Exception stack | Exclude from public surfaces; record only a safe reason internally |
 
@@ -302,3 +312,10 @@ They MUST NOT record secret values, raw request bodies, raw prompts, or full too
   `nativeType`, internal ids, raw prompts/reasoning, and full tool payloads do not escape.
 - Container: the AIO container contains no publicly exposed secret by default; `/health` and `/ready` do not output sensitive environment data.
 - Delegation: HOME, Docker socket, SSH paths, symlink escapes, parent-directory widening, and mount drift are denied during create and restore.
+
+### Manager project/workspace boundary
+
+Project and branch labels are untrusted display text. Local folder selection remains subject to
+canonicalization and workspace trust. Remote endpoints persist only SecretRef/fingerprint and use
+endpoint-scoped opaque workspace references; Manager absolute paths and host mounts never cross the
+remote boundary. Git mutation uses argv allowlists and direct user intent, not agent-controlled text.

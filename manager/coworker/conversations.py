@@ -602,6 +602,30 @@ class ConversationStore:
             self._conn.commit()
         return cur.rowcount > 0
 
+    def set_archived_many(self, session_ids: list[str], archived: bool = True) -> list[str]:
+        """Atomically update archive state and return the rows that actually changed."""
+        unique_ids = list(dict.fromkeys(session_ids))
+        if not unique_ids:
+            return []
+        placeholders = ",".join("?" for _ in unique_ids)
+        target = 1 if archived else 0
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT session_id FROM sessions WHERE session_id IN ({placeholders}) "
+                "AND archived != ? ORDER BY session_id",
+                (*unique_ids, target),
+            ).fetchall()
+            changed = [str(row["session_id"]) for row in rows]
+            if changed:
+                changed_placeholders = ",".join("?" for _ in changed)
+                self._conn.execute(
+                    f"UPDATE sessions SET archived = ? "
+                    f"WHERE session_id IN ({changed_placeholders})",
+                    (target, *changed),
+                )
+                self._conn.commit()
+        return changed
+
     def set_origin(self, session_id: str, origin: str, origin_label: str = "") -> bool:
         """Mark where a spawned session came from (§31). Set once at spawn; `save()` never
         names these columns, so per-turn saves can't clobber them (the pinned mechanism).

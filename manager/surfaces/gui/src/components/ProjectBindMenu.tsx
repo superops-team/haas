@@ -106,7 +106,7 @@ export function ProjectBindMenu(props: {
         {title}
       </div>
       {named.length >= FILTER_AT && (
-        <div className="mx-2.5 mb-1.5 flex items-center gap-1.5 rounded-lg border border-line px-2 py-1">
+        <div className="field-input-shell mx-2.5 mb-1.5 flex items-center gap-1.5 rounded-lg border border-line px-2 py-1">
           <Icon name="search" size={12} className="text-faint shrink-0" />
           <input
             className="w-full bg-transparent text-[12.5px] outline-none"

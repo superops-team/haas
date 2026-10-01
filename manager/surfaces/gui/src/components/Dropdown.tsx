@@ -15,12 +15,15 @@ interface Props {
   align?: "left" | "right";
   // Extra classes appended to the trigger pill (e.g. "chip" for a bordered composer-head chip).
   className?: string;
+  placeholder?: string;
 }
 
-export function Dropdown({ prefix, value, options, onChange, align = "left", className }: Props) {
+export function Dropdown({ prefix, value, options, onChange, align = "left", className, placeholder }: Props) {
   const [open, setOpen] = useState(false);
   const current = options.find((o) => o.value === value);
-  const label = (prefix ? `${prefix}: ` : "") + (current?.label || value);
+  const label =
+    (prefix ? `${prefix}: ` : "") +
+    (current?.label || placeholder || value);
   return (
     <div className="dd">
       <button

@@ -278,6 +278,7 @@ Log fields must use safe route ids, fingerprints and status codes, never prompt 
 | delegated session credentialRef 缺失或未授权 | fail closed，返回 `invalid_credential` 或 `haas_provider_source_invalid`；不得要求 harness 提供 key |
 | provider unreachable | invocation 接受前返回 `502 haas_provider_error`；接受后持久化 `haas.turn.failed` 且 `haas.code=haas_provider_error`，保留 partial events，并保持 `/run`/`/run_sse` HTTP 200 |
 | upstream 429/502/503/504 或 connect/read timeout，且尚未输出 byte | 在 invocation deadline 允许范围内执行带 jitter 的有界指数退避重试；默认最多 2 次，总 sleep 有上限 |
+| 可重试 response 后重建 streaming request | 使用 route 的 scalar total/read 值重新构造 `httpx.Timeout`。不得把上一请求的 `extensions["timeout"]` mapping 当作 timeout 值；每个 transport extension 只能是 numeric scalar 或 `None` |
 | stream idle timeout | 输出前按 provider policy retry；接受后或已输出 byte 后耗尽时，持久化带稳定 timeout code/reason 的 `haas.turn.failed` 或 `haas.turn.incomplete`，HTTP 保持 200 |
 | Manager/HaaS 重启后 loopback listener 端口变化 | 通过 owned credential channel 重建 session capability，并在下一次模型请求前 rebind native profile；不得附着到不归当前 Manager 拥有的 listener |
 | unsupported tool schema | fail with safe `haas_tool_schema_unsupported`, do not drop tool silently |
@@ -290,6 +291,7 @@ Log fields must use safe route ids, fingerprints and status codes, never prompt 
 - Integration：loopback proxy receives harness request and injects provider credential only outbound。
 - Integration：delegated Codex container 只使用 loopback model proxy，无法观察 manager/provider raw key。
 - Streaming：SSE/chunked upstream relay is progressive and handles idle timeout。
+- Streaming retry：通过真实网络或检查 transport 的 503-to-200 用例，证明重建请求保持 scalar timeout extension，并且不会产生未捕获 `TypeError`。
 - Security：provider key never appears in harness env/config/log/event/artifact/report。
 - Negative：unsupported provider, missing key, expired token, disallowed URL and malformed upstream response；测试区分 pre-acceptance HTTP error 与 accepted HTTP-200 terminal failure，并保留 partial output。
 - Lifecycle：真实或受控时钟任务跨过配置的 stream-idle 区间、过去的 900 秒边界，并完成至少一轮 tool round-trip，token 仍有效；refresh/rebind 保持精确 session/provider scope；stale、跨 session 和 session 撤销/删除后的 token 均失败。

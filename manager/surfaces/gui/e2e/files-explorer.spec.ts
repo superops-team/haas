@@ -6,7 +6,7 @@ import { test } from "./fixtures";
 
 test("Files lists the session roots and browses into a file", async ({ page }) => {
   await page.goto("/");
-  await page.getByPlaceholder(/Ask the coworker/).fill("hello");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("hello");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText(/Echo: hello/)).toBeVisible();
 

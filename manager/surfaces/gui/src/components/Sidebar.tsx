@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
+import { createPortal } from "react-dom";
 import { getI18n, useTranslation } from "react-i18next";
 import {
   AUTOMATIONS_CHANGED,
@@ -10,7 +19,7 @@ import {
   setNavLayout,
   type Automation,
   type Persona,
-  type RecentWorkspace,
+  type ProjectSummary,
   type SurfaceVisibility,
 } from "../api";
 import type { SessionInfo } from "../types";
@@ -20,18 +29,25 @@ import { Icon, type IconName } from "./Icon";
 import { personaGlyph } from "./personaIcon";
 import { SearchModal } from "./SearchModal";
 import { baseName } from "../paths";
+import type { ProjectBootstrapPhase } from "../projectBootstrap";
+import {
+  sortProjectSessions,
+  sortProjects,
+  type ConversationOrder,
+  type ProjectOrder,
+} from "./projectNavigation";
 
 // Session surfaces shown as accordions, in display order. The surfaced personas drive this list
 // (so third-party / Ops personas appear); the hardcoded set is the fallback before personas load.
 const SURFACES: { key: string; label: string; icon: IconName; cls: string }[] = [
-  { key: "cowork", label: "Coworker", icon: "diamond", cls: "ico-cowork" },
+  { key: "cowork", label: "AI Assistant", icon: "diamond", cls: "ico-cowork" },
   { key: "chat", label: "Chat", icon: "chat", cls: "ico-chat" },
   { key: "code", label: "Code", icon: "code", cls: "ico-code" },
 ];
 
-const surfaceFromPersona = (p: Persona) => ({
+const surfaceFromPersona = (p: Persona, assistantLabel: string) => ({
   key: p.id,
-  label: shortPersonaName(p.name, p.id),
+  label: shortPersonaName(p.name, p.id, assistantLabel),
   icon: personaGlyph(p.icon, p.requires_folder),
   cls: `ico-${p.icon || "cowork"}`,
 });
@@ -114,12 +130,31 @@ interface Props {
   workspace: string;
   surfaces: SurfaceVisibility;
   sessions: SessionInfo[];
-  projects: RecentWorkspace[];
+  projects: ProjectSummary[];
+  projectBootstrapPhase: ProjectBootstrapPhase;
+  sidecarReady?: boolean;
   activeSession: string;
   onSwitchAgent: (agent: string) => void;
   onNewSession: (agent: string) => void;
   onSelectSession: (id: string, workspace: string, agent: string) => void;
+  onPrefetchSession?: (id: string) => void;
   onNewProject: (persona: string) => void;
+  projectOrder?: ProjectOrder;
+  conversationOrder?: ConversationOrder;
+  onUpdateProject?: (
+    projectId: string,
+    patch: { name?: string; pinned?: boolean; archived?: boolean },
+  ) => void | Promise<void>;
+  onReorderProjects?: (projectIds: string[]) => void | Promise<void>;
+  onSidebarOrderChange?: (
+    projectOrder: ProjectOrder,
+    conversationOrder: ConversationOrder,
+  ) => void | Promise<void>;
+  onNewProjectSession: (project: ProjectSummary) => void;
+  onEditProject?: (project: ProjectSummary) => void;
+  onArchiveProjectSessions?: (projectId: string) => void | Promise<void>;
+  onRevealProject?: (projectId: string) => void | Promise<void>;
+  onCreateProjectWorktree?: (projectId: string) => void | Promise<void>;
   onRenameSession: (id: string, title: string) => void;
   onDeleteSession: (id: string) => void;
   onArchiveSession: (id: string, archived: boolean) => void;
@@ -170,6 +205,7 @@ const compactAge = (iso?: string | null): string => {
 
 export function Sidebar(props: Props) {
   const { t } = useTranslation();
+  const sidecarReady = props.sidecarReady !== false;
   const [searchModalOpen, setSearchModalOpen] = useState(false);
   const [appMenuOpen, setAppMenuOpen] = useState(false);
   // Inbox chip sticky unlock (§26): absent until the product first parks an item (or a
@@ -192,6 +228,7 @@ export function Sidebar(props: Props) {
   // (mark-seen must clear the badge the moment the detail opens).
   const [automations, setAutomations] = useState<Automation[]>([]);
   useEffect(() => {
+    if (!sidecarReady) return;
     const load = () => getAutomations().then(setAutomations).catch(() => {});
     load();
     const t = setInterval(load, 15_000);
@@ -200,7 +237,7 @@ export function Sidebar(props: Props) {
       clearInterval(t);
       window.removeEventListener(AUTOMATIONS_CHANGED, load);
     };
-  }, []);
+  }, [sidecarReady]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   // Two-step delete inside the row's ⋮ menu: Delete arms ("Delete?"), a second click deletes.
@@ -249,12 +286,178 @@ export function Sidebar(props: Props) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowMenu]);
+  const [projectMenu, setProjectMenu] = useState<{
+    projectId: string;
+    top: number;
+    left: number;
+    anchor: HTMLButtonElement;
+  } | null>(null);
+  const [projectConfirm, setProjectConfirm] = useState<
+    "archive" | "remove" | null
+  >(null);
+  const [projectActionError, setProjectActionError] = useState("");
+  const [organizeMenu, setOrganizeMenu] = useState<{
+    top: number;
+    left: number;
+    anchor: HTMLButtonElement;
+  } | null>(null);
+  const [organizePane, setOrganizePane] = useState<
+    "root" | "projects" | "conversations" | "archived"
+  >("root");
+  const [hoverPreview, setHoverPreview] = useState<
+    | { kind: "project"; projectId: string; top: number; left: number }
+    | { kind: "conversation"; sessionId: string; top: number; left: number }
+    | null
+  >(null);
+  const projectHover = hoverPreview?.kind === "project" ? hoverPreview : null;
+  const conversationHover = hoverPreview?.kind === "conversation" ? hoverPreview : null;
+  const hoverOpenTimer = useRef<number | null>(null);
+  const hoverCloseTimer = useRef<number | null>(null);
+  const clearHoverTimers = () => {
+    if (hoverOpenTimer.current !== null) window.clearTimeout(hoverOpenTimer.current);
+    if (hoverCloseTimer.current !== null) window.clearTimeout(hoverCloseTimer.current);
+    hoverOpenTimer.current = null;
+    hoverCloseTimer.current = null;
+  };
+  const closeProjectOverlays = (restoreFocus = false) => {
+    const anchor = projectMenu?.anchor || organizeMenu?.anchor;
+    clearHoverTimers();
+    setHoverPreview(null);
+    setProjectConfirm(null);
+    setProjectMenu(null);
+    setOrganizeMenu(null);
+    setOrganizePane("root");
+    if (restoreFocus) requestAnimationFrame(() => anchor?.focus());
+  };
+  const overlayPosition = (anchor: HTMLElement, width: number, height: number) => {
+    const rect = anchor.getBoundingClientRect();
+    const gutter = 8;
+    const left = Math.min(
+      window.innerWidth - width - gutter,
+      Math.max(gutter, rect.right + gutter),
+    );
+    const top = Math.min(
+      window.innerHeight - height - gutter,
+      Math.max(gutter, rect.top),
+    );
+    return { top, left };
+  };
+  const hoverPosition = (anchor: HTMLElement, width: number, height: number) => {
+    const rect = anchor.getBoundingClientRect();
+    const gutter = 8;
+    const availableWidth = window.innerWidth - gutter * 2;
+    const renderedWidth = Math.min(width, availableWidth);
+    if (window.innerWidth - rect.right >= renderedWidth + gutter) {
+      return overlayPosition(anchor, renderedWidth, height);
+    }
+    return {
+      top: Math.min(
+        window.innerHeight - height - gutter,
+        Math.max(gutter, rect.bottom + gutter),
+      ),
+      left: Math.min(
+        window.innerWidth - renderedWidth - gutter,
+        Math.max(gutter, rect.left),
+      ),
+    };
+  };
+  const scheduleProjectHover = (projectId: string, anchor: HTMLElement) => {
+    clearHoverTimers();
+    setHoverPreview(null);
+    hoverOpenTimer.current = window.setTimeout(() => {
+      const position = hoverPosition(anchor, 300, 176);
+      setHoverPreview({ kind: "project", projectId, ...position });
+    }, 300);
+  };
+  const showProjectHover = (projectId: string, anchor: HTMLElement) => {
+    clearHoverTimers();
+    const position = hoverPosition(anchor, 300, 176);
+    setHoverPreview({ kind: "project", projectId, ...position });
+  };
+  const scheduleConversationHover = (sessionId: string, anchor: HTMLElement) => {
+    clearHoverTimers();
+    setHoverPreview(null);
+    hoverOpenTimer.current = window.setTimeout(() => {
+      const position = hoverPosition(anchor, 300, 128);
+      setHoverPreview({ kind: "conversation", sessionId, ...position });
+    }, 300);
+  };
+  const showConversationHover = (sessionId: string, anchor: HTMLElement) => {
+    clearHoverTimers();
+    const position = hoverPosition(anchor, 300, 128);
+    setHoverPreview({ kind: "conversation", sessionId, ...position });
+  };
+  const scheduleHoverClose = () => {
+    if (hoverOpenTimer.current !== null) window.clearTimeout(hoverOpenTimer.current);
+    hoverCloseTimer.current = window.setTimeout(() => {
+      setHoverPreview(null);
+    }, 120);
+  };
+  const keepOrCloseHover = (nextTarget: EventTarget | null) => {
+    const next = nextTarget instanceof Node ? nextTarget : null;
+    if (
+      next &&
+      (document.querySelector(".sidebar-project-card")?.contains(next) ||
+        document.querySelector(".sidebar-conversation-card")?.contains(next))
+    )
+      return;
+    scheduleHoverClose();
+  };
+  useEffect(
+    () => () => {
+      clearHoverTimers();
+    },
+    [],
+  );
+  useEffect(() => {
+    if (!projectMenu && !organizeMenu && !hoverPreview) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeProjectOverlays(true);
+    };
+    const onScroll = () => closeProjectOverlays();
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  });
+  useEffect(() => {
+    if (!projectMenu && !organizeMenu) return;
+    const frame = requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(
+          '[data-testid="project-action-menu"] button:not(:disabled), ' +
+            '[data-testid="project-organize-menu"] button:not(:disabled)',
+        )
+        ?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [organizeMenu, organizePane, projectMenu]);
+  const handleOverlayMenuKey = (event: ReactKeyboardEvent<HTMLElement>) => {
+    const items = [
+      ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+        'button:not(:disabled)',
+      ),
+    ];
+    if (!items.length) return;
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    let next = current;
+    if (event.key === "ArrowDown") next = (current + 1 + items.length) % items.length;
+    else if (event.key === "ArrowUp") next = (current - 1 + items.length) % items.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else return;
+    event.preventDefault();
+    items[next]?.focus();
+  };
   const [showArchived, setShowArchived] = useState(false);
   // Surfaced + enabled personas drive the surface list + family-aware behavior.
   // Refetched on the personas-changed event so an enable/install/delete in Settings
   // shows up here immediately (no page refresh).
   const [personas, setPersonas] = useState<Persona[] | null>(null);
   useEffect(() => {
+    if (!sidecarReady) return;
     const load = () =>
       getPersonas()
         .then(setPersonas)
@@ -262,8 +465,19 @@ export function Sidebar(props: Props) {
     load();
     window.addEventListener(PERSONAS_CHANGED, load);
     return () => window.removeEventListener(PERSONAS_CHANGED, load);
-  }, []);
+  }, [sidecarReady]);
   const personaOf = (id: string) => personas?.find((p) => p.id === id);
+  const projectFirst = props.projects.length > 0;
+  const projectShell =
+    props.projectBootstrapPhase === "shell" ||
+    (props.projectBootstrapPhase === "degraded" && projectFirst);
+  const projectProjectionReady = props.projectBootstrapPhase === "authoritative";
+  useLayoutEffect(() => {
+    if (typeof performance.mark !== "function") return;
+    if ((projectShell && projectFirst) || projectProjectionReady)
+      performance.mark("haas:project-level-visible");
+    if (projectProjectionReady) performance.mark("haas:project-hierarchy-visible");
+  }, [projectFirst, projectProjectionReady, projectShell]);
 
   // Sidebar layout (§7): "grouped" = the per-coworker accordion; "flat" = a single
   // ungrouped list (Pinned + Recent). Flat stays the default even with Coworkers shipped
@@ -274,6 +488,7 @@ export function Sidebar(props: Props) {
   // Sessions shown per group before "Show more" — Settings ▸ Appearance ▸ Sidebar.
   const [peek, setPeek] = useState(5);
   useEffect(() => {
+    if (!sidecarReady) return;
     getSettings()
       .then((s) => {
         setLayout(
@@ -283,7 +498,7 @@ export function Sidebar(props: Props) {
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [sidecarReady]);
   const setGroupBy = (next: "flat" | "grouped") => {
     setLayout(next);
     setNavLayout(next).catch(() => {});
@@ -311,10 +526,12 @@ export function Sidebar(props: Props) {
   useEffect(() => setOpenKey(props.agent), [props.agent]);
   const browseKey = openKey ?? props.agent; // the persona whose sessions the body shows
 
-  // Per-project collapse + "Show more". The active workspace's folder is open by default; toggling
-  // any folder flips it (XOR). `projShowAll` lifts the peek cap for a given folder;
+  // Per-project expansion + "Show more". An explicit choice remains stable when the active
+  // conversation changes. `projShowAll` lifts the peek cap for a given folder;
   // `personaShowAll` does the same for a (non-project) persona's flat session list.
-  const [projToggled, setProjToggled] = useState<Set<string>>(new Set());
+  const [projectOpenOverrides, setProjectOpenOverrides] = useState<
+    Map<string, boolean>
+  >(new Map());
   const [projShowAll, setProjShowAll] = useState<Set<string>>(new Set());
   const [personaShowAll, setPersonaShowAll] = useState<Set<string>>(new Set());
   const toggleSet = (set: Set<string>, key: string) => {
@@ -387,16 +604,16 @@ export function Sidebar(props: Props) {
   // persona group / project list (matching the flat layout's Recent, which also drops pinned).
   const all = props.sessions.filter(
     (s) =>
-      s.agent === browseKey &&
+      (projectFirst || s.agent === browseKey) &&
       !s.session_id.startsWith("__") &&
       s.team?.role !== "worker", // workers nest under their lead, never top-level
   );
-  const mine = all.filter((s) => !s.archived && !s.pinned);
+  const mine = all.filter((s) => !s.archived && (projectFirst || !s.pinned));
   const archived = all.filter((s) => s.archived);
   // Only PROJECT-SCOPED personas group sessions by project (git-bound Code, project-bound Ops).
   // Scratch/deliverable conversations are orphan (each has its own per-conversation scratch dir),
   // so they list flat. Workspace-aware (not id-aware) — any git/project persona gets Projects.
-  const workspaceSurface = isProjectScoped(personaOf(browseKey));
+  const workspaceSurface = projectFirst || isProjectScoped(personaOf(browseKey));
 
   // Search now lives in the SearchModal (command-palette overlay), so the sidebar lists never filter
   // in place — these stay constant and the `.filter(matches)` / `normalizedQuery ? …` call sites
@@ -418,7 +635,7 @@ export function Sidebar(props: Props) {
   // the menu offers Rename · Pin/Unpin · Archive/Unarchive · Delete, with the two-step delete
   // confirm kept inside it. Shared by BOTH row styles, so the chronological cardRow offers the
   // same actions as the persona accordion's sessionRow (owner ask 2026-07-09).
-  const rowActions = (s: SessionInfo, title: string) => {
+  const rowActions = (s: SessionInfo, title: string, projectScoped = false) => {
     const menuOpen = rowMenu?.id === s.session_id;
     const item = (testid: string, icon: IconName, label: string, onClick: () => void) => (
       <button
@@ -437,9 +654,29 @@ export function Sidebar(props: Props) {
     return (
       <span
         // Stay visible while this row's menu is open — the pointer may be on the menu, off the row.
-        className={(menuOpen ? "flex" : "hidden group-hover:flex") + " items-center shrink-0"}
+        className={`sidebar-conversation-actions${menuOpen ? " is-open" : ""}`}
         onClick={(e) => e.stopPropagation()}
       >
+        {projectScoped && (
+          <>
+            <button
+              title={s.pinned ? t("sidebar.unpin") : t("sidebar.pin")}
+              aria-label={s.pinned ? t("sidebar.unpin") : t("sidebar.pin")}
+              className="sidebar-conversation-action"
+              onClick={() => props.onTogglePin(s.session_id, !s.pinned)}
+            >
+              <Icon name="pin" size={13} />
+            </button>
+            <button
+              title={t("sidebar.archive")}
+              aria-label={t("sidebar.archive")}
+              className="sidebar-conversation-action"
+              onClick={() => props.onArchiveSession(s.session_id, true)}
+            >
+              <Icon name="archive" size={13} />
+            </button>
+          </>
+        )}
         <button
           title={t("sidebar.session_actions")}
           aria-label={t("sidebar.session_actions")}
@@ -450,7 +687,14 @@ export function Sidebar(props: Props) {
             "w-5 h-5 grid place-items-center rounded hover:bg-chromeHover " +
             (menuOpen ? "text-ink bg-chromeHover" : "text-faint hover:text-ink")
           }
-          onClick={(e) => (menuOpen ? closeRowMenu() : openRowMenu(s.session_id, e.currentTarget))}
+          onClick={(e) => {
+            if (menuOpen) {
+              closeRowMenu();
+              return;
+            }
+            closeProjectOverlays();
+            openRowMenu(s.session_id, e.currentTarget);
+          }}
         >
           {/* Vertical kebab = the horizontal glyph rotated — no extra icon needed. */}
           <Icon name="moreHorizontal" size={14} className="rotate-90" />
@@ -508,7 +752,10 @@ export function Sidebar(props: Props) {
 
   // A compact session row (mock §141 grouped/recent rows): one-line title + right-side indicators,
   // with the ⋮ actions kebab revealed on hover. Used in accordion bodies + grouped cards.
-  const sessionRow = (s: SessionInfo, opts: { showTime?: boolean } = {}) => {
+  const sessionRow = (
+    s: SessionInfo,
+    opts: { showTime?: boolean; projectScoped?: boolean } = {},
+  ) => {
     const title = s.title || s.session_id;
     const editing = editingId === s.session_id;
     const active = s.session_id === props.activeSession;
@@ -521,15 +768,20 @@ export function Sidebar(props: Props) {
       <div
         key={s.session_id}
         className={
-          "group flex items-center gap-2 px-2 py-1.5 rounded-lg text-left cursor-pointer " +
+          "sidebar-conversation-row group flex items-center gap-2 px-2 py-1.5 rounded-lg text-left cursor-pointer " +
+          (rowMenu?.id === s.session_id ? "is-menu-open " : "") +
           (active
             ? "bg-ink/[0.055]"
             : "hover:bg-panel")
         }
-        onClick={() => {
-          if (!editing) props.onSelectSession(s.session_id, s.workspace, s.agent);
+        data-testid={`conversation-row-${s.session_id}`}
+        onMouseEnter={(event) => {
+          props.onPrefetchSession?.(s.session_id);
+          if (!editing)
+            scheduleConversationHover(s.session_id, event.currentTarget);
         }}
-        title={editing ? undefined : title}
+        onMouseLeave={scheduleHoverClose}
+        onBlur={(event) => keepOrCloseHover(event.relatedTarget)}
       >
         {editing ? (
           <input
@@ -547,29 +799,46 @@ export function Sidebar(props: Props) {
           />
         ) : (
           <>
-            <span
+            <button
+              type="button"
               className={
-                "min-w-0 flex-1 flex items-center gap-1.5 truncate text-[13px] " +
-                (active ? "font-medium text-ink" : "text-ink")
+                "sidebar-conversation-primary min-w-0 flex-1 flex items-center gap-1.5 truncate " +
+                (active ? "is-active" : "is-inactive")
+              }
+              aria-describedby={
+                conversationHover?.sessionId === s.session_id
+                  ? `conversation-hover-${s.session_id}`
+                  : undefined
+              }
+              onFocus={(event) => {
+                props.onPrefetchSession?.(s.session_id);
+                showConversationHover(s.session_id, event.currentTarget);
+              }}
+              onClick={() =>
+                props.onSelectSession(s.session_id, s.workspace, s.agent)
               }
             >
               {s.pinned && <Icon name="pin" size={11} className="text-faint shrink-0" />}
-              <span className="truncate">{title}</span>
+              <span className="sidebar-conversation-title truncate">{title}</span>
+            </button>
+            <span className="sidebar-conversation-trailing">
+              <span
+                className="sidebar-conversation-meta flex items-center gap-1.5 shrink-0"
+                aria-describedby={
+                  conversationHover?.sessionId === s.session_id
+                    ? `conversation-hover-${s.session_id}`
+                    : undefined
+                }
+              >
+                {opts.showTime && compactAge(s.updated_at) && (
+                  <span className="sidebar-conversation-age text-faint">{compactAge(s.updated_at)}</span>
+                )}
+                <OriginIcon s={s} />
+                <LiveDot state={s.liveness} />
+                <AttnBadge n={s.attention || 0} />
+              </span>
+              {rowActions(s, title, opts.projectScoped)}
             </span>
-            <span
-              className={
-                "flex items-center gap-1.5 shrink-0 group-hover:hidden" +
-                (rowMenu?.id === s.session_id ? " hidden" : "")
-              }
-            >
-              {opts.showTime && compactAge(s.updated_at) && (
-                <span className="text-[11px] text-faint tabular-nums">{compactAge(s.updated_at)}</span>
-              )}
-              <OriginIcon s={s} />
-              <LiveDot state={s.liveness} />
-              <AttnBadge n={s.attention || 0} />
-            </span>
-            {rowActions(s, title)}
           </>
         )}
       </div>
@@ -593,15 +862,20 @@ export function Sidebar(props: Props) {
       <div
         key={s.session_id}
         className={
-          "group w-full flex items-center gap-2.5 px-2 py-2 rounded-lg cursor-pointer text-left " +
+          "sidebar-conversation-row group w-full flex items-center gap-2.5 px-2 py-2 rounded-lg cursor-pointer text-left " +
+          (rowMenu?.id === s.session_id ? "is-menu-open " : "") +
           (active
             ? "bg-ink/[0.055]"
             : "hover:bg-chromeHover")
         }
-        title={editing ? undefined : title}
-        onClick={() => {
-          if (!editing) props.onSelectSession(s.session_id, s.workspace, s.agent);
+        data-testid={`conversation-row-${s.session_id}`}
+        onMouseEnter={(event) => {
+          props.onPrefetchSession?.(s.session_id);
+          if (!editing)
+            scheduleConversationHover(s.session_id, event.currentTarget);
         }}
+        onMouseLeave={scheduleHoverClose}
+        onBlur={(event) => keepOrCloseHover(event.relatedTarget)}
       >
         {/* No leading glyph on session rows (Rohit's call 2026-07-07: the per-session icon
             read as noise in both grouped and chronological). Team leads are plain rows too —
@@ -622,25 +896,31 @@ export function Sidebar(props: Props) {
           />
         ) : (
           <>
-            <span
+            <button
+              type="button"
               className={
-                "min-w-0 flex-1 block truncate text-[13px] " + (active ? "font-medium" : "")
+                "sidebar-conversation-primary min-w-0 flex-1 block truncate " +
+                (active ? "is-active" : "is-inactive")
+              }
+              onFocus={(event) => {
+                props.onPrefetchSession?.(s.session_id);
+                showConversationHover(s.session_id, event.currentTarget);
+              }}
+              onClick={() =>
+                props.onSelectSession(s.session_id, s.workspace, s.agent)
               }
             >
               {title}
+            </button>
+            <span className="sidebar-conversation-trailing">
+              <span className="sidebar-conversation-meta flex items-center gap-1.5 shrink-0">
+                <OriginIcon s={s} />
+                <ConnectorDot subs={s.subscriptions} />
+                <LiveDot state={s.liveness} />
+                <AttnBadge n={s.attention || 0} />
+              </span>
+              {rowActions(s, title)}
             </span>
-            <span
-              className={
-                "flex items-center gap-1.5 shrink-0 group-hover:hidden" +
-                (rowMenu?.id === s.session_id ? " hidden" : "")
-              }
-            >
-              <OriginIcon s={s} />
-              <ConnectorDot subs={s.subscriptions} />
-              <LiveDot state={s.liveness} />
-              <AttnBadge n={s.attention || 0} />
-            </span>
-            {rowActions(s, title)}
           </>
         )}
       </div>
@@ -780,15 +1060,29 @@ export function Sidebar(props: Props) {
     );
   };
 
-  // Code/Cowork group by project; Chat is a flat recents list.
+  const projectById = useMemo(
+    () => new Map(props.projects.map((project) => [project.projectId, project])),
+    [props.projects],
+  );
+
+  // Project identity comes from the server migration barrier. Raw workspace path is only a
+  // fallback for an older server and never creates a second row when projectId is available.
   const byProject = useMemo(() => {
     const grouped = new Map<string, SessionInfo[]>();
     for (const s of mine) {
-      if (!grouped.has(s.workspace)) grouped.set(s.workspace, []);
-      grouped.get(s.workspace)!.push(s);
+      const key = s.projectId || s.workspace || "prj_personal";
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)!.push(s);
+    }
+    for (const list of grouped.values()) {
+      const ordered = sortProjectSessions(
+        list,
+        props.conversationOrder || "recent",
+      );
+      list.splice(0, list.length, ...ordered);
     }
     return grouped;
-  }, [mine]);
+  }, [mine, props.conversationOrder]);
 
   const filteredByProject = useMemo(() => {
     const grouped = new Map<string, SessionInfo[]>();
@@ -800,15 +1094,30 @@ export function Sidebar(props: Props) {
   // under Cowork only if it has Cowork sessions (+ the currently-open folder). No cross-bleed.
   const projectOrder: string[] = [];
   const seen = new Set<string>();
-  // Pin the active folder at top only when browsing the active persona (else it belongs elsewhere).
-  if (props.workspace && browseKey === props.agent) {
-    projectOrder.push(props.workspace);
-    seen.add(props.workspace);
+  const activeProjectId = props.sessions.find(
+    (session) => session.session_id === props.activeSession,
+  )?.projectId;
+  const orderedProjects = projectShell
+    ? props.projects.filter((project) => !project.archived)
+    : sortProjects(
+        props.projects.filter((project) => !project.archived),
+        props.sessions,
+        props.projectOrder || "manual",
+      );
+  for (const project of orderedProjects) {
+    if (!seen.has(project.projectId)) {
+      seen.add(project.projectId);
+      projectOrder.push(project.projectId);
+    }
   }
-  for (const s of mine) {
-    if (s.workspace && !seen.has(s.workspace)) {
-      seen.add(s.workspace);
-      projectOrder.push(s.workspace);
+  if (!projectShell) {
+    for (const session of mine) {
+      if (session.projectId && projectById.get(session.projectId)?.archived) continue;
+      const key = session.projectId || session.workspace || "prj_personal";
+      if (!seen.has(key)) {
+        seen.add(key);
+        projectOrder.push(key);
+      }
     }
   }
 
@@ -831,8 +1140,12 @@ export function Sidebar(props: Props) {
       ? personas
           .filter((p) => (p.enabled && p.surfaced) || agentsWithSessions.has(p.id))
           .sort((a, b) => Number(b.default) - Number(a.default)) // default leads
-          .map(surfaceFromPersona)
-      : SURFACES.filter(
+          .map((persona) => surfaceFromPersona(persona, t("common.ai_assistant")))
+      : SURFACES.map((surface) =>
+          surface.key === "cowork"
+            ? { ...surface, label: t("common.ai_assistant") }
+            : surface,
+        ).filter(
           (s) => s.key === "cowork" || props.surfaces[s.key as keyof SurfaceVisibility],
         )
   ).filter((s) => personaVisible(s.key));
@@ -843,11 +1156,406 @@ export function Sidebar(props: Props) {
   // changes only when a session is selected or "New session" is clicked.
   const onHeaderClick = (key: string) => setOpenKey((k) => (k === key ? null : key));
 
+  const invokeProjectAction = (
+    action: (() => void | Promise<void>) | undefined,
+  ) => {
+    closeProjectOverlays();
+    setProjectActionError("");
+    if (action)
+      void Promise.resolve(action()).catch((reason) =>
+        setProjectActionError(
+          reason instanceof Error ? reason.message : t("project.update_failed"),
+        ),
+      );
+  };
+
+  const projectOverlay = () => {
+    const hovered = projectHover
+      ? projectById.get(projectHover.projectId)
+      : undefined;
+    const selected = projectMenu
+      ? projectById.get(projectMenu.projectId)
+      : undefined;
+    const hoveredConversation = conversationHover
+      ? props.sessions.find(
+          (session) => session.session_id === conversationHover.sessionId,
+        )
+      : undefined;
+    const hoveredConversationProject = hoveredConversation?.projectId
+      ? projectById.get(hoveredConversation.projectId)
+      : undefined;
+    return (
+      <>
+        {hovered &&
+          createPortal(
+            <div
+              className="sidebar-project-popover sidebar-project-card"
+              data-testid="project-hover-card"
+              id={`project-hover-${hovered.projectId}`}
+              role="group"
+              aria-label={hovered.name}
+              style={{ top: projectHover!.top, left: projectHover!.left }}
+              onMouseEnter={clearHoverTimers}
+              onMouseLeave={scheduleHoverClose}
+              onBlur={(event) => keepOrCloseHover(event.relatedTarget)}
+            >
+              <div className="sidebar-project-card-title">
+                <Icon name="folder" size={16} />
+                <strong>{hovered.name}</strong>
+              </div>
+              <div className="sidebar-project-card-meta">
+                {t("sidebar.project_tasks", {
+                  n: hovered.activeSessionCount ?? hovered.sessionCount,
+                })}
+              </div>
+              <div className="sidebar-project-card-path">
+                {hovered.workspaces[0]?.displayPath || t("sidebar.project_no_location")}
+              </div>
+              <div className="sidebar-project-card-actions">
+                <button
+                  type="button"
+                  aria-label={
+                    hovered.pinned
+                      ? t("sidebar.unpin_project")
+                      : t("sidebar.pin_project")
+                  }
+                  onClick={() =>
+                    invokeProjectAction(() =>
+                      props.onUpdateProject?.(hovered.projectId, {
+                        pinned: !hovered.pinned,
+                      }),
+                    )
+                  }
+                >
+                  <Icon name="pin" size={15} />
+                </button>
+                <button
+                  type="button"
+                  aria-label={t("sidebar.new_project_session", {
+                    name: hovered.name,
+                  })}
+                  onClick={() =>
+                    invokeProjectAction(() => props.onNewProjectSession(hovered))
+                  }
+                >
+                  <Icon name="pencil" size={15} />
+                </button>
+              </div>
+            </div>,
+            document.body,
+          )}
+        {hoveredConversation &&
+          createPortal(
+            <div
+              className="sidebar-project-popover sidebar-conversation-card"
+              data-testid="conversation-hover-card"
+              id={`conversation-hover-${hoveredConversation.session_id}`}
+              role="tooltip"
+              style={{
+                top: conversationHover!.top,
+                left: conversationHover!.left,
+              }}
+              onMouseEnter={clearHoverTimers}
+              onMouseLeave={scheduleHoverClose}
+            >
+              <strong>{hoveredConversation.title || hoveredConversation.session_id}</strong>
+              <span>{hoveredConversationProject?.name || t("project.personal")}</span>
+              <span>{compactAge(hoveredConversation.updated_at)}</span>
+            </div>,
+            document.body,
+          )}
+        {selected &&
+          createPortal(
+            <>
+              <button
+                className="sidebar-overlay-backdrop"
+                aria-label={t("common.dismiss")}
+                onClick={() => closeProjectOverlays(true)}
+              />
+              <div
+                className="sidebar-project-popover sidebar-project-menu"
+                role="menu"
+                data-testid="project-action-menu"
+                style={{ top: projectMenu!.top, left: projectMenu!.left }}
+                onKeyDown={handleOverlayMenuKey}
+              >
+                <button
+                  role="menuitem"
+                  onClick={() =>
+                    invokeProjectAction(() =>
+                      props.onUpdateProject?.(selected.projectId, {
+                        pinned: !selected.pinned,
+                      }),
+                    )
+                  }
+                >
+                  <Icon name="pin" size={15} />
+                  {selected.pinned
+                    ? t("sidebar.unpin_project")
+                    : t("sidebar.pin_project")}
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={() =>
+                    invokeProjectAction(() => props.onEditProject?.(selected))
+                  }
+                >
+                  <Icon name="pencil" size={15} />
+                  {t("sidebar.edit_project")}
+                </button>
+                <div className="sidebar-project-menu-separator" />
+                <button
+                  role="menuitem"
+                  disabled={!selected.capabilities?.reveal.enabled}
+                  title={selected.capabilities?.reveal.reasonCode || undefined}
+                  onClick={() =>
+                    invokeProjectAction(() =>
+                      props.onRevealProject?.(selected.projectId),
+                    )
+                  }
+                >
+                  <Icon name="folder" size={15} />
+                  {t("sidebar.reveal_project")}
+                </button>
+                <button
+                  role="menuitem"
+                  disabled={!selected.capabilities?.createWorktree.enabled}
+                  title={selected.capabilities?.createWorktree.reasonCode || undefined}
+                  onClick={() =>
+                    invokeProjectAction(() =>
+                      props.onCreateProjectWorktree?.(selected.projectId),
+                    )
+                  }
+                >
+                  <Icon name="branch" size={15} />
+                  {t("sidebar.create_project_worktree")}
+                </button>
+                {props.projectOrder === "manual" && (
+                  <>
+                    <button
+                      role="menuitem"
+                      disabled={
+                        projectOrder.filter((id) => id !== "prj_personal")[0] ===
+                        selected.projectId
+                      }
+                      onClick={() => {
+                        const ids = projectOrder.filter((id) => id !== "prj_personal");
+                        const index = ids.indexOf(selected.projectId);
+                        if (index > 0) [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]];
+                        invokeProjectAction(() => props.onReorderProjects?.(ids));
+                      }}
+                    >
+                      <Icon name="arrowLeft" size={15} />
+                      {t("sidebar.move_project_up")}
+                    </button>
+                    <button
+                      role="menuitem"
+                      disabled={
+                        projectOrder.filter((id) => id !== "prj_personal")[
+                          projectOrder.filter((id) => id !== "prj_personal").length - 1
+                        ] === selected.projectId
+                      }
+                      onClick={() => {
+                        const ids = projectOrder.filter((id) => id !== "prj_personal");
+                        const index = ids.indexOf(selected.projectId);
+                        if (index >= 0 && index < ids.length - 1)
+                          [ids[index], ids[index + 1]] = [ids[index + 1], ids[index]];
+                        invokeProjectAction(() => props.onReorderProjects?.(ids));
+                      }}
+                    >
+                      <Icon name="arrowLeft" size={15} className="rotate-180" />
+                      {t("sidebar.move_project_down")}
+                    </button>
+                  </>
+                )}
+                <div className="sidebar-project-menu-separator" />
+                <button
+                  role="menuitem"
+                  onClick={() =>
+                    projectConfirm === "archive"
+                      ? invokeProjectAction(() =>
+                          props.onArchiveProjectSessions?.(selected.projectId),
+                        )
+                      : setProjectConfirm("archive")
+                  }
+                >
+                  <Icon name="archive" size={15} />
+                  {projectConfirm === "archive"
+                    ? t("sidebar.confirm_archive_project_conversations")
+                    : t("sidebar.archive_project_conversations")}
+                </button>
+                <button
+                  className="is-danger"
+                  role="menuitem"
+                  onClick={() =>
+                    projectConfirm === "remove"
+                      ? invokeProjectAction(() =>
+                          props.onUpdateProject?.(selected.projectId, {
+                            archived: true,
+                          }),
+                        )
+                      : setProjectConfirm("remove")
+                  }
+                >
+                  <Icon name="x" size={15} />
+                  {projectConfirm === "remove"
+                    ? t("sidebar.confirm_remove_project")
+                    : t("sidebar.remove_project")}
+                </button>
+              </div>
+            </>,
+            document.body,
+          )}
+      </>
+    );
+  };
+
+  const organizeOverlay = () =>
+    organizeMenu
+      ? createPortal(
+          <>
+            <button
+              className="sidebar-overlay-backdrop"
+              aria-label={t("common.dismiss")}
+              onClick={() => closeProjectOverlays(true)}
+            />
+            <div
+              className="sidebar-project-popover sidebar-organize-menu"
+              data-testid="project-organize-menu"
+              role="menu"
+              style={{ top: organizeMenu.top, left: organizeMenu.left }}
+              onKeyDown={handleOverlayMenuKey}
+            >
+              {organizePane === "root" ? (
+                <>
+                  <button role="menuitem" onClick={() => setOrganizePane("projects")}>
+                    <span>{t("sidebar.project_order")}</span>
+                    <Icon name="chevronRight" size={14} />
+                  </button>
+                  <button role="menuitem" onClick={() => setOrganizePane("conversations")}>
+                    <span>{t("sidebar.conversation_order")}</span>
+                    <Icon name="chevronRight" size={14} />
+                  </button>
+                  {props.projects.some((project) => project.archived) && (
+                    <button role="menuitem" onClick={() => setOrganizePane("archived")}>
+                      <span>{t("sidebar.archived_projects")}</span>
+                      <Icon name="chevronRight" size={14} />
+                    </button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <button
+                    role="menuitem"
+                    className="sidebar-menu-back"
+                    onClick={() => setOrganizePane("root")}
+                  >
+                    <Icon name="arrowLeft" size={14} />
+                    <span>
+                      {organizePane === "projects"
+                        ? t("sidebar.project_order")
+                        : organizePane === "conversations"
+                          ? t("sidebar.conversation_order")
+                          : t("sidebar.archived_projects")}
+                    </span>
+                  </button>
+                  <div className="sidebar-project-menu-separator" />
+                  {organizePane === "projects" &&
+                    (["manual", "recent", "name"] as ProjectOrder[]).map((value) => (
+                      <button
+                        role="menuitemradio"
+                        aria-checked={(props.projectOrder || "manual") === value}
+                        key={value}
+                        onClick={() =>
+                          invokeProjectAction(() =>
+                            props.onSidebarOrderChange?.(
+                              value,
+                              props.conversationOrder || "recent",
+                            ),
+                          )
+                        }
+                      >
+                        <span>{t(`sidebar.project_order_${value}`)}</span>
+                        {(props.projectOrder || "manual") === value && <span>✓</span>}
+                      </button>
+                    ))}
+                  {organizePane === "conversations" &&
+                    (["recent", "oldest", "name"] as ConversationOrder[]).map((value) => (
+                      <button
+                        role="menuitemradio"
+                        aria-checked={(props.conversationOrder || "recent") === value}
+                        key={value}
+                        onClick={() =>
+                          invokeProjectAction(() =>
+                            props.onSidebarOrderChange?.(
+                              props.projectOrder || "manual",
+                              value,
+                            ),
+                          )
+                        }
+                      >
+                        <span>{t(`sidebar.conversation_order_${value}`)}</span>
+                        {(props.conversationOrder || "recent") === value && <span>✓</span>}
+                      </button>
+                    ))}
+                  {organizePane === "archived" &&
+                    props.projects
+                      .filter((project) => project.archived)
+                      .map((project) => (
+                        <button
+                          role="menuitem"
+                          key={project.projectId}
+                          onClick={() =>
+                            invokeProjectAction(() =>
+                              props.onUpdateProject?.(project.projectId, {
+                                archived: false,
+                              }),
+                            )
+                          }
+                        >
+                          <span>{project.name}</span>
+                          <span>{t("sidebar.restore_project")}</span>
+                        </button>
+                      ))}
+                </>
+              )}
+            </div>
+          </>,
+          document.body,
+        )
+      : null;
+
   // The expanded body for the active surface: a "New session" action, then the project-grouped
   // (or flat) session list, then the archived disclosure.
   const surfaceBody = () => {
+    if (!projectProjectionReady && !projectShell) {
+      return (
+        <div
+          className="project-navigation-loading"
+          data-testid="project-navigation-loading"
+          role="status"
+          aria-label={t("sidebar.loading_projects")}
+          aria-busy="true"
+        >
+          <div className="project-section-header flex items-center px-1.5 pt-1">
+            <span className="text-[11px] uppercase tracking-[0.07em] text-faint font-medium">
+              {t("sidebar.projects")}
+            </span>
+          </div>
+          <div className="project-navigation-skeleton" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+        </div>
+      );
+    }
     return (
-      <div className="space-y-1 px-1.5 pb-2 pt-0.5">
+      <div
+        className="space-y-1 px-1.5 pb-2 pt-0.5"
+        data-testid={projectShell ? "project-navigation-shell" : undefined}
+        aria-busy={projectShell ? "true" : undefined}
+      >
         {/* Body is flush inside the expanded group's fill (provided by the wrapper) so the header +
             its sessions read as one connected block — clear where a group ends and the next begins. */}
         {/* No per-persona "New session" here — the top split button's ▾ already starts a session
@@ -856,18 +1564,39 @@ export function Sidebar(props: Props) {
           <>
             {/* Codex-style Projects: a "+" header affordance, then collapsible folders whose
                 rows carry a right-aligned compact age and truncate to PROJECT_PEEK + "Show more". */}
-            <div className="flex items-center justify-between px-1.5 pt-1">
-              <span className="text-[11px] uppercase tracking-[0.07em] text-faint font-semibold">
+            <div className="project-section-header flex items-center justify-between px-1.5 pt-1">
+              <span className="text-[11px] uppercase tracking-[0.07em] text-faint font-medium">
                 {t("sidebar.projects")}
               </span>
-              <button
-                className="w-5 h-5 grid place-items-center rounded text-faint hover:text-ink hover:bg-panel"
-                title={t("sidebar.new_project")}
-                aria-label={t("sidebar.new_project")}
-                onClick={() => props.onNewProject(browseKey)}
-              >
-                <Icon name="folderPlus" size={14} />
-              </button>
+              <span className="project-section-actions">
+                <button
+                  className="project-section-action"
+                  data-testid="project-create-button"
+                  title={t("sidebar.new_project")}
+                  aria-label={t("sidebar.new_project")}
+                  disabled={projectShell}
+                  onClick={() => props.onNewProject(browseKey)}
+                >
+                  <Icon name="plus" size={14} />
+                </button>
+                <button
+                  className="project-section-action is-organize"
+                  data-testid="project-organize-button"
+                  title={t("sidebar.organize_projects")}
+                  aria-label={t("sidebar.organize_projects")}
+                  aria-haspopup="menu"
+                  aria-expanded={Boolean(organizeMenu)}
+                  disabled={projectShell}
+                  onClick={(event) => {
+                    closeProjectOverlays();
+                    const position = overlayPosition(event.currentTarget, 248, 360);
+                    setOrganizePane("root");
+                    setOrganizeMenu({ ...position, anchor: event.currentTarget });
+                  }}
+                >
+                  <Icon name="moreHorizontal" size={15} />
+                </button>
+              </span>
             </div>
             <div className="space-y-0.5">
               {projectOrder.length === 0 && (
@@ -877,46 +1606,128 @@ export function Sidebar(props: Props) {
               )}
               {projectOrder.map((proj) => {
                 const list = filteredByProject.get(proj) || [];
+                const project = projectById.get(proj);
                 if (normalizedQuery && list.length === 0) return null; // hide non-matching folders while searching
-                const isActive = proj === props.workspace;
+                const isActive = proj === activeProjectId;
                 // Open the active project by default; if none is active (browsing from another
                 // persona), open the most-recent folder so the accordion isn't all-collapsed.
-                const activeInOrder = !!props.workspace && projectOrder.includes(props.workspace);
+                const activeInOrder = !!activeProjectId && projectOrder.includes(activeProjectId);
                 const defaultOpen = isActive || (!activeInOrder && proj === projectOrder[0]);
-                const open = !!normalizedQuery || defaultOpen !== projToggled.has(proj);
+                const persistedOpen = projectOpenOverrides.get(proj) ?? defaultOpen;
+                const open = !projectShell && (!!normalizedQuery || persistedOpen);
                 const showAll = !!normalizedQuery || projShowAll.has(proj);
                 const shown = showAll ? list : list.slice(0, peek);
                 return (
                   <div key={proj}>
                     <div
                       className={
-                        "flex items-center gap-1.5 px-1.5 py-1 rounded-lg cursor-pointer select-none hover:bg-panel " +
+                        "project-sidebar-row group flex items-center rounded-lg select-none " +
+                        (projectShell ? "is-shell " : "hover:bg-panel ") +
                         (isActive ? "text-ink" : "text-muted hover:text-ink")
                       }
-                      onClick={() => setProjToggled((s) => toggleSet(s, proj))}
-                      title={proj}
+                      data-testid={`project-row-${proj}`}
+                      onMouseEnter={(event) => {
+                        if (!projectShell && project)
+                          scheduleProjectHover(project.projectId, event.currentTarget);
+                      }}
+                      onMouseLeave={projectShell ? undefined : scheduleHoverClose}
+                      onBlur={
+                        projectShell
+                          ? undefined
+                          : (event) => keepOrCloseHover(event.relatedTarget)
+                      }
                     >
-                      <Icon name="folder" size={15} className="shrink-0" />
-                      <span
-                        className={
-                          "truncate min-w-0 text-[13px] " + (isActive ? "font-semibold" : "font-medium")
+                      <button
+                        type="button"
+                        className="project-sidebar-disclosure"
+                        aria-expanded={projectShell ? false : open}
+                        disabled={projectShell}
+                        aria-describedby={
+                          project && projectHover?.projectId === project.projectId
+                            ? `project-hover-${project.projectId}`
+                            : undefined
                         }
+                        onFocus={(event) => {
+                          if (!projectShell && project)
+                            showProjectHover(project.projectId, event.currentTarget);
+                        }}
+                        onClick={() => {
+                          if (normalizedQuery) return;
+                          setProjectOpenOverrides((current) => {
+                            const next = new Map(current);
+                            next.set(proj, !persistedOpen);
+                            return next;
+                          });
+                        }}
                       >
-                        {baseName(proj)}
-                      </span>
-                      {/* Disclosure chevron sits AFTER the name (Codex parity), not leading the row. */}
-                      <Icon
-                        name={open ? "chevronDown" : "chevronRight"}
-                        size={12}
-                        className="text-faint shrink-0"
-                      />
+                        <Icon name="folder" size={15} className="shrink-0" />
+                        <span
+                          className={
+                            "sidebar-project-name truncate min-w-0 " +
+                            (isActive ? "font-medium" : "font-normal")
+                          }
+                        >
+                          {project?.name ||
+                            (proj === "prj_personal" ? "Personal" : baseName(proj))}
+                        </span>
+                        <Icon
+                          name={open ? "chevronDown" : "chevronRight"}
+                          size={12}
+                          className="text-faint shrink-0"
+                        />
+                      </button>
+                      {!projectShell && project && project.projectId !== "prj_personal" && (
+                        <>
+                          <button
+                            type="button"
+                            className="project-row-action is-create"
+                            aria-label={t("sidebar.new_project_session", {
+                              name: project.name,
+                            })}
+                            onClick={() =>
+                              invokeProjectAction(() =>
+                                props.onNewProjectSession(project),
+                              )
+                            }
+                          >
+                            <Icon name="pencil" size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            className="project-row-action"
+                            data-testid={`project-menu-${project.projectId}`}
+                            aria-label={t("sidebar.project_actions", {
+                              name: project.name,
+                            })}
+                            aria-haspopup="menu"
+                            aria-expanded={projectMenu?.projectId === project.projectId}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              closeProjectOverlays();
+                              const position = overlayPosition(event.currentTarget, 248, 360);
+                              setProjectMenu({
+                                projectId: project.projectId,
+                                ...position,
+                                anchor: event.currentTarget,
+                              });
+                            }}
+                          >
+                            <Icon name="moreHorizontal" size={15} />
+                          </button>
+                        </>
+                      )}
+                      {projectShell && project?.projectId !== "prj_personal" && (
+                        <span className="project-row-shell-actions" aria-hidden="true" />
+                      )}
                     </div>
                     {open &&
                       (list.length > 0 ? (
                         // pl-[19px] aligns each session's name under the folder NAME (folder icon
                         // 15 + gap 6 + row px 6 − session px 8 = 19), per Rohit's clean-column ask.
                         <div className="space-y-0.5 pl-[19px]">
-                          {shown.map((s) => sessionRow(s, { showTime: true }))}
+                          {shown.map((s) =>
+                            sessionRow(s, { showTime: true, projectScoped: true }),
+                          )}
                           {!showAll && list.length > peek && (
                             <button
                               className="px-2 py-1 text-[12px] text-faint hover:text-muted"
@@ -987,8 +1798,8 @@ export function Sidebar(props: Props) {
       {/* Header: collapse/pin control FIRST + wordmark. The pin sits at the same screen position
           as the collapsed reveal button (see .nav-pin-btn / .nav-reveal-btn in styles.css), so
           hovering the reveal peeks the nav and the pin lands right under the cursor — no travel.
-          data-tauri-drag-region drags the window; on desktop the row clears the traffic lights. */}
-      <div className="brand px-3.5 pt-2.5 pb-2 flex items-center gap-2" data-tauri-drag-region>
+          data-page-drag-region delegates one native drag; on desktop the row clears the traffic lights. */}
+      <div className="brand px-3.5 pt-2.5 pb-2 flex items-center gap-2" data-page-drag-region>
         {/* Collapse (dock) / pin the sidebar. ⌘B mirrors this. */}
         {props.onCollapse && (
           <button
@@ -1047,11 +1858,15 @@ export function Sidebar(props: Props) {
       {/* UX-040 rhythm: clear air between the fixed nav block and the content bands. */}
       <div className="flex-1 overflow-y-auto px-2.5 mt-[22px] pb-2">
         <div className="space-y-5">
-          {pinnedBand()}
+          {projectProjectionReady && !projectFirst && pinnedBand()}
           {scheduledBand()}
           <div>
-            {recentHeader()}
-            {layout === "grouped" ? (
+            {projectProjectionReady && !projectFirst && recentHeader()}
+            {!projectProjectionReady && !projectFirst ? (
+              surfaceBody()
+            ) : projectFirst ? (
+              surfaceBody()
+            ) : layout === "grouped" ? (
             <div className="space-y-1.5">
               {visibleSurfaces.map((s) => {
                 const expanded = isExpanded(s.key);
@@ -1222,6 +2037,21 @@ export function Sidebar(props: Props) {
           </button>
         </div>
       </div>
+
+      {projectOverlay()}
+      {organizeOverlay()}
+      {projectActionError && (
+        <div className="sidebar-project-error" role="alert">
+          <span>{projectActionError}</span>
+          <button
+            type="button"
+            aria-label={t("common.dismiss")}
+            onClick={() => setProjectActionError("")}
+          >
+            <Icon name="x" size={13} />
+          </button>
+        </div>
+      )}
 
       {searchModalOpen && (
         <SearchModal

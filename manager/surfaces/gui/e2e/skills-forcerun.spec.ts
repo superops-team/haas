@@ -9,7 +9,7 @@ test("skills-forcerun: popup pick → inline /name → skill rides the frame →
   await page.getByText("Draft the launch note").first().click();
 
   // "/" opens the popup; picking inserts the inline prefix (no chip) and keeps focus.
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("/");
   await expect(page.getByTestId("skill-popup")).toBeVisible();
   await page.getByText("/weekly-report").click();

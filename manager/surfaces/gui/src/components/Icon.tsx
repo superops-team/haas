@@ -19,6 +19,7 @@ export type IconName =
   | "gear"
   | "inbox"
   | "code"
+  | "device"
   | "wrench"
   | "pencil"
   | "branch"
@@ -64,6 +65,7 @@ export function Icon({
     strokeLinecap: "round" as const,
     strokeLinejoin: "round" as const,
     className,
+    "data-icon": name,
     "aria-hidden": true,
   };
 
@@ -244,6 +246,13 @@ export function Icon({
       return (
         <svg {...s}>
           <path d="M8.5 8.5 4.5 12l4 3.5M15.5 8.5l4 3.5-4 3.5" />
+        </svg>
+      );
+    case "device":
+      return (
+        <svg {...s}>
+          <rect x="4" y="4.5" width="16" height="12" rx="1.8" />
+          <path d="M2.8 19.5h18.4M8.5 16.5l-.7 3M15.5 16.5l.7 3" />
         </svg>
       );
     case "chat":

@@ -1,39 +1,12 @@
-export type EventType =
-  | "ready"
-  | "inbound"
-  | "turn_start"
-  | "assistant_delta"
-  | "reasoning_delta"
-  | "model_stage_updated"
-  | "assistant_message"
-  | "tool_proposed"
-  | "permission_required"
-  | "directory_requested"
-  | "tool_requested"
-  | "question_requested"
-  | "plan_proposed"
-  | "team_proposed"
-  | "items_proposed"
-  | "tool_started"
-  | "tool_output_delta"
-  | "tool_finished"
-  | "task_state"
-  | "iteration_end"
-  | "turn_end"
-  | "error"
-  | "input_rejected"
-  | "interrupted"
-  | "model_changed"
-  | "mode_notice"
-  | "memory_saved"
-  | "compacting"
-  | "compacted"
-  | "turn_done"
-  | "execution_control";
+export type { EventType, WsEvent } from "./conversation/model/events";
 
-export interface WsEvent {
-  type: EventType;
-  data: any;
+export interface CommandAck {
+  clientCommandId: string;
+  status: "accepted" | "duplicate";
+  disposition: "running" | "queued" | "terminal";
+  turnId: string | null;
+  queueItemId: string | null;
+  outcomeRef: string | null;
 }
 
 // Re-exported for transcript items below. Lives in api.ts (the REST/WS contract source of truth);
@@ -92,6 +65,12 @@ export interface SessionInfo {
   messages: number;
   pinned?: boolean;
   archived?: boolean;
+  projectId?: string;
+  workspaceBindingId?: string | null;
+  endpointId?: string;
+  executionLocation?: "local" | "remote";
+  branchSnapshot?: string | null;
+  remoteWorkspaceRef?: string | null;
   // Inbox items awaiting this session (the amber attention count that bubbles up the sidebar).
   attention?: number;
   // working = in-flight turn; sleeping = a self-wake is pending; idle = neither. A count-less dot.
@@ -193,8 +172,8 @@ export interface PersistedActivity {
 // Transcript items
 // `ts` = unix seconds (the server's canonical-message stamp; live items stamp locally).
 // Optional: sessions saved before the server stamped timestamps have none.
-export type Item =
-  | { kind: "user"; text: string; attachments?: Attachment[]; ts?: number }
+export type Item = (
+  | { kind: "user"; text: string; attachments?: Attachment[]; context?: import("./conversation/model/context").ContextReference[]; ts?: number }
   // A connector-delivered inbound message (Slack/Salesforce/…), rendered as a structured card
   // (ConnectorMessageCard) instead of a plain user bubble. Generalizes to any connector via the
   // registry — no per-connector special-casing.
@@ -207,6 +186,7 @@ export type Item =
       source?: "manager" | "haas";
       activities?: PersistedActivity[];
       modelStages?: ModelCallStage[];
+      usage?: TurnUsage;
       taskOutcome?: TaskOutcome;
     }
   // `hidden` = results the user's privacy filters removed before the agent saw them
@@ -338,6 +318,7 @@ export type Item =
       kind: "notice";
       tone: "info" | "warn";
       text: string;
+      event?: "model_switch" | "compacted" | "interrupted" | "status";
       retriable?: boolean;
       // `title` switches the one-line status notice to a block: a heading plus
       // blank-line-separated paragraphs, left-aligned. Used for the Auto-Approve
@@ -359,7 +340,7 @@ export type Item =
       text: string;
       previous?: string;
       undone?: boolean;
-    };
+    }) & { rowId?: string; turnId?: string };
 
 // -- ask_user question metadata (OPE-51) --------------------------------------
 // An option is a plain string (renders as today's pill) or a rich object: `label` is the answer

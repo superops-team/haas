@@ -68,7 +68,11 @@ export function SessionSetupRow(props: Props) {
       {/* Coworker chip — name only, no icon (owner call). */}
       <div className="relative">
         <button className={chip} data-testid="coworker-chip" onClick={() => toggle("coworker")}>
-          {fullPersonaName(current?.name, props.agent)}
+          {fullPersonaName(
+            current?.name,
+            props.agent,
+            t("common.ai_assistant"),
+          )}
           <Icon name="chevronDown" size={12} className="text-faint" />
         </button>
         {openMenu === "coworker" && (
@@ -86,7 +90,7 @@ export function SessionSetupRow(props: Props) {
                 }}
               >
                 <span className="block text-[13px] font-medium text-ink">
-                  {fullPersonaName(p.name, p.id)}
+                  {fullPersonaName(p.name, p.id, t("common.ai_assistant"))}
                 </span>
                 {p.tagline && (
                   <span className="block text-[12px] text-muted truncate">{p.tagline}</span>

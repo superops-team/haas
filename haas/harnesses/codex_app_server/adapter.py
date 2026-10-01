@@ -74,6 +74,14 @@ DEFAULT_CWD = "/workspace"
 DEFAULT_APPROVAL_POLICY = "on-request"
 DEFAULT_TIMEOUT_SECONDS = 86_400.0
 BUILTIN_COWORK_RECALL_MCP_NAME = "manager-cowork-recall"
+_REASONING_SUMMARY_PRESENTATION_GUIDANCE = (
+    "Write safe reasoning summaries in the language of the user's latest message. "
+    "For Chinese input, use concise Simplified Chinese intent or progress descriptions. "
+    "Before every tool-call batch, emit exactly one short sentence describing the current goal "
+    "or progress, and emit a new sentence before a later tool-call batch. "
+    "Describe the goal or observed progress; do not echo literal tool names, commands, paths, "
+    "or transport labels. Do not reveal raw chain-of-thought."
+)
 MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
 SessionScope = tuple[str, str, str]
 
@@ -118,6 +126,7 @@ class _TurnContext:
     server_request_cursor: int = 0
     current_model_call_metered: bool = False
     completed_tool_in_model_call: bool = False
+    model_call_boundary_observed: bool = False
     active_tool_ids: set[str] = field(default_factory=set)
     item_model_calls: dict[str, str] = field(default_factory=dict)
     tool_model_calls: dict[str, str] = field(default_factory=dict)
@@ -622,6 +631,11 @@ class CodexAdapter:
             ) from exc
 
         instructions = request.instructions
+        instructions = (
+            f"{instructions}\n\n{_REASONING_SUMMARY_PRESENTATION_GUIDANCE}"
+            if instructions
+            else _REASONING_SUMMARY_PRESENTATION_GUIDANCE
+        )
         disabled_tools = _disabled_tools(request.policy)
         if disabled_tools:
             notice = (
@@ -1098,6 +1112,7 @@ class CodexAdapter:
                 "required": bool(data.get("required", False)),
                 "tool_timeout_sec": float(data.get("timeoutSeconds") or 10),
                 "enabled_tools": ["recall"],
+                "default_tools_approval_mode": "approve",
             }
         return servers
 
@@ -1341,7 +1356,7 @@ class CodexAdapter:
             known = ctx.item_model_calls.get(item_id) if item_id else None
             if known is not None:
                 return known
-            if (
+            if ctx.model_call_boundary_observed or (
                 ctx.current_model_call_metered
                 and ctx.completed_tool_in_model_call
                 and not ctx.active_tool_ids
@@ -1355,9 +1370,16 @@ class CodexAdapter:
         if method == "thread/tokenUsage/updated":
             model_call_id = self._ensure_model_call(ctx)
             ctx.current_model_call_metered = True
+            if ctx.completed_tool_in_model_call and not ctx.active_tool_ids:
+                ctx.model_call_boundary_observed = True
             return model_call_id
 
         if method == "item/started" and item_type in _TOOL_ITEM_TYPES:
+            known = ctx.tool_model_calls.get(item_id) if item_id else None
+            if known is not None:
+                return known
+            if ctx.model_call_boundary_observed:
+                self._open_model_call(ctx)
             model_call_id = self._ensure_model_call(ctx)
             if item_id:
                 ctx.tool_model_calls[item_id] = model_call_id
@@ -1388,6 +1410,7 @@ class CodexAdapter:
         ctx.current_model_call_id = f"mcall_{ctx.model_call_ordinal:04d}"
         ctx.current_model_call_metered = False
         ctx.completed_tool_in_model_call = False
+        ctx.model_call_boundary_observed = False
         ctx.active_tool_ids.clear()
         return ctx.current_model_call_id
 

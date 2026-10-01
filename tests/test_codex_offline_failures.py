@@ -1052,6 +1052,7 @@ async def test_start_thread_includes_builtin_cowork_recall_mcp_only() -> None:
         "X-HaaS-Recall-Token": "fixture_recall_token",
     }
     assert recall["enabled_tools"] == ["recall"]
+    assert recall["default_tools_approval_mode"] == "approve"
     handle = await adapter.start_turn(
         StartTurnRequest(
             invocationId="inv_2",
@@ -1099,6 +1100,9 @@ async def test_resume_thread_refreshes_builtin_cowork_recall_mcp() -> None:
     assert resumes[-1]["params"]["config"]["mcp_servers"]["manager-cowork-recall"][
         "enabled_tools"
     ] == ["recall"]
+    assert resumes[-1]["params"]["config"]["mcp_servers"]["manager-cowork-recall"][
+        "default_tools_approval_mode"
+    ] == "approve"
 
 
 # --- session inspection / resume -------------------------------------------
@@ -1277,7 +1281,8 @@ async def test_disabled_tools_non_list_policy_is_ignored() -> None:
         )
     )
     turn_params = next(m for m in transport.sent if m.get("method") == "turn/start")
-    assert turn_params["params"]["instructions"] == "Be helpful."
+    assert turn_params["params"]["instructions"].startswith("Be helpful.")
+    assert "language of the user's latest message" in turn_params["params"]["instructions"]
 
 
 async def test_inspect_non_resumable_session() -> None:

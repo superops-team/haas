@@ -20,6 +20,7 @@ window.addEventListener("drop", (e) => e.preventDefault());
 
 // Initialize i18n before the first render so t() resolves everywhere.
 initI18n().finally(() => {
+  performance.mark("haas:react-mount");
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <App />

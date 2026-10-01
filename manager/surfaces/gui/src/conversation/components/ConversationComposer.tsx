@@ -1,0 +1,1727 @@
+import { ContextChips } from "./ContextChips";
+import type { ContextReference } from "../model/context";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { getI18n, useTranslation } from "react-i18next";
+import type { Attachment, SessionUsage } from "../../types";
+import { isPdfFile, readFile } from "../../attach";
+import { ProjectBindMenu } from "../../components/ProjectBindMenu";
+import {
+  getSettings,
+  inspectPdf,
+  sessionSkills,
+  type SessionSkillRow,
+} from "../../api";
+import { formatTokens, totalTokens } from "../../usage";
+import { Dropdown, type Option } from "../../components/Dropdown";
+import { Icon } from "../../components/Icon";
+import { Toggle } from "../../components/Toggle";
+import type { ConversationPresentation } from "../model/types";
+import { PendingInteractionDock } from "./PendingInteractionDock";
+import {
+  deleteConversationDraft,
+  loadConversationDraft,
+  loadConversationDraftAttachments,
+  saveConversationDraft,
+} from "../store/draftStore";
+import {
+  cancelDictation,
+  getDictationLevel,
+  getDictationStatus,
+  isTauri,
+  startDictation,
+  stopDictation,
+  type DictationStatus,
+} from "../../tauri";
+
+// Plan + Custom hidden for this release (owner ask 2026-07-22): Plan's approval flow isn't
+// polished enough to ship, and Custom (config.toml auto-allow rules) is a power-user mode
+// with no in-app explanation. The server still honors both — a session already in one of
+// those modes keeps working; the picker just doesn't offer them.
+// "auto" is the legacy wire value for Bypass approvals (server: Mode.BYPASS_APPROVALS) —
+// kept so saved sessions and configs keep working. Auto-Approve ("auto-approve") is the
+// reviewer mode (spec: reviewed-auto-mode.md); it appears only when the server says the
+// feature flag is on, wired in the settings pass — until then the picker omits it.
+// `caution` prefixes the label with a warning triangle; `gated` hides the entry unless the
+// server's auto_approve flag is on. Picker-local extensions of Dropdown's Option.
+type ModeOption = Option & { caution?: boolean; gated?: boolean };
+// "auto" is the legacy wire value for Bypass approvals (server: Mode.BYPASS_APPROVALS).
+// Auto-approve is `gated`: shown only when getSettings().auto_approve is true (the feature
+// flag, off by default).
+// Labels/descriptions are i18n keys (resolved at render via t()); kept as keys here so the
+// module-level constant stays outside the component without losing translation.
+const PERMISSION_OPTIONS: ModeOption[] = [
+  {
+    value: "discuss",
+    label: "composer.mode.discuss",
+    description: "composer.mode.discuss_desc",
+  },
+  {
+    value: "interactive",
+    label: "composer.mode.interactive",
+    description: "composer.mode.interactive_desc",
+  },
+  {
+    value: "auto-approve",
+    label: "composer.mode.auto_approve",
+    description: "composer.mode.auto_approve_desc",
+    gated: true,
+  },
+  {
+    value: "auto",
+    label: "composer.mode.auto",
+    description: "composer.mode.auto_desc",
+    caution: true,
+  },
+];
+
+/** The picker's label for a mode value ("auto-approve" -> "Auto-approve"). Exported so the
+ * transcript's mode markers read the same names the user just chose from. */
+export function modeLabel(value: string): string {
+  const option = PERMISSION_OPTIONS.find((o) => o.value === value);
+  return option ? getI18n().t(option.label) : value;
+}
+
+// No hardcoded model fallback: until the server supplies the list (a few seconds after a
+// cold app boot), the picker renders a disabled "Loading models…" chip. A baked-in list
+// goes stale and silently offers ids the backend never confirmed (caught 2026-07-21).
+
+// Drop the provider prefix for display (anthropic:claude-opus-4-8 → claude-opus-4-8); full id on hover.
+const shortModel = (m: string) =>
+  m.includes(":") ? m.split(":").slice(1).join(":") : m;
+
+// Identify an attachment by name + payload size so duplicates (e.g. the same file picked twice,
+// or a prefill applied twice) collapse to one chip.
+const attKey = (a: Attachment) =>
+  a.kind === "text"
+    ? `t:${a.name}:${a.text?.length ?? 0}`
+    : `${a.kind[0]}:${a.name}:${a.data_url?.length ?? 0}`;
+const mergeAttachments = (
+  cur: Attachment[],
+  add: Attachment[],
+): Attachment[] => {
+  const seen = new Set(cur.map(attKey));
+  return [...cur, ...add.filter((a) => !seen.has(attKey(a)))].slice(0, 8);
+};
+
+interface Props {
+  mode: string;
+  model: string;
+  models?: string[];
+  modelLabels?: Record<string, string>; // curated display names (raw id when absent)
+  // The model is FIXED once the session has history (§17): the picker renders ONLY on a fresh
+  // session; after the first turn the fact lives in the topbar subtitle (§22) — no
+  // interactive-then-disabled control.
+  presentation: ConversationPresentation;
+  onSubmissionChange?: (state: "pending" | "unknown" | null) => void;
+  submissionResolution?: {
+    nonce: number;
+    revision: number;
+    status: "accepted" | "duplicate" | "rejected";
+    safeMessage?: string;
+  } | null;
+  connected: boolean;
+  // False when the default model's provider has no key — the composer shows a "connect a model"
+  // banner and routes sends to setup (preserving the draft) instead of dropping them.
+  onConnectModel?: () => void;
+  onConfigureVoiceInput?: () => void;
+  onSend: (
+    text: string,
+    attachments?: Attachment[],
+    skill?: string,
+    options?: {
+      delivery: "start_now" | "enqueue";
+      draftRevision: number;
+      context?: ContextReference[];
+    },
+  ) => void | Promise<unknown>;
+  // Feeds the "/" force-run popup (SKILLS-SPEC §4.1 #3): the popup lists this session's
+  // effective skill menu. Absent (e.g. tests without sessions) → the popup never opens.
+  sessionId?: string;
+  onInterrupt: () => void;
+  onPause?: () => void;
+  onContinue?: () => void;
+  onModeChange: (mode: string) => void;
+  onModelChange: (model: string) => void;
+  // When set (Code/Cowork), the Mode menu is shown. The folder/roots + branch controls left the
+  // composer for the Session settings drawer (§22) — folder access is standing session config.
+  workspace?: string;
+  // Unattended / send-approvals-to-Inbox — folded into the Mode menu (§22): "who approves, and
+  // when" is one mental model. Absent handler = no toggle (e.g. Chat).
+  unattended?: boolean;
+  onUnattendedChange?: (on: boolean) => void;
+  // The pending-approval card rendered above the input (plan / work-items / team / tool /
+  // folder requests). Attended sessions only — Unattended parks the prompt in the Inbox.
+  approvalSlot?: ReactNode;
+  // UX-044: "View & edit…" in the Project memory submenu routes to the memory panel.
+  onOpenMemory?: () => void;
+  // Push text + attachments into the composer (e.g. a start-panel task card). The `nonce` makes
+  // repeated identical prefills re-apply; the user can still edit before sending.
+  prefill?: {
+    text: string;
+    attachments?: Attachment[];
+    skill?: string;
+    model?: string;
+    mode?: string;
+    context?: ContextReference[];
+    nonce: number;
+  };
+  onOpenContext?: (reference: ContextReference) => void;
+  sessionReferences?: ContextReference[];
+  // Changes when the active conversation changes; clears any unsent draft.
+  draftScopeKey?: string;
+  draftDiscard?: { nonce: number; scopeKey: string } | null;
+  // Surface-specific hint shown in the empty textarea.
+  placeholder?: string;
+  // Per-session token usage (OPE-42) — absent/empty hides the usage chip entirely
+  // (older servers, backends that don't report usage, fresh sessions).
+  usage?: SessionUsage;
+  // Context-window size (tokens) of the ACTIVE model, from the curated matrix;
+  // undefined hides the fill meter (unverified/custom models) but keeps the counts.
+  contextWindow?: number;
+  // Settings toggle (default off): true shows the fill bar instead of the session total.
+  contextBar?: boolean;
+  // §8.4 breaker tripped this turn: the mode chip says so quietly until the turn ends
+  // or an ask_user answer resets the streak.
+  reviewerPaused?: boolean;
+  interactionSupported?: boolean;
+}
+
+export function ConversationComposer(props: Props) {
+  const { t } = useTranslation();
+  const [text, setText] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [acceptanceUnknown, setAcceptanceUnknown] = useState(false);
+  const [draftPersistenceError, setDraftPersistenceError] = useState(false);
+  // A slash selects a semantic skill reference; the editor retains only prose.
+  const [pendingSkill, setPendingSkill] = useState<SessionSkillRow | null>(
+    null,
+  );
+  const [pendingContext, setPendingContext] = useState<ContextReference[]>([]);
+  const draftRevisionRef = useRef(0);
+  const frozenSubmissionTextRef = useRef<string | null>(null);
+  const activeDraftScopeRef = useRef<string | undefined>(props.draftScopeKey);
+  const consumedDraftDiscardRef = useRef(0);
+  const [draftHydrated, setDraftHydrated] = useState(!props.draftScopeKey);
+  const updateAttachments = (
+    update: Attachment[] | ((current: Attachment[]) => Attachment[]),
+  ) => {
+    draftRevisionRef.current += 1;
+    setAttachments(update);
+  };
+  const [slashSkills, setSlashSkills] = useState<SessionSkillRow[] | null>(
+    null,
+  );
+  const [slashIndex, setSlashIndex] = useState(0);
+  const slashQuery =
+    !pendingSkill &&
+    props.sessionId &&
+    text.startsWith("/") &&
+    !/\s/.test(text.slice(1))
+      ? text.slice(1).toLowerCase()
+      : null;
+  const slashMatches = (slashSkills ?? []).filter((s) =>
+    s.name.toLowerCase().includes(slashQuery ?? ""),
+  );
+  useEffect(() => {
+    // Fetch on each popup open (fresh menu); drop when closed.
+    if (slashQuery === null) {
+      setSlashSkills(null);
+      setSlashIndex(0);
+      return;
+    }
+    if (slashSkills === null && props.sessionId) {
+      sessionSkills(props.sessionId, props.workspace)
+        .then((all) => setSlashSkills(all.filter((s) => s.enabled)))
+        .catch(() => setSlashSkills([]));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slashQuery === null]);
+  const pickSkill = (s: SessionSkillRow) => {
+    setPendingSkill(s);
+    draftRevisionRef.current += 1;
+    setText("");
+    textareaRef.current?.focus();
+  };
+  const [dragging, setDragging] = useState(false);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  // UX-044: which "This session" submenu is open (bindings live server-side).
+  const [bindMenu, setBindMenu] = useState<"memory" | "board" | null>(null);
+  // Bindings need a session and a workspace surface (Chat has neither).
+  const sessionRows = Boolean(props.sessionId && props.workspace !== undefined);
+  const bindRow = (
+    icon: "book" | "table",
+    label: string,
+    kind: "memory" | "board",
+  ) => (
+    <button
+      className={
+        "w-full flex items-center gap-2.5 px-3 py-1.5 conversation-type-ui text-left hover:bg-paper" +
+        (bindMenu === kind ? " bg-paper" : "")
+      }
+      onClick={() => setBindMenu(bindMenu === kind ? null : kind)}
+    >
+      <Icon name={icon} size={15} className="shrink-0 text-muted" />
+      <span className="flex-1">{label}</span>
+      <Icon name="chevronRight" size={12} className="shrink-0 text-faint" />
+    </button>
+  );
+  const [dictation, setDictation] = useState<DictationStatus | null>(null);
+  const [dictationBusy, setDictationBusy] = useState<string | null>(null);
+  const [dictationError, setDictationError] = useState<string | null>(null);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [attachNotice, setAttachNotice] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const noticeTimer = useRef<number | null>(null);
+
+  // Rejected-attachment notice: visible ~8s, then clears (or on ✕).
+  const showAttachNotice = (message: string) => {
+    setAttachNotice(message);
+    if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setAttachNotice(null), 8000);
+  };
+
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    // The cap must include the vertical PADDING: scrollHeight does, so a
+    // padding-blind cap left the box ~20px short and scrolled the top padding
+    // (plus the first line) out of the clip while typing (OPE-106). Six lines —
+    // team briefs outgrew four.
+    const cs = getComputedStyle(el);
+    const pad =
+      (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const max = (parseFloat(cs.lineHeight) || 22) * 6 + pad;
+    const next = Math.min(el.scrollHeight, max);
+    el.style.height = `${Math.max(next, 24)}px`;
+    el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
+  }, [text]);
+
+  // Drafts are session-scoped user assets. Switching conversations persists the old text and
+  // hydrates the target without putting prompt content in localStorage or telemetry.
+  useEffect(() => {
+    const scopeKey = props.draftScopeKey;
+    const previousScope = activeDraftScopeRef.current;
+    const discardPrevious = Boolean(
+      previousScope &&
+        previousScope !== scopeKey &&
+        props.draftDiscard?.scopeKey === previousScope &&
+        props.draftDiscard.nonce !== consumedDraftDiscardRef.current,
+    );
+    if (discardPrevious && props.draftDiscard) {
+      consumedDraftDiscardRef.current = props.draftDiscard.nonce;
+    } else if (previousScope && previousScope !== scopeKey) {
+      const previousText = textareaRef.current?.value ?? text;
+      const record = {
+        schemaVersion: 1 as const,
+        scopeKey: previousScope,
+        revision: draftRevisionRef.current,
+        text: previousText,
+        attachmentRefs: [],
+        contextRefs: [
+          ...(pendingSkill ? [pendingSkill.name] : []),
+          ...pendingContext.map((reference) => reference.id),
+        ],
+        context: pendingContext,
+        skill: pendingSkill ?? undefined,
+        model: props.model,
+        mode: props.mode,
+        updatedAtMs: Date.now(),
+      };
+      void (
+        previousText ||
+        attachments.length > 0 ||
+        pendingSkill ||
+        pendingContext.length > 0
+          ? saveConversationDraft(record, attachments)
+          : deleteConversationDraft(previousScope)
+      ).catch(() => setDraftPersistenceError(true));
+    }
+    activeDraftScopeRef.current = scopeKey;
+    setSubmitting(false);
+    setAcceptanceUnknown(false);
+    setSubmissionError(null);
+    props.onSubmissionChange?.(null);
+    draftRevisionRef.current = 0;
+    setDraftHydrated(!scopeKey);
+    setText("");
+    setAttachments([]);
+    setPendingSkill(null);
+    setPendingContext([]);
+    if (!scopeKey) return;
+    let active = true;
+    const revisionAtLoad = draftRevisionRef.current;
+    void Promise.all([
+      loadConversationDraft(scopeKey),
+      loadConversationDraftAttachments(scopeKey),
+    ])
+      .then(([draft, storedAttachments]) => {
+        if (!active || activeDraftScopeRef.current !== scopeKey) return;
+        if (draftRevisionRef.current === revisionAtLoad) {
+          if (draft) draftRevisionRef.current = draft.revision;
+          if (draft?.text) setText(draft.text);
+          if (draft?.skill) setPendingSkill(draft.skill);
+          if (draft?.context) setPendingContext(draft.context);
+          if (draft?.model) props.onModelChange(draft.model);
+          if (draft?.mode) props.onModeChange(draft.mode);
+          if (storedAttachments.length > 0) setAttachments(storedAttachments);
+        }
+        setDraftHydrated(true);
+      })
+      .catch(() => {
+        if (!active) return;
+        setDraftPersistenceError(true);
+        setDraftHydrated(true);
+      });
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.draftScopeKey]);
+
+  useEffect(() => {
+    const resolution = props.submissionResolution;
+    if (!resolution) return;
+    setAcceptanceUnknown(false);
+    setSubmitting(false);
+    if (resolution.status === "rejected") {
+      setSubmissionError(
+        resolution.safeMessage ?? t("composer.send_failed"),
+      );
+      return;
+    }
+    if (draftRevisionRef.current !== resolution.revision) return;
+    setSubmissionError(null);
+    setText("");
+    setAttachments([]);
+    setPendingSkill(null);
+    setPendingContext([]);
+  }, [props.submissionResolution, t]);
+
+  useEffect(() => {
+    const scopeKey = props.draftScopeKey;
+    if (!scopeKey || !draftHydrated) return;
+    const timer = window.setTimeout(() => {
+      const record = {
+        schemaVersion: 1 as const,
+        scopeKey,
+        revision: draftRevisionRef.current,
+        text,
+        attachmentRefs: [],
+        contextRefs: [
+          ...(pendingSkill ? [pendingSkill.name] : []),
+          ...pendingContext.map((reference) => reference.id),
+        ],
+        context: pendingContext,
+        skill: pendingSkill ?? undefined,
+        model: props.model,
+        mode: props.mode,
+        updatedAtMs: Date.now(),
+      };
+      void (
+        text ||
+        attachments.length > 0 ||
+        pendingSkill !== null ||
+        pendingContext.length > 0
+          ? saveConversationDraft(record, attachments)
+          : deleteConversationDraft(scopeKey)
+      )
+        .then(() => setDraftPersistenceError(false))
+        .catch(() => setDraftPersistenceError(true));
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [
+    attachments,
+    draftHydrated,
+    props.draftScopeKey,
+    text,
+    pendingSkill,
+    pendingContext,
+    props.model,
+    props.mode,
+  ]);
+
+  useEffect(() => {
+    const flushDraft = () => {
+      const scopeKey = activeDraftScopeRef.current;
+      if (!scopeKey) return;
+      const record = {
+        schemaVersion: 1 as const,
+        scopeKey,
+        revision: draftRevisionRef.current,
+        text: textareaRef.current?.value ?? text,
+        attachmentRefs: [],
+        contextRefs: [
+          ...(pendingSkill ? [pendingSkill.name] : []),
+          ...pendingContext.map((reference) => reference.id),
+        ],
+        ...(pendingContext.length > 0 ? { context: pendingContext } : {}),
+        skill: pendingSkill ?? undefined,
+        model: props.model,
+        mode: props.mode,
+        updatedAtMs: Date.now(),
+      };
+      void (
+        record.text ||
+        attachments.length > 0 ||
+        pendingSkill !== null ||
+        pendingContext.length > 0
+          ? saveConversationDraft(record, attachments)
+          : deleteConversationDraft(scopeKey)
+      ).catch(() => setDraftPersistenceError(true));
+    };
+    window.addEventListener("pagehide", flushDraft);
+    return () => window.removeEventListener("pagehide", flushDraft);
+  }, [
+    attachments,
+    text,
+    pendingSkill,
+    pendingContext,
+    props.model,
+    props.mode,
+  ]);
+
+  // Apply a prefill (text + attachments) pushed from outside, then focus the composer. Applied at
+  // most once per nonce (a ref guards against StrictMode/re-render double-fires), and attachments
+  // are de-duplicated so the same file never lands twice.
+  const appliedNonce = useRef<number>(-1);
+  useEffect(() => {
+    const p = props.prefill;
+    if (!p || p.nonce === appliedNonce.current) return;
+    appliedNonce.current = p.nonce;
+    draftRevisionRef.current += 1;
+    setText((current) =>
+      current.trim() &&
+      current !== p.text &&
+      current !== frozenSubmissionTextRef.current
+        ? `${current}\n\n${p.text}`
+        : p.text,
+    );
+    if (p.skill)
+      setPendingSkill({
+        name: p.skill,
+        description: "",
+        scope: "project",
+        enabled: true,
+      });
+    if (p.context)
+      setPendingContext(
+        p.context.filter((reference) => reference.kind !== "skill"),
+      );
+    if (p.model) props.onModelChange(p.model);
+    if (p.mode) props.onModeChange(p.mode);
+    if (p.attachments?.length)
+      updateAttachments((cur) => mergeAttachments(cur, p.attachments!));
+    textareaRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.prefill?.nonce]);
+
+  // Dictation is intentionally native-only: the browser/dev build remains a local server client
+  // and never turns on the browser microphone or ships audio anywhere.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const refresh = (event?: Event) => {
+      const supplied = (event as CustomEvent<DictationStatus> | undefined)
+        ?.detail;
+      if (supplied) {
+        setDictation(supplied);
+        return;
+      }
+      void getDictationStatus().then(
+        (status) => status && setDictation(status),
+      );
+    };
+    refresh();
+    window.addEventListener("coworker:voice-input-changed", refresh);
+    return () =>
+      window.removeEventListener("coworker:voice-input-changed", refresh);
+  }, []);
+
+  useEffect(() => {
+    if (!dictation?.recording) {
+      setRecordingSeconds(0);
+      return;
+    }
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      setRecordingSeconds(Math.floor((Date.now() - started) / 1000));
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [dictation?.recording]);
+
+  // Live waveform: poll mic loudness at ~10Hz while recording; the bars scroll left so the
+  // trace reads as a real input meter (owner catch on DMG #28 — the first cut's bars were
+  // decorative constants and read as fake).
+  const [levels, setLevels] = useState<number[]>([]);
+  useEffect(() => {
+    if (!dictation?.recording) {
+      setLevels([]);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      getDictationLevel().then((level) => {
+        if (typeof level === "number")
+          setLevels((cur) => [...cur.slice(-13), level]);
+      });
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [dictation?.recording]);
+
+  useEffect(() => {
+    if (!dictation?.recording) return;
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      void cancelDictation()
+        .catch(() => undefined)
+        .finally(() => {
+          void getDictationStatus().then(
+            (status) => status && setDictation(status),
+          );
+        });
+    };
+    window.addEventListener("keydown", cancelOnEscape);
+    return () => window.removeEventListener("keydown", cancelOnEscape);
+  }, [dictation?.recording]);
+
+  const voiceReady =
+    !!dictation?.supported &&
+    !!dictation?.model_verified &&
+    !!dictation?.test_passed;
+  const recordingTime = `${Math.floor(recordingSeconds / 60)}:${String(recordingSeconds % 60).padStart(2, "0")}`;
+
+  // Attach-time PDF thresholds (Settings → Token savings): a PDF over the user's page or
+  // size limit is REJECTED with a visible notice — never attached, never silently dropped.
+  // The rationale is token cost: a big PDF re-rides every turn of the conversation.
+  const addFiles = async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    let maxPages = 20;
+    let maxMb = 10;
+    if (list.some(isPdfFile)) {
+      try {
+        const s = await getSettings();
+        if (s.pdf_max_pages) maxPages = s.pdf_max_pages;
+        if (s.pdf_max_mb) maxMb = s.pdf_max_mb;
+      } catch {
+        /* offline settings fetch — fall back to defaults */
+      }
+    }
+    const accepted: File[] = [];
+    for (const file of list) {
+      if (isPdfFile(file) && file.size > maxMb * 1024 * 1024) {
+        showAttachNotice(
+          t("composer.pdf_too_big", {
+            name: file.name,
+            mb: (file.size / 1024 / 1024).toFixed(1),
+            limit: maxMb,
+          }),
+        );
+        continue;
+      }
+      accepted.push(file);
+    }
+    const read = (await Promise.all(accepted.map(readFile))).filter(
+      Boolean,
+    ) as Attachment[];
+    const next: Attachment[] = [];
+    for (const a of read) {
+      if (a.kind === "pdf" && a.data_url) {
+        const info = await inspectPdf(a.data_url).catch(() => null);
+        if (info?.ok && (info.pages ?? 0) > maxPages) {
+          showAttachNotice(
+            t("composer.pdf_too_many_pages", {
+              name: a.name,
+              pages: info.pages,
+              limit: maxPages,
+            }),
+          );
+          continue;
+        }
+        if (info && !info.ok) {
+          showAttachNotice(
+            t("composer.pdf_unreadable", {
+              name: a.name,
+              error: info.error || t("composer.pdf_could_not_read"),
+            }),
+          );
+          continue;
+        }
+      }
+      next.push(a);
+    }
+    if (next.length) updateAttachments((a) => mergeAttachments(a, next));
+  };
+
+  // The "+" menu offers typed shortcuts; each just narrows the OS picker's filter.
+  const pickFiles = (accept: string) => {
+    setAttachMenuOpen(false);
+    if (fileInput.current) {
+      fileInput.current.accept = accept;
+      fileInput.current.click();
+    }
+  };
+
+  const selectableModels = props.models ?? [];
+  const modelsLoaded = props.models !== undefined;
+  const currentModelSelectable = selectableModels.includes(props.model);
+  const needsModel = modelsLoaded && selectableModels.length === 0;
+  const needsModelSelection = modelsLoaded && !needsModel && !currentModelSelectable;
+
+  const submit = async () => {
+    // While the "/" popup is open the draft is a query, not a message — never send it.
+    if (slashQuery !== null) return;
+    // The visible "/name " prefix is UI state, not message text — strip it for the send;
+    // the skill rides as its own field. (Named `body`, not `t`, so it can't shadow i18n's t.)
+    const skill = pendingSkill?.name;
+    const body = text.trim();
+    if (
+      (!body && attachments.length === 0 && !skill) ||
+      props.presentation.composerMode === "blocked" ||
+      !props.connected ||
+      dictation?.recording ||
+      dictationBusy ||
+      submitting ||
+      acceptanceUnknown ||
+      needsModelSelection
+    )
+      return;
+    // No model connected: keep the draft (don't drop it) and send the user to setup instead.
+    if (needsModel) {
+      props.onConnectModel?.();
+      return;
+    }
+    const submittedScope = activeDraftScopeRef.current;
+    const submittedText = text;
+    const submittedAttachments = attachments;
+    const submittedRevision = draftRevisionRef.current;
+    setSubmissionError(null);
+    setAcceptanceUnknown(false);
+    setSubmitting(true);
+    props.onSubmissionChange?.("pending");
+    frozenSubmissionTextRef.current = submittedText;
+    try {
+      await props.onSend(body, attachments, skill, {
+        delivery:
+          props.presentation.composerMode === "queue" ? "enqueue" : "start_now",
+        draftRevision: submittedRevision,
+        ...(pendingContext.length > 0 ? { context: pendingContext } : {}),
+      });
+      if (activeDraftScopeRef.current !== submittedScope) return;
+      props.onSubmissionChange?.(null);
+      setText((current) => (current === submittedText ? "" : current));
+      setAttachments((current) =>
+        current === submittedAttachments ? [] : current,
+      );
+      setPendingSkill((current) => (current === pendingSkill ? null : current));
+      setPendingContext((current) =>
+        current === pendingContext ? [] : current,
+      );
+      if (
+        props.draftScopeKey &&
+        draftRevisionRef.current === submittedRevision
+      ) {
+        await deleteConversationDraft(props.draftScopeKey).catch(() => {
+          setDraftPersistenceError(true);
+        });
+      }
+    } catch (error) {
+      if (activeDraftScopeRef.current !== submittedScope) return;
+      const unknown =
+        error instanceof Error &&
+        "acceptanceUnknown" in error &&
+        error.acceptanceUnknown === true;
+      setAcceptanceUnknown(unknown);
+      props.onSubmissionChange?.(unknown ? "unknown" : null);
+      setSubmissionError(
+        error instanceof Error ? error.message : t("composer.send_failed"),
+      );
+    } finally {
+      if (frozenSubmissionTextRef.current === submittedText)
+        frozenSubmissionTextRef.current = null;
+      if (activeDraftScopeRef.current === submittedScope) setSubmitting(false);
+    }
+  };
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (slashQuery !== null) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashIndex((i) =>
+          Math.min(i + 1, Math.max(slashMatches.length - 1, 0)),
+        );
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setText("");
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        const chosen = slashMatches[slashIndex];
+        if (chosen) pickSkill(chosen);
+        return;
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void submit();
+    }
+  };
+
+  const onPaste = (e: React.ClipboardEvent) => {
+    const imgs = Array.from(e.clipboardData.items)
+      .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+      .map((it) => it.getAsFile())
+      .filter(Boolean) as File[];
+    if (imgs.length) {
+      e.preventDefault();
+      addFiles(imgs);
+    }
+  };
+
+  const toggleDictation = async () => {
+    if (!isTauri() || dictationBusy) return;
+    setDictationError(null);
+    try {
+      if (dictation?.recording) {
+        setDictationBusy(t("composer.starting_transcribe"));
+        const transcript = await stopDictation();
+        if (transcript === null) throw new Error(t("composer.err_transcribe"));
+        if (transcript.trim()) {
+          setText((draft) =>
+            draft.trim()
+              ? `${draft.trimEnd()} ${transcript.trim()}`
+              : transcript.trim(),
+          );
+        }
+        setDictation(await getDictationStatus());
+        textareaRef.current?.focus();
+        return;
+      }
+
+      const status = dictation || (await getDictationStatus());
+      if (!status) throw new Error(t("composer.err_dictation_unavailable"));
+      if (!status.supported || !status.model_verified || !status.test_passed) {
+        props.onConfigureVoiceInput?.();
+        return;
+      }
+      setDictationBusy(t("composer.starting_mic"));
+      const recording = await startDictation();
+      if (!recording?.recording) throw new Error(t("composer.err_mic_start"));
+      setDictation(recording);
+    } catch (error) {
+      setDictationError(
+        error instanceof Error
+          ? error.message
+          : t("composer.err_dictation_unavailable"),
+      );
+      const status = await getDictationStatus();
+      if (status) setDictation(status);
+    } finally {
+      setDictationBusy(null);
+    }
+  };
+
+  const modelOptions: Option[] = Array.from(new Set(selectableModels)).map((m) => ({
+    value: m,
+    label: props.modelLabels?.[m] || shortModel(m),
+  }));
+
+  const iconBtn =
+    "w-7 h-7 grid place-items-center rounded-md text-muted hover:text-ink hover:bg-paper shrink-0";
+
+  // The send button is accent only when there's something to send — subtle grey otherwise, so the
+  // composer isn't carrying a constant blue dot.
+  // A pinned /skill is sendable content on its own (tester catch 2026-07-26: the arrow
+  // stayed grey after picking a skill, reading as "stuck").
+  const hasContent =
+    text.trim().length > 0 || attachments.length > 0 || !!pendingSkill;
+  const interactionActive = Boolean(props.approvalSlot);
+
+  return (
+    <div className="composer-wrap px-6 pb-5 pt-4">
+      {props.approvalSlot ? (
+        <PendingInteractionDock label={t("conversation.interaction.label")}>
+          {props.approvalSlot}
+        </PendingInteractionDock>
+      ) : null}
+
+      <div
+        className={
+          interactionActive
+            ? "composer-input-shell is-inert"
+            : "composer-input-shell"
+        }
+        data-conversation-composer
+        aria-hidden={interactionActive || undefined}
+        {...(interactionActive
+          ? ({ inert: "" } as Record<string, string>)
+          : {})}
+      >
+        {dictationError && (
+          <div
+            className="max-w-3xl mx-auto mb-2 px-1 conversation-type-ui text-danger"
+            role="alert"
+          >
+            {dictationError}
+          </div>
+        )}
+
+        {submissionError && (
+          <div
+            className="max-w-3xl mx-auto mb-2 px-3 py-2 rounded-lg border border-danger/30 bg-dangerSoft conversation-type-ui text-danger"
+            role="alert"
+          >
+            {submissionError}
+          </div>
+        )}
+
+        {draftPersistenceError && (
+          <div
+            className="max-w-3xl mx-auto mb-2 px-3 py-2 rounded-lg border border-warnInk/30 bg-warnSoft conversation-type-ui text-warnInk"
+            role="alert"
+          >
+            {t("composer.draft_persistence_failed")}
+          </div>
+        )}
+
+        {/* Rejected-attachment notice (PDF over the user's Token-savings thresholds). */}
+        {attachNotice && (
+          <div
+            data-testid="attach-notice"
+            className="max-w-3xl mx-auto mb-1.5 flex items-center gap-2 rounded-lg border border-warnInk/30 bg-warnSoft px-3 py-1.5 conversation-type-ui text-warnInk"
+          >
+            <span className="flex-1">{attachNotice}</span>
+            <button
+              className="shrink-0 opacity-60 hover:opacity-100"
+              onClick={() => setAttachNotice(null)}
+              title={t("common.dismiss")}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* Attachments preview — a strip ABOVE the input box (mock/Claude-style). */}
+        {attachments.length > 0 && (
+          <div className="max-w-3xl mx-auto mb-1.5 flex flex-wrap gap-2">
+            {attachments.map((a, i) => (
+              <AttachChip
+                key={i}
+                a={a}
+                onRemove={() =>
+                  updateAttachments((all) => all.filter((_, j) => j !== i))
+                }
+              />
+            ))}
+          </div>
+        )}
+
+        <div
+          className={
+            "composer max-w-3xl mx-auto rounded-2xl border border-line bg-panel" +
+            (dragging ? " dragging" : "")
+          }
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragging(false);
+            if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+          }}
+        >
+          {/* "/" force-run popup — in-flow above the textarea; rows are the session's
+            effective menu only (muted/disabled skills never appear). */}
+          {slashQuery !== null && (
+            <div
+              className="px-2 pt-2"
+              data-testid="skill-popup"
+              role="listbox"
+              aria-label="Skills"
+            >
+              {slashSkills === null ? (
+                <div className="px-2 py-1.5 conversation-type-ui text-faint">
+                  Loading skills…
+                </div>
+              ) : slashMatches.length === 0 ? (
+                <div className="px-2 py-1.5 conversation-type-ui text-faint">
+                  No matching skills.
+                </div>
+              ) : (
+                slashMatches.map((s, i) => (
+                  <button
+                    key={s.name}
+                    role="option"
+                    aria-selected={i === slashIndex}
+                    className={
+                      "w-full text-left flex items-center gap-2 px-2 py-1.5 rounded-lg " +
+                      (i === slashIndex ? "bg-paper" : "hover:bg-paper")
+                    }
+                    onMouseEnter={() => setSlashIndex(i)}
+                    onClick={() => pickSkill(s)}
+                  >
+                    <span className="conversation-type-ui font-medium text-accent shrink-0">
+                      /{s.name}
+                    </span>
+                    <span className="conversation-type-ui text-faint truncate flex-1">
+                      {s.description}
+                    </span>
+                    <span className="conversation-type-caption px-1.5 py-0.5 rounded-full border border-line text-faint shrink-0">
+                      {s.scope}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+          <ContextChips
+            references={[
+              ...(pendingSkill
+                ? [
+                    {
+                      kind: "skill" as const,
+                      id: pendingSkill.name,
+                      label: pendingSkill.name,
+                    },
+                  ]
+                : []),
+              ...pendingContext,
+            ]}
+            onOpen={props.onOpenContext}
+            onRemove={(reference) => {
+              draftRevisionRef.current += 1;
+              if (reference.kind === "skill") setPendingSkill(null);
+              else
+                setPendingContext((current) =>
+                  current.filter(
+                    (candidate) =>
+                      candidate.kind !== reference.kind ||
+                      candidate.id !== reference.id,
+                  ),
+                );
+            }}
+          />
+          <textarea
+            ref={textareaRef}
+            className="w-full block px-3.5 pt-3.5 pb-1.5 conversation-type-body"
+            placeholder={
+              props.presentation.phase === "waiting"
+                ? t("composer.placeholder_gate")
+                : props.placeholder || t("composer.placeholder")
+            }
+            value={text}
+            onChange={(e) => {
+              draftRevisionRef.current += 1;
+              setText(e.target.value);
+            }}
+            onKeyDown={onKey}
+            onPaste={onPaste}
+            rows={1}
+          />
+
+          {/* Three-control row (§22): + attach · Mode ⌄ …(right)… model (fresh only) · send */}
+          <div className="composer-controls px-2.5 pb-2.5 pt-1 flex items-center gap-1.5">
+            {/* + attach menu */}
+            <div className="relative">
+              <button
+                className={
+                  iconBtn + (attachMenuOpen ? " bg-paper text-ink" : "")
+                }
+                title={t("composer.attach")}
+                aria-label={t("composer.attach")}
+                onClick={() => setAttachMenuOpen((v) => !v)}
+              >
+                <Icon name="plus" size={17} />
+              </button>
+              {attachMenuOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-30"
+                    onClick={() => {
+                      setAttachMenuOpen(false);
+                      setBindMenu(null);
+                    }}
+                  />
+                  <div className="absolute z-40 bottom-full mb-1 left-0 min-w-[200px] rounded-xl border border-line bg-panel shadow-2xl py-1.5">
+                    {sessionRows && (
+                      <div className="px-3 pt-1 pb-0.5 conversation-type-caption font-semibold tracking-wide uppercase text-faint">
+                        {t("composer.attach_this_message")}
+                      </div>
+                    )}
+                    {attachItem("image", t("composer.attach_image"), () =>
+                      pickFiles("image/*"),
+                    )}
+                    {attachItem("file", "PDF", () =>
+                      pickFiles("application/pdf,.pdf"),
+                    )}
+                    {attachItem("fileCode", t("composer.attach_other"), () =>
+                      pickFiles(
+                        "text/*,.md,.csv,.json,.yaml,.yml,.log,.py,.ts,.tsx,.js,.rs,.go,.toml",
+                      ),
+                    )}
+                    {(props.sessionReferences ?? []).length > 0 && (
+                      <>
+                        <div className="my-1 border-t border-line" />
+                        <div className="px-3 pt-0.5 pb-0.5 conversation-type-caption font-semibold tracking-wide uppercase text-faint">
+                          {t("composer.reference_conversation")}
+                        </div>
+                        {(props.sessionReferences ?? [])
+                          .slice(0, 6)
+                          .map((reference) =>
+                            attachItem(
+                              "chat",
+                              reference.label,
+                              () => {
+                                setPendingContext((current) =>
+                                  current.some(
+                                    (candidate) =>
+                                      candidate.kind === reference.kind &&
+                                      candidate.id === reference.id,
+                                  )
+                                    ? current
+                                    : [...current, reference],
+                                );
+                                draftRevisionRef.current += 1;
+                                setAttachMenuOpen(false);
+                              },
+                              reference.id,
+                            ),
+                          )}
+                      </>
+                    )}
+                    {sessionRows && (
+                      <>
+                        <div className="my-1 border-t border-line" />
+                        <div className="px-3 pt-0.5 pb-0.5 conversation-type-caption font-semibold tracking-wide uppercase text-faint">
+                          {t("composer.attach_this_session")}
+                        </div>
+                        {bindRow("book", t("composer.bind_memory"), "memory")}
+                        {bindRow("table", t("composer.bind_board"), "board")}
+                      </>
+                    )}
+                  </div>
+                  {bindMenu && props.sessionId && (
+                    <ProjectBindMenu
+                      sessionId={props.sessionId}
+                      kind={bindMenu}
+                      onClose={() => {
+                        setBindMenu(null);
+                        setAttachMenuOpen(false);
+                      }}
+                      onOpenMemory={props.onOpenMemory}
+                    />
+                  )}
+                </>
+              )}
+            </div>
+            <input
+              ref={fileInput}
+              type="file"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files) addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+
+            {/* Listening replaces the quiet middle controls with a LIVE waveform (mic RMS,
+              polled ~10Hz, scrolling left) + elapsed time (§37). */}
+            {dictation?.recording ? (
+              <div
+                className="voice-wave-row flex-1 flex items-center gap-2 ml-1"
+                aria-hidden="true"
+              >
+                <span className="voice-wave-line" />
+                <span className="voice-wave-bars">
+                  {Array.from({ length: 14 }, (_, index) => {
+                    const level = levels[levels.length - 14 + index] ?? 0;
+                    return (
+                      <i
+                        key={index}
+                        style={{ height: Math.round(4 + level * 24) }}
+                      />
+                    );
+                  })}
+                </span>
+                <span className="conversation-type-ui text-muted tabular-nums">
+                  {recordingTime}
+                </span>
+              </div>
+            ) : props.workspace !== undefined ? (
+              <ModeMenu
+                reviewerPaused={props.reviewerPaused}
+                interactionSupported={props.interactionSupported}
+                mode={props.mode}
+                onModeChange={props.onModeChange}
+                unattended={props.unattended}
+                onUnattendedChange={props.onUnattendedChange}
+              />
+            ) : null}
+
+            {dictationBusy === t("composer.starting_transcribe") && (
+              <span className="conversation-type-ui text-accent">
+                {dictationBusy}
+              </span>
+            )}
+
+            {(props.presentation.secondaryActions.includes("pause") ||
+              props.presentation.secondaryActions.includes("end_task")) && (
+              <div className="composer-secondary-actions">
+                {props.presentation.secondaryActions.includes("pause") && (
+                  <button
+                    className="composer-control"
+                    onClick={props.onPause}
+                    disabled={!props.connected}
+                  >
+                    {t("composer.pause")}
+                  </button>
+                )}
+                {props.presentation.secondaryActions.includes("end_task") && (
+                  <button
+                    className="composer-control is-danger"
+                    onClick={props.onInterrupt}
+                    disabled={!props.connected}
+                  >
+                    {t("conversation.end_task")}
+                  </button>
+                )}
+              </div>
+            )}
+
+            <span className="ml-auto" />
+
+            {/* token usage (OPE-42) — a quiet chip; hidden until the server reports usage.
+              Shows the context-window fill bar alone (the session total lives in the
+              popover), or the session total when there's no window / the bar is off. */}
+            {!dictation?.recording &&
+              props.usage &&
+              totalTokens(props.usage) > 0 && (
+                <div className="composer-usage">
+                  <UsageChip
+                    usage={props.usage}
+                    contextWindow={props.contextWindow}
+                    contextBar={props.contextBar}
+                    model={props.model}
+                    modelLabels={props.modelLabels}
+                  />
+                </div>
+              )}
+
+            <div
+              className="composer-trailing-cluster"
+              data-testid="composer-trailing-cluster"
+            >
+
+            {/* model — a quiet chip, now for the session's whole life (§17 rev 2026-07-22:
+              mid-session switching shipped, so the picker stays actionable; the topbar
+              subtitle still states the current model). */}
+            {needsModel ? (
+                <button
+                  className="pill model-warn chip"
+                  onClick={() => props.onConnectModel?.()}
+                  title={t("composer.model.connect")}
+                  aria-label={t("composer.model.none_aria")}
+                >
+                  <span className="pill-label">{t("composer.model.none")}</span>
+                  <span className="model-warn-ico" aria-hidden>
+                    ⚠
+                  </span>
+                </button>
+              ) : modelsLoaded ? (
+                <Dropdown
+                  value={props.model}
+                  options={modelOptions}
+                  onChange={props.onModelChange}
+                  align="right"
+                  placeholder={
+                    needsModelSelection
+                      ? t("composer.model.choose")
+                      : undefined
+                  }
+                />
+              ) : (
+                <button
+                  className="pill chip text-faint cursor-default"
+                  disabled
+                  data-testid="models-loading"
+                  title={t("composer.model.loading_title")}
+                >
+                  <span className="pill-label">
+                    {t("composer.model.loading")}
+                  </span>
+                </button>
+              )}
+
+            {/* mic — immediately before send (owner call, DMG #28 walkthrough) */}
+            {isTauri() && (
+              <button
+                className={
+                  iconBtn +
+                  (dictation?.recording
+                    ? " bg-dangerSoft text-danger hover:bg-dangerSoft"
+                    : "") +
+                  (dictationBusy ? " opacity-60" : "") +
+                  (!voiceReady && !dictation?.recording ? " opacity-40" : "")
+                }
+                onClick={() => void toggleDictation()}
+                disabled={!!dictationBusy}
+                title={
+                  dictationBusy ||
+                  (dictation?.recording
+                    ? t("composer.voice.stop_transcribe")
+                    : voiceReady
+                      ? t("composer.voice.start_dictation")
+                      : t("composer.voice.configure"))
+                }
+                aria-label={
+                  dictation?.recording
+                    ? t("composer.voice.stop_dictation")
+                    : voiceReady
+                      ? t("composer.voice.start_dictation_btn")
+                      : t("composer.voice.configure")
+                }
+                aria-disabled={!voiceReady && !dictation?.recording}
+              >
+                <Icon name={dictation?.recording ? "stop" : "mic"} size={16} />
+              </button>
+            )}
+
+            <>
+              {props.presentation.primaryAction === "continue" && (
+                <button
+                  className="composer-control"
+                  data-primary-action="continue"
+                  onClick={props.onContinue}
+                  disabled={!props.connected}
+                >
+                  {t("composer.continue")}
+                </button>
+              )}
+              {props.presentation.primaryAction === "stop" && (
+                <button
+                  className="composer-control is-icon"
+                  aria-label={t("composer.stop")}
+                  title={t("composer.stop")}
+                  data-primary-action="stop"
+                  onClick={props.onInterrupt}
+                  disabled={!props.connected}
+                >
+                  <Icon name="stop" size={20} />
+                </button>
+              )}
+              {props.presentation.primaryAction === null && (
+                <span className="composer-state">
+                  {t(props.presentation.statusLabel)}
+                </span>
+              )}
+              {props.presentation.composerMode !== "blocked" &&
+                (props.presentation.composerMode !== "queue" || hasContent) && (
+                  <button
+                    className="composer-send"
+                    data-primary-action={
+                      props.presentation.primaryAction === "send"
+                        ? "send"
+                        : undefined
+                    }
+                    onClick={() => void submit()}
+                    disabled={
+                      !hasContent ||
+                      !props.connected ||
+                      needsModelSelection ||
+                      !!dictation?.recording ||
+                      !!dictationBusy ||
+                      submitting ||
+                      acceptanceUnknown
+                    }
+                    title={
+                      props.presentation.composerMode === "queue"
+                        ? t("composer.queue_follow_up")
+                        : needsModel
+                          ? t("composer.connect_to_send")
+                          : needsModelSelection
+                            ? t("composer.model.choose")
+                          : undefined
+                    }
+                    aria-label={
+                      props.presentation.composerMode === "queue"
+                        ? t("composer.queue_follow_up")
+                        : t("common.send")
+                    }
+                  >
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      aria-hidden="true"
+                    >
+                      <path d="M12 19V5M5 12l7-7 7 7" />
+                    </svg>
+                  </button>
+                )}
+            </>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Token-usage chip + popover (OPE-42). Trigger: a tiny context-fill meter (only when the
+// active model's window is known) + the session's total token count. Click → per-model
+// breakdown. Tokens only, never dollars (true cost is unknowable client-side — discounted
+// pricing, per-provider cache billing).
+function UsageChip({
+  usage,
+  contextWindow,
+  contextBar,
+  model,
+  modelLabels,
+}: {
+  usage: SessionUsage;
+  contextWindow?: number;
+  contextBar?: boolean;
+  model: string;
+  modelLabels?: Record<string, string>;
+}) {
+  const [open, setOpen] = useState(false);
+  const total = totalTokens(usage);
+  const pct = contextWindow
+    ? Math.min(100, Math.round((usage.context / contextWindow) * 100))
+    : null;
+  // Settings can hide the bar; without a known window there is nothing to fill either.
+  const showBar = pct !== null && contextBar === true;
+  // Release hold (owner call 2026-08-24): cumulative session totals need more vetting
+  // before they ship — cache-read sums across turns read like a bill. Until then the
+  // chip and popover speak context-window only. Flip this to restore the breakdown.
+  const SHOW_SESSION_TOTALS = false;
+  const labelFor = (id: string) =>
+    id === "unknown" ? "Unknown model" : modelLabels?.[id] || shortModel(id);
+  // One field per line, session-summed (owner ask 2026-07-28). Values are cumulative
+  // across the whole session, never just the last turn; "Input" is the fresh
+  // (uncached) share — the cached share sits in the cache rows at its own price.
+  const stat = (label: string, value: number) => (
+    <div className="flex items-baseline justify-between conversation-type-ui leading-snug">
+      <span className="text-faint">{label}</span>
+      <span className="text-ink tabular-nums">{formatTokens(value)}</span>
+    </div>
+  );
+  return (
+    <div className="relative">
+      <button
+        className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg conversation-type-ui text-muted hover:text-ink hover:bg-paper shrink-0"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Token usage"
+        title={
+          pct !== null
+            ? `Context window ${pct}% full — ${formatTokens(usage.context)} of ${formatTokens(contextWindow as number)}`
+            : `In context now: ${formatTokens(usage.context)} tokens`
+        }
+        data-testid="usage-chip"
+      >
+        {/* The bar is the context-window fill. With totals on release hold, the numeric
+            fallback is the in-context size — the one figure we trust — never the
+            cumulative session total. */}
+        {showBar ? (
+          <span
+            className="w-12 h-1.5 rounded-full bg-line overflow-hidden"
+            aria-hidden="true"
+          >
+            <span
+              className="block h-full bg-accent transition-[width]"
+              style={{ width: `${Math.max(pct as number, 4)}%` }}
+            />
+          </span>
+        ) : (
+          <span className="tabular-nums">
+            {SHOW_SESSION_TOTALS
+              ? formatTokens(total)
+              : formatTokens(usage.context)}
+          </span>
+        )}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div
+            className="absolute z-40 bottom-full mb-1 right-0 w-[280px] rounded-xl border border-line bg-panel shadow-2xl p-3"
+            role="menu"
+            data-testid="usage-popover"
+          >
+            {contextWindow ? (
+              <div className="mb-2.5">
+                <div className="conversation-type-caption uppercase tracking-[0.06em] text-faint font-semibold mb-1">
+                  Context window
+                </div>
+                <div className="h-1.5 rounded-full bg-line overflow-hidden">
+                  <div
+                    className="h-full bg-accent transition-[width]"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <div className="mt-1 conversation-type-ui text-muted tabular-nums">
+                  {formatTokens(usage.context)} of {formatTokens(contextWindow)}{" "}
+                  · {pct}%
+                </div>
+              </div>
+            ) : usage.context > 0 ? (
+              <div className="mb-2.5 conversation-type-ui text-muted tabular-nums">
+                In context now: {formatTokens(usage.context)} tokens
+              </div>
+            ) : null}
+            {SHOW_SESSION_TOTALS && (
+              <>
+                <div className="conversation-type-caption uppercase tracking-[0.06em] text-faint font-semibold mb-1">
+                  Session totals
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {Object.entries(usage.byModel).map(([id, t]) => (
+                    <div key={id}>
+                      <div
+                        className="conversation-type-ui text-ink font-medium truncate"
+                        title={id}
+                      >
+                        {labelFor(id)}
+                      </div>
+                      {/* Every row is a session sum. With a cache split, the input rows are
+                      the three BILLING CLASSES of input (each priced differently) and
+                      read as components: uncached + cache reads + cache writes = total.
+                      Without one (Ollama, compat vendors), plain "Input" says it all. */}
+                      <div className="mt-0.5 flex flex-col gap-0.5">
+                        {t.cache_read + t.cache_write > 0 ? (
+                          <>
+                            {stat("Uncached input", t.input)}
+                            {stat("Cache reads", t.cache_read)}
+                            {stat("Cache writes", t.cache_write)}
+                            {stat(
+                              "Total input",
+                              t.input + t.cache_read + t.cache_write,
+                            )}
+                          </>
+                        ) : (
+                          stat("Input", t.input)
+                        )}
+                        {stat("Output", t.output)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-2 pt-2 border-t border-line flex items-baseline justify-between conversation-type-ui">
+                  <span className="text-faint">Total</span>
+                  <span className="text-ink tabular-nums">
+                    {formatTokens(total)} tokens
+                  </span>
+                </div>
+              </>
+            )}
+            {model && !modelLabels?.[model] && contextWindow === undefined && (
+              <div className="mt-1 conversation-type-caption text-faint leading-snug">
+                Context meter unavailable for custom models.
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// The composer's Mode menu (§22): a quiet "Mode ⌄" chip opening the five permission options with
+// the current one marked, plus — when the session supports it — the "Send approvals to Inbox"
+// toggle at the bottom (the old standalone InboxControl, folded in).
+function ModeMenu({
+  mode,
+  onModeChange,
+  unattended,
+  onUnattendedChange,
+  reviewerPaused,
+  interactionSupported = true,
+}: {
+  mode: string;
+  onModeChange: (mode: string) => void;
+  unattended?: boolean;
+  onUnattendedChange?: (on: boolean) => void;
+  reviewerPaused?: boolean;
+  interactionSupported?: boolean;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  // The Auto-Approve entry is gated on the server flag. Fetch once on first open; a session
+  // already IN auto-approve mode always shows its own entry so the current mode is legible
+  // even if the flag was later turned off.
+  const [autoApproveEnabled, setAutoApproveEnabled] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    getSettings()
+      .then((s) => setAutoApproveEnabled(s.auto_approve === true))
+      .catch(() => {});
+  }, [open]);
+  const options = PERMISSION_OPTIONS.filter(
+    (o) => !o.gated || autoApproveEnabled || o.value === mode,
+  );
+  const current = PERMISSION_OPTIONS.find((o) => o.value === mode);
+  return (
+    <div className="relative">
+      {/* Borderless, and it names the CHOSEN mode (owner ask 2026-07-11, competitor composer
+          comparison): "Ask for approval ⌄" not a generic "Mode ⌄" pill. aria-label stays
+          "Mode" so the accessible name is stable across mode changes. */}
+      <button
+        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg conversation-type-ui text-muted hover:text-ink hover:bg-paper shrink-0"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={t("composer.mode_label")}
+        title={
+          `${t("composer.mode_label")}: ${current ? t(current.label) : mode}` +
+          (reviewerPaused && mode === "auto-approve"
+            ? " · " + t("composer.reviewer_paused_tip")
+            : "") +
+          (unattended ? " · " + t("composer.approvals_to_inbox") : "")
+        }
+      >
+        {current ? t(current.label) : mode}
+        {reviewerPaused && mode === "auto-approve" && (
+          <span
+            className="conversation-type-caption text-warnInk"
+            data-testid="mode-paused"
+          >
+            · {t("composer.paused")}
+          </span>
+        )}
+        <Icon name="chevronDown" size={11} className="text-faint" />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div
+            className="absolute z-40 bottom-full mb-1 left-0 w-[260px] rounded-xl border border-line bg-panel shadow-2xl p-1.5"
+            role="menu"
+            data-testid="mode-menu"
+          >
+            {options.map((o) => (
+              <button
+                key={o.value}
+                className="w-full flex flex-col items-start px-2.5 py-1.5 rounded-lg text-left hover:bg-paper"
+                disabled={o.value === "interactive" && !interactionSupported}
+                title={
+                  o.value === "interactive" && !interactionSupported
+                    ? "This HaaS runtime does not support interactive approval"
+                    : undefined
+                }
+                onClick={() => {
+                  onModeChange(o.value);
+                  setOpen(false);
+                }}
+              >
+                <span
+                  className={
+                    "flex items-center conversation-type-ui " +
+                    (o.value === mode ? "font-medium text-accent" : "text-ink")
+                  }
+                >
+                  {o.caution && (
+                    <Icon
+                      name="warning"
+                      size={13}
+                      className="mr-1.5 shrink-0 text-warnInk"
+                    />
+                  )}
+                  {t(o.label)}
+                  {o.value === mode && <span className="ml-1.5">✓</span>}
+                </span>
+                <span className="conversation-type-caption text-faint leading-snug">
+                  {t(o.description ?? "")}
+                </span>
+              </button>
+            ))}
+            {onUnattendedChange && (
+              <>
+                <div className="my-1 border-t border-line" />
+                <div className="flex items-center gap-2 px-2.5 py-1.5">
+                  <span className="flex-1 min-w-0">
+                    <span className="block conversation-type-ui text-ink">
+                      {t("composer.approvals_to_inbox")}
+                    </span>
+                    <span className="block conversation-type-caption text-faint leading-snug">
+                      {t("composer.approvals_to_inbox_help")}
+                    </span>
+                  </span>
+                  <Toggle
+                    checked={!!unattended}
+                    onChange={onUnattendedChange}
+                    title={t("composer.send_approvals_to_inbox")}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// A row in the "+" attach menu.
+function attachItem(
+  icon: "image" | "file" | "fileCode" | "chat",
+  label: string,
+  onClick: () => void,
+  key?: string,
+) {
+  return (
+    <button
+      key={key}
+      className="w-full flex items-center gap-2.5 px-3 py-1.5 conversation-type-ui text-left hover:bg-paper"
+      onClick={onClick}
+    >
+      <Icon name={icon} size={15} className="shrink-0 text-muted" /> {label}
+    </button>
+  );
+}
+
+function AttachChip({ a, onRemove }: { a: Attachment; onRemove: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div className={"attach-chip" + (a.kind === "image" ? " img" : "")}>
+      {a.kind === "image" ? (
+        <img src={a.data_url} alt={a.name} />
+      ) : (
+        <>
+          <Icon name="file" size={13} />
+          <span className="attach-name">{a.name}</span>
+        </>
+      )}
+      <button
+        className="attach-x"
+        onClick={onRemove}
+        title={t("common.remove")}
+      >
+        ✕
+      </button>
+    </div>
+  );
+}

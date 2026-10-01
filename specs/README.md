@@ -137,7 +137,11 @@ Sandbox Runtime projects one policy contract into Lite Docker or OpenSandbox AIO
 | P0 | Policy Controller | `specs/policy-controller/README.md` | Workspace, network, tool, approval, and model policy compilation and admission |
 | P0 | Manager Delegation | `specs/manager-delegation/README.md` | Manager-facing delegated-session binding, mount manifest, restore, workspace single-writer policy, approval relay, and provider delegation contract |
 | P0 | Manager HaaS Sidecar Backend | `specs/manager-haas-sidecar-backend/README.md` | OpenHarness local-managed and remote HaaS sidecar backend selection, unified HaaS client protocol, session binding, and MCP/skill/model materialization handoff |
+| P0 | Manager Conversation Experience | `specs/manager-conversation-experience/README.md` | Product-turn-first Agent conversation projection, stable first-delta streaming, canonical lifecycle controls, acknowledged input, durable drafts/queue, calm work disclosure, reusable React AI components, dual themes, accessibility, and legacy-free migration |
+| P0 | Manager Project Workbench Experience | `specs/manager-project-workspace-experience/README.md` | Project-grouped conversations, workspace and HaaS endpoint binding, Git context, Codex-style command disclosure, and native desktop window behavior |
 | P1 | Manager GUI Performance | `specs/manager-gui-performance/README.md` | OpenHarness React/Vite bundle budgets, live-render isolation, reconciliation and refresh ownership |
+| P1 | Manager File Preview | `specs/manager-file-preview/README.md` | Lazy read-only CodeMirror file viewing, deterministic language mapping, theme integration, lifecycle safety, and large-file degradation |
+| P1 | Manager Office Preview | `specs/manager-office-preview/README.md` | Safe lazy Worker/WASM spreadsheet preview, read-only controls, document trust boundary, and SheetJS removal |
 | P0 | Manager Product Identity | `specs/manager-product-identity/README.md` | OpenHarness product identity, no-login desktop behavior, and local-only account/connector boundaries |
 | P0 | Stores | `specs/stores/README.md` | Persistent source of truth: registry/session/event/idempotency/admission interfaces, schemas, and migrations |
 | P0 | Identity | `specs/identity/README.md` | Bearer -> principal, tenant/workspace/userId scope, and `IdentityProvider` interface |
@@ -182,6 +186,8 @@ Every component spec MUST contain the following sections. Sections MAY be concis
 | Container | `container` | `cntr_...` | Container Runtime | Follows the session |
 | File | `file` | `file_...` | Artifact Store | Follows the container/session |
 | Event | none | invocation-scoped | Event Log | Replayable during the retention period |
+| Manager Project | `project` | `prj_...` | Manager ProjectStore | Creation/import through archive |
+| Manager Workspace Binding | `workspace_binding` | `wsb_...` | Manager ProjectStore | Follows project membership; session snapshots are immutable after acceptance |
 
 An `invocation` is the public run unit; a `turn` is the internal execution unit. They are 1:1 in the initial release, but the protocol does not assume that they will always remain so. A `harness` is the ADK app identity, while `harness_profile` is the versioned execution configuration. Session creation freezes the active profile; later dynamic updates affect only new sessions unless an existing session is explicitly rebound.
 

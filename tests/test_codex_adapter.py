@@ -347,6 +347,52 @@ def test_model_call_correlation_is_stable_across_items_tools_and_usage() -> None
     }
 
 
+def test_direct_tool_after_metered_terminal_tool_opens_next_model_call() -> None:
+    adapter = CodexAdapter(CodexEndpoint(transport="stdio", listen_url="stdio://"))
+    ctx = _TurnContext(
+        turn_id="turn_1", session_id="hsess_1", invocation_id="inv_1",
+        thread_id="thread_1", codex_turn_id="codex_turn_1", timeout_seconds=30,
+    )
+
+    first = adapter._to_harness_event(
+        {"method": "item/started", "params": {"item": {
+            "id": "call_1", "type": "commandExecution", "command": "pwd",
+        }}},
+        ctx,
+    )
+    adapter._to_harness_event(
+        {"method": "item/completed", "params": {"item": {
+            "id": "call_1", "type": "commandExecution", "command": "pwd",
+            "status": "completed", "exitCode": 0,
+        }}},
+        ctx,
+    )
+    adapter._to_harness_event(
+        {"method": "thread/tokenUsage/updated", "params": {"tokenUsage": {
+            "last": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
+            "total": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
+        }}},
+        ctx,
+    )
+    duplicate = adapter._to_harness_event(
+        {"method": "item/started", "params": {"item": {
+            "id": "call_1", "type": "commandExecution", "command": "pwd",
+        }}},
+        ctx,
+    )
+    second = adapter._to_harness_event(
+        {"method": "item/started", "params": {"item": {
+            "id": "call_2", "type": "commandExecution", "command": "git status",
+        }}},
+        ctx,
+    )
+
+    assert first is not None and duplicate is not None and second is not None
+    assert first.actions["artifactDelta"]["modelCallId"] == "mcall_0001"
+    assert duplicate.actions["artifactDelta"]["modelCallId"] == "mcall_0001"
+    assert second.actions["artifactDelta"]["modelCallId"] == "mcall_0002"
+
+
 def test_thread_sandbox_mode_rejects_unknown() -> None:
     with pytest.raises(SandboxPolicyError):
         to_thread_sandbox_mode("no-isolation")
@@ -662,6 +708,27 @@ async def test_disabled_tools_without_prior_instructions() -> None:
     )
     turn_params = next(p for m, p in rpc.requests if m == "turn/start")
     assert "web_search" in turn_params["instructions"]
+
+
+async def test_turn_instructions_request_locale_aligned_reasoning_summaries() -> None:
+    rpc = _RecordingRpc()
+    adapter = _adapter_with_rpc(rpc)
+    await adapter.start_turn(
+        StartTurnRequest(
+            invocationId="inv_1",
+            sessionId="hsess_1",
+            turnId="turn_1",
+            appName="chrn_1",
+            input=[{"text": "检查最新代码"}],
+        )
+    )
+
+    turn_params = next(p for m, p in rpc.requests if m == "turn/start")
+    assert "language of the user's latest message" in turn_params["instructions"]
+    assert "Simplified Chinese" in turn_params["instructions"]
+    assert "Before every tool-call batch" in turn_params["instructions"]
+    assert "emit a new sentence before a later tool-call batch" in turn_params["instructions"]
+    assert "literal tool names" in turn_params["instructions"]
 
 
 async def test_start_turn_timeout_maps_to_structured_error() -> None:

@@ -59,6 +59,10 @@ DEFAULT_TRIGGER_KEYWORDS = [
 class HaasDelegationConfig:
     enabled: bool = True
     mode: str = "local_managed"
+    endpoint_id: str = "hep_local_managed"
+    endpoint_fingerprint: str = ""
+    tls_verify: bool = True
+    allow_insecure_development: bool = False
     backend_preference: str = "haas"
     execution_mode: str = "local_api"
     base_url: str = "http://127.0.0.1:8092"
@@ -85,6 +89,10 @@ class HaasDelegationConfig:
         return {
             "enabled": self.enabled,
             "mode": self.mode,
+            "endpoint_id": self.endpoint_id,
+            "endpoint_fingerprint": self.endpoint_fingerprint,
+            "tls_verify": self.tls_verify,
+            "allow_insecure_development": self.allow_insecure_development,
             "backend_preference": self.backend_preference,
             "execution_mode": self.execution_mode,
             "base_url": self.base_url,
@@ -623,9 +631,10 @@ def deterministic_decision(
     if not is_text_only_content(content):
         return DelegationDecision("blocked", "unsupported_content", config=config)
     if config.execution_mode == "local_api":
-        if config.mode != "local_managed":
-            return DelegationDecision("blocked", "remote_local_api_unsupported", config=config)
-        return DelegationDecision("haas", "local_api_default", config=config)
+        if config.mode == "remote" and not workspace:
+            return DelegationDecision("blocked", "remote_workspace_unavailable", config=config)
+        reason = "remote_api_default" if config.mode == "remote" else "local_api_default"
+        return DelegationDecision("haas", reason, config=config)
     if agent not in set(config.agent_allowlist):
         return DelegationDecision("blocked", "agent_not_allowed", config=config)
     if not workspace or not Path(workspace).is_dir():
@@ -748,7 +757,13 @@ def apply_config_snapshot(
     policy_snapshot = policy_snapshot if isinstance(policy_snapshot, dict) else {}
     return HaasDelegationConfig(
         enabled=config.enabled,
-        mode=config.mode,
+        mode=str(binding.get("endpoint_mode") or config.mode),
+        endpoint_id=str(binding.get("endpoint_id") or config.endpoint_id),
+        endpoint_fingerprint=str(
+            binding.get("endpoint_fingerprint") or config.endpoint_fingerprint
+        ),
+        tls_verify=config.tls_verify,
+        allow_insecure_development=config.allow_insecure_development,
         backend_preference=config.backend_preference,
         execution_mode=str(binding.get("execution_mode") or config.execution_mode),
         base_url=str(binding.get("haas_base_url") or config.base_url),

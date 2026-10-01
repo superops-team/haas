@@ -8,7 +8,7 @@ async function openPersonas(page) {
   await page.goto("/");
   await page.getByTestId("account-row").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Coworkers", exact: true }).click();
+  await page.getByRole("button", { name: "AI Assistants", exact: true }).click();
 }
 
 test("the Gallery entry point is gone from the Coworkers page", async ({ page }) => {

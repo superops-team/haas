@@ -1,4 +1,3 @@
-import { humanizeTool, type HumanLine } from "./humanize";
 import type {
   ActivityKind,
   ActivityStatus,
@@ -9,9 +8,9 @@ import type {
 
 type ToolItem = Extract<Item, { kind: "tool" }>;
 
-export interface ToolActivity extends PersistedActivity {
-  legacyLine?: HumanLine;
-}
+export type ToolActivity = PersistedActivity & Pick<ToolItem,
+  "hidden" | "standingRule" | "reviewerReason" | "allowAnyway" | "approvalOrigin" | "approvalNote" | "approvalGrant"
+> & { overrideAction?: { name: string; args: unknown } };
 
 const KINDS = new Set<ActivityKind>([
   "command",
@@ -96,6 +95,13 @@ const TERMINAL_PHASES = new Set([
   "cancelled",
   "canceled",
 ]);
+const UNFINISHED_ACTIVITY_STATES = new Set<ActivityStatus>([
+  "running",
+  "pending",
+  "waiting",
+]);
+export const MISSING_ACTIVITY_TERMINAL_REASON =
+  "Tool ended without a terminal event";
 
 export function isTerminalTaskOutcome(
   outcome: TaskOutcome | undefined,
@@ -103,9 +109,23 @@ export function isTerminalTaskOutcome(
   return !!outcome?.phase && TERMINAL_PHASES.has(outcome.phase);
 }
 
+export function settleActivityStatusForTerminalTurn(
+  status: string,
+  outcomePhase: string,
+  exitCode?: number,
+): ActivityStatus {
+  const normalized = normalizeActivityStatus(status, exitCode);
+  if (!TERMINAL_PHASES.has(outcomePhase) || !UNFINISHED_ACTIVITY_STATES.has(normalized))
+    return normalized;
+  return outcomePhase === "cancelled" || outcomePhase === "canceled"
+    ? "cancelled"
+    : "failed";
+}
+
 export function latestHaasTaskOutcome(items: Item[]): TaskOutcome | undefined {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
+    if (item.kind === "user" || item.kind === "connector") return undefined;
     if ((item.kind === "assistant" || item.kind === "tool") && item.taskOutcome) {
       return item.taskOutcome;
     }
@@ -166,18 +186,19 @@ export function finalizeCurrentHaasTurn(
     }
     if (item.kind !== "tool" || item.source !== "haas") return item;
     const activityStatus = normalizeActivityStatus(item.status, item.exitCode);
-    const unfinished = new Set<ActivityStatus>([
-      "running",
-      "pending",
-      "waiting",
-    ]).has(activityStatus);
+    const settledStatus = settleActivityStatusForTerminalTurn(
+      item.status,
+      outcome.phase,
+      item.exitCode,
+    );
+    const unfinished = settledStatus !== activityStatus;
     return {
       ...item,
       taskOutcome: outcome,
       ...(unfinished
         ? {
-            status: outcome.phase === "cancelled" ? "cancelled" : "failed",
-            safeReason: "Tool ended without a terminal event",
+            status: settledStatus,
+            safeReason: MISSING_ACTIVITY_TERMINAL_REASON,
           }
         : {}),
     };
@@ -205,17 +226,20 @@ export function projectToolActivity(tool: ToolItem): ToolActivity {
     ? (tool.activityKind as ActivityKind)
     : "tool";
   const preview = previewFor(tool);
-  const isHaas =
-    tool.source === "haas" ||
-    tool.safeSummary !== undefined ||
-    tool.activityKind !== undefined;
 
   return {
     id: tool.id,
+    hidden: tool.hidden,
+    standingRule: tool.standingRule,
+    reviewerReason: tool.reviewerReason,
+    allowAnyway: tool.allowAnyway,
+    approvalOrigin: tool.approvalOrigin,
+    approvalNote: tool.approvalNote,
+    approvalGrant: tool.approvalGrant,
+    ...(tool.allowAnyway ? { overrideAction: { name: tool.name, args: tool.args } } : {}),
     kind,
     status: normalizeActivityStatus(tool.status, tool.exitCode),
     title: TITLES[kind],
-    ...(isHaas ? {} : { legacyLine: humanizeTool(tool.name, tool.args) }),
     summary: String(tool.safeSummary ?? ""),
     ...preview,
     ...(typeof tool.durationMs === "number"

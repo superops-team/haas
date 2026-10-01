@@ -415,9 +415,13 @@ async def test_blocked_run_does_not_stall_other_tasks(tmp_path):
     sched = Scheduler(store, runner, tick_seconds=0.05)
     sched.start()
     await asyncio.sleep(0.2)
-    # The quick task completed while the blocked one is still suspended.
+    # The quick task completed while the blocked one is still suspended. The
+    # blocked occurrence is durably consumed at dispatch, but has no terminal
+    # result until the approval gate opens.
     assert store.get(quick.id).run_count == 1
-    assert store.get(blocked.id).run_count == 0
+    assert store.get(blocked.id).run_count == 1
+    assert store.get(blocked.id).last_run is None
+    assert store.get(blocked.id).last_status is None
     gate.set()
     await asyncio.sleep(0.1)
     assert store.get(blocked.id).run_count == 1

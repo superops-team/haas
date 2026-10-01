@@ -1,8 +1,9 @@
+import { selectConversationPresentation } from "../conversation/model/presentation";
 // §37 voice input — the composer's side of the contract, driven through a mocked
 // __TAURI__ global (the mic is native-only; the browser build renders no mic at all).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { Composer } from "./Composer";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { ConversationComposer as Composer } from "../conversation/components/ConversationComposer";
 
 const READY = {
   recording: false,
@@ -24,7 +25,7 @@ let invoke: ReturnType<typeof vi.fn>;
 const props = (extra: Partial<Parameters<typeof Composer>[0]> = {}) => ({
   mode: "interactive",
   model: "gpt-5.6-sol",
-  running: false,
+  presentation: selectConversationPresentation({ phase: "idle" }),
   connected: true,
   onSend: vi.fn(),
   onInterrupt: vi.fn(),
@@ -69,12 +70,36 @@ describe("Composer voice input (§37)", () => {
     expect(invoke).not.toHaveBeenCalledWith("start_dictation", undefined);
   });
 
+  it("keeps model, microphone and Send as one ordered trailing cluster", async () => {
+    const modelLabel = "deepseek-v4-pro-260425-with-an-intentionally-long-label";
+    render(
+      <Composer
+        {...props({
+          models: ["deepseek-v4-pro-260425"],
+          model: "deepseek-v4-pro-260425",
+          modelLabels: { "deepseek-v4-pro-260425": modelLabel },
+        })}
+      />,
+    );
+
+    const mic = await screen.findByLabelText("Start dictation");
+    const cluster = screen.getByTestId("composer-trailing-cluster");
+    const model = within(cluster).getByRole("button", { name: modelLabel });
+    const send = within(cluster).getByRole("button", { name: "Send" });
+    expect(model.closest(".dd")?.parentElement).toBe(cluster);
+    expect(mic.parentElement).toBe(cluster);
+    expect(send.parentElement).toBe(cluster);
+    expect([...cluster.children]).toEqual([model.closest(".dd"), mic, send]);
+  });
+
   it("ready → record shows the waveform and protects Send; stop inserts an editable draft", async () => {
     render(<Composer {...props()} />);
 
     fireEvent.click(await screen.findByLabelText("Start dictation"));
     const stop = await screen.findByLabelText("Stop dictation");
+    const cluster = screen.getByTestId("composer-trailing-cluster");
     expect(document.querySelector(".voice-wave-bars")).toBeTruthy();
+    expect(within(cluster).getByTestId("models-loading")).toBeTruthy();
     expect(screen.getByLabelText("Send").hasAttribute("disabled")).toBe(true);
 
     invoke.mockImplementation(async (cmd: string) => {
@@ -84,9 +109,26 @@ describe("Composer voice input (§37)", () => {
     });
     fireEvent.click(stop);
     await screen.findByLabelText("Start dictation"); // recording UI wound down
-    const box = screen.getByPlaceholderText(/Ask the coworker/) as HTMLTextAreaElement;
+    const box = screen.getByPlaceholderText(/Ask the AI assistant/) as HTMLTextAreaElement;
     expect(box.value).toBe("hello from the mic"); // a DRAFT — nothing auto-sent
     expect(document.querySelector(".voice-wave-bars")).toBeNull();
+  });
+
+  it("keeps the same model-mic-action ownership while running", async () => {
+    render(
+      <Composer
+        {...props({
+          models: ["gpt-5.6-sol"],
+          presentation: selectConversationPresentation({ phase: "running" }),
+        })}
+      />,
+    );
+
+    const cluster = screen.getByTestId("composer-trailing-cluster");
+    const model = within(cluster).getByRole("button", { name: "gpt-5.6-sol" });
+    const mic = await within(cluster).findByLabelText("Start dictation");
+    const stop = within(cluster).getByRole("button", { name: "Stop" });
+    expect([...cluster.children]).toEqual([model.closest(".dd"), mic, stop]);
   });
 
   it("a start failure surfaces the error and never wedges the mic", async () => {

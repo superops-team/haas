@@ -9,7 +9,7 @@ test("skills-session: new skill offered in '/', disabled one absent", async ({ p
   await page.getByText("Draft the launch note").first().click();
 
   // The seeded menu: both enabled skills offered on "/".
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("/");
   await expect(page.getByTestId("skill-popup")).toBeVisible();
   await expect(page.getByText("/weekly-report")).toBeVisible();

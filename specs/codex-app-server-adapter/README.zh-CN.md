@@ -3,7 +3,7 @@
 [English](README.md) | **简体中文**
 
 Status: Draft
-Last reviewed: 2026-09-14
+Last reviewed: 2026-09-30
 Change ID: unified-runtime-approval-policy
 Related specs: [Harness Adapter](../harness-adapter/README.zh-CN.md), [Session Runtime](../session-runtime/README.zh-CN.md), [Event Log & SSE](../event-log-sse/README.zh-CN.md), [Model Proxy](../model-proxy/README.zh-CN.md)
 固定 Codex CLI 版本：`0.152.1`
@@ -22,6 +22,14 @@ schema。Resume 或 rebind 更新当前 proxy route/token，不替换 native thr
 跨单次 invocation terminal 继续有效，仅在 session 删除/撤销或 runtime shutdown 时撤销。
 
 本地 proxy 集成采用保守的 Responses 工具集合：关闭原生多 agent namespace 和 provider 托管 web search，同时设置 `model_reasoning_summary=auto`，只请求过程时间线所需的 provider 安全推理摘要。Raw reasoning 继续保持私有且绝不投影。支持 Responses 不等于支持其他扩展。普通 function 工具仍受现有 sandbox/policy 管控；proxy 不得静默丢弃工具或改写原生工具调用。Adapter 在 start 和 resume 均应用该配置。真实 Codex wire 测试拒绝 namespace/web-search 声明、确认安全摘要请求与普通 function 工具仍存在；真实 provider smoke 必须通过此链路完成。
+
+每个 turn 还必须携带稳定 presentation guidance：安全 reasoning summary 跟随最新用户消息语言，使用简洁的
+意图/进展描述，不复述 literal tool name、command、path 或 transport label。这是 adapter instruction，
+不是 GUI 翻译或基于内容的 event 分类，也绝不请求 raw chain-of-thought。
+
+Adapter 只为内置 `manager-cowork-recall` server 的工具设置
+`default_tools_approval_mode="approve"`。该 server 已限定为 loopback、固定 header、单一只读工具及
+session-scoped capability；其他 MCP server 保持自身 approval mode，绝不得继承该例外。
 
 ## 2. 来源与依据
 
@@ -200,8 +208,8 @@ Turn 规则：
 过程事件规则：
 
 - `item/reasoning/summaryTextDelta` 可以映射为脱敏的 `harness.reasoning.delta`。Raw `item/reasoning/textDelta` 保持私有，不得持久化或投影。没有安全 summary 时，Manager 根据 tool/lifecycle fact 展示通用类型化进度，不得重建 chain-of-thought。
-- `item/agentMessage/delta` 与 `item/reasoning/summaryTextDelta` 携带 native `itemId`；reasoning 还保留 `summaryIndex`。Adapter 将其作为安全关联事实透传，并为每次真实模型 round trip 分配 invocation-scoped 稳定 `modelCallId`。Commentary、reasoning summary、其触发的 tool lifecycle 与该 round trip 的 usage 共享此 id；tool result 后的新 model output 开启下一个 id。这些 id 不包含 prompt 或 provider payload。
-- `item/agentMessage/delta` 没有权威 phase。Adapter 立即携带 `itemId` 流式发送并保持未分类，直到匹配的 agent-message `item/completed` 提供 `phase=commentary|final_answer`；随后发送带同一 `itemId`、`modelCallId` 和 phase 的 `harness.output.item.completed`，且不重复 message 文本。Consumer 原地重新分类既有 item，不得根据自然语言猜测 phase。
+- `item/agentMessage/delta` 与 `item/reasoning/summaryTextDelta` 携带 native `itemId`；reasoning 还保留 `summaryIndex`。Adapter 将其作为安全关联事实透传，并为每次真实模型 round trip 分配 invocation-scoped 稳定 `modelCallId`。Commentary、reasoning summary、其触发的 tool lifecycle 与该 round trip 的 usage 共享此 id。一个包含 tool 的 call 已计量且所有 tool 已终态后，下一个 model output **或直接到来的下一个 tool** 都必须开启新 id，因此 tool-only model call 不能并入上一轮。这些 id 不包含 prompt 或 provider payload。
+- `item/agentMessage/delta` 没有权威 phase。Adapter 立即携带 `itemId` 流式发送并保持未分类，直到匹配的 agent-message `item/completed` 提供 `phase=commentary|final_answer`；随后发送带同一 `itemId`、`modelCallId` 和 phase 的 `harness.output.item.completed`，且不重复 message 文本。Consumer 原地重新分类既有 item，不得根据自然语言猜测 phase。若同一 model call 中未分类 message 后开始 tool，该因果边界可确定此前 message 不可能是 turn final answer，必须将其归类为 commentary，使它可作为安全进度标题且不能拼入 final response。
 - Reasoning `item/completed` 同样发送带 `itemId` 与 `modelCallId` 的 `harness.output.item.completed` fact，但不复制 summary 或 raw reasoning 内容。Consumer 使用该 lifecycle 边界冻结有界首屏 reasoning preview，同时只在显式详情中保留已经流式接收的 canonical summary 文本。
 - Codex 0.152.1 的 `thread/tokenUsage/updated.tokenUsage` 是含 `last`、`total` 与可选 `modelContextWindow` 的对象，不是扁平 token counter。Adapter 发送 `scope=model_call` 的 `haas.usage.updated`：`last` 映射为 `usage`，`total` 映射为 `cumulativeUsage`，并关联当前 `modelCallId`。保留 `inputTokens`、`outputTokens`、`totalTokens`，将 `cachedInputTokens` 映射为 `cacheReadTokens`、`cacheWriteInputTokens` 映射为 `cacheWriteTokens`，并保留 `reasoningOutputTokens`。Native 未提供的 counter 保持缺失，不补零；`total` 只是 snapshot，不能再次与 model-call 数值相加。
 - `cacheReadTokens` 是 `inputTokens` 中的缓存子集，`reasoningOutputTokens` 是 `outputTokens` 中的 reasoning 子集；计算总消耗时二者都不能再次相加。Usage notification 只为 model call 计量，不单独终结 stage：关联该调用的 tool 可能随后才开始或结束。只有所有关联 tool 进入终态，或后续 model output 开启下一次 model call 时，该 stage 才完成。
@@ -211,7 +219,8 @@ Turn 规则：
   in-memory execution-evidence store。Sink 在 8 MiB（8,388,608 UTF-8 bytes）以内完整保留
   command output；中间 accumulator 不得使用更小上限。stdio frame 上限另行计入 JSON 开销。
   Public event 只携带安全动作摘要、有界脱敏 preview
-  和 opaque evidence ref。Codex 0.152.1 将 turn command 的 stdout/stderr 合并在
+  和 opaque evidence ref。脱敏前，command output 中属于该命令已授权 working directory
+  的部分转换为语义 `workspace/` 前缀；其他绝对 host path 继续脱敏。Codex 0.152.1 将 turn command 的 stdout/stderr 合并在
   `aggregatedOutput`，且 `item/commandExecution/outputDelta` 没有 stream discriminator；
   adapter 必须如实标为“命令输出”，不得猜测拆成 stdout/stderr。
   Codex 可能用 argv 数组，也可能用 `/bin/zsh -lc \"<payload>\"` 这类序列化命令

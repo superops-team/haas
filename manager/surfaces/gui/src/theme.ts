@@ -19,9 +19,16 @@ export function getThemePref(): ThemePref {
   }
 }
 
+let themeFrame = 0;
 function apply(pref: ThemePref) {
   const dark = pref === "dark" || (pref === "auto" && !!media?.matches);
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  const root = document.documentElement;
+  root.dataset.themeChanging = "";
+  root.dataset.theme = dark ? "dark" : "light";
+  cancelAnimationFrame(themeFrame);
+  themeFrame = requestAnimationFrame(() => {
+    themeFrame = requestAnimationFrame(() => { delete root.dataset.themeChanging; });
+  });
 }
 
 export function setThemePref(pref: ThemePref) {

@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-14
+Last reviewed: 2026-09-30
 Change ID: unified-runtime-approval-policy
 Related specs: [Harness Adapter](../harness-adapter/README.md), [Session Runtime](../session-runtime/README.md), [Event Log & SSE](../event-log-sse/README.md), [Model Proxy](../model-proxy/README.md)
 Pinned Codex CLI: `0.152.1`
@@ -25,6 +25,16 @@ capabilities outlive individual invocation terminals and are revoked on session
 delete/revoke or runtime shutdown.
 
 The local proxy integration uses a conservative Responses tool surface: native multi-agent namespaces and provider-hosted web search are disabled, while `model_reasoning_summary=auto` requests only the provider-authored safe reasoning summary needed by the process timeline. Raw reasoning remains private and is never projected. Responses support alone does not imply support for other extensions. Ordinary function tools remain available under the existing sandbox/policy; the proxy must not silently drop tools or rewrite native tool calls. The adapter applies this configuration on both start and resume. Real Codex wire tests reject namespace/web-search declarations, verify the safe-summary request and ordinary function tools, and real-provider smoke must complete through this path.
+
+Every turn also carries stable presentation guidance: safe reasoning summaries follow the language
+of the latest user message, use concise intent/progress wording, and do not echo literal tool names,
+commands, paths, or transport labels. This is an adapter instruction, not GUI translation or
+content-based event classification, and it never requests raw chain-of-thought.
+
+The adapter marks only the built-in `manager-cowork-recall` server's tools with
+`default_tools_approval_mode="approve"`. That server is already restricted to loopback, fixed
+headers, one read-only tool, and a session-scoped capability. Other MCP servers retain their own
+approval mode and can never receive this exemption.
 
 ## 2. Sources and Rationale
 
@@ -206,8 +216,8 @@ Turn rules:
 Process-event rules:
 
 - `item/reasoning/summaryTextDelta` may map to redacted `harness.reasoning.delta`. Raw `item/reasoning/textDelta` stays private and MUST NOT be persisted or projected. If no safe summary exists, Manager shows generic typed progress derived from tool/lifecycle facts rather than reconstructing chain-of-thought.
-- `item/agentMessage/delta` and `item/reasoning/summaryTextDelta` carry their native `itemId`; reasoning additionally preserves `summaryIndex`. The adapter copies these as safe correlation facts and assigns a stable invocation-scoped `modelCallId` to each actual model round trip. Commentary, reasoning summary, triggered tool lifecycle and that round trip's usage share the id; model output after a tool result opens the next id. The ids contain no prompt or provider payload.
-- `item/agentMessage/delta` has no authoritative phase. It is streamed immediately with `itemId` and remains unclassified until the matching agent-message `item/completed` supplies `phase=commentary|final_answer`. The adapter then emits `harness.output.item.completed` with the same `itemId`, `modelCallId`, and phase, without repeating message text. Consumers reclassify the existing item in place and MUST NOT infer phase from prose.
+- `item/agentMessage/delta` and `item/reasoning/summaryTextDelta` carry their native `itemId`; reasoning additionally preserves `summaryIndex`. The adapter copies these as safe correlation facts and assigns a stable invocation-scoped `modelCallId` to each actual model round trip. Commentary, reasoning summary, triggered tool lifecycle and that round trip's usage share the id. After a tool-bearing call is metered and all its tools are terminal, the next model output **or next directly emitted tool** opens the next id; tool-only model calls therefore cannot collapse into the previous round. The ids contain no prompt or provider payload.
+- `item/agentMessage/delta` has no authoritative phase. It is streamed immediately with `itemId` and remains unclassified until the matching agent-message `item/completed` supplies `phase=commentary|final_answer`. The adapter then emits `harness.output.item.completed` with the same `itemId`, `modelCallId`, and phase, without repeating message text. Consumers reclassify the existing item in place and MUST NOT infer phase from prose. If a tool starts after an unclassified message in the same model call, that causal boundary classifies the preceding message as commentary because it cannot be the turn's final answer; it becomes eligible as the safe progress title without being appended to the final response.
 - A reasoning `item/completed` emits the same `harness.output.item.completed` fact with `itemId` and `modelCallId`, without copying summary or raw reasoning content. Consumers use that lifecycle boundary to freeze the bounded first-screen reasoning preview while retaining already streamed canonical summary text for explicit detail.
 - Codex 0.152.1 `thread/tokenUsage/updated.tokenUsage` is an object with `last`, `total`, and optional `modelContextWindow`; it is not a flat token counter. The adapter emits `haas.usage.updated` with `scope=model_call`, maps `last` to `usage`, maps `total` to `cumulativeUsage`, and correlates the event to the current `modelCallId`. It preserves `inputTokens`, `outputTokens`, `totalTokens`, `cachedInputTokens` as `cacheReadTokens`, `cacheWriteInputTokens` as `cacheWriteTokens`, and `reasoningOutputTokens`. Missing native counters remain absent rather than zero-filled. `total` is a snapshot and MUST NOT be added to the model-call values.
 - `cacheReadTokens` is the cached subset of `inputTokens`, and `reasoningOutputTokens` is the reasoning subset of `outputTokens`; neither is added again when computing total consumption. A usage notification meters the model call but does not by itself complete its stage: tools correlated to that call may start or finish afterward. The stage completes only after its correlated tools are terminal or when later model output opens the next model call.
@@ -218,6 +228,8 @@ Process-event rules:
   command output complete through 8 MiB (8,388,608 UTF-8 bytes); it MUST NOT apply a smaller
   intermediate accumulator limit. The stdio frame bound separately includes JSON overhead. Public events
   carry only a safe action summary, bounded redacted preview and opaque evidence reference.
+  Before redaction, occurrences of the command's authorized working directory in output are
+  converted to the semantic `workspace/` prefix; other absolute host paths remain redacted.
   Codex 0.152.1 combines turn-command stdout and stderr in `aggregatedOutput` and its
   `item/commandExecution/outputDelta` has no stream discriminator; the adapter labels this
   honestly as combined command output and MUST NOT guess a stdout/stderr split.

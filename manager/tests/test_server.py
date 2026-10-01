@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from coworker.delegation import BINDING_KEY as HAAS_DELEGATION_BINDING_KEY
 from coworker.delegation import HaasDelegationError
@@ -34,6 +36,18 @@ def _text(text):
     return AssistantTurn(text=text, finish_reason="stop")
 
 
+def _user_message(text, **fields):
+    suffix = uuid.uuid4().hex
+    return {
+        "type": "user_message",
+        "clientCommandId": f"cmd-{suffix}",
+        "idempotencyKey": f"idem-{suffix}",
+        "delivery": "start_now",
+        "text": text,
+        **fields,
+    }
+
+
 def _tool(name, args, call_id="call_1"):
     return AssistantTurn(tool_calls=[ToolCall(id=call_id, name=name, arguments=args)])
 
@@ -44,6 +58,30 @@ def _client(tmp_path, turns):
 
 
 # -- REST -----------------------------------------------------------------------
+
+
+def test_local_command_display_matches_live_and_history_without_mutating_provider(tmp_path):
+    client = _client(tmp_path, [_tool("run_shell", {"command": "printf synthetic"}, "cmd-display"), _text("done")])
+    with client.websocket_connect("/ws/session/display-check?agent=cowork&mode=bypass") as ws:
+        ws.receive_json()
+        ws.send_json(_user_message("check command display"))
+        proposed = None
+        while True:
+            event = ws.receive_json()
+            if event["type"] == "permission_required":
+                ws.send_json({"type": "approval", "decision": "allow"})
+            if event["type"] == "tool_proposed":
+                proposed = event["data"]
+            if event["type"] == "turn_done":
+                break
+    assert proposed is not None
+    assert proposed["toolCallId"] == "cmd-display"
+    assert proposed["commandPreview"] == "printf synthetic"
+    messages = client.get("/v1/sessions/display-check/messages").json()["messages"]
+    call = next(call for message in messages for call in message.get("tool_calls", []))
+    assert call["_managerDisplay"] == {"activityKind": "command", "commandPreview": "printf synthetic"}
+    engine = client.app.state.manager._engines["display-check"]
+    assert all("_managerDisplay" not in call for message in engine.messages for call in message.get("tool_calls", []))
 
 
 def test_chat_completions_openai_shape(tmp_path):
@@ -72,10 +110,7 @@ def test_agents_and_memory_rest(tmp_path):
 
     added = client.post("/v1/memory", json={"content": "prefer pathlib"}).json()
     assert added["content"] == "prefer pathlib"
-    assert any(
-        m["content"] == "prefer pathlib"
-        for m in client.get("/v1/memory").json()["memory"]
-    )
+    assert any(m["content"] == "prefer pathlib" for m in client.get("/v1/memory").json()["memory"])
 
 
 def test_disable_persona_archives_its_sessions(tmp_path):
@@ -99,9 +134,7 @@ def test_disable_persona_archives_its_sessions(tmp_path):
     mk("chat-a", "code")
     mk("chat-b", "code")
     mk("chat-old", "code")
-    store.set_flags(
-        "chat-old", archived=True
-    )  # already archived — must not be re-counted
+    store.set_flags("chat-old", archived=True)  # already archived — must not be re-counted
     mk("cowork-a", "cowork")
     mk("__run__r1", "code")  # internal automation thread — never touched
 
@@ -125,18 +158,14 @@ def test_disable_persona_archives_its_sessions(tmp_path):
 
 def test_connector_tool_settings_and_audit_rest(tmp_path):
     client = _client(tmp_path, [])
-    connectors = {
-        c["name"]: c for c in client.get("/v1/connectors").json()["connectors"]
-    }
+    connectors = {c["name"]: c for c in client.get("/v1/connectors").json()["connectors"]}
     assert any(t["name"] == "browser_open_url" for t in connectors["browser"]["tools"])
 
     res = client.patch(
         "/v1/connectors/browser/tools", json={"enabled": {"browser_open_url": False}}
     ).json()
     assert res["ok"] is True
-    connectors = {
-        c["name"]: c for c in client.get("/v1/connectors").json()["connectors"]
-    }
+    connectors = {c["name"]: c for c in client.get("/v1/connectors").json()["connectors"]}
     browser_tools = {t["name"]: t for t in connectors["browser"]["tools"]}
     assert browser_tools["browser_open_url"]["enabled"] is False
 
@@ -164,16 +193,12 @@ def test_artifacts_list_and_read_previewable_files(tmp_path):
     assert ".secret.md" not in by_path
     assert "node_modules/noise.md" not in by_path
 
-    md = client.get(
-        "/v1/sessions/unknown/artifacts/read", params={"path": "brief.md"}
-    ).json()
+    md = client.get("/v1/sessions/unknown/artifacts/read", params={"path": "brief.md"}).json()
     assert md["ok"] is True
     assert md["kind"] == "markdown"
     assert md["content"].startswith("# Brief")
 
-    html = client.get(
-        "/v1/sessions/unknown/artifacts/read", params={"path": "page.html"}
-    ).json()
+    html = client.get("/v1/sessions/unknown/artifacts/read", params={"path": "page.html"}).json()
     assert html["ok"] is True
     assert html["kind"] == "html"
     assert "<h1>Preview</h1>" in html["content"]
@@ -199,9 +224,7 @@ def test_artifact_read_folder_returns_listing(tmp_path):
     assert res["entries"][2]["size"] > 0
 
     # A genuinely missing path keeps a friendly, non-jargon error.
-    missing = client.get(
-        "/v1/sessions/unknown/artifacts/read", params={"path": "nope.md"}
-    ).json()
+    missing = client.get("/v1/sessions/unknown/artifacts/read", params={"path": "nope.md"}).json()
     assert missing["ok"] is False
     assert "moved or deleted" in missing["error"]
 
@@ -347,18 +370,14 @@ def test_haas_bound_artifact_read_and_ambiguous_basename(tmp_path):
     manager, haas = _haas_bound_manager(tmp_path)
     client = TestClient(create_app(manager))
 
-    read = client.get(
-        "/v1/sessions/s1/artifacts/read", params={"path": "output/report.md"}
-    ).json()
+    read = client.get("/v1/sessions/s1/artifacts/read", params={"path": "output/report.md"}).json()
     assert read["ok"] is True
     assert read["source"] == "haas"
     assert read["kind"] == "markdown"
     assert read["content"] == "# Report"
     assert haas.downloaded == ["file_report"]
 
-    ambiguous = client.get(
-        "/v1/sessions/s1/artifacts/read", params={"path": "report.md"}
-    ).json()
+    ambiguous = client.get("/v1/sessions/s1/artifacts/read", params={"path": "report.md"}).json()
     assert ambiguous["ok"] is False
     assert ambiguous["code"] == "artifact_ambiguous"
 
@@ -394,9 +413,7 @@ def test_haas_bound_artifact_download_proxies_bytes_with_safe_headers(tmp_path):
     assert response.status_code == 200
     assert response.content == b"# Report"
     assert response.headers["content-type"].startswith("text/markdown")
-    assert response.headers["content-disposition"] == (
-        "attachment; filename*=UTF-8''report.md"
-    )
+    assert response.headers["content-disposition"] == ("attachment; filename*=UTF-8''report.md")
     assert response.headers["x-content-type-options"] == "nosniff"
     assert haas.downloaded == ["file_report"]
 
@@ -405,9 +422,7 @@ def test_haas_bound_artifact_download_rejects_ambiguous_basename(tmp_path):
     manager, haas = _haas_bound_manager(tmp_path)
     client = TestClient(create_app(manager))
 
-    response = client.get(
-        "/v1/sessions/s1/artifacts/download", params={"path": "report.md"}
-    )
+    response = client.get("/v1/sessions/s1/artifacts/download", params={"path": "report.md"})
 
     assert response.status_code == 409
     assert response.json()["code"] == "artifact_ambiguous"
@@ -428,9 +443,7 @@ def test_haas_bound_artifact_read_does_not_fallback_to_local_workspace(tmp_path)
     )
     client = TestClient(create_app(manager))
 
-    read = client.get(
-        "/v1/sessions/s1/artifacts/read", params={"path": "output/report.md"}
-    ).json()
+    read = client.get("/v1/sessions/s1/artifacts/read", params={"path": "output/report.md"}).json()
 
     assert read["ok"] is False
     assert read["source"] == "haas"
@@ -542,9 +555,7 @@ def test_sessions_hide_scheduled_internal_runs(tmp_path):
         )
     )
     client = TestClient(create_app(manager))
-    session_ids = {
-        s["session_id"] for s in client.get("/v1/sessions").json()["sessions"]
-    }
+    session_ids = {s["session_id"] for s in client.get("/v1/sessions").json()["sessions"]}
     assert "normal" in session_ids
     assert "__run__daily-news-1" not in session_ids
     assert "__task__daily-news" not in session_ids
@@ -565,15 +576,10 @@ def test_sessions_can_be_renamed_and_deleted(tmp_path):
     )
     client = TestClient(create_app(manager))
 
-    renamed = client.patch(
-        "/v1/sessions/rename-me", json={"title": "  Better title  "}
-    ).json()
+    renamed = client.patch("/v1/sessions/rename-me", json={"title": "  Better title  "}).json()
     assert renamed["ok"] is True
     sessions = client.get("/v1/sessions").json()["sessions"]
-    assert any(
-        s["session_id"] == "rename-me" and s["title"] == "Better title"
-        for s in sessions
-    )
+    assert any(s["session_id"] == "rename-me" and s["title"] == "Better title" for s in sessions)
 
     deleted = client.delete("/v1/sessions/rename-me").json()
     assert deleted["ok"] is True
@@ -597,25 +603,16 @@ def test_sessions_can_be_pinned_and_archived(tmp_path):
         )
     client = TestClient(create_app(manager))
 
-    assert (
-        client.patch("/v1/sessions/older", json={"pinned": True}).json()["ok"] is True
-    )
+    assert client.patch("/v1/sessions/older", json={"pinned": True}).json()["ok"] is True
     sessions = client.get("/v1/sessions").json()["sessions"]
     assert sessions[0]["session_id"] == "older" and sessions[0]["pinned"] is True
 
-    assert (
-        client.patch("/v1/sessions/newer", json={"archived": True}).json()["ok"] is True
-    )
+    assert client.patch("/v1/sessions/newer", json={"archived": True}).json()["ok"] is True
     by_id = {s["session_id"]: s for s in client.get("/v1/sessions").json()["sessions"]}
     assert by_id["newer"]["archived"] is True
 
-    assert (
-        client.patch("/v1/sessions/older", json={"pinned": False}).json()["ok"] is True
-    )
-    assert (
-        client.patch("/v1/sessions/newer", json={"archived": False}).json()["ok"]
-        is True
-    )
+    assert client.patch("/v1/sessions/older", json={"pinned": False}).json()["ok"] is True
+    assert client.patch("/v1/sessions/newer", json={"archived": False}).json()["ok"] is True
     by_id = {s["session_id"]: s for s in client.get("/v1/sessions").json()["sessions"]}
     assert by_id["older"]["pinned"] is False and by_id["newer"]["archived"] is False
 
@@ -639,43 +636,662 @@ def test_ws_simple_turn(tmp_path):
     client = _client(tmp_path, [_text("done thinking")])
     with client.websocket_connect("/ws/session/s1") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hello"})
+        ws.send_json(_user_message("hello"))
         types = _drain(ws)
         assert "assistant_message" in types
         assert "turn_end" in types
 
 
+def test_ws_requires_acknowledged_conversation_protocol(tmp_path):
+    client = _client(tmp_path, [_text("must not run")])
+    with client.websocket_connect("/ws/session/upgrade-required") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "user_message", "text": "legacy request"})
+        event = ws.receive_json()
+
+    assert event == {
+        "type": "client_upgrade_required",
+        "data": {
+            "code": "client_upgrade_required",
+            "safeMessage": "This OpenHarness client is out of date. Reload to continue.",
+            "recoveryAction": "reload",
+        },
+    }
+    assert not any(
+        message.get("role") == "user"
+        for message in client.app.state.manager.session_messages("upgrade-required")
+    )
+
+
+def test_ws_acknowledges_v2_user_message_before_starting_turn(tmp_path):
+    client = _client(tmp_path, [_text("done thinking")])
+    with client.websocket_connect("/ws/session/acked") as ws:
+        ready = ws.receive_json()
+        assert ready["type"] == "ready"
+        assert ready["data"]["conversationProtocolVersion"] == 2
+
+        ws.send_json(
+            {
+                "type": "user_message",
+                "clientCommandId": "cmd_test_1",
+                "idempotencyKey": "idem_test_1",
+                "delivery": "start_now",
+                "text": "hello",
+            }
+        )
+
+        ack = ws.receive_json()
+        assert ack["type"] == "command_ack"
+        assert ack["data"] == {
+            "clientCommandId": "cmd_test_1",
+            "status": "accepted",
+            "disposition": "running",
+            "turnId": ack["data"]["turnId"],
+            "queueItemId": None,
+            "outcomeRef": None,
+            "error": None,
+        }
+        assert ack["data"]["turnId"].startswith("turn_")
+        events = []
+        while True:
+            event = ws.receive_json()
+            events.append(event)
+            if event["type"] == "turn_done":
+                break
+        turn_start = next(event for event in events if event["type"] == "turn_start")
+        assert turn_start["data"]["turnId"] == ack["data"]["turnId"]
+
+
+def test_ws_duplicate_idempotency_key_reuses_original_turn_without_rerun(tmp_path):
+    client = _client(tmp_path, [_text("only once")])
+    with client.websocket_connect("/ws/session/deduplicated") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        first = {
+            "type": "user_message",
+            "clientCommandId": "cmd_original",
+            "idempotencyKey": "idem_shared",
+            "delivery": "start_now",
+            "text": "run once",
+        }
+        ws.send_json(first)
+        first_ack = ws.receive_json()
+        assert first_ack["type"] == "command_ack"
+        assert "turn_done" in _drain(ws)
+
+        ws.send_json(
+            {
+                **first,
+                "clientCommandId": "cmd_retry",
+                "text": "must not replace original",
+            }
+        )
+        duplicate = ws.receive_json()
+
+        assert duplicate["type"] == "command_ack"
+        assert duplicate["data"]["clientCommandId"] == "cmd_retry"
+        assert duplicate["data"]["status"] == "duplicate"
+        assert duplicate["data"]["turnId"] == first_ack["data"]["turnId"]
+        engine = client.app.state.manager._engines["deduplicated"]
+        user_messages = [message for message in engine.messages if message.get("role") == "user"]
+        assert [message["content"] for message in user_messages] == ["run once"]
+
+
+def test_ws_persists_typed_context_without_sending_sidecar_to_provider(tmp_path):
+    client = _client(tmp_path, [_text("done")])
+    with client.websocket_connect("/ws/session/context-sidecar") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json(
+            _user_message(
+                "compare this",
+                contextRefs=[
+                    {
+                        "kind": "session",
+                        "id": "prior-session",
+                        "label": "Earlier investigation",
+                    }
+                ],
+            )
+        )
+        _drain(ws)
+
+    engine = client.app.state.manager._engines["context-sidecar"]
+    user = next(message for message in engine.messages if message.get("role") == "user")
+    assert user["_managerContext"] == [
+        {
+            "kind": "session",
+            "id": "prior-session",
+            "label": "Earlier investigation",
+        }
+    ]
+    assert "_managerContext" not in engine._outbound_messages()[-2]
+
+
+def test_ws_rejects_malformed_context_references(tmp_path):
+    client = _client(tmp_path, [])
+    with client.websocket_connect("/ws/session/bad-context") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json(_user_message("inspect", contextRefs=[{"kind": "secret"}]))
+        rejected = ws.receive_json()
+
+    assert rejected["type"] == "command_ack"
+    assert rejected["data"]["status"] == "rejected"
+    assert rejected["data"]["error"]["code"] == "invalid_context"
+
+
+def test_command_receipt_readback_reconciles_a_lost_ack(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([]))
+    receipt = manager.conversation_commands.accept(
+        session_id="reconcile",
+        client_command_id="cmd-original",
+        idempotency_key="idem-lost-ack",
+        delivery="start_now",
+        payload={"text": "sensitive input is never returned"},
+        busy=False,
+    )
+    client = TestClient(create_app(manager))
+
+    response = client.get("/v1/sessions/reconcile/conversation-commands/idem-lost-ack")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "clientCommandId": "cmd-original",
+        "status": "duplicate",
+        "disposition": "running",
+        "turnId": receipt.turn_id,
+        "queueItemId": None,
+        "outcomeRef": None,
+        "error": None,
+    }
+    assert "sensitive input" not in response.text
+
+
+def test_manager_restart_pauses_an_accepted_command_without_a_turn_checkpoint(tmp_path):
+    first = SessionManager(data_dir=tmp_path, provider=ScriptedProvider([]))
+    accepted = first.conversation_commands.accept(
+        session_id="restart-before-checkpoint",
+        client_command_id="cmd-restart",
+        idempotency_key="idem-restart",
+        delivery="start_now",
+        payload={"text": "synthetic recovery input", "attachments": []},
+        busy=False,
+    )
+    assert accepted.turn_id is not None
+    first.conversation_commands.close()
+
+    restarted = SessionManager(data_dir=tmp_path, provider=ScriptedProvider([]))
+    receipt = restarted.conversation_commands.find_by_idempotency(
+        "restart-before-checkpoint", "idem-restart"
+    )
+    assert receipt is not None
+    assert receipt.disposition == "queued"
+    assert receipt.turn_id is None
+    assert restarted.conversation_commands.queue_status("restart-before-checkpoint") == {
+        "paused": True,
+        "reason": "restart_uncertain",
+    }
+    assert restarted.conversation_commands.claim_next("restart-before-checkpoint") is None
+
+
+def test_manager_restart_repairs_checkpoint_marker_from_persisted_turn(tmp_path):
+    first = SessionManager(data_dir=tmp_path, provider=ScriptedProvider([]))
+    accepted = first.conversation_commands.accept(
+        session_id="saved-before-marker",
+        client_command_id="cmd-saved",
+        idempotency_key="idem-saved",
+        delivery="start_now",
+        payload={"text": "already saved"},
+        busy=False,
+    )
+    assert accepted.turn_id is not None
+    first.session_store.save(
+        SessionRecord(
+            session_id="saved-before-marker",
+            workspace=str(tmp_path),
+            model="synthetic",
+            mode="interactive",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "already saved",
+                    "_managerTurnId": accepted.turn_id,
+                    "_managerRowId": "row-saved",
+                }
+            ],
+        )
+    )
+    first.conversation_commands.close()
+
+    restarted = SessionManager(data_dir=tmp_path, provider=ScriptedProvider([]))
+    receipt = restarted.conversation_commands.find_by_idempotency(
+        "saved-before-marker", "idem-saved"
+    )
+    assert receipt is not None
+    assert receipt.disposition == "running"
+    assert receipt.turn_id == accepted.turn_id
+    assert restarted.conversation_commands.uncheckpointed_running() == []
+    assert restarted.conversation_commands.queue_snapshot("saved-before-marker") == []
+
+
+def test_turn_start_save_marks_the_command_checkpoint_before_terminal(tmp_path, monkeypatch):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([_text("done")]))
+    monkeypatch.setattr(manager, "_maybe_autotitle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        manager.conversation_commands,
+        "mark_terminal",
+        lambda *_args, **_kwargs: False,
+    )
+    client = TestClient(create_app(manager))
+    command = _user_message("persist this synthetic turn")
+    with client.websocket_connect("/ws/session/checkpoint-marker") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json(command)
+        event_types = _drain(ws)
+
+    assert "command_ack" in event_types
+    receipt = manager.conversation_commands.find_by_idempotency(
+        "checkpoint-marker", command["idempotencyKey"]
+    )
+    assert receipt is not None
+    persisted = manager.session_store.load("checkpoint-marker")
+    assert persisted is not None
+    assert any(
+        message.get("_managerTurnId") == receipt.turn_id
+        for message in persisted.messages
+    )
+    assert manager.conversation_commands.uncheckpointed_running() == []
+    assert receipt.disposition == "running"
+
+
+def test_ws_busy_v2_message_queues_and_drains_after_success(tmp_path):
+    import threading
+    import time
+
+    class SlowTwoTurnProvider(ProviderClient):
+        def __init__(self):
+            self.calls = 0
+            self.models = []
+            self.first_started = threading.Event()
+
+        def complete(self, *, model, messages, tools=None, **settings):
+            if messages and "title chat sessions" in str(messages[0].get("content", "")):
+                return _text("A Title")
+            self.calls += 1
+            self.models.append(model)
+            if self.calls == 1:
+                self.first_started.set()
+                time.sleep(0.08)
+            return _text(f"done {self.calls}")
+
+        def capabilities(self, model):
+            return ModelCapabilities()
+
+    provider = SlowTwoTurnProvider()
+    manager = SessionManager(workspace=tmp_path, provider=provider)
+    client = TestClient(create_app(manager))
+    with client.websocket_connect("/ws/session/queued") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json(
+            {
+                "type": "user_message",
+                "clientCommandId": "cmd-first",
+                "idempotencyKey": "idem-first",
+                "delivery": "start_now",
+                "text": "first",
+                "model": "openai:model-a",
+            }
+        )
+        assert ws.receive_json()["data"]["disposition"] == "running"
+        ws.send_json(
+            {
+                "type": "user_message",
+                "clientCommandId": "cmd-second",
+                "idempotencyKey": "idem-second",
+                "delivery": "enqueue",
+                "text": "second",
+                "model": "openai:model-b",
+            }
+        )
+
+        events = []
+        while sum(event["type"] == "turn_done" for event in events) < 2:
+            events.append(ws.receive_json())
+
+    queued_ack = next(
+        event
+        for event in events
+        if event["type"] == "command_ack" and event["data"]["clientCommandId"] == "cmd-second"
+    )
+    assert queued_ack["data"]["disposition"] == "queued"
+    assert provider.calls == 2
+    assert provider.models == ["openai:model-a", "openai:model-b"]
+    assert manager.conversation_commands.queue_snapshot("queued") == []
+
+
+def test_ws_restart_paused_queue_requires_explicit_resume(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([_text("resumed")]))
+    manager.conversation_commands.accept(
+        session_id="queue-resume",
+        client_command_id="cmd-resume",
+        idempotency_key="idem-resume",
+        delivery="enqueue",
+        payload={"text": "resume me", "attachments": []},
+        busy=True,
+    )
+    manager.conversation_commands.pause_queue("queue-resume", "restart_uncertain")
+    client = TestClient(create_app(manager))
+
+    with client.websocket_connect("/ws/session/queue-resume") as ws:
+        ready = ws.receive_json()
+        assert ready["data"]["queuePaused"] is True
+        ws.send_json({"type": "queue_resume", "idempotencyKey": "resume-mutation"})
+        events = []
+        while not any(event["type"] == "turn_done" for event in events):
+            events.append(ws.receive_json())
+
+    assert any(
+        event["type"] == "queue_updated" and event["data"].get("paused") is False
+        for event in events
+    )
+    assert manager.conversation_commands.queue_snapshot("queue-resume") == []
+
+
+def test_ws_send_now_explicitly_runs_selected_item_from_a_paused_queue(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([_text("sent")]))
+    receipt = manager.conversation_commands.accept(
+        session_id="queue-send-now",
+        client_command_id="cmd-send-now",
+        idempotency_key="idem-send-now",
+        delivery="enqueue",
+        payload={"text": "run selected", "attachments": []},
+        busy=True,
+    )
+    assert receipt.queue_item_id is not None
+    manager.conversation_commands.pause_queue("queue-send-now", "restart_uncertain")
+    client = TestClient(create_app(manager))
+
+    with client.websocket_connect("/ws/session/queue-send-now") as ws:
+        ready = ws.receive_json()
+        assert ready["data"]["queuePaused"] is True
+        ws.send_json(
+            {
+                "type": "queue_send_now",
+                "queueItemId": receipt.queue_item_id,
+                "expectedRevision": 1,
+                "idempotencyKey": "send-now-from-pause",
+            }
+        )
+        events = []
+        while not any(event["type"] == "turn_done" for event in events):
+            events.append(ws.receive_json())
+
+    assert any(event["type"] == "turn_start" for event in events)
+    assert manager.conversation_commands.queue_snapshot("queue-send-now") == []
+    assert manager.conversation_commands.queue_status("queue-send-now")["paused"] is False
+
+
+def test_ws_restores_queued_message_for_edit(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([]))
+    receipt = manager.conversation_commands.accept(
+        session_id="queue-edit",
+        client_command_id="cmd-edit",
+        idempotency_key="idem-edit",
+        delivery="enqueue",
+        payload={"text": "edit this", "attachments": []},
+        busy=True,
+    )
+    assert receipt.queue_item_id is not None
+    client = TestClient(create_app(manager))
+
+    with client.websocket_connect("/ws/session/queue-edit") as ws:
+        ready = ws.receive_json()
+        assert ready["data"]["queue"][0]["safePreview"] == "edit this"
+        ws.send_json(
+            {
+                "type": "queue_edit",
+                "queueItemId": receipt.queue_item_id,
+                "expectedRevision": 1,
+                "idempotencyKey": "queue-edit-mutation",
+            }
+        )
+        restored = ws.receive_json()
+        assert restored == {
+            "type": "queue_restored",
+            "data": {
+                "payload": {"text": "edit this", "attachments": []},
+                "mutationIdempotencyKey": "queue-edit-mutation",
+            },
+        }
+        updated = ws.receive_json()
+        assert updated == {
+            "type": "queue_updated",
+            "data": {"items": [], "paused": False},
+        }
+
+
+def test_ws_replays_committed_queue_edit_after_the_first_reply_was_lost(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([]))
+    receipt = manager.conversation_commands.accept(
+        session_id="queue-edit-replay",
+        client_command_id="cmd-edit-replay",
+        idempotency_key="idem-edit-replay",
+        delivery="enqueue",
+        payload={"text": "recover this exact text", "attachments": []},
+        busy=True,
+    )
+    assert receipt.queue_item_id is not None
+    payload = manager.conversation_commands.restore_queue_item(
+        "queue-edit-replay",
+        receipt.queue_item_id,
+        expected_revision=1,
+        idempotency_key="queue-edit-replay-mutation",
+    )
+    assert payload["text"] == "recover this exact text"
+    client = TestClient(create_app(manager))
+
+    with client.websocket_connect("/ws/session/queue-edit-replay") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json(
+            {
+                "type": "queue_edit",
+                "queueItemId": receipt.queue_item_id,
+                "expectedRevision": 1,
+                "idempotencyKey": "queue-edit-replay-mutation",
+            }
+        )
+        restored = ws.receive_json()
+
+    assert restored == {
+        "type": "queue_restored",
+        "data": {
+            "payload": {"text": "recover this exact text", "attachments": []},
+            "mutationIdempotencyKey": "queue-edit-replay-mutation",
+        },
+    }
+
+
+def test_ws_moves_queued_message_with_revision_and_idempotency(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([]))
+    first = manager.conversation_commands.accept(
+        session_id="queue-move",
+        client_command_id="cmd-first",
+        idempotency_key="idem-first",
+        delivery="enqueue",
+        payload={"text": "first"},
+        busy=True,
+    )
+    second = manager.conversation_commands.accept(
+        session_id="queue-move",
+        client_command_id="cmd-second",
+        idempotency_key="idem-second",
+        delivery="enqueue",
+        payload={"text": "second"},
+        busy=True,
+    )
+    assert first.queue_item_id and second.queue_item_id
+    client = TestClient(create_app(manager))
+
+    with client.websocket_connect("/ws/session/queue-move") as ws:
+        ready = ws.receive_json()
+        assert [item["clientCommandId"] for item in ready["data"]["queue"]] == [
+            "cmd-first",
+            "cmd-second",
+        ]
+        move = {
+            "type": "queue_move",
+            "queueItemId": second.queue_item_id,
+            "expectedRevision": 1,
+            "targetPosition": 1,
+            "idempotencyKey": "queue-move-mutation",
+        }
+        ws.send_json(move)
+        updated = ws.receive_json()
+        assert [item["clientCommandId"] for item in updated["data"]["items"]] == [
+            "cmd-second",
+            "cmd-first",
+        ]
+
+        ws.send_json(move)
+        duplicate = ws.receive_json()
+        assert [item["clientCommandId"] for item in duplicate["data"]["items"]] == [
+            "cmd-second",
+            "cmd-first",
+        ]
+
+
+def test_ws_send_now_stop_failure_keeps_item_queued_and_drain_paused(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    class SlowProvider(ProviderClient):
+        def __init__(self):
+            self.started = threading.Event()
+
+        def complete(self, *, model, messages, tools=None, **settings):
+            if messages and "title chat sessions" in str(messages[0].get("content", "")):
+                return _text("A Title")
+            self.started.set()
+            time.sleep(0.25)
+            return _text("done")
+
+        def capabilities(self, model):
+            return ModelCapabilities()
+
+    manager = SessionManager(workspace=tmp_path, provider=SlowProvider())
+
+    async def reject_interrupt(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("synthetic unexpected stop failure")
+
+    monkeypatch.setattr(manager, "request_interrupt", reject_interrupt)
+    client = TestClient(create_app(manager))
+    with client.websocket_connect("/ws/session/send-now-failure") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json(
+            {
+                "type": "user_message",
+                "clientCommandId": "cmd-running",
+                "idempotencyKey": "idem-running",
+                "delivery": "start_now",
+                "text": "keep running",
+            }
+        )
+        assert ws.receive_json()["data"]["disposition"] == "running"
+        ws.send_json(
+            {
+                "type": "user_message",
+                "clientCommandId": "cmd-queued",
+                "idempotencyKey": "idem-queued",
+                "delivery": "enqueue",
+                "text": "send me now",
+            }
+        )
+
+        queue_item_id = None
+        while queue_item_id is None:
+            event = ws.receive_json()
+            if event["type"] == "command_ack" and event["data"]["clientCommandId"] == "cmd-queued":
+                queue_item_id = event["data"]["queueItemId"]
+        ws.send_json(
+            {
+                "type": "queue_send_now",
+                "queueItemId": queue_item_id,
+                "expectedRevision": 1,
+                "idempotencyKey": "send-now-mutation",
+            }
+        )
+        error = None
+        while error is None:
+            event = ws.receive_json()
+            if event["type"] == "queue_error":
+                error = event
+
+        assert error["data"]["code"] == "queue_send_now_failed"
+        assert len(error["data"]["items"]) == 1
+        assert error["data"]["items"][0]["position"] == 1
+        assert error["data"]["paused"] is True
+        assert manager.conversation_commands.queue_status("send-now-failure") == {
+            "paused": True,
+            "reason": "send_now_interrupt_failed",
+        }
+        assert not manager.consume_queue_drain_after_stop("send-now-failure")
+
+
+def test_ws_queue_resume_conflict_is_structured_and_keeps_socket_alive(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([]))
+    receipt = manager.conversation_commands.accept(
+        session_id="resume-conflict",
+        client_command_id="cmd-conflict",
+        idempotency_key="idem-conflict",
+        delivery="enqueue",
+        payload={"text": "queued"},
+        busy=True,
+    )
+    assert receipt.queue_item_id is not None
+    manager.conversation_commands.prioritize_queue_item(
+        "resume-conflict",
+        receipt.queue_item_id,
+        expected_revision=1,
+        idempotency_key="reused-mutation",
+    )
+    manager.conversation_commands.pause_queue("resume-conflict", "manual")
+    client = TestClient(create_app(manager))
+
+    with client.websocket_connect("/ws/session/resume-conflict") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json(
+            {"type": "queue_resume", "idempotencyKey": "reused-mutation"}
+        )
+        error = ws.receive_json()
+        assert error["type"] == "queue_error"
+        assert error["data"]["code"] == "queue_conflict"
+        assert error["data"]["paused"] is True
+        ws.send_json({"type": "unknown-after-conflict"})
+        assert ws.receive_json()["type"] == "input_rejected"
+
+
 def test_ws_rejects_oversized_message(tmp_path):
-    from coworker.server import app as app_mod
     from coworker.attachments import MAX_ATTACHMENTS
+    from coworker.server import app as app_mod
 
     client = _client(tmp_path, [_text("should not run")])
     with client.websocket_connect("/ws/session/big") as ws:
         assert ws.receive_json()["type"] == "ready"
 
         # Oversized text → single input-rejected frame, no turn runs.
-        ws.send_json(
-            {"type": "user_message", "text": "x" * (app_mod._MAX_MESSAGE_TEXT_CHARS + 1)}
-        )
+        ws.send_json(_user_message("x" * (app_mod._MAX_MESSAGE_TEXT_CHARS + 1)))
         evt = ws.receive_json()
-        assert evt["type"] == "input_rejected"
-        assert "too long" in evt["data"]["error"].lower()
+        assert evt["type"] == "command_ack"
+        assert "too long" in evt["data"]["error"]["safeMessage"].lower()
 
         # The ingress cap is the same cap the attachment builder enforces.
         assert app_mod._MAX_ATTACHMENTS == MAX_ATTACHMENTS
-        ws.send_json(
-            {
-                "type": "user_message",
-                "text": "hi",
-                "attachments": ["a"] * (app_mod._MAX_ATTACHMENTS + 1),
-            }
-        )
+        ws.send_json(_user_message("hi", attachments=["a"] * (app_mod._MAX_ATTACHMENTS + 1)))
         evt = ws.receive_json()
-        assert evt["type"] == "input_rejected"
-        assert "attachment" in evt["data"]["error"].lower()
+        assert evt["type"] == "command_ack"
+        assert "attachment" in evt["data"]["error"]["safeMessage"].lower()
 
         # A normal message still works afterwards (the socket wasn't torn down).
-        ws.send_json({"type": "user_message", "text": "hello"})
+        ws.send_json(_user_message("hello"))
         assert "turn_done" in _drain(ws)
 
 
@@ -685,23 +1301,25 @@ def test_ws_rejects_malformed_payloads_without_killing_socket(tmp_path):
         assert ws.receive_json()["type"] == "ready"
 
         invalid = [
-            [],
-            {"type": "user_message", "text": ["not", "text"]},
-            {"type": "user_message", "text": "x", "attachments": {}},
-            {
-                "type": "user_message",
-                "text": "x",
-                "attachments": [{"kind": "image", "data_url": "https://example.com/x"}],
-            },
-            {"type": "set_model", "model": {"unexpected": True}},
-            {"type": "unknown"},
+            ([], "input_rejected"),
+            (_user_message(["not", "text"]), "command_ack"),
+            (_user_message("x", attachments={}), "command_ack"),
+            (
+                _user_message(
+                    "x",
+                    attachments=[{"kind": "image", "data_url": "https://example.com/x"}],
+                ),
+                "command_ack",
+            ),
+            ({"type": "set_model", "model": {"unexpected": True}}, "input_rejected"),
+            ({"type": "unknown"}, "input_rejected"),
         ]
-        for payload in invalid:
+        for payload, expected_type in invalid:
             ws.send_json(payload)
             evt = ws.receive_json()
-            assert evt["type"] == "input_rejected"
+            assert evt["type"] == expected_type
 
-        ws.send_json({"type": "user_message", "text": "still works"})
+        ws.send_json(_user_message("still works"))
         assert "turn_done" in _drain(ws)
 
 
@@ -739,14 +1357,14 @@ def test_ws_allows_only_one_inflight_turn_per_session(tmp_path):
     client = TestClient(create_app(manager))
     with client.websocket_connect("/ws/session/serialized") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "first"})
-        ws.send_json({"type": "user_message", "text": "second"})
+        ws.send_json(_user_message("first"))
+        ws.send_json(_user_message("second"))
 
         types = []
         while "turn_done" not in types:
             types.append(ws.receive_json()["type"])
 
-    assert "input_rejected" in types
+    assert "command_ack" in types
     assert provider.max_active == 1
     engine = manager._engines["serialized"]
     user_messages = [m for m in engine.messages if m.get("role") == "user"]
@@ -829,7 +1447,7 @@ def test_ws_error_persists_notice_and_retry_reruns(tmp_path):
     client = TestClient(create_app(manager))
     with client.websocket_connect("/ws/session/flaky") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hello"})
+        ws.send_json(_user_message("hello"))
         assert "error" in _drain(ws)
         # The error survives as a persisted notice (reload shows what happened)…
         messages = client.get("/v1/sessions/flaky/messages").json()["messages"]
@@ -890,14 +1508,12 @@ def test_sidecar_token_gates_rest_and_websockets(tmp_path, monkeypatch):
 
     assert client.get("/v1/health").json() == {"status": "ok"}
     assert client.get("/v1/sessions").status_code == 401
-    assert client.get(
-        "/v1/sessions", headers={"X-OpenWorker-Token": "wrong"}
-    ).status_code == 401
+    assert client.get("/v1/sessions", headers={"X-OpenWorker-Token": "wrong"}).status_code == 401
 
     headers = {"X-OpenWorker-Token": "a" * 64}
-    assert client.get("/v1/health", headers=headers).json()[
-        "default_workspace"
-    ] == str(tmp_path.resolve())
+    assert client.get("/v1/health", headers=headers).json()["default_workspace"] == str(
+        tmp_path.resolve()
+    )
     assert client.get("/v1/sessions", headers=headers).status_code == 200
 
     rejected = client.post(
@@ -918,15 +1534,11 @@ def test_sidecar_token_gates_rest_and_websockets(tmp_path, monkeypatch):
         assert ws.accepted_subprotocol == "openworker"
         assert ws.receive_json()["type"] == "ready"
 
-    with client.websocket_connect(
-        "/ws/events", subprotocols=["openworker", "a" * 64]
-    ) as ws:
+    with client.websocket_connect("/ws/events", subprotocols=["openworker", "a" * 64]) as ws:
         assert ws.accepted_subprotocol == "openworker"
 
     # Redirect callbacks remain tokenless, then enforce their own signed state.
-    assert client.get(
-        "/auth/callback", params={"code": "x", "state": "bad"}
-    ).status_code == 400
+    assert client.get("/auth/callback", params={"code": "x", "state": "bad"}).status_code == 400
     assert client.get("/mcp/oauth/callback").status_code == 400
     assert client.post("/oauth/callback", data={"app_state": "bad"}).status_code == 400
 
@@ -941,7 +1553,7 @@ def test_ws_approval_round_trip(tmp_path):
     )
     with client.websocket_connect("/ws/session/s2") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "create made.py"})
+        ws.send_json(_user_message("create made.py"))
         types = _drain(ws, on_permission="once")
         assert "permission_required" in types
         assert "tool_finished" in types
@@ -960,7 +1572,7 @@ def test_ws_session_persisted_while_parked_on_approval(tmp_path):
     client = TestClient(create_app(manager))
     with client.websocket_connect("/ws/session/persist1") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "make x.py"})
+        ws.send_json(_user_message("make x.py"))
         while ws.receive_json()["type"] != "permission_required":
             pass
         # Parked on the approval — nothing approved, turn far from done. Already saved?
@@ -978,7 +1590,7 @@ def test_ws_browser_tool_audit_round_trip(tmp_path):
     client = _client(tmp_path, [_tool("browser_close", {}), _text("closed")])
     with client.websocket_connect("/ws/session/browser-audit?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "close browser"})
+        ws.send_json(_user_message("close browser"))
         types = _drain(ws, on_permission="once")
         assert "permission_required" in types
         assert "tool_finished" in types
@@ -986,9 +1598,7 @@ def test_ws_browser_tool_audit_round_trip(tmp_path):
     rows = client.get(
         "/v1/audit", params={"session_id": "browser-audit", "connector": "browser"}
     ).json()["events"]
-    assert any(
-        r["tool"] == "browser_close" and r["stage"] == "approval_resolved" for r in rows
-    )
+    assert any(r["tool"] == "browser_close" and r["stage"] == "approval_resolved" for r in rows)
     assert any(r["tool"] == "browser_close" and r["stage"] == "finished" for r in rows)
 
 
@@ -1015,18 +1625,14 @@ def test_workspace_command_trust_controls_live_engine(tmp_path):
     )
     client = TestClient(create_app(manager))
 
-    with client.websocket_connect(
-        f"/ws/session/trust?workspace={quote(str(proj))}"
-    ) as ws:
+    with client.websocket_connect(f"/ws/session/trust?workspace={quote(str(proj))}") as ws:
         ready = ws.receive_json()
         policy = ready["data"]["command_trust"]
         assert policy["required"] is True
         assert policy["requested_commands"] == ["pytest"]
 
         engine = manager._engines["trust"]
-        before = engine.permissions.evaluate(
-            "run_shell", {"command": "pytest -q"}, None
-        )
+        before = engine.permissions.evaluate("run_shell", {"command": "pytest -q"}, None)
         assert not before.allowed and before.needs_user
         # Workspace auto_allow remains ignored even after command trust.
         assert "write_file" not in engine.permissions.auto_allow_tools
@@ -1036,9 +1642,7 @@ def test_workspace_command_trust_controls_live_engine(tmp_path):
             json={"path": str(proj), "trusted": True},
         ).json()
         assert trusted["ok"] and trusted["trusted"]
-        assert engine.permissions.evaluate(
-            "run_shell", {"command": "pytest -q"}, None
-        ).allowed
+        assert engine.permissions.evaluate("run_shell", {"command": "pytest -q"}, None).allowed
 
         listed = client.get("/v1/workspaces/trusted").json()["workspaces"]
         assert [item["workspace"] for item in listed] == [str(proj.resolve())]
@@ -1048,9 +1652,7 @@ def test_workspace_command_trust_controls_live_engine(tmp_path):
             json={"path": str(proj), "trusted": False},
         ).json()
         assert revoked["ok"] and not revoked["trusted"]
-        after = engine.permissions.evaluate(
-            "run_shell", {"command": "pytest -q"}, None
-        )
+        after = engine.permissions.evaluate("run_shell", {"command": "pytest -q"}, None)
         assert not after.allowed and after.needs_user
 
     manager.workspace_trust.set_trusted(proj, True)
@@ -1105,9 +1707,7 @@ def test_delete_session_removes_its_scratch_dir_only(tmp_path):
     proj = tmp_path / "real-project"
     proj.mkdir()
     mgr.session_store.save(
-        SessionRecord(
-            session_id="sess-proj", workspace=str(proj), model="m", mode="interactive"
-        )
+        SessionRecord(session_id="sess-proj", workspace=str(proj), model="m", mode="interactive")
     )
     assert mgr.delete_session("sess-proj")["ok"]
     assert proj.is_dir()  # user folders are sacred
@@ -1115,9 +1715,7 @@ def test_delete_session_removes_its_scratch_dir_only(tmp_path):
 
 def test_open_invalid_workspace(tmp_path):
     client = _client(tmp_path, [])
-    bad = client.post(
-        "/v1/workspaces/open", json={"path": str(tmp_path / "nope")}
-    ).json()
+    bad = client.post("/v1/workspaces/open", json={"path": str(tmp_path / "nope")}).json()
     assert bad["ok"] is False
 
 
@@ -1125,18 +1723,14 @@ def test_open_workspace_create(tmp_path):
     client = _client(tmp_path, [])
     fresh = tmp_path / "fresh-project"
     assert not fresh.exists()
-    res = client.post(
-        "/v1/workspaces/open", json={"path": str(fresh), "create": True}
-    ).json()
+    res = client.post("/v1/workspaces/open", json={"path": str(fresh), "create": True}).json()
     assert res["ok"] is True
     assert fresh.is_dir()
 
 
 def test_ws_requires_workspace_when_no_default(tmp_path):
     # Manager with no default workspace: a session with no folder is rejected.
-    manager = SessionManager(
-        workspace=None, data_dir=tmp_path, provider=ScriptedProvider([])
-    )
+    manager = SessionManager(workspace=None, data_dir=tmp_path, provider=ScriptedProvider([]))
     client = TestClient(create_app(manager))
     with client.websocket_connect("/ws/session/nofolder") as ws:
         first = ws.receive_json()
@@ -1159,7 +1753,7 @@ def test_ws_with_workspace_query(tmp_path):
         ready = ws.receive_json()
         assert ready["type"] == "ready"
         assert ready["data"]["workspace"] == str(proj.resolve())
-        ws.send_json({"type": "user_message", "text": "hello"})
+        ws.send_json(_user_message("hello"))
         assert "turn_end" in _drain(ws)
 
 
@@ -1176,7 +1770,7 @@ def test_ws_removed_agent_id_falls_back_to_default(tmp_path):
         ready = ws.receive_json()
         assert ready["type"] == "ready"
         assert ready["data"]["agent"] == "cowork"
-        ws.send_json({"type": "user_message", "text": "hello"})
+        ws.send_json(_user_message("hello"))
         assert "turn_end" in _drain(ws)
 
 
@@ -1196,18 +1790,14 @@ def test_ws_set_mode_auto_skips_approval(tmp_path):
     with client.websocket_connect(f"/ws/session/sm?workspace={quote(str(proj))}") as ws:
         assert ws.receive_json()["type"] == "ready"
         ws.send_json({"type": "set_mode", "mode": "auto"})
-        ws.send_json({"type": "user_message", "text": "write a.py"})
+        ws.send_json(_user_message("write a.py"))
         types = _drain(ws)  # no approval handler — would hang if it asked
         assert "permission_required" not in types
     assert (proj / "a.py").read_text() == "x"
 
 
-def test_ws_set_mode_keeps_previous_mode_when_haas_policy_update_fails(
-    tmp_path, monkeypatch
-):
-    manager = SessionManager(
-        workspace=tmp_path, provider=ScriptedProvider([_text("unused")])
-    )
+def test_ws_set_mode_keeps_previous_mode_when_haas_policy_update_fails(tmp_path, monkeypatch):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider([_text("unused")]))
 
     async def reject_policy_update(*args, **kwargs):
         del args, kwargs
@@ -1232,7 +1822,7 @@ def test_ws_session_resume_via_store(tmp_path):
     client = _client(tmp_path, [_text("first answer")])
     with client.websocket_connect("/ws/session/keep") as ws:
         ws.receive_json()
-        ws.send_json({"type": "user_message", "text": "remember this"})
+        ws.send_json(_user_message("remember this"))
         _drain(ws)
     # The session is now listed via REST.
     sessions = client.get("/v1/sessions").json()["sessions"]
@@ -1251,17 +1841,17 @@ def test_ws_first_message_binds_then_midsession_switch_persists_notice(tmp_path)
     with client.websocket_connect("/ws/session/model-per-msg") as ws:
         ready = ws.receive_json()
         assert ready["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hi", "model": "zai:glm-5.2"})
+        ws.send_json(_user_message("hi", model="zai:glm-5.2"))
         assert "model_changed" not in _drain(ws)  # first bind is silent
         # message WITHOUT a model keeps the bound one (no silent reset to default)
-        ws.send_json({"type": "user_message", "text": "again"})
+        ws.send_json(_user_message("again"))
         _drain(ws)
         ws.send_json({"type": "set_model", "model": "kimi:kimi-k2.6"})
         changed = ws.receive_json()
         assert changed["type"] == "model_changed"
         assert changed["data"]["model"] == "kimi:kimi-k2.6"
         assert "Kimi" in changed["data"]["text"]
-        ws.send_json({"type": "user_message", "text": "switched now"})
+        ws.send_json(_user_message("switched now"))
         _drain(ws)
     mgr = client.app.state.manager
     engine = mgr._engines["model-per-msg"]
@@ -1298,9 +1888,7 @@ def test_pick_native_folder_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subprocess,
         "run",
-        lambda *a, **k: SimpleNamespace(
-            returncode=0, stdout="/tmp/picked\n", stderr=""
-        ),
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="/tmp/picked\n", stderr=""),
     )
     assert client.post("/v1/workspaces/pick").json() == {
         "ok": True,
@@ -1310,9 +1898,7 @@ def test_pick_native_folder_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subprocess,
         "run",
-        lambda *a, **k: SimpleNamespace(
-            returncode=1, stdout="", stderr="User canceled."
-        ),
+        lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="User canceled."),
     )
     assert client.post("/v1/workspaces/pick").json()["ok"] is False
 
@@ -1367,7 +1953,7 @@ def test_provider_env_source_survives_remove_without_store_profile(tmp_path, mon
 
 
 def test_always_allow_grants_survive_restart(tmp_path):
-    """"Always allow" is session-scoped, and the session outlives the process — a restart
+    """ "Always allow" is session-scoped, and the session outlives the process — a restart
     (fresh manager over the same store) must not re-ask for an approved command
     (owner-hit 2026-07-22 on the 0.1.6 walkthrough)."""
 
@@ -1382,7 +1968,7 @@ def test_always_allow_grants_survive_restart(tmp_path):
     def _run_turn(client, expect_prompts):
         with client.websocket_connect("/ws/session/grants1?agent=cowork") as ws:
             assert ws.receive_json()["type"] == "ready"
-            ws.send_json({"type": "user_message", "text": "run it"})
+            ws.send_json(_user_message("run it"))
             asked = 0
             while True:
                 ev = ws.receive_json()
@@ -1527,3 +2113,99 @@ def test_connect_banners_a_session_already_in_auto_approve(tmp_path):
     engine = manager._engines["modes2"]
     kinds = [m.get("kind") for m in engine.messages if m.get("role") == "notice"]
     assert kinds.count("mode_notice") == 1
+
+
+def test_conversation_identity_survives_message_readback_without_entering_model_input(tmp_path):
+    class InspectingProvider(ScriptedProvider):
+        def complete(self, *, model, messages, tools=None, **settings):
+            assert all(
+                "_managerTurnId" not in message and "_managerRowId" not in message
+                for message in messages
+            )
+            return _text("Synthetic result")
+
+    manager = SessionManager(
+        workspace=tmp_path,
+        provider=InspectingProvider([_text("First result"), _text("Second result")]),
+    )
+    client = TestClient(create_app(manager))
+    with client.websocket_connect("/ws/session/identity-case") as ws:
+        while ws.receive_json()["type"] != "ready":
+            pass
+        for request in ("first synthetic task", "second synthetic task"):
+            ws.send_json(_user_message(request))
+            events = []
+            while True:
+                event = ws.receive_json()
+                events.append(event)
+                if event["type"] == "turn_done":
+                    break
+            receipt = next(event["data"] for event in events if event["type"] == "command_ack")
+            assert any(event["type"] == "assistant_message" for event in events), [
+                event for event in events if event["type"] == "error"
+            ]
+            answer = next(event["data"] for event in events if event["type"] == "assistant_message")
+            saved = client.get("/v1/sessions/identity-case/messages").json()["messages"]
+            response = next(
+                message for message in reversed(saved) if message["role"] == "assistant"
+            )
+            assert response["_managerTurnId"] == receipt["turnId"] == answer["turnId"]
+            assert response["_managerRowId"] == answer["rowId"]
+
+
+def test_accepted_command_runs_when_ack_transport_write_fails(tmp_path, monkeypatch):
+    import threading
+
+    from starlette.websockets import WebSocket, WebSocketDisconnect
+
+    completed = threading.Event()
+
+    class Provider(ProviderClient):
+        def complete(self, *, model, messages, tools=None, **settings):
+            if not (messages and "title chat sessions" in str(messages[0].get("content", ""))):
+                completed.set()
+            return _text("Synthetic result")
+
+        def capabilities(self, model):
+            return ModelCapabilities()
+
+    original = WebSocket.send_json
+
+    async def lose_ack(self, data, mode="text"):
+        if data.get("type") == "command_ack":
+            raise WebSocketDisconnect(code=1006)
+        return await original(self, data, mode)
+
+    monkeypatch.setattr(WebSocket, "send_json", lose_ack)
+    from unittest.mock import AsyncMock
+
+    manager = SessionManager(workspace=tmp_path, provider=Provider())
+    monkeypatch.setattr(manager, "start_gateway", AsyncMock(return_value=[]))
+    with TestClient(create_app(manager)) as client:
+        with client.websocket_connect("/ws/session/ack-failed") as ws:
+            assert ws.receive_json()["type"] == "ready"
+            ws.send_json(_user_message("Synthetic request"))
+            assert completed.wait(timeout=2), "Accepted task must run even if its ACK socket closes"
+
+
+def test_missing_workspace_reports_non_retryable_setup_failure(tmp_path):
+    from starlette.websockets import WebSocketDisconnect
+
+    client = _client(tmp_path, [])
+    with client.websocket_connect(
+        f"/ws/session/missing-folder?agent=code&workspace={tmp_path / 'missing'}"
+    ) as ws:
+        event = ws.receive_json()
+        assert event["type"] == "error"
+        assert event["data"]["code"] == "workspace_unavailable"
+        assert event["data"]["retryable"] is False
+        assert event["data"]["recoveryAction"] == "restore_workspace"
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_json()
+        assert closed.value.code == 1008
+
+    (tmp_path / "missing").mkdir()
+    with client.websocket_connect(
+        f"/ws/session/missing-folder?agent=code&workspace={tmp_path / 'missing'}"
+    ) as ws:
+        assert ws.receive_json()["type"] == "ready"

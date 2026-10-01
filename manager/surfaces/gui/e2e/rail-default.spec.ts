@@ -32,7 +32,7 @@ test("rail is hidden by default; the toggle persists across restarts", async ({ 
 test("an artifact chip force-shows the rail without overwriting the hidden preference", async ({ page }) => {
   await clearRailPref(page);
   // "show the report" makes the fixture echo carry an [artifact:] chip.
-  await page.getByPlaceholder(/Ask the coworker/).fill("show the report");
+  await page.getByPlaceholder(/Ask the AI assistant/).fill("show the report");
   await page.getByRole("button", { name: "Send" }).click();
 
   // The transcript's artifact chip opens the viewer even though the rail is hidden.

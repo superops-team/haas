@@ -5,7 +5,7 @@
 Status: Draft
 Last reviewed: 2026-09-14
 Change ID: unified-runtime-approval-policy
-Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Model Proxy](../model-proxy/README.zh-CN.md), [MCP / Tool / Skill Runtime](../mcp-tool-skill-runtime/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md)
+Related specs: [HaaS Protocol](../haas-protocol/README.zh-CN.md), [Harness Profile](../harness-profile/README.zh-CN.md), [Model Proxy](../model-proxy/README.zh-CN.md), [MCP / Tool / Skill Runtime](../mcp-tool-skill-runtime/README.zh-CN.md), [Manager Delegation](../manager-delegation/README.zh-CN.md), [Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md), [Container Runtime](../container-runtime/README.zh-CN.md)
 
 ## 1. 组件定位
 
@@ -154,6 +154,8 @@ Lite 使用 broker memory 替代 OpenSandbox runtime vault；Security Boundary �
 
 内置 macOS local API 使用仅由自有 HaaS 子进程继承的匿名 Unix socketpair；继承 descriptor 的持有权证明 peer 身份，没有可发现 listener。`HAAS_CREDENTIAL_FD` 只传编号，启动时消费且不传给 Codex。Manager grant 绑定 reference/harness/session/model/精确 URL，请求序号单调、frame 有界。EOF、超时、重放、格式错误或未知 grant 均拒绝解析；只有 Manager SecretStore 解析可在此通道返回 key bytes。Grant 与通道随 supervisor 结束，不支持任意 secret 查询或远程转发。
 
+Manager 命令回执与排队输入同样属于私有执行数据。POSIX 下，自有 SQLite database 及 WAL/SHM/rollback journal 必须在 SQLite 读取或写入内容前设为 owner-only（0600），新 store 目录使用 0700。打开前修复自有旧文件权限；符号链接、非普通文件/多硬链接或其他用户所有的文件必须拒绝，不能修改引用目标。权限失败 fail closed；不修改进程 umask 或无关父目录权限。迁移与 A1 回归用例归 Manager 后端 spec；Windows 继续依赖 managed profile ACL，不以 POSIX mode 宣称安全。这些文件继续排除于 artifact、diagnostic、event、log；文件权限不放宽内容策略。
+
 短期执行证据是独立的非持久执行数据。HaaS process 可以为每个 active command
 activity 在内存保留一条有界 evidence record，使所属用户可检查实际命令、工作目录和
 输出。每条 record 的脱敏 output 上限为 8 MiB（8,388,608 UTF-8 bytes）；Codex transport
@@ -244,6 +246,7 @@ pattern 清单（单一事实源，代码侧由同一 fixture 驱动）。
 | `raw-prompt` | `trace_content=false`（默认）下的输入 prompt | 不入日志/事件 |
 | `tool-payload` | 完整 tool args/result | 默认摘要，full payload 需已批准 debug 设计 |
 | `native-event` | Adapter/native type name、untyped metadata、internal event field | 投影到稳定 allowlisted `haas.*` type，校验 type-specific `haas` metadata，并在 public projection 前剥离内部字段 |
+| `authorized-workspace-path` | Command output path 等于或位于该命令已校验 working directory 下 | 仅将已校验前缀替换为 `workspace/`，再对余下内容执行常规脱敏 |
 | `host-path` | 内部 host、绝对路径 | `[REDACTED_PATH]` |
 | `stack-trace` | 异常栈 | 不出公开面，内部只记 safe reason |
 
@@ -297,3 +300,10 @@ model proxy 与 OpenSandbox client 共用，禁止各自复制一份。
 - Event/log：构造含 key/header/raw prompt/tool args/AGENTS.md secret-like content 的输入，断言公开面全部脱敏或拒绝。Native event 测试拒绝 unknown/untyped public payload，并证明 adapter `nativeType`、internal id、raw prompt/reasoning、完整 tool payload 不外泄。
 - Container：AIO 容器内无默认公开 secret；`/health`、`/ready` 不输出敏感环境。
 - Delegation：HOME、Docker socket、SSH path、symlink escape、父目录扩大和 mount drift 在 create 与 restore 时均被拒绝。
+
+### Manager project/workspace 边界
+
+Project/branch label 是不可信展示文本。Local folder selection 继续接受 canonicalization 与
+workspace trust。Remote endpoint 只持久化 SecretRef/fingerprint，并使用 endpoint-scoped opaque
+workspace ref；Manager absolute path/host mount 不跨越 remote boundary。Git mutation 使用 argv
+allowlist 与用户直接意图，不能使用 agent-controlled text。

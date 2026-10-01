@@ -455,3 +455,139 @@ gate requiring it.
    auxiliary files.
 5. Update provenance, run all acceptance cases, then complete code-review,
    brooks-review, and brooks-test with every finding dispositioned.
+
+## 16. 2026-09-27 Project-Level Review and Development Loop Delta
+
+### 16.1 Background and evidence
+
+The repository already contains `code-review` and `dev-loop`, but their project
+specialization is uneven. `dev-loop` coordinates most HaaS delivery gates, while
+`code-review` remains largely repository-neutral and does not make the HaaS protocol,
+secretless, adapter, recovery, GUI, and container review surfaces explicit. The two
+skills also need a precise boundary with `parallel-code-review`, `brooks-review`, and
+`brooks-test` so that agents neither skip mandatory gates nor duplicate findings.
+
+Change ID: `project-level-code-review-dev-loop`.
+
+### 16.2 Goals and non-goals
+
+Goals:
+
+1. Keep the canonical invocations `$code-review` and `$dev-loop` while making both
+   skills explicitly HaaS-local.
+2. Make review scope, project-specific risk checks, finding dispositions, lifecycle
+   gates, and closeout evidence deterministic enough for another agent to execute.
+3. Preserve review-only behavior when requested and prevent autonomous commit, push,
+   release, image publication, or unrelated-worktree mutation.
+4. Keep the skills concise, valid under the repository skill validator, and aligned
+   with root `AGENTS.md`.
+
+Non-goals:
+
+- Do not add duplicate `haas-code-review` or `haas-dev-loop` skill names.
+- Do not change runtime code, public APIs, events, session state, artifacts, images, or
+  user-visible product behavior.
+- Do not replace `parallel-code-review`, `brooks-review`, `brooks-test`,
+  `requirement-spec`, `review-spec`, or `code-automation`; coordinate them by named
+  responsibility.
+- Do not introduce scripts or reference files unless the final instructions cannot
+  remain below the progressive-disclosure limit without them.
+
+### 16.3 `code-review` contract
+
+`code-review` MUST:
+
+1. Resolve scope from the user-selected diff/range first, otherwise from task-owned
+   worktree changes; it MUST separate unrelated pre-existing changes and pass a stable
+   scope manifest through both review rounds.
+2. Read root and nearest `AGENTS.md`, the governing component specs, and relevant
+   acceptance cases before judging correctness.
+3. Run two rounds: first for concrete correctness/build/interface defects and confirmed
+   minimal fixes; second for adversarial boundary, failure, concurrency, cleanup,
+   compatibility, and regression analysis.
+4. Apply the HaaS review matrix when relevant:
+   - ADK and `/v1/haas/*` schema, idempotency, SSE parity, and structured errors;
+   - session/response/event monotonicity, terminal states, replay, cancel, timeout, and
+     restart recovery;
+   - harness-adapter isolation and Codex app-server initialization/resume boundaries;
+   - secretless logging/events/metrics/artifacts, URL and path safety, and caller-owned
+     content handling;
+   - Manager browser/desktop parity, queue/reconnect behavior, accessibility, and
+     packaged-app lifecycle;
+   - Lite/AIO platform, startup, health/readiness, and image-pinning contracts.
+5. Treat `parallel-code-review` as an optional accelerator for a large cross-component
+   first round, never as a replacement for the two-round disposition contract.
+   `brooks-review` and `brooks-test` remain separate mandatory lifecycle gates.
+6. Record each finding with one location, severity, evidence, impact, and final status
+   `fixed`, `false_positive`, or `accepted_risk`. `accepted_risk` requires explicit
+   justification in a component spec or delivery evidence.
+7. Respect review-only requests by producing findings without code mutation. In the
+   default repair mode, modify only task-owned files and re-run affected checks after
+   every review fix.
+
+### 16.4 `dev-loop` contract
+
+`dev-loop` MUST orchestrate a complete substantial HaaS change in this order:
+
+1. Establish a stable change ID, task-owned scope manifest, dirty-worktree boundary,
+   current evidence, governing specs, and component impact analysis.
+2. Create or update English and Chinese component specs, run `review-spec`, and resolve
+   all blockers before production-code edits.
+3. Map each implementation slice to requirement and acceptance-case IDs, then use TDD:
+   focused red evidence, smallest implementation, green evidence, and refactor.
+4. Select only the relevant domain skills while retaining named ownership:
+   `fastapi-backend`/`pydantic-modeling` for backend contracts,
+   `adapter-extension` for adapters, `react-typescript-kit` and UI skills for Manager,
+   and `code-automation` for verification selection.
+5. Escalate verification by impact while preserving mandatory root gates: focused tests,
+   required unit/integration/E2E or smoke evidence, `make pre-commit`, and
+   `make full-check` for cross-component, final-merge, or release scope. A skipped check
+   is `not_run`, never a pass.
+6. Execute `code-review`, then `brooks-review`, then `brooks-test`; after fixes, re-run
+   every affected verification gate.
+7. Close out with changed specs, acceptance mapping, implementation scope, ADK/HaaS
+   compatibility, security/redaction/event/artifact/container conclusions, exact
+   commands and results, skipped checks, findings, residual risks, and requested
+   delivery status.
+
+The skill MUST NOT create commits, push branches, publish images, install artifacts, or
+mutate external systems unless the user explicitly requested that action. Image push
+always requires explicit confirmation.
+
+### 16.5 Compatibility, security, and rollback
+
+- ADK and `/v1/haas/*`: no runtime impact; the skills review these contracts but do not
+  change them.
+- Existing skill invocation: fully additive; `$code-review` and `$dev-loop` remain the
+  canonical names and existing `agents/openai.yaml` entry points remain valid.
+- Security: instructions reinforce secretless evidence and prohibit exposing raw
+  prompts, credentials, cookies, authorization values, presigned URLs, or complete tool
+  arguments in reports.
+- Worktree safety: only the two skill folders and this bilingual spec delta are in task
+  scope; existing Manager and runtime changes remain user-owned.
+- Rollback: revert this bilingual delta and the two skill/metadata edits together.
+
+### 16.6 Acceptance cases
+
+| ID | Case | Command or inspection | Expected result |
+|---|---|---|---|
+| AS-RD01 | Official skill validation | Run `quick_validate.py` for both skill folders | Both print `Skill is valid!` |
+| AS-RD02 | Repository skill validation | `uv run python scripts/quality/check_agent_skills.py` | Exit 0 with both skills passing metadata, naming, size, layout, and link checks |
+| AS-RD03 | Skill validator regression | `uv run pytest -q tests/test_check_agent_skills.py` | All validator tests pass |
+| AS-RD04 | Review specialization inspection | Inspect `code-review/SKILL.md` | Two rounds, HaaS matrix, scope isolation, review-only mode, and finding statuses are explicit |
+| AS-RD05 | Lifecycle specialization inspection | Inspect `dev-loop/SKILL.md` | Spec review, TDD, domain routing, verification escalation, ordered reviews, and delivery authority are explicit |
+| AS-RD06 | Metadata alignment | Inspect both `agents/openai.yaml` files | Display names, descriptions, and `$skill-name` prompts match each SKILL.md |
+| AS-RD07 | Repository gate | `make pre-commit` | Skill validation, whitespace/conflict checks, and secret scan pass |
+| AS-RD08 | Unrelated-change preservation | `git diff --name-only` and scoped diff inspection | No pre-existing Manager/runtime change is modified by this change |
+
+### 16.7 Implementation order and exit criteria
+
+1. Review and approve this bilingual contract delta.
+2. Update `code-review/SKILL.md` and its UI metadata.
+3. Update `dev-loop/SKILL.md` and its UI metadata.
+4. Run AS-RD01 through AS-RD08 as applicable.
+5. Run the ordered review gates and disposition every finding.
+
+Exit requires both skills to pass structural validation, match this contract, preserve
+unrelated changes, and have no unresolved review blocker. No runtime, API, event, session,
+artifact, container, or end-user behavior changes are introduced.

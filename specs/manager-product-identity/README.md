@@ -3,9 +3,9 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Status: Draft
-Last reviewed: 2026-09-15
-Change ID: manager-openharness-no-login, manager-macos-dock-reopen, manager-macos-one-command-install
-Related specs: [Manager Delegation](../manager-delegation/README.md), [Security Boundary](../security-boundary/README.md)
+Last reviewed: 2026-09-28
+Change ID: manager-openharness-no-login, manager-macos-dock-reopen, manager-macos-one-command-install, manager-ai-assistant-terminology
+Related specs: [Manager Delegation](../manager-delegation/README.md), [Manager Project Workbench Experience](../manager-project-workspace-experience/README.md), [Security Boundary](../security-boundary/README.md)
 
 ## 1. Component Role
 
@@ -21,6 +21,9 @@ In scope:
 - Replace visible product naming from OpenWorker to OpenHarness in the desktop
   shell, GUI chrome, startup text, settings copy, and local documentation used by
   this repository.
+- Replace the user-facing persona category term `Coworker`/`Coworkers` with
+  `AI Assistant`/`AI Assistants` in every English GUI surface and replace the
+  corresponding Chinese term `同事` with `AI助手`.
 - Provide a dedicated OpenHarness logo and app icon family for desktop and GUI
   surfaces.
 - Remove cloud account sign-in, sign-out, account row, cloud telemetry, cloud
@@ -44,12 +47,17 @@ Out of scope:
   scripts in the same change. Existing `coworker` package names and
   `openworker-server` entrypoints may remain as compatibility implementation
   details until a separate migration.
+- Renaming stable API/i18n keys, `.coworker/config.toml`, user-authored assistant
+  names, or copy that explicitly refers to a human colleague rather than an agent.
 - Removing all historical test fixtures, mockups, or comments that are not
   user-facing runtime behavior.
 
 ## 3. Product Rules
 
 - User-facing surfaces MUST say `OpenHarness`, not `OpenWorker`.
+- User-facing persona labels and explanatory copy MUST consistently use `AI Assistant`
+  in English and `AI助手` in Chinese. Legacy `Coworker`/`同事` wording is allowed only
+  for the compatibility and human-language exceptions listed in §2.
 - The application MUST NOT render a sign-in button, signed-in account row, cloud
   account badge, or cloud telemetry control.
 - Features that previously required OpenWorker Cloud MUST either be hidden,
@@ -98,6 +106,11 @@ Out of scope:
 
 - Desktop app window, tray title, package metadata, boot text, sidebar wordmark,
   and settings text use OpenHarness.
+- Settings navigation/title/description, new-session selection, grouping/filtering,
+  connector/Inbox/gallery/skill/memory copy, installer copy, and accessible names use
+  `AI Assistant(s)` / `AI助手`. Locale contract tests scan all translated values and
+  fail on a non-allowlisted legacy term. Instance names supplied by users or the server
+  remain byte-for-byte unchanged.
 - The first desktop launch builds the main window hidden and explicitly shows and focuses it
   exactly once, only after the WebView reports its initial page load as finished. Later reloads
   or navigations MUST NOT resurface a window that the user has closed to the tray. This prevents a
@@ -140,3 +153,11 @@ Out of scope:
 ### Automation desktop notifications
 
 The native shell may show a fixed completion/failure notification from an automation_run_finished event. No generated content, prompt or tool arguments cross the notification command. The command accepts only the closed outcome enum; OS notification denial does not affect task success or durable Inbox delivery. Automated tests verify command input/bridge behavior; native notification delivery requires user OS permission.
+
+### Native project-workbench window chrome
+
+The packaged desktop top chrome provides platform-native dragging and double-click
+maximize/restore over non-interactive regions. Buttons, links, inputs, popovers and selectable
+conversation content are no-drag. Sidebar collapse/expand, zoom, maximize, restore, fullscreen,
+Dock/tray reopen and multi-display bounds restoration preserve one window, WebView and sidecar.
+Browser geometry is not sufficient evidence; packaged native interaction is required.

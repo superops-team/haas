@@ -9,6 +9,7 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -26,18 +27,47 @@ from coworker.delegation import (
     is_text_only_content,
     make_delegated_session_body,
 )
-from coworker.haas import AcceptedInvocationHeaders, HaasClientError, HaasEnvelope
+from coworker.haas import (
+    AcceptedInvocationHeaders,
+    EndpointMode,
+    HaasClientError,
+    HaasEndpoint,
+    HaasEnvelope,
+)
 from coworker.haas.attempts import AttemptLedger
-from coworker.haas.stream_bridge import SessionKey, StreamBridgeState
+from coworker.haas.stream_bridge import BridgeAction, SessionKey, StreamBridgeState
 from coworker.memory import Scope
 from coworker.permissions import Mode
 from coworker.providers import AssistantTurn, ModelCapabilities, ProviderClient
+from coworker.secrets import SecretStore
 from coworker.server import SessionManager, create_app
 from fastapi.testclient import TestClient
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+_COMMAND_IDS = count(1)
+
+
+def _user_message(text: str, **extra: Any) -> dict[str, Any]:
+    sequence = next(_COMMAND_IDS)
+    return {
+        "type": "user_message",
+        "text": text,
+        "clientCommandId": f"cmd-test-{sequence}",
+        "idempotencyKey": f"idem-test-{sequence}",
+        "draftRevision": sequence,
+        "delivery": "start_now",
+        **extra,
+    }
+
+
+def _receive_until(ws: Any, event_type: str) -> dict[str, Any]:
+    while True:
+        event = ws.receive_json()
+        if event["type"] == event_type:
+            return event
 
 
 class ScriptedProvider(ProviderClient):
@@ -411,6 +441,10 @@ class FakeDirectHaasClient:
             trace_id="tr_caps",
         )
 
+    async def ready(self, *, scope: str = "control") -> HaasEnvelope[dict[str, Any]]:
+        assert scope == "execution"
+        return HaasEnvelope({"status": "ready"}, trace_id="tr_ready")
+
     async def update_session_policy(
         self,
         session_id: str,
@@ -470,6 +504,12 @@ class CapturingDirectHaasClient(FakeDirectHaasClient):
     def run_sse(self, body: dict[str, Any], *, idempotency_key: str, last_event_id=None):
         self.submitted_messages.append(body["newMessage"])
         return super().run_sse(body, idempotency_key=idempotency_key, last_event_id=last_event_id)
+
+
+class UnavailableRemoteDirectHaasClient(FakeDirectHaasClient):
+    async def ready(self, *, scope: str = "control") -> HaasEnvelope[dict[str, Any]]:
+        del scope
+        raise HaasClientError("remote endpoint unavailable")
 
 
 class TerminalReconciliationRunStream:
@@ -717,11 +757,17 @@ class PauseAwareDirectHaasClient(FakeDirectHaasClient):
     async def get_invocation(
         self, session_id: str, invocation_id: str
     ) -> HaasEnvelope[dict[str, Any]]:
+        paused = self.paused.is_set()
         return HaasEnvelope(
             {
                 "id": invocation_id,
                 "sessionId": session_id,
-                "status": "interrupted" if self.paused.is_set() else "running",
+                "status": "interrupted" if paused else "running",
+                "sessionControl": {
+                    "controlState": "paused" if paused else "running",
+                    "supportsResume": paused,
+                    "resumableInvocationId": invocation_id if paused else None,
+                },
             },
             trace_id="tr_pause_invocation",
         )
@@ -1450,7 +1496,7 @@ def test_local_api_default_skips_delegated_agent_allowlist(tmp_path):
     assert decision.reason == "local_api_default"
 
 
-def test_remote_local_api_is_blocked_before_workspace_leak(tmp_path):
+def test_remote_direct_api_accepts_only_the_explicit_remote_workspace_scope(tmp_path):
     cfg = _local_api_config()
     cfg.mode = "remote"
     cfg.base_url = "https://haas.example.com"
@@ -1464,8 +1510,8 @@ def test_remote_local_api_is_blocked_before_workspace_leak(tmp_path):
         content="hello",
     )
 
-    assert decision.backend == "blocked"
-    assert decision.reason == "remote_local_api_unsupported"
+    assert decision.use_haas
+    assert decision.reason == "remote_api_default"
 
 
 def test_deterministic_delegation_honors_explicit_local_choice(tmp_path):
@@ -1557,6 +1603,15 @@ def test_adk_assistant_text_excludes_thoughts() -> None:
     assert event["content"]["parts"][0]["text"] == "reasoning-only"
 
 
+def test_manager_does_not_publish_unclassified_haas_text_as_assistant_delta() -> None:
+    event = SessionManager._haas_bridge_event(
+        BridgeAction("assistant_delta", {"text": "process commentary"}),
+        {"execution_mode": "local_api", "haas_session_id": "hsess_1"},
+    )
+
+    assert event is None
+
+
 def test_adk_message_accepts_text_only_parts() -> None:
     assert adk_message_from_content("hello") == {
         "role": "user",
@@ -1585,7 +1640,7 @@ def test_ws_delegates_first_matching_turn_and_persists_binding(tmp_path, monkeyp
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         events = []
         while True:
             event = ws.receive_json()
@@ -1594,19 +1649,26 @@ def test_ws_delegates_first_matching_turn_and_persists_binding(tmp_path, monkeyp
                 break
 
     assert provider.calls == 0
-    assert [event["type"] for event in events] == [
+    ack = events[0]
+    assert ack["type"] == "command_ack"
+    assert ack["data"]["status"] == "accepted"
+    domain_events = [
+        event["type"]
+        for event in events
+        if event["type"] not in {"command_ack", "queue_updated"}
+    ]
+    assert domain_events == [
         "turn_start",
         "execution_control",
-        "assistant_delta",
-        "assistant_delta",
         "assistant_message",
         "turn_end",
         "execution_control",
         "turn_done",
     ]
-    assert events[1]["data"]["controlState"] == "running"
-    assert events[1]["data"]["pauseSupported"] is True
-    assert events[-2]["data"]["controlState"] == "idle"
+    control_events = [event for event in events if event["type"] == "execution_control"]
+    assert control_events[0]["data"]["controlState"] == "running"
+    assert control_events[0]["data"]["pauseSupported"] is True
+    assert control_events[-1]["data"]["controlState"] == "idle"
     assert clients[0].created[0]["managerSessionId"] == "s1"
     assert clients[0].created[0]["mountManifest"]["primaryWorkspace"]["access"] == "rw"
     assert clients[0].restored == ["dgsess_1"]
@@ -1688,7 +1750,7 @@ def test_ws_default_uses_local_haas_api_without_delegated_agent_gate(
 
     with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hello from packaged app"})
+        ws.send_json(_user_message("hello from packaged app"))
         events = []
         while True:
             event = ws.receive_json()
@@ -1700,23 +1762,28 @@ def test_ws_default_uses_local_haas_api_without_delegated_agent_gate(
         assert any(event["type"] == "error" for event in events)
         assert not any(event["type"] == "turn_end" for event in events)
         return
-    assert [event["type"] for event in events] == [
+    assert events[0]["type"] == "command_ack"
+    assert events[0]["data"]["status"] == "accepted"
+    domain_events = [
+        event
+        for event in events
+        if event["type"] not in {"command_ack", "queue_updated"}
+    ]
+    assert [event["type"] for event in domain_events] == [
         "turn_start",
         "execution_control",
-        "assistant_delta",
         "reasoning_delta",
         "tool_proposed",
         "tool_started",
-        "assistant_delta",
         "tool_finished",
         "assistant_message",
         "turn_end",
         "execution_control",
         "turn_done",
     ]
-    assert events[1]["data"]["controlState"] == "running"
-    assert events[1]["data"]["pauseSupported"] is True
-    assert events[-2]["data"]["controlState"] == "idle"
+    assert domain_events[1]["data"]["controlState"] == "running"
+    assert domain_events[1]["data"]["pauseSupported"] is True
+    assert domain_events[-2]["data"]["controlState"] == "idle"
     process_events = [
         event
         for event in events
@@ -1754,6 +1821,196 @@ def test_ws_default_uses_local_haas_api_without_delegated_agent_gate(
     assert messages[-1]["content"] == "local haas done"
 
 
+@pytest.mark.asyncio
+async def test_remote_project_routes_to_frozen_endpoint_without_local_fallback(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(SessionManager, "_maybe_autotitle", lambda self, session_id: None)
+    manager = SessionManager(data_dir=tmp_path / "state", provider=ScriptedProvider())
+    manager.secrets = SecretStore(tmp_path / "secrets.json")
+    endpoint = HaasEndpoint.create(
+        endpoint_id="hep_remote_team",
+        mode=EndpointMode.REMOTE,
+        base_url="https://haas.example.invalid",
+        token_ref="secret://manager/haas/remote-team",
+        server_identity="team-dev",
+    )
+    manager.endpoint_store.put(endpoint)
+    manager.secrets.put(endpoint.token_ref, {"api_token": "test-remote-token"})
+    project = manager.project_store.create_remote_project(
+        name="Remote HaaS",
+        endpoint_id=endpoint.endpoint_id,
+        remote_workspace_ref="/srv/workspaces/haas",
+        display_path="~/workspaces/haas",
+        idempotency_key="create-remote-project",
+    )
+    supervisor = FakeLocalHaasSupervisor()
+    manager._haas_supervisor = supervisor
+    direct_clients: list[FakeDirectHaasClient] = []
+
+    def direct_factory(config: HaasDelegationConfig) -> FakeDirectHaasClient:
+        client = FakeDirectHaasClient(config)
+        direct_clients.append(client)
+        return client
+
+    manager._haas_direct_client_factory = direct_factory
+    manager.bind_session_project_context(
+        "s-remote",
+        workspace=None,
+        project_id=project.project.project_id,
+        workspace_binding_id=project.workspace.workspace_binding_id,
+        endpoint_id=endpoint.endpoint_id,
+        remote_workspace_ref="/srv/workspaces/haas",
+    )
+    engine = manager.get_engine("s-remote", agent="cowork")
+    assert engine is not None
+
+    async def collect_events():
+        return [
+            event
+            async for event in manager.run_turn_events(
+                "s-remote",
+                engine,
+                "inspect the remote repository",
+                agent="cowork",
+            )
+        ]
+
+    events = await asyncio.wait_for(collect_events(), timeout=5)
+
+    assert not [event for event in events if event.type.value == "error"]
+    assert direct_clients
+    remote = direct_clients[0]
+    assert remote.config.endpoint_id == endpoint.endpoint_id
+    assert remote.config.mode == "remote"
+    assert remote.config.base_url == endpoint.base_url
+    assert remote.config.api_token == "test-remote-token"
+    assert remote.runs[0]["body"]["sandbox"] == {
+        "mode": remote.config.workspace_mode,
+        "workspaceRoot": "/srv/workspaces/haas",
+        "writableRoots": ["/srv/workspaces/haas"],
+    }
+    assert "haas" not in remote.runs[0]["body"]
+    assert supervisor.ensured == []
+    binding = manager.session_store.load("s-remote").bindings["haas_delegation"]
+    assert binding["endpoint_id"] == endpoint.endpoint_id
+    assert binding["endpoint_fingerprint"] == endpoint.url_fingerprint
+    assert binding["remote_workspace_ref"] == "/srv/workspaces/haas"
+    assert str(manager.scratch_base()) not in str(remote.runs[0]["body"])
+
+
+@pytest.mark.asyncio
+async def test_unavailable_remote_endpoint_stops_before_task_submission(tmp_path):
+    provider = ScriptedProvider()
+    manager = SessionManager(data_dir=tmp_path / "state", provider=provider)
+    manager.secrets = SecretStore(tmp_path / "secrets.json")
+    endpoint = HaasEndpoint.create(
+        endpoint_id="hep_remote_offline",
+        mode=EndpointMode.REMOTE,
+        base_url="https://offline.example.invalid",
+        token_ref="secret://manager/haas/offline",
+        server_identity="offline",
+    )
+    manager.endpoint_store.put(endpoint)
+    manager.secrets.put(endpoint.token_ref, {"api_token": "test-remote-token"})
+    project = manager.project_store.create_remote_project(
+        name="Offline",
+        endpoint_id=endpoint.endpoint_id,
+        remote_workspace_ref="/srv/offline",
+        display_path="offline",
+        idempotency_key="create-offline-project",
+    )
+    manager.bind_session_project_context(
+        "s-offline",
+        workspace=None,
+        project_id=project.project.project_id,
+        workspace_binding_id=project.workspace.workspace_binding_id,
+        endpoint_id=endpoint.endpoint_id,
+        remote_workspace_ref=project.workspace.remote_workspace_ref,
+    )
+    remote = UnavailableRemoteDirectHaasClient(
+        HaasDelegationConfig(mode="remote")
+    )
+    manager._haas_direct_client_factory = lambda _config: remote
+    engine = manager.get_engine("s-offline", agent="cowork")
+    assert engine is not None
+
+    events = [
+        event
+        async for event in manager.run_turn_events(
+            "s-offline", engine, "do not run locally", agent="cowork"
+        )
+    ]
+
+    assert [event.type.value for event in events] == ["error"]
+    assert "remote endpoint unavailable" in events[0].data["error"]
+    assert remote.runs == []
+    assert provider.calls == 0
+
+
+def test_missing_frozen_remote_endpoint_blocks_instead_of_using_local_provider(tmp_path):
+    provider = ScriptedProvider()
+    manager = SessionManager(data_dir=tmp_path / "state", provider=provider)
+    manager.project_store.ensure_session_binding(
+        "s-missing-remote",
+        workspace=None,
+        endpoint_id="hep_missing_remote",
+    )
+
+    decision = manager.delegation_decision(
+        "s-missing-remote",
+        agent="cowork",
+        content="do not run this locally",
+    )
+
+    assert decision.backend == "blocked"
+    assert decision.reason == "endpoint_unavailable"
+    assert provider.calls == 0
+
+    client = TestClient(create_app(manager))
+    with client.websocket_connect("/ws/session/s-missing-remote?agent=cowork") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json(_user_message("do not run this locally"))
+        rejected = ws.receive_json()
+
+    assert rejected["type"] == "command_ack"
+    assert rejected["data"]["status"] == "rejected"
+    assert rejected["data"]["error"]["code"] == "endpoint_unavailable"
+    assert provider.calls == 0
+
+
+def test_local_project_binding_overrides_a_remote_global_default(tmp_path, monkeypatch):
+    workspace = tmp_path / "local-project"
+    workspace.mkdir()
+    manager = SessionManager(data_dir=tmp_path / "state", provider=ScriptedProvider())
+    project = manager.project_store.ensure_local_project(workspace)
+    manager.project_store.ensure_session_binding(
+        "s-local",
+        workspace=str(workspace),
+        explicit_project_id=project.project.project_id,
+        explicit_workspace_binding_id=project.workspace.workspace_binding_id,
+        endpoint_id="hep_local_managed",
+    )
+    remote_default = HaasDelegationConfig(
+        mode="remote",
+        execution_mode="local_api",
+        base_url="https://old-default.example.invalid",
+        api_token="must-not-cross",
+    )
+    monkeypatch.setattr(manager, "_haas_config", lambda _workspace: remote_default)
+
+    decision = manager.delegation_decision(
+        "s-local", agent="cowork", content="run locally"
+    )
+
+    assert decision.use_haas
+    assert decision.config is not None
+    assert decision.config.endpoint_id == "hep_local_managed"
+    assert decision.config.mode == "local_managed"
+    assert decision.config.base_url == "http://127.0.0.1:8092"
+    assert decision.config.api_token != "must-not-cross"
+
+
 def test_ws_reports_local_haas_startup_error_without_background_task_crash(
     tmp_path, monkeypatch
 ):
@@ -1771,7 +2028,7 @@ def test_ws_reports_local_haas_startup_error_without_background_task_crash(
 
     with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hello from packaged app"})
+        ws.send_json(_user_message("hello from packaged app"))
         events = []
         while True:
             event = ws.receive_json()
@@ -1779,8 +2036,13 @@ def test_ws_reports_local_haas_startup_error_without_background_task_crash(
             if event["type"] == "turn_done":
                 break
 
-    assert [event["type"] for event in events] == ["error", "turn_done"]
-    assert events[0]["data"] == {
+    domain_events = [
+        event
+        for event in events
+        if event["type"] not in {"command_ack", "queue_updated"}
+    ]
+    assert [event["type"] for event in domain_events] == ["error", "turn_done"]
+    assert domain_events[0]["data"] == {
         "error": "local HaaS sidecar unavailable: local_haas_exited",
         "error_type": "HaasDelegationError",
     }
@@ -1891,7 +2153,7 @@ def test_local_haas_network_setting_projects_allow_policy(tmp_path, monkeypatch)
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fetch example"})
+        ws.send_json(_user_message("fetch example"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -1922,8 +2184,8 @@ def test_ws_stop_cancels_active_local_haas_invocation_and_waits_for_terminal(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until stopped"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until stopped"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "interrupt"})
         events = []
         while True:
@@ -1965,8 +2227,8 @@ def test_ws_rejected_active_stop_restores_running_control_state(tmp_path, monkey
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until stop fails"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until stop fails"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "interrupt"})
         restored = ws.receive_json()
 
@@ -1993,11 +2255,12 @@ def test_ws_pause_interrupts_active_local_haas_invocation_and_restores_paused_st
     )
 
     app = create_app(manager)
+    message = _user_message("run until paused")
     with TestClient(app).websocket_connect("/ws/session/s1?agent=cowork") as ws:
         ready = ws.receive_json()
         assert ready["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(message)
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "pause"})
         events = []
         while True:
@@ -2019,6 +2282,11 @@ def test_ws_pause_interrupts_active_local_haas_invocation_and_restores_paused_st
     assert binding["control_state"] == "paused"
     assert binding["supports_resume"] is True
     assert binding["resumable_invocation_id"] == "inv_pause_1"
+    receipt = manager.conversation_commands.find_by_idempotency(
+        "s1", message["idempotencyKey"]
+    )
+    assert receipt is not None
+    assert receipt.execution_ref == "inv_pause_1"
 
     with TestClient(app).websocket_connect("/ws/session/s1?agent=cowork") as ws:
         ready = ws.receive_json()
@@ -2046,8 +2314,8 @@ def test_ws_stop_supersedes_inflight_pause_without_blocking_receive_loop(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until stopped"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until stopped"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         assert ws.receive_json()["type"] == "execution_control"
         ws.send_json({"type": "pause"})
         pausing = ws.receive_json()
@@ -2087,8 +2355,8 @@ def test_ws_rejected_pause_restores_running_control_state(tmp_path, monkeypatch)
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until pause fails"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until pause fails"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         running = ws.receive_json()
         assert running["type"] == "execution_control"
         assert running["data"] == {
@@ -2128,8 +2396,8 @@ def test_ws_stop_while_paused_revokes_resume_without_reopening_source_turn(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "pause"})
         while ws.receive_json()["type"] != "turn_done":
             pass
@@ -2167,8 +2435,8 @@ def test_ws_stop_after_paused_readback_before_turn_done_publishes_idle(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         assert ws.receive_json()["data"]["controlState"] == "running"
         ws.send_json({"type": "pause"})
         assert ws.receive_json()["data"]["controlState"] == "pausing"
@@ -2219,8 +2487,8 @@ def test_ws_continue_resumes_same_haas_session_with_a_new_invocation(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "pause"})
         while ws.receive_json()["type"] != "turn_done":
             pass
@@ -2274,8 +2542,8 @@ def test_ws_continue_works_after_paused_readback_before_source_turn_done(
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         assert ws.receive_json()["data"]["controlState"] == "running"
         ws.send_json({"type": "pause"})
         assert ws.receive_json()["data"]["controlState"] == "pausing"
@@ -2334,8 +2602,8 @@ def test_ws_rejected_continue_restores_paused_control_state(tmp_path, monkeypatc
         "/ws/session/s1?agent=cowork"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "pause"})
         while ws.receive_json()["type"] != "turn_done":
             pass
@@ -2376,8 +2644,8 @@ def test_ws_pause_and_continue_preserve_delegated_session_affinity(tmp_path, mon
         "/ws/session/s1?agent=code"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run until paused"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run until paused"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "pause"})
         while ws.receive_json()["type"] != "turn_done":
             pass
@@ -2426,8 +2694,8 @@ def test_ws_stop_cancels_delegated_invocation_before_first_sse_event(tmp_path, m
         "/ws/session/s1?agent=code"
     ) as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run silently until stopped"})
-        assert ws.receive_json()["type"] == "turn_start"
+        ws.send_json(_user_message("run silently until stopped"))
+        assert _receive_until(ws, "turn_start")["type"] == "turn_start"
         ws.send_json({"type": "interrupt"})
         events = []
         while True:
@@ -2460,10 +2728,10 @@ def test_ws_reuses_existing_haas_binding_for_followup(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         while ws.receive_json()["type"] != "turn_done":
             pass
-        ws.send_json({"type": "user_message", "text": "hello again"})
+        ws.send_json(_user_message("hello again"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -2489,7 +2757,7 @@ def test_ws_waits_for_pending_policy_before_starting_delegated_turn(tmp_path, mo
 
     with TestClient(create_app(manager)).websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this"})
+        ws.send_json(_user_message("fix this"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -2515,7 +2783,7 @@ def test_server_confirmed_410_creates_and_reuses_one_linked_attempt(tmp_path, mo
     app_client = TestClient(create_app(manager))
     with app_client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this"})
+        ws.send_json(_user_message("fix this"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -2526,7 +2794,7 @@ def test_server_confirmed_410_creates_and_reuses_one_linked_attempt(tmp_path, mo
 
     with app_client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "again"})
+        ws.send_json(_user_message("again"))
         failed = []
         while True:
             event = ws.receive_json()
@@ -2559,17 +2827,16 @@ def test_ws_unbound_unsupported_attachment_fails_closed(tmp_path, monkeypatch):
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
         ws.send_json(
-            {
-                "type": "user_message",
-                "text": "fix this image",
-                "model": "volcengine-ark:m1",
-                "attachments": [
+            _user_message(
+                "fix this image",
+                model="volcengine-ark:m1",
+                attachments=[
                     {
                         "kind": "image",
                         "data_url": "data:image/png;base64,aaa",
                     }
                 ],
-            }
+            )
         )
         seen = []
         while True:
@@ -2579,8 +2846,8 @@ def test_ws_unbound_unsupported_attachment_fails_closed(tmp_path, monkeypatch):
                 break
 
     assert provider.calls == 0
-    assert seen[0]["type"] == "error"
-    assert "unsupported_content" in seen[0]["data"]["error"]
+    error = next(event for event in seen if event["type"] == "error")
+    assert "unsupported_content" in error["data"]["error"]
 
 
 def test_ws_uses_bound_haas_endpoint_after_config_change(tmp_path, monkeypatch):
@@ -2606,10 +2873,10 @@ def test_ws_uses_bound_haas_endpoint_after_config_change(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         while ws.receive_json()["type"] != "turn_done":
             pass
-        ws.send_json({"type": "user_message", "text": "hello again"})
+        ws.send_json(_user_message("hello again"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -2636,7 +2903,7 @@ def test_ws_retry_on_haas_bound_session_stays_delegated(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         while ws.receive_json()["type"] != "turn_done":
             pass
         ws.send_json({"type": "retry"})
@@ -2664,7 +2931,7 @@ def test_ws_bound_haas_session_fails_closed(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         events = []
         while True:
             event = ws.receive_json()
@@ -2693,7 +2960,7 @@ def test_ws_delegated_failed_terminal_status_is_preserved(tmp_path, monkeypatch)
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         seen = []
         while True:
             event = ws.receive_json()
@@ -2719,7 +2986,7 @@ def test_ws_defaults_to_haas_when_no_keyword_matches(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "hello", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("hello", model="volcengine-ark:m1"))
         while ws.receive_json()["type"] != "turn_done":
             pass
 
@@ -2742,7 +3009,7 @@ def test_local_human_bridge_resumes_same_invocation_after_approval_and_input(tmp
 
     with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "run interactively"})
+        ws.send_json(_user_message("run interactively"))
         approval = ws.receive_json()
         while approval["type"] != "permission_required":
             approval = ws.receive_json()
@@ -2804,7 +3071,7 @@ def test_local_structured_plan_gets_one_linked_continuation_then_completes(tmp_p
 
     with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "finish the plan"})
+        ws.send_json(_user_message("finish the plan"))
         events = []
         while True:
             event = ws.receive_json()
@@ -2835,7 +3102,7 @@ def test_local_structured_plan_stops_after_three_continuations(tmp_path, monkeyp
 
     with client.websocket_connect("/ws/session/s1?agent=cowork") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "finish the plan"})
+        ws.send_json(_user_message("finish the plan"))
         events = []
         while True:
             event = ws.receive_json()
@@ -3090,7 +3357,7 @@ async def test_delegated_mode_change_updates_same_revisioned_policy_control(
 
 
 @pytest.mark.asyncio
-async def test_reconnect_suppresses_stale_interaction_after_non_success_terminal(
+async def test_reconnect_suppresses_stale_interaction_when_terminal_event_id_is_missing(
     tmp_path, monkeypatch
 ):
     cfg = _local_api_config()
@@ -3155,8 +3422,8 @@ async def test_reconnect_suppresses_stale_interaction_after_non_success_terminal
 
     assert await manager.pending_haas_interactions("s1") == []
     stored = manager.session_store.load("s1").bindings["haas_delegation"]
-    assert stored["stream_bridge"]["terminalStatus"] == "failed"
-    assert stored["stream_bridge"]["task"]["phase"] == "failed"
+    assert stored["stream_bridge"]["terminalStatus"] is None
+    assert stored["stream_bridge"]["task"]["phase"] == "incomplete"
     assert stored["stream_bridge"]["completed"] is True
     assert stored["control_state"] == "idle"
     assert stored["attempt_ledger"]["attempts"][0]["terminal"] is True
@@ -3168,7 +3435,7 @@ async def test_reconnect_suppresses_stale_interaction_after_non_success_terminal
     assert ready["type"] == "ready"
     assert ready["data"]["running"] is False
     assert ready["data"]["execution_control"]["controlState"] == "idle"
-    assert ready["data"]["haas_task_outcome"]["phase"] == "failed"
+    assert ready["data"]["haas_task_outcome"]["phase"] == "incomplete"
 
 
 @pytest.mark.asyncio
@@ -3244,7 +3511,593 @@ async def test_reconnect_reconciles_stale_running_binding_after_success(
 
 
 @pytest.mark.asyncio
-async def test_reconnect_marks_missing_canonical_terminal_as_recoverable_incomplete(
+async def test_startup_recovery_reconciles_checkpointed_orphan_without_opening_chat(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    direct = InteractiveDirectHaasClient(cfg)
+    reads = 0
+
+    async def incomplete_invocation(session_id, invocation_id):
+        nonlocal reads
+        reads += 1
+        assert session_id == "hsess_s1"
+        assert invocation_id == "inv_restart_orphan"
+        return HaasEnvelope(
+            {"status": "incomplete", "terminalEventId": "evt_restart_incomplete"},
+            trace_id="tr_restart",
+        )
+
+    async def incomplete_events(session_id, *, after_event_id=None, limit=100):
+        assert session_id == "hsess_s1"
+        del limit
+        if after_event_id is not None:
+            return HaasEnvelope([], trace_id="tr_empty")
+        return HaasEnvelope(
+            [
+                {
+                    "eventId": "evt_restart_incomplete",
+                    "invocationId": "inv_restart_orphan",
+                    "type": "haas.turn.incomplete",
+                    "haas": {
+                        "status": "incomplete",
+                        "code": "sidecar_restart_execution_lost",
+                        "safeReason": "sidecar_restart_execution_lost",
+                        "retryable": True,
+                    },
+                }
+            ],
+            trace_id="tr_restart_events",
+        )
+
+    direct.get_invocation = incomplete_invocation
+    direct.events_page = incomplete_events
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager._haas_direct_client_factory = lambda _config: direct
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    engine.messages.append(
+        {
+            "role": "user",
+            "content": "resume safely after restart",
+            "_managerTurnId": "turn_restart",
+            "_managerRowId": "row_restart_user",
+            "ts": 100.0,
+        }
+    )
+    manager.save("s1", engine)
+    receipt = manager.conversation_commands.accept(
+        session_id="s1",
+        client_command_id="cmd-restart",
+        idempotency_key="idem-restart",
+        delivery="start_now",
+        payload={"text": "resume safely after restart"},
+        busy=False,
+    )
+    assert receipt.turn_id is not None
+    manager.conversation_commands.checkpoint_execution(
+        "s1", receipt.turn_id, execution_ref="inv_restart_orphan"
+    )
+
+    bridge = StreamBridgeState(
+        endpoint_id=cfg.base_url,
+        session=SessionKey(cfg.harness_id, cfg.user_id, "hsess_s1"),
+        invocation_id="inv_restart_orphan",
+    )
+    ledger = AttemptLedger()
+    ledger.add(
+        manager_turn_id="turn_restart",
+        attempt_id="attempt_restart",
+        idempotency_key="manager-turn:s1:turn_restart:attempt_restart",
+        invocation_id="inv_restart_orphan",
+    )
+    binding = manager._direct_haas_binding(
+        session_id="s1", config=cfg, workspace=str(tmp_path)
+    )
+    binding.update(
+        {
+            "attempt_ledger": ledger.to_dict(),
+            "current_attempt_id": "attempt_restart",
+            "accepted_invocation_id": "inv_restart_orphan",
+            "control_state": "running",
+            "stream_bridge": bridge.to_dict(),
+        }
+    )
+    manager._persist_haas_binding("s1", engine, binding)
+
+    first = await manager.reconcile_startup_haas_commands()
+    second = await manager.reconcile_startup_haas_commands()
+
+    assert first == {"terminal": 1, "reattached": 0, "recovery_required": 0}
+    assert second == {"terminal": 0, "reattached": 0, "recovery_required": 0}
+    assert reads == 1
+    command = manager.conversation_commands.find_by_idempotency("s1", "idem-restart")
+    assert command is not None
+    assert command.disposition == "terminal"
+    assert command.outcome_ref == "inv_restart_orphan"
+    stored = manager.session_store.load("s1")
+    assert stored is not None
+    assert stored.bindings["haas_delegation"]["control_state"] == "idle"
+    assistants = [message for message in stored.messages if message["role"] == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0]["_haas_task_outcome"]["phase"] == "incomplete"
+    assert assistants[0]["_haas_task_outcome"]["code"] == "sidecar_restart_execution_lost"
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_migrates_newest_legacy_receipt_and_closes_predecessors(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    manager.save("s1", engine)
+    receipts = []
+    for index in range(2):
+        receipt = manager.conversation_commands.accept(
+            session_id="s1",
+            client_command_id=f"cmd-legacy-{index}",
+            idempotency_key=f"idem-legacy-{index}",
+            delivery="start_now",
+            payload={"text": f"legacy {index}"},
+            busy=False,
+        )
+        assert receipt.turn_id is not None
+        manager.conversation_commands.mark_checkpointed("s1", receipt.turn_id)
+        receipts.append(receipt)
+    bridge = StreamBridgeState(
+        endpoint_id=cfg.base_url,
+        session=SessionKey(cfg.harness_id, cfg.user_id, "hsess_s1"),
+        invocation_id="inv_legacy_current",
+    )
+    bridge.terminal_status = "incomplete"
+    bridge.terminal_code = "sidecar_restart_execution_lost"
+    bridge.terminal_safe_reason = "sidecar_restart_execution_lost"
+    bridge.terminal_retryable = True
+    bridge.task.observe_terminal(
+        "incomplete",
+        code="sidecar_restart_execution_lost",
+        safe_reason="sidecar_restart_execution_lost",
+    )
+    bridge.completed = True
+    ledger = AttemptLedger()
+    attempt = ledger.add(
+        manager_turn_id="turn_legacy_current",
+        attempt_id="attempt_legacy_current",
+        idempotency_key="manager-turn:s1:turn_legacy_current:attempt_legacy_current",
+        invocation_id="inv_legacy_current",
+    )
+    attempt.terminal = True
+    binding = manager._direct_haas_binding(
+        session_id="s1", config=cfg, workspace=str(tmp_path)
+    )
+    binding.update(
+        {
+            "attempt_ledger": ledger.to_dict(),
+            "current_attempt_id": attempt.attempt_id,
+            "accepted_invocation_id": "inv_legacy_current",
+            "control_state": "running",
+            "stream_bridge": bridge.to_dict(),
+        }
+    )
+    manager._persist_haas_binding("s1", engine, binding)
+
+    result = await manager.reconcile_startup_haas_commands()
+
+    assert result == {"terminal": 1, "reattached": 0, "recovery_required": 0}
+    first = manager.conversation_commands.find_by_idempotency("s1", "idem-legacy-0")
+    second = manager.conversation_commands.find_by_idempotency("s1", "idem-legacy-1")
+    assert first is not None and first.disposition == "terminal"
+    assert first.outcome_ref == "superseded:inv_legacy_current"
+    assert second is not None and second.disposition == "terminal"
+    assert second.execution_ref == "inv_legacy_current"
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_reattaches_live_invocation_without_resubmitting(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    direct = FakeDirectHaasClient(cfg)
+    reads = 0
+
+    async def invocation_readback(session_id, invocation_id):
+        nonlocal reads
+        reads += 1
+        return HaasEnvelope(
+            {
+                "id": invocation_id,
+                "sessionId": session_id,
+                "status": "running" if reads == 1 else "completed",
+                "terminalEventId": "evt_recovered_terminal" if reads > 1 else None,
+            },
+            trace_id="tr_live_recovery",
+        )
+
+    async def recovered_events(session_id, *, after_event_id=None, limit=100):
+        del session_id, limit
+        assert after_event_id == "evt_checkpoint"
+        return HaasEnvelope(
+            [
+                {
+                    "eventId": "evt_recovered_terminal",
+                    "invocationId": "inv_live_recovery",
+                    "type": "haas.turn.completed",
+                    "haas": {"status": "completed"},
+                }
+            ],
+            trace_id="tr_live_events",
+        )
+
+    direct.get_invocation = invocation_readback
+    direct.events_page = recovered_events
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager._haas_supervisor = FakeLocalHaasSupervisor()
+    manager._haas_direct_client_factory = lambda _config: direct
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    engine.messages.append({"role": "user", "content": "keep following this invocation"})
+    manager.save("s1", engine)
+    receipt = manager.conversation_commands.accept(
+        session_id="s1",
+        client_command_id="cmd-live-recovery",
+        idempotency_key="idem-live-recovery",
+        delivery="start_now",
+        payload={"text": "keep following this invocation"},
+        busy=False,
+    )
+    assert receipt.turn_id is not None
+    manager.conversation_commands.checkpoint_execution(
+        "s1", receipt.turn_id, execution_ref="inv_live_recovery"
+    )
+    bridge = StreamBridgeState(
+        endpoint_id=cfg.base_url,
+        session=SessionKey(cfg.harness_id, cfg.user_id, "hsess_s1"),
+        invocation_id="inv_live_recovery",
+        native_cursor="evt_checkpoint",
+    )
+    ledger = AttemptLedger()
+    ledger.add(
+        manager_turn_id="turn_live_recovery",
+        attempt_id="attempt_live_recovery",
+        idempotency_key="manager-turn:s1:turn_live_recovery:attempt_live_recovery",
+        invocation_id="inv_live_recovery",
+    )
+    binding = manager._direct_haas_binding(
+        session_id="s1", config=cfg, workspace=str(tmp_path)
+    )
+    binding.update(
+        {
+            "attempt_ledger": ledger.to_dict(),
+            "current_attempt_id": "attempt_live_recovery",
+            "accepted_invocation_id": "inv_live_recovery",
+            "control_state": "running",
+            "stream_bridge": bridge.to_dict(),
+        }
+    )
+    manager._persist_haas_binding("s1", engine, binding)
+
+    result = await manager.reconcile_startup_haas_commands()
+    await manager.wait_for_startup_haas_recovery()
+
+    assert result["reattached"] + result["terminal"] == 1
+    assert direct.runs == []
+    command = manager.conversation_commands.find_by_idempotency(
+        "s1", "idem-live-recovery"
+    )
+    assert command is not None and command.disposition == "terminal"
+    assert manager.session_store.load("s1").bindings["haas_delegation"][
+        "control_state"
+    ] == "idle"
+
+
+def test_persisted_running_without_live_manager_owner_does_not_expose_stop(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    manager.save("s1", engine)
+    binding = manager._direct_haas_binding(
+        session_id="s1", config=cfg, workspace=str(tmp_path)
+    )
+    binding["control_state"] = "running"
+    manager._persist_haas_binding("s1", engine, binding)
+    manager._startup_unowned_haas_sessions.add("s1")
+
+    assert manager.haas_control_state("s1")["controlState"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_never_manufactures_haas_binding_for_local_turn(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    manager.save("s1", engine)
+    receipt = manager.conversation_commands.accept(
+        session_id="s1",
+        client_command_id="cmd-local",
+        idempotency_key="idem-local",
+        delivery="start_now",
+        payload={"text": "local provider work"},
+        busy=False,
+    )
+    assert receipt.turn_id is not None
+    manager.conversation_commands.mark_checkpointed("s1", receipt.turn_id)
+
+    result = await manager.reconcile_startup_haas_commands()
+
+    assert result == {"terminal": 0, "reattached": 0, "recovery_required": 1}
+    stored = manager.session_store.load("s1")
+    assert stored is not None
+    assert "haas_delegation" not in stored.bindings
+    command = manager.conversation_commands.find_by_idempotency("s1", "idem-local")
+    assert command is not None and command.disposition == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_prepare_restart_pauses_owned_turn_and_persists_resume_marker(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    direct = PauseAwareDirectHaasClient(cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager._haas_direct_client_factory = lambda _config: direct
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    manager.save("s1", engine)
+    binding = manager._direct_haas_binding(
+        session_id="s1", config=cfg, workspace=str(tmp_path)
+    )
+    binding.update(
+        {
+            "accepted_invocation_id": "inv_pause_1",
+            "control_state": "running",
+            "pause_supported": True,
+        }
+    )
+    manager._persist_haas_binding("s1", engine, binding)
+    assert manager.mark_running("s1") is True
+    await manager._bind_active_haas_turn(
+        "s1",
+        client=direct,
+        haas_session_id="hsess_s1",
+        invocation_id="inv_pause_1",
+    )
+
+    first = await manager.prepare_restart(
+        idempotency_key="restart-key", timeout_seconds=0.5
+    )
+    repeated = await manager.prepare_restart(
+        idempotency_key="restart-key", timeout_seconds=0.5
+    )
+
+    assert first == repeated
+    assert first["state"] == "ready"
+    assert first["paused"] == 1
+    assert first["recoveryRequired"] == 0
+    assert direct.pause_calls == [("hsess_s1", "inv_pause_1")]
+    assert manager.conversation_commands.queue_status("s1")["paused"] is False
+    stored = manager.session_store.load("s1").bindings["haas_delegation"]
+    assert stored["control_state"] == "paused"
+    assert stored["supports_resume"] is True
+    assert stored["restartRecovery"] == {
+        "generation": first["generation"],
+        "state": "paused",
+        "sourceInvocationId": "inv_pause_1",
+        "requestedAtMs": stored["restartRecovery"]["requestedAtMs"],
+        "reasonCode": "desktop_restart",
+    }
+
+
+@pytest.mark.asyncio
+async def test_prepare_restart_never_manufactures_haas_binding_for_local_turn(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    manager.save("s1", engine)
+    assert manager.mark_running("s1") is True
+
+    result = await manager.prepare_restart(
+        idempotency_key="restart-local", timeout_seconds=0.05
+    )
+
+    assert result["state"] == "blocked"
+    assert result["paused"] == 0
+    assert result["recoveryRequired"] == 1
+    stored = manager.session_store.load("s1")
+    assert stored is not None
+    assert "haas_delegation" not in stored.bindings
+
+
+def test_prepare_restart_route_forwards_idempotency_and_bounded_timeout(
+    tmp_path, monkeypatch
+):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    captured = {}
+
+    async def prepare_restart(*, idempotency_key=None, timeout_seconds=8.0):
+        captured.update(
+            idempotency_key=idempotency_key,
+            timeout_seconds=timeout_seconds,
+        )
+        return {
+            "state": "ready",
+            "generation": "restart_route",
+            "paused": 0,
+            "recoveryRequired": 0,
+        }
+
+    monkeypatch.setattr(manager, "prepare_restart", prepare_restart)
+    with TestClient(create_app(manager)) as client:
+        response = client.post(
+            "/v1/lifecycle/prepare-restart",
+            headers={"Idempotency-Key": "restart-route-key"},
+            json={"timeoutSeconds": 99},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["generation"] == "restart_route"
+    assert captured == {
+        "idempotency_key": "restart-route-key",
+        "timeout_seconds": 10.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_auto_continues_restart_owned_paused_session_once(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    direct = ResumeAwareDirectHaasClient(cfg)
+    direct.paused.set()
+    ready_calls = 0
+
+    async def delayed_ready(*, scope="control"):
+        nonlocal ready_calls
+        assert scope == "execution"
+        ready_calls += 1
+        if ready_calls == 1:
+            raise HaasClientError("local sidecar is still starting")
+        return HaasEnvelope({"status": "ready"}, trace_id="tr_ready_after_restart")
+
+    direct.ready = delayed_ready
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager._haas_supervisor = FakeLocalHaasSupervisor()
+    manager._haas_direct_client_factory = lambda _config: direct
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    engine.messages.append(
+        {
+            "role": "user",
+            "content": "finish this after update",
+            "_managerTurnId": "turn_source",
+            "_managerRowId": "row_source_user",
+            "ts": 100.0,
+        }
+    )
+    manager.save("s1", engine)
+    bridge = StreamBridgeState(
+        endpoint_id=cfg.base_url,
+        session=SessionKey(cfg.harness_id, cfg.user_id, "hsess_s1"),
+        invocation_id="inv_pause_1",
+    )
+    bridge.terminal_status = "interrupted"
+    bridge.terminal_retryable = True
+    bridge.task.observe_terminal("interrupted")
+    bridge.completed = True
+    ledger = AttemptLedger()
+    source = ledger.add(
+        manager_turn_id="turn_source",
+        attempt_id="attempt_source",
+        idempotency_key="manager-turn:s1:turn_source:attempt_source",
+        invocation_id="inv_pause_1",
+    )
+    source.terminal = True
+    binding = manager._direct_haas_binding(
+        session_id="s1", config=cfg, workspace=str(tmp_path)
+    )
+    binding.update(
+        {
+            "attempt_ledger": ledger.to_dict(),
+            "current_attempt_id": "attempt_source",
+            "accepted_invocation_id": "inv_pause_1",
+            "control_state": "paused",
+            "supports_resume": True,
+            "resumable_invocation_id": "inv_pause_1",
+            "pause_supported": True,
+            "stream_bridge": bridge.to_dict(),
+            "restartRecovery": {
+                "generation": "restart_test",
+                "state": "paused",
+                "sourceInvocationId": "inv_pause_1",
+                "requestedAtMs": 100,
+                "reasonCode": "desktop_restart",
+            },
+        }
+    )
+    manager._persist_haas_binding("s1", engine, binding)
+
+    manager.conversation_commands.close()
+    manager.audit_store.close()
+    restarted = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    restarted._haas_supervisor = FakeLocalHaasSupervisor()
+    restarted._haas_direct_client_factory = lambda _config: direct
+
+    await restarted._reconcile_startup_haas_when_ready()
+    await restarted.wait_for_startup_haas_recovery()
+    await restarted.reconcile_startup_haas_commands()
+    await restarted.wait_for_startup_haas_recovery()
+
+    assert len(direct.continue_calls) == 1
+    assert direct.continue_calls[0][0:2] == ("hsess_s1", "inv_pause_1")
+    assert "do not repeat completed side effects" in direct.continue_calls[0][2]
+    assert ready_calls == 2
+    stored = restarted.session_store.load("s1")
+    assert stored is not None
+    assert stored.bindings["haas_delegation"]["restartRecovery"]["state"] == "continued"
+    assert stored.bindings["haas_delegation"]["control_state"] == "idle"
+    assert [message["role"] for message in stored.messages].count("user") == 1
+    assistant_texts = [
+        message["content"]
+        for message in stored.messages
+        if message["role"] == "assistant"
+    ]
+    assert assistant_texts == ["resumed"]
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_does_not_continue_mismatched_restart_marker(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    direct = ResumeAwareDirectHaasClient(cfg)
+    direct.paused.set()
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    manager._haas_supervisor = FakeLocalHaasSupervisor()
+    manager._haas_direct_client_factory = lambda _config: direct
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    manager.save("s1", engine)
+    binding = manager._direct_haas_binding(
+        session_id="s1", config=cfg, workspace=str(tmp_path)
+    )
+    binding.update(
+        {
+            "control_state": "paused",
+            "supports_resume": True,
+            "resumable_invocation_id": "inv_pause_1",
+            "restartRecovery": {
+                "generation": "restart_mismatch",
+                "state": "paused",
+                "sourceInvocationId": "inv_other",
+                "requestedAtMs": 100,
+                "reasonCode": "desktop_restart",
+            },
+        }
+    )
+    manager._persist_haas_binding("s1", engine, binding)
+
+    result = await manager.reconcile_startup_haas_commands()
+    await manager.wait_for_startup_haas_recovery()
+
+    assert result["recovery_required"] == 1
+    assert direct.continue_calls == []
+    stored = manager.session_store.load("s1").bindings["haas_delegation"]
+    assert stored["restartRecovery"]["state"] == "recovery_required"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_without_terminal_event_id_converges_without_history_scan(
     tmp_path, monkeypatch
 ):
     cfg = _local_api_config()
@@ -3254,13 +4107,12 @@ async def test_reconnect_marks_missing_canonical_terminal_as_recoverable_incompl
     async def completed_invocation(session_id, invocation_id):
         del session_id, invocation_id
         return HaasEnvelope(
-            {"status": "completed", "terminalEventId": "evt_missing"},
+            {"status": "failed", "terminalEventId": None},
             trace_id="tr_completed",
         )
 
-    async def no_terminal_events(session_id, *, after_event_id=None, limit=100):
-        del session_id, after_event_id, limit
-        return HaasEnvelope([], trace_id="tr_empty")
+    async def no_terminal_events(*args, **kwargs):
+        raise AssertionError("missing terminalEventId must not trigger full event replay")
 
     direct.get_invocation = completed_invocation
     direct.events_page = no_terminal_events
@@ -3367,6 +4219,201 @@ async def test_reconnect_replays_process_events_with_stable_event_ids(tmp_path, 
         "evt_tool_1",
     ]
     assert direct.runs == []
+
+
+@pytest.mark.asyncio
+async def test_completed_reconnect_skips_process_history_and_compacts_bridge(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+
+    def unexpected_client(_config):
+        raise AssertionError("completed reconnect must not contact the HaaS event client")
+
+    manager._haas_direct_client_factory = unexpected_client
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    engine.messages.append(
+        {
+            "role": "assistant",
+            "content": "process commentary",
+            "ts": 123.0,
+            "_managerRowId": "assistant-existing",
+            "_managerTurnId": "turn-existing",
+            "_haas_activity": [
+                {
+                    "id": "call_1",
+                    "invocationId": "inv_completed_large",
+                    "status": "running",
+                }
+            ],
+            "_haas_task_outcome": {"phase": "running"},
+        }
+    )
+    manager.save("s1", engine)
+    binding = manager._direct_haas_binding(
+        session_id="s1", config=cfg, workspace=str(tmp_path)
+    )
+    bridge = StreamBridgeState(
+        endpoint_id=cfg.base_url,
+        session=SessionKey(cfg.harness_id, cfg.user_id, "hsess_s1"),
+        invocation_id="inv_completed_large",
+    )
+    bridge.assistant_text = "completed answer"
+    bridge.activities["call_1"] = {
+        "id": "call_1",
+        "kind": "command",
+        "status": "completed",
+        "invocationId": "inv_completed_large",
+        "evidenceRef": "evidence_1",
+    }
+    bridge.model_stages = [
+        {
+            "modelCallId": "model_call_1",
+            "status": "completed",
+            "steps": [{"stepId": "result_1", "kind": "result", "text": "done"}],
+        }
+    ]
+    bridge.terminal_status = "completed"
+    bridge.task.observe_terminal("completed")
+    bridge.completed = True
+    legacy_bridge = bridge.to_dict()
+    legacy_bridge["seen"] = [
+        [
+            cfg.base_url,
+            "chrn_codex_default\u001fmanager\u001fhsess_s1",
+            "inv_completed_large",
+            f"evt_{index}",
+            "native",
+        ]
+        for index in range(25_000)
+    ]
+    legacy_bridge["toolSeen"] = [[f"call_{index}", "finished"] for index in range(1_000)]
+    legacy_bridge["contentSeen"] = [
+        [f"evt_{index}", "reasoning"] for index in range(25_000)
+    ]
+    binding["stream_bridge"] = legacy_bridge
+    manager._persist_haas_binding("s1", engine, binding)
+    manager._engines.pop("s1", None)
+
+    messages = manager.session_messages("s1")
+    assistants = [message for message in messages if message["role"] == "assistant"]
+    assert len(assistants) == 1
+    assistant = assistants[0]
+    assert assistant["content"] == "done"
+    assert assistant["ts"] == 123.0
+    assert assistant["_managerRowId"] == "assistant-existing"
+    assert assistant["_managerTurnId"] == "turn-existing"
+    assert assistant["_haas_task_outcome"]["phase"] == "completed"
+    assert assistant["_haas_activity"][0]["evidenceRef"] == "evidence_1"
+    assert assistant["_haas_model_stages"][0]["steps"][0]["text"] == "done"
+
+    assert await manager.pending_haas_interactions("s1") == []
+    assert await manager.replay_haas_process_events("s1") == []
+
+    stored = manager.session_store.load("s1").bindings["haas_delegation"]["stream_bridge"]
+    assert stored["seen"] == []
+    assert stored["toolSeen"] == []
+    assert stored["contentSeen"] == []
+    assert stored["assistantText"] == "completed answer"
+    assert stored["activities"][0]["evidenceRef"] == "evidence_1"
+    assert stored["modelStages"][0]["steps"][0]["text"] == "done"
+
+
+def test_completed_reconnect_replaces_no_tool_commentary_by_turn_identity(
+    tmp_path, monkeypatch
+):
+    cfg = _local_api_config()
+    monkeypatch.setattr(SessionManager, "_haas_config", lambda self, workspace: cfg)
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    engine = manager.get_engine("s1", workspace=str(tmp_path), agent="cowork")
+    assert engine is not None
+    engine.messages.extend(
+        [
+            {
+                "role": "user",
+                "content": "Summarize the project",
+                "ts": 90.0,
+                "_managerRowId": "user-earlier",
+                "_managerTurnId": "turn-earlier",
+            },
+            {
+                "role": "assistant",
+                "content": "Final summary",
+                "ts": 91.0,
+                "_managerRowId": "assistant-earlier",
+                "_managerTurnId": "turn-earlier",
+                "_haas_task_outcome": {
+                    "phase": "completed",
+                    "invocationStatus": "completed",
+                    "continuationCount": 0,
+                    "continuationLimit": 3,
+                    "blockingRequestId": None,
+                    "code": None,
+                    "safeReason": None,
+                    "pendingPlanSteps": 0,
+                    "inProgressPlanSteps": 0,
+                    "status": "completed",
+                    "retryable": None,
+                },
+            },
+            {
+                "role": "user",
+                "content": "Summarize the project",
+                "ts": 100.0,
+                "_managerRowId": "user-existing",
+                "_managerTurnId": "turn-existing",
+            },
+            {
+                "role": "assistant",
+                "content": "process commentary",
+                "ts": 123.0,
+                "_managerRowId": "assistant-existing",
+                "_managerTurnId": "turn-existing",
+                "_haas_task_outcome": {"phase": "running"},
+            },
+        ]
+    )
+    manager.save("s1", engine)
+
+    bridge = StreamBridgeState(
+        endpoint_id=cfg.base_url,
+        session=SessionKey(cfg.harness_id, cfg.user_id, "hsess_s1"),
+        invocation_id="inv_completed_no_tool",
+    )
+    bridge.model_stages = [
+        {
+            "modelCallId": "model_call_1",
+            "status": "completed",
+            "steps": [{"stepId": "result_1", "kind": "result", "text": "Final summary"}],
+        }
+    ]
+    bridge.terminal_status = "completed"
+    bridge.task.observe_terminal("completed")
+    bridge.completed = True
+    binding = manager._direct_haas_binding(
+        session_id="s1", config=cfg, workspace=str(tmp_path)
+    )
+    binding["last_user_message"] = {
+        "content": "Summarize the project",
+        "display": None,
+        "ts": 100.0,
+    }
+    binding["stream_bridge"] = bridge.to_dict()
+    manager._persist_haas_binding("s1", engine, binding)
+    manager._engines.pop("s1", None)
+
+    messages = manager.session_messages("s1")
+    assistants = [message for message in messages if message["role"] == "assistant"]
+    assert len(assistants) == 2
+    assert assistants[0]["_managerTurnId"] == "turn-earlier"
+    assert assistants[0]["ts"] == 91.0
+    assert assistants[1]["content"] == "Final summary"
+    assert assistants[1]["ts"] == 123.0
+    assert assistants[1]["_managerRowId"] == "assistant-existing"
+    assert assistants[1]["_managerTurnId"] == "turn-existing"
 
 
 @pytest.mark.asyncio
@@ -3856,6 +4903,43 @@ def test_cowork_recall_mcp_returns_scoped_memory_and_session_history(tmp_path, m
     binding["recall_token"] = "fixture_recall_token"
     manager._persist_haas_binding("s1", engine, binding)
     client = TestClient(create_app(manager))
+    mcp_headers = {
+        "Accept": "application/json, text/event-stream",
+        "X-HaaS-Session-ID": "hsess_s1",
+        "X-HaaS-Recall-Token": "fixture_recall_token",
+    }
+
+    initialize = client.post(
+        "/mcp/cowork-recall",
+        json={
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "1"},
+            },
+        },
+        headers=mcp_headers,
+    )
+
+    initialized = client.post(
+        "/mcp/cowork-recall",
+        json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        headers=mcp_headers,
+    )
+    tools = client.post(
+        "/mcp/cowork-recall",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        headers=mcp_headers,
+    )
+
+    assert initialize.status_code == 200
+    assert initialize.json()["result"]["protocolVersion"] == "2025-06-18"
+    assert initialized.status_code == 202
+    assert initialized.content == b""
+    assert [tool["name"] for tool in tools.json()["result"]["tools"]] == ["recall"]
 
     response = client.post(
         "/mcp/cowork-recall",
@@ -3865,7 +4949,7 @@ def test_cowork_recall_mcp_returns_scoped_memory_and_session_history(tmp_path, m
             "method": "tools/call",
             "params": {"name": "recall", "arguments": {"query": "Quarto", "limit": 5}},
         },
-        headers={"X-HaaS-Session-ID": "hsess_s1", "X-HaaS-Recall-Token": "fixture_recall_token"},
+        headers=mcp_headers,
     )
 
     assert response.status_code == 200
@@ -4238,6 +5322,7 @@ def test_missing_bundled_codex_keeps_manager_startup_available(tmp_path, monkeyp
     monkeypatch.setattr(sys, "executable", str(tmp_path / "openworker-server"))
     supervisor = LocalHaasSupervisor(tmp_path)
     monkeypatch.setattr(supervisor, "_healthy", lambda _url: False)
+    monkeypatch.setattr(supervisor, "_port_is_listening", lambda _host, _port: False)
     cfg = _local_api_config()
     cfg.local_autostart = True
 
@@ -4317,7 +5402,7 @@ def test_ws_fails_closed_when_haas_omits_required_accepted_headers(tmp_path, mon
 
     with client.websocket_connect("/ws/session/s1?agent=code") as ws:
         assert ws.receive_json()["type"] == "ready"
-        ws.send_json({"type": "user_message", "text": "fix this", "model": "volcengine-ark:m1"})
+        ws.send_json(_user_message("fix this", model="volcengine-ark:m1"))
         seen = []
         while True:
             event = ws.receive_json()
@@ -4325,7 +5410,11 @@ def test_ws_fails_closed_when_haas_omits_required_accepted_headers(tmp_path, mon
             if event["type"] == "turn_done":
                 break
 
-    assert [event["type"] for event in seen] == ["error", "turn_done"]
+    assert [
+        event["type"]
+        for event in seen
+        if event["type"] not in {"command_ack", "queue_updated"}
+    ] == ["error", "turn_done"]
     assert manager.session_store.load("s1").bindings.get("haas_delegation") is None
 
 
@@ -4404,5 +5493,46 @@ async def test_scheduled_run_uses_real_manager_haas_route(tmp_path, monkeypatch)
     assert provider.calls == 0
     assert len(direct.runs) == 1
     assert direct.runs[0]["body"]["sessionId"] == "hsess_" + run.session_id
-    assert manager.session_store.load(run.session_id).bindings["haas_delegation"]["execution_mode"] == "local_api"
+    assert (
+        manager.session_store.load(run.session_id).bindings["haas_delegation"][
+            "execution_mode"
+        ]
+        == "local_api"
+    )
     assert manager.inbox.pending(run.session_id)
+
+
+def test_restart_readback_preserves_all_predecessor_invocations(tmp_path):
+    manager = SessionManager(workspace=tmp_path, provider=ScriptedProvider())
+    engine = manager.get_engine("restart-facts", workspace=str(tmp_path), agent="cowork")
+    engine.messages.append({"role": "user", "content": "fixture task", "_managerTurnId": "t1"})
+    for invocation in ("inv1", "inv2", "inv3"):
+        engine.messages.append({
+            "role": "assistant", "content": invocation,
+            "_managerTurnId": "t1", "_managerRowId": invocation, "ts": 1,
+            "_haas_task_outcome": {"phase": "completed"},
+            "_haas_activity": [{"invocationId": invocation, "id": "same", "status": "running"}],
+            "_haas_model_stages": [{"invocationId": invocation, "modelCallId": "same", "steps": []}],
+        })
+    manager._merge_restart_continuation_messages(engine, "t1")
+    assert len([m for m in engine.messages if m["role"] == "assistant"]) == 1
+    assert [v["invocationId"] for v in engine.messages[-1]["_haas_activity"]] == ["inv1", "inv2", "inv3"]
+    bridge = StreamBridgeState(
+        endpoint_id="http://127.0.0.1:8092", session=SessionKey("app", "user", "session"),
+        invocation_id="inv3",
+    )
+    bridge.assistant_text = "Final answer"
+    bridge.activities["fresh"] = {"invocationId": "inv3", "id": "fresh", "status": "completed"}
+    bridge.model_stages = [{"invocationId": "inv3", "modelCallId": "fresh", "steps": []}]
+    bridge.terminal_status = "completed"
+    bridge.task.observe_terminal("completed")
+    binding = {"last_user_message": {"content": "fixture task"}, "stream_bridge": bridge.to_dict()}
+    # The current bridge must replace stale facts in its own invocation only.
+    recovered = manager._recover_haas_messages(engine.messages, binding)
+    answer = recovered[-1]
+    assert answer["_managerRowId"] == "inv1"
+    assert answer["content"] == "Final answer"
+    assert [(v["invocationId"], v["id"]) for v in answer["_haas_activity"]] == [
+        ("inv1", "same"), ("inv2", "same"), ("inv3", "fresh")]
+    assert [v["modelCallId"] for v in answer["_haas_model_stages"]] == ["same", "same", "fresh"]
+    assert manager._recover_haas_messages(recovered, binding) == recovered

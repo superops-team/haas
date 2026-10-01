@@ -13,10 +13,48 @@ const scrollerState = `(() => {
   return el ? { top: el.scrollTop, height: el.scrollHeight, client: el.clientHeight } : null;
 })()`;
 
-test("scrolling up mid-stream pins the viewport; jump-to-latest re-engages", async ({ page }) => {
+test("blank desktop chrome cannot scroll or rubber-band the document root", async ({
+  page,
+}) => {
+  await page.goto("/?overlay=1");
+  await expect(page.getByPlaceholder(/Ask the AI assistant/)).toBeVisible();
+  const containment = await page.evaluate(() => {
+    const root = document.documentElement;
+    const body = document.body;
+    const app = document.querySelector<HTMLElement>(".app")!;
+    const transcript = document.querySelector<HTMLElement>(".main-scroll")!;
+    return {
+      rootOverflow: getComputedStyle(root).overflow,
+      bodyOverflow: getComputedStyle(body).overflow,
+      rootOverscroll: getComputedStyle(root).overscrollBehaviorY,
+      bodyOverscroll: getComputedStyle(body).overscrollBehaviorY,
+      appOverscroll: getComputedStyle(app).overscrollBehaviorY,
+      transcriptOverscroll: getComputedStyle(transcript).overscrollBehaviorY,
+    };
+  });
+  expect(containment).toEqual({
+    rootOverflow: "hidden",
+    bodyOverflow: "hidden",
+    rootOverscroll: "none",
+    bodyOverscroll: "none",
+    appOverscroll: "none",
+    transcriptOverscroll: "contain",
+  });
+
+  await page.locator(".main-topbar").hover();
+  await page.mouse.wheel(0, 900);
+  expect(await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }))).toEqual({
+    x: 0,
+    y: 0,
+  });
+});
+
+test("scrolling up mid-stream pins the viewport; jump-to-latest re-engages", async ({
+  page,
+}) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("stream the epic");
   await box.press("Enter");
 
@@ -57,7 +95,9 @@ test("scrolling up mid-stream pins the viewport; jump-to-latest re-engages", asy
   await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
 
   // Re-engaged: the follow survives the rest of the stream to the turn's end.
-  await expect(page.getByText("The epic concludes.").first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText("The epic concludes.").first()).toBeVisible({
+    timeout: 10_000,
+  });
   const done = (await page.evaluate(scrollerState))!;
   expect(done.height - done.top - done.client).toBeLessThan(80);
 });
@@ -67,12 +107,14 @@ test("submitting from older history follows the new prompt and initial waiting p
 }) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
 
   // First produce enough committed history to make the transcript independently scrollable.
   await box.fill("stream the epic");
   await box.press("Enter");
-  await expect(page.getByText("The epic concludes.").first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText("The epic concludes.").first()).toBeVisible({
+    timeout: 10_000,
+  });
   await page.locator(".main-scroll").evaluate((el) => {
     el.scrollTop = 0;
     el.dispatchEvent(new Event("scroll"));
@@ -84,21 +126,24 @@ test("submitting from older history follows the new prompt and initial waiting p
   await box.fill("silent start scroll follow");
   await box.press("Enter");
   await page.waitForTimeout(100);
-  const foregroundVisible = await page.locator(".main-scroll").evaluate((scroller) => {
-    const prompts = scroller.querySelectorAll(".bubble-user");
-    const prompt = prompts.item(prompts.length - 1);
-    const waiting = scroller.querySelector(".waiting-row");
-    if (!(prompt instanceof HTMLElement) || !(waiting instanceof HTMLElement)) return false;
-    const viewport = scroller.getBoundingClientRect();
-    const promptBox = prompt.getBoundingClientRect();
-    const waitingBox = waiting.getBoundingClientRect();
-    return (
-      promptBox.top >= viewport.top &&
-      promptBox.bottom <= viewport.bottom &&
-      waitingBox.top >= viewport.top &&
-      waitingBox.bottom <= viewport.bottom
-    );
-  });
+  const foregroundVisible = await page
+    .locator(".main-scroll")
+    .evaluate((scroller) => {
+      const prompts = scroller.querySelectorAll(".user-message");
+      const prompt = prompts.item(prompts.length - 1);
+      const waiting = scroller.querySelector('[data-testid="work-summary"]');
+      if (!(prompt instanceof HTMLElement) || !(waiting instanceof HTMLElement))
+        return false;
+      const viewport = scroller.getBoundingClientRect();
+      const promptBox = prompt.getBoundingClientRect();
+      const waitingBox = waiting.getBoundingClientRect();
+      return (
+        promptBox.top >= viewport.top &&
+        promptBox.bottom <= viewport.bottom &&
+        waitingBox.top >= viewport.top &&
+        waitingBox.bottom <= viewport.bottom
+      );
+    });
   expect(foregroundVisible).toBe(true);
   await page.waitForFunction(
     () => {
@@ -108,19 +153,25 @@ test("submitting from older history follows the new prompt and initial waiting p
     { timeout: 3_000 },
   );
   await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
-  await expect(page.getByText("Silent start follow completed.")).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByText("Silent start follow completed.")).toBeVisible({
+    timeout: 5_000,
+  });
 });
 
-test("bubbles carry hover copy + timestamp without layout shift", async ({ page }) => {
+test("bubbles carry hover copy + timestamp without layout shift", async ({
+  page,
+}) => {
   await page.goto("/");
   await page.getByText("Draft the launch note").first().click();
-  const box = page.getByPlaceholder(/Ask the coworker/);
+  const box = page.getByPlaceholder(/Ask the AI assistant/);
   await box.fill("hello meta");
   await box.press("Enter");
-  await expect(page.getByText("Echo: hello meta", { exact: false }).first()).toBeVisible();
+  await expect(
+    page.getByText("Echo: hello meta", { exact: false }).first(),
+  ).toBeVisible();
 
   // Live items are stamped client-side, so both bubbles expose the affordance strip.
-  const userBubble = page.locator(".bubble-user").last();
+  const userBubble = page.locator(".user-message").last();
   await userBubble.hover();
   const meta = page.getByTestId("bubble-copy");
   await expect(meta.first()).toBeVisible();

@@ -6,23 +6,26 @@ export function isProjectScoped(p?: { requires_folder?: boolean }): boolean {
   return p?.requires_folder === true;
 }
 
-// Persona naming: the product is "OpenHarness"; the personas are a "Coworker" family — Coworker
-// (general), Code Coworker, Ops Coworker. In lists/chrome we use the SHORT label (Coworker / Code /
-// Ops); the persona detail page uses the FULL family name. Backend names are left untouched (the
-// API + tests keep "OpenHarness" / "Ops Coworker"); this is purely the display layer.
-
-// Short label for the sidebar + top bar: "Coworker" / "Code" / "Ops" / "Chat".
-export function shortPersonaName(name?: string, id?: string): string {
-  if (id === "cowork") return "Coworker";
+// Persona naming stays at the display boundary. Backend/user-authored names remain untouched;
+// the built-in generic persona and generated family suffix use the localized AI Assistant term.
+export function shortPersonaName(
+  name?: string,
+  id?: string,
+  assistantLabel = "AI Assistant",
+): string {
+  if (id === "cowork") return assistantLabel;
   const n = (name || id || "").trim();
   return n.replace(/\s*coworker$/i, "").trim() || n;
 }
 
-// Full family name for the persona detail page: "Coworker" / "Code Coworker" / "Ops Coworker".
-// Chat isn't a coworker — left as-is.
-export function fullPersonaName(name?: string, id?: string): string {
-  if (id === "cowork") return "Coworker";
+// Chat and explicitly named assistants are left as-is; bare role names gain the localized suffix.
+export function fullPersonaName(
+  name?: string,
+  id?: string,
+  assistantLabel = "AI Assistant",
+): string {
+  if (id === "cowork") return assistantLabel;
   const n = (name || id || "").trim();
   if (id === "chat" || !n) return n;
-  return /coworker$/i.test(n) ? n : `${n} Coworker`;
+  return /coworker$/i.test(n) ? n : `${n} ${assistantLabel}`;
 }

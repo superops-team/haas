@@ -3,9 +3,9 @@
 [English](README.md) | **简体中文**
 
 状态：Draft
-最近评审：2026-09-15
-Change ID：manager-openharness-no-login、manager-macos-dock-reopen、manager-macos-one-command-install
-相关规格：[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
+最近评审：2026-09-28
+Change ID：manager-openharness-no-login、manager-macos-dock-reopen、manager-macos-one-command-install、manager-ai-assistant-terminology
+相关规格：[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
 
 ## 1. 组件角色
 
@@ -18,6 +18,8 @@ Manager Product Identity 定义 HaaS 配套 manager 应用的对外产品身份�
 
 - 将桌面壳、GUI chrome、启动文案、设置文案和本仓本地文档中的可见产品名从
   OpenWorker 替换为 OpenHarness。
+- 将英文 GUI 中用户可见的 persona 类别术语 `Coworker`/`Coworkers` 全部替换为
+  `AI Assistant`/`AI Assistants`，并将对应中文术语 `同事` 统一替换为 `AI助手`。
 - 提供 OpenHarness 专用 logo 和桌面/GUI 图标资源。
 - 从用户界面移除 cloud account sign-in、sign-out、账号行、cloud telemetry、
   cloud gallery 和 managed one-click connector 登录入口。
@@ -35,11 +37,15 @@ Manager Product Identity 定义 HaaS 配套 manager 应用的对外产品身份�
 
 - 同时重命名内部 Python package、数据库/状态目录和 console script。现有
   `coworker` 包名与 `openworker-server` 入口可作为兼容实现细节保留，后续单独迁移。
+- 重命名稳定 API/i18n key、`.coworker/config.toml`、用户自定义助手名称，或确实指向人类同事
+  而非 agent 的文案。
 - 清理所有历史测试 fixture、mockup 或非用户可见注释中的旧名称。
 
 ## 3. 产品规则
 
 - 用户可见界面必须显示 `OpenHarness`，不得显示 `OpenWorker`。
+- 用户可见 persona label 与说明文案必须统一使用英文 `AI Assistant`、中文 `AI助手`。旧术语
+  `Coworker`/`同事` 只允许出现在 §2 所列兼容标识和人类语义例外中。
 - 应用不得渲染登录按钮、已登录账号行、cloud account badge 或 cloud telemetry
   控件。
 - 过去依赖 OpenWorker Cloud 的功能必须隐藏、以无登录不可用状态呈现，或改为只展示
@@ -76,6 +82,9 @@ Manager Product Identity 定义 HaaS 配套 manager 应用的对外产品身份�
 
 - 桌面窗口、tray title、package metadata、启动文案、侧栏 wordmark 和设置文案使用
   OpenHarness。
+- Settings 导航/标题/说明、新会话选择、group/filter、connector/Inbox/gallery/skill/memory、
+  installer 文案与 accessible name 使用 `AI Assistant(s)` / `AI助手`。Locale contract test 扫描
+  所有翻译 value，发现非 allowlist 的旧术语即失败；用户或 server 提供的实例名称保持字节不变。
 - 桌面首次启动必须先隐藏构建主窗口，只有 WebView 报告首次页面加载完成后，才仅执行一次
   显式显示和聚焦；后续 reload 或导航不得把用户已关闭到托盘的窗口重新弹出。该顺序既避免
   可见的首帧白屏，又保证窗口最终可见且可交互。只有用户关闭
@@ -110,3 +119,10 @@ Manager Product Identity 定义 HaaS 配套 manager 应用的对外产品身份�
 ### 自动化桌面通知
 
 原生 shell 根据 automation_run_finished 显示固定完成/失败通知，不传生成内容、prompt 或工具参数。命令仅接受封闭 outcome 枚举；系统通知权限拒绝不影响任务结果或持久 Inbox。自动测试验证命令参数和桥接；系统通知实际展示依赖用户 OS 权限。
+
+### 原生项目工作台 window chrome
+
+Packaged desktop 顶部 chrome 在非交互区域提供平台原生 drag 与双击 maximize/restore；button、
+link、input、popover 与可选 conversation content 都是 no-drag。Sidebar 展开/折叠、zoom、
+maximize、restore、fullscreen、Dock/tray reopen 与 multi-display bounds restore 保持同一个
+window、WebView 与 sidecar。Browser geometry 不能作为充分证据，必须做 packaged native interaction。

@@ -137,7 +137,11 @@ Sandbox Runtime 把同一 policy 合同投影到 Lite Docker 或 OpenSandbox AIO
 | P0 | Policy Controller | `specs/policy-controller/README.md` | workspace、network、tool、approval、model policy 编译和准入 |
 | P0 | Manager Delegation | `specs/manager-delegation/README.md` | 面向 manager 的 delegated-session binding、mount manifest、恢复、workspace single-writer 策略、approval relay 和 provider 委派合同 |
 | P0 | Manager HaaS Sidecar Backend | `specs/manager-haas-sidecar-backend/README.md` | OpenHarness 本地托管与远程 HaaS sidecar backend 选择、统一 HaaS client 协议、session binding，以及 MCP/skill/model 物化交接 |
+| P0 | Manager Conversation Experience | `specs/manager-conversation-experience/README.md` | Product-turn-first Agent 对话投影、稳定首 delta 流式正文、统一生命周期控制、带 ACK 输入、持久草稿/队列、克制 work disclosure、可复用 React AI 组件、双主题、无障碍与无 legacy 迁移 |
+| P0 | Manager Project Workbench Experience | `specs/manager-project-workspace-experience/README.md` | 项目分组会话、workspace/HaaS endpoint binding、Git context、Codex 风格 command disclosure 与原生桌面窗口行为 |
 | P1 | Manager GUI Performance | `specs/manager-gui-performance/README.md` | OpenHarness React/Vite bundle 预算、live render 隔离、对账与刷新归属 |
+| P1 | Manager File Preview | `specs/manager-file-preview/README.md` | lazy 只读 CodeMirror 文件查看、确定性语言映射、主题集成、生命周期安全与大文件降级 |
+| P1 | Manager Office Preview | `specs/manager-office-preview/README.md` | 安全 lazy Worker/WASM spreadsheet 预览、只读控件、文档信任边界与 SheetJS 移除 |
 | P0 | Manager Product Identity | `specs/manager-product-identity/README.md` | OpenHarness 产品身份、无登录桌面行为和本地账号/连接器边界 |
 | P0 | Stores | `specs/stores/README.md` | 持久化事实源：registry/session/event/idempotency/admission 接口、schema 与迁移 |
 | P0 | Identity | `specs/identity/README.md` | bearer -> principal、tenant/workspace/userId scope、`IdentityProvider` 接口 |
@@ -180,6 +184,8 @@ Sandbox Runtime 把同一 policy 合同投影到 Lite Docker 或 OpenSandbox AIO
 | Container | `container` | `cntr_...` | Container Runtime | 跟随 session |
 | File | `file` | `file_...` | Artifact Store | 跟随 container/session |
 | Event | none | invocation-scoped | Event Log | 保留期内可 replay |
+| Manager Project | `project` | `prj_...` | Manager ProjectStore | 创建/导入到 archive |
+| Manager Workspace Binding | `workspace_binding` | `wsb_...` | Manager ProjectStore | 跟随 project membership；session snapshot 在 acceptance 后不可变 |
 
 `invocation` 是 public 运行单元；`turn` 是内部执行单元。首期一一对应，但协议上不依赖两者永远相同。`harness` 是 ADK app identity，`harness_profile` 是可版本化执行配置；session 创建时冻结 active profile，后续动态更新只影响新 session，已有 session 必须显式 rebind 才能切换。
 
