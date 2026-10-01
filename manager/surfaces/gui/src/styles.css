@@ -1197,6 +1197,16 @@ button.btn.danger { color: var(--accent); }
 .mlist-main input { accent-color: var(--accent); margin: 0; }
 .mlist-name { font-size: 13px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mlist-row.off .mlist-name { color: var(--muted); }
+.mlist-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(88px, 18vw, 180px) 96px;
+  column-gap: 12px;
+}
+.mlist-provider {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--faint);
+}
+.mlist-picker-action { justify-self: end; max-width: 100%; }
 .mlist-default {
   background: var(--ink); color: var(--panel); font-size: 11px; font-weight: 600;
   padding: 2px 9px; border-radius: 999px; letter-spacing: 0.03em; flex: none;

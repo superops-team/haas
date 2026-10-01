@@ -74,6 +74,12 @@ test("Models: provider gallery states; vendor form previews models", async ({ pa
   // The composer-picker card lists the curated models with provider tags.
   const picker = page.getByTestId("composer-picker");
   await expect(picker).toContainText("In the composer's picker");
+  const pickerRows = picker.locator(".mlist-row");
+  await expect(pickerRows).toHaveCount(5);
+  const providerLefts = await pickerRows.evaluateAll((rows) =>
+    rows.map((row) => row.children[1].getBoundingClientRect().left),
+  );
+  expect(Math.max(...providerLefts) - Math.min(...providerLefts)).toBeLessThanOrEqual(1);
 
   // Vendor form: blurb renders; the prefilled endpoint hides behind the disclosure.
   await page.getByTestId("set-provider-zai").click();

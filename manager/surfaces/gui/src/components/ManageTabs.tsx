@@ -181,8 +181,9 @@ function ComposerPickerCard({
       <div className="mlist">
         {settings.models.map((id) => {
           const isDefault = id === settings.model;
+          const providerLabel = tag(id);
           return (
-            <div className="mlist-row" key={id}>
+            <div className="mlist-row mlist-picker-row" key={id}>
               <label className="mlist-main">
                 <input
                   type="checkbox"
@@ -195,11 +196,13 @@ function ComposerPickerCard({
                   {settings.model_labels?.[id] || id}
                 </span>
               </label>
-              <span className="text-[11px] text-faint mr-2 shrink-0">{tag(id)}</span>
+              <span className="mlist-provider" title={providerLabel}>
+                {providerLabel}
+              </span>
               {isDefault ? (
-                <span className="mlist-default">{t("models.default_badge")}</span>
+                <span className="mlist-default mlist-picker-action">{t("models.default_badge")}</span>
               ) : (
-                <button className="mlist-make" onClick={() => setDefaultModel(id).then(() => onChanged())}>
+                <button className="mlist-make mlist-picker-action" onClick={() => setDefaultModel(id).then(() => onChanged())}>
                   {t("models.make_default")}
                 </button>
               )}

@@ -163,6 +163,9 @@ when it removes a demonstrated duplicate responsibility.
 - The Composer model menu is a capability surface, not a catalog. It renders only the backend's
   usable-model list and never injects an unavailable current/default model. Full discovery and
   credential setup remain in Settings.
+- Settings' enabled-model list uses stable columns for model identity, provider, and row action.
+  The default badge occupies the same action slot as Make default, so changing the default never
+  shifts the provider column. Long model/provider labels ellipsize inside their own columns.
 - Desktop information architecture is project-first: a Project groups its conversations and one
   or more executable workspace bindings. Project expansion never changes the active conversation.
   Draft context presents Project, Work location, and Git branch as quiet peer controls; accepted

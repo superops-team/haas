@@ -135,6 +135,9 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
   Find/上一条/下一条 toolbar，也不拦截 Cmd/Ctrl+F；保留 browser/WebView 原生查找。
 - Composer model menu 是 capability surface，不是 catalog：只渲染 backend 返回的 usable-model
   list，绝不重新注入不可用的 current/default model。完整发现与 credential 配置留在 Settings。
+- Settings 的已启用模型列表为 model identity、provider 和 row action 使用稳定列。默认徽标与
+  “设为默认”占用同一个 action 槽，因此切换默认模型不能推动 provider 列；长 model/provider
+  label 只在各自列内 ellipsis。
 - 桌面信息架构以 Project 为先：Project 聚合 conversations 与一个或多个可执行
   workspace binding。展开 Project 不等于切换 conversation。Draft context 将 Project、Work
   location 与 Git branch 作为克制的同级控件；accepted work 冻结这些身份，后续变化创建新
