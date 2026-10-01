@@ -35,6 +35,51 @@ struct ServerProcess {
     stopping: AtomicBool,
 }
 
+#[derive(Clone)]
+struct ServerEndpoint {
+    port: u16,
+    api_token: String,
+    restart_key: String,
+}
+
+fn prepare_restart_request(endpoint: &ServerEndpoint) -> String {
+    let body = r#"{"timeoutSeconds":8}"#;
+    format!(
+        "POST /v1/lifecycle/prepare-restart HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-OpenWorker-Token: {}\r\nIdempotency-Key: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        endpoint.port,
+        endpoint.api_token,
+        endpoint.restart_key,
+        body.len(),
+        body
+    )
+}
+
+fn prepare_server_restart(endpoint: &ServerEndpoint) -> bool {
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), endpoint.port);
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
+        return false;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    if stream
+        .write_all(prepare_restart_request(endpoint).as_bytes())
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = [0_u8; 256];
+    let Ok(read) = stream.read(&mut response) else {
+        return false;
+    };
+    std::str::from_utf8(&response[..read])
+        .map(|value| value.starts_with("HTTP/1.1 200") || value.starts_with("HTTP/1.0 200"))
+        .unwrap_or(false)
+}
+
 fn server_restart_delay(attempts: u32, stopping: bool) -> Option<std::time::Duration> {
     if stopping || attempts >= 3 {
         None
@@ -733,13 +778,36 @@ fn clear_pending_update(pending: tauri::State<'_, PendingUpdate>) {
     *pending.0.lock().unwrap() = None;
 }
 
+// Admission drain is a commit barrier: installation failures must leave the
+// currently running Manager usable. Futures keep preparation lazy until success.
+async fn install_then_prepare(
+    install: impl std::future::Future<Output = Result<(), String>>,
+    prepare: impl std::future::Future<Output = ()>,
+) -> Result<(), String> {
+    install.await?;
+    prepare.await;
+    Ok(())
+}
+
 #[tauri::command]
 async fn install_update(
     app: tauri::AppHandle,
     pending: tauri::State<'_, PendingUpdate>,
+    endpoint: tauri::State<'_, ServerEndpoint>,
 ) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    let builder = app.updater_builder();
+    #[cfg(target_os = "windows")]
+    let builder = {
+        let restart_endpoint = endpoint.inner().clone();
+        let exit_app = app.clone();
+        builder.on_before_exit(move || {
+            let _ = prepare_server_restart(&restart_endpoint);
+            // Preserve the updater's default exit cleanup when replacing its hook.
+            exit_app.cleanup_before_exit();
+        })
+    };
+    let updater = builder.build().map_err(|e| e.to_string())?;
     let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
         return Err("no update available".into());
     };
@@ -752,13 +820,28 @@ async fn install_update(
             _ => None,
         }
     };
-    match cached {
-        Some(bytes) => update.install(bytes).map_err(|e| e.to_string())?,
-        None => update
-            .download_and_install(|_, _| {}, || {})
-            .await
-            .map_err(|e| e.to_string())?,
-    }
+    install_then_prepare(
+        async {
+            match cached {
+                Some(bytes) => update.install(bytes).map_err(|e| e.to_string()),
+                None => update
+                    .download_and_install(|_, _| {}, || {})
+                    .await
+                    .map_err(|e| e.to_string()),
+            }
+        },
+        async {
+            #[cfg(not(target_os = "windows"))]
+            {
+                let restart_endpoint = endpoint.inner().clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    prepare_server_restart(&restart_endpoint)
+                })
+                .await;
+            }
+        },
+    )
+    .await?;
     // Windows never reaches here (the NSIS installer takes over and relaunches).
     // macOS: the .app was swapped in place — restart into the new version. The tray
     // Exit path's sidecar kill runs via RunEvent, so no orphaned openworker-server.
@@ -894,6 +977,11 @@ pub fn run() {
                 child: Mutex::new(child),
                 stopping: AtomicBool::new(false),
             });
+            app.manage(ServerEndpoint {
+                port,
+                api_token: api_token.clone(),
+                restart_key: format!("restart_{}", Uuid::new_v4().simple()),
+            });
             supervise_server(app.handle().clone(), server_cmd);
 
             // Restore keep-awake from the last session.
@@ -1005,6 +1093,9 @@ pub fn run() {
             // Also on Exit: belt-and-suspenders in case a quit path reaches teardown without
             // a preceding ExitRequested (observed with macOS Cmd+Q under the tray setup).
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                if let Some(endpoint) = app.try_state::<ServerEndpoint>() {
+                    let _ = prepare_server_restart(&endpoint);
+                }
                 if let Some(state) = app.try_state::<ServerProcess>() {
                     state.stopping.store(true, Ordering::SeqCst);
                     if let Some(mut child) = state.child.lock().unwrap().take() {
@@ -1021,7 +1112,36 @@ pub fn run() {
 
 #[cfg(test)]
 mod supervisor_tests {
-    use super::server_restart_delay;
+    use super::{
+        prepare_restart_request, prepare_server_restart, server_restart_delay, ServerEndpoint,
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    #[test]
+    fn failed_install_keeps_admission_open_and_success_prepares_after_install() {
+        use std::sync::{Arc, Mutex};
+        for result in [Err("signature or install failure".to_string()), Ok(())] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let installed = Arc::clone(&calls);
+            let prepared = Arc::clone(&calls);
+            let expected = result.clone();
+            let outcome = tauri::async_runtime::block_on(super::install_then_prepare(
+                async move {
+                    installed.lock().unwrap().push("install");
+                    result
+                },
+                async move { prepared.lock().unwrap().push("prepare"); },
+            ));
+            assert_eq!(outcome, expected);
+            let expected_calls = if expected.is_ok() {
+                vec!["install", "prepare"]
+            } else {
+                vec!["install"]
+            };
+            assert_eq!(*calls.lock().unwrap(), expected_calls);
+        }
+    }
+
     #[test]
     fn restart_backoff_is_bounded_and_quit_suppresses_restart() {
         for (attempt, seconds) in [(0, 1), (1, 2), (2, 4)] {
@@ -1033,5 +1153,45 @@ mod supervisor_tests {
         }
         assert!(server_restart_delay(3, false).is_none());
         assert!(server_restart_delay(u32::MAX, false).is_none());
+    }
+
+    #[test]
+    fn restart_request_is_authenticated_idempotent_and_bounded() {
+        let request = prepare_restart_request(&ServerEndpoint {
+            port: 43210,
+            api_token: "test-token".into(),
+            restart_key: "restart_test".into(),
+        });
+        assert!(request.starts_with(
+            "POST /v1/lifecycle/prepare-restart HTTP/1.1\r\nHost: 127.0.0.1:43210\r\n"
+        ));
+        assert!(request.contains("X-OpenWorker-Token: test-token\r\n"));
+        assert!(request.contains("Idempotency-Key: restart_test\r\n"));
+        assert!(request.ends_with("\r\n\r\n{\"timeoutSeconds\":8}"));
+    }
+
+    #[test]
+    fn restart_preparation_waits_for_the_authenticated_manager_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let read = stream.read(&mut request).unwrap();
+            let request = std::str::from_utf8(&request[..read]).unwrap();
+            assert!(request.contains("X-OpenWorker-Token: test-token\r\n"));
+            assert!(request.contains("Idempotency-Key: restart_test\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .unwrap();
+        });
+        let endpoint = ServerEndpoint {
+            port,
+            api_token: "test-token".into(),
+            restart_key: "restart_test".into(),
+        };
+
+        assert!(prepare_server_restart(&endpoint));
+        server.join().unwrap();
     }
 }

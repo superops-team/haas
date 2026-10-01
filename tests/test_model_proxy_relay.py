@@ -183,10 +183,12 @@ async def test_proxy_retries_connect_timeout_before_json_output() -> None:
 
 async def test_proxy_retries_transient_provider_errors_before_stream_output() -> None:
     calls = 0
+    timeout_extensions: list[dict[str, float | None]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        timeout_extensions.append(request.extensions["timeout"])
         if calls == 1:
             return httpx.Response(503, json={"error": {"code": "overloaded"}})
         return httpx.Response(
@@ -213,4 +215,8 @@ async def test_proxy_retries_transient_provider_errors_before_stream_output() ->
     chunks = [chunk async for chunk in proxy.relay_stream(response)]
 
     assert calls == 2
+    assert timeout_extensions == [
+        {"connect": 300.0, "read": 300.0, "write": 300.0, "pool": 300.0},
+        {"connect": 300.0, "read": 300.0, "write": 300.0, "pool": 300.0},
+    ]
     assert any('"delta":"ok"' in chunk for chunk in chunks)

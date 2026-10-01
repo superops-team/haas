@@ -2,8 +2,8 @@
 
 [English](README.md) | **简体中文**
 
-状态：MPW-022 至 MPW-040 已实施；等待 owner 视觉验收
-最近评审：2026-09-29
+状态：MPW-022 至 MPW-041 已实施；等待 owner 视觉验收
+最近评审：2026-09-30
 Change ID：`manager-project-workspace-experience`
 相关规格：[Manager 对话体验](../manager-conversation-experience/README.zh-CN.md)、[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager 产品身份](../manager-product-identity/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Stores](../stores/README.zh-CN.md)、[安全边界](../security-boundary/README.zh-CN.md)
 
@@ -313,9 +313,22 @@ adapter 只存在于 server projection boundary，不增加第二个 React rende
 
 ### 6.4 Window command
 
-Tauri bridge 提供类型化 `startDragging`、`toggleMaximize`、`isMaximized`、`minimize`、
-`closeToTray`、`showMain`。Command 返回结构化成功/失败，不能把 unsupported platform 吞成
-成功。权限显式列入 `src-tauri/capabilities/default.json`。
+Tauri bridge 提供类型化 `startWindowDrag` 与 `toggleWindowMaximize` wrapper，分别调用原生
+`start_window_drag` 与 `toggle_window_maximize` command。Window command 返回结构化成功/失败，
+不能把 unsupported platform 吞成成功。权限显式列入 `src-tauri/capabilities/default.json`。
+
+所有 Manager full-page title/empty region 使用一条共享 pointer 与 double-click delegation
+路径。`data-tauri-drag-region` 只是语义 target marker，不是充分执行证据：主按钮在非交互的
+marked descendant 上 pointer down 时只调用一次 `startWindowDrag`，double click 只调用一次
+`toggleWindowMaximize`。嵌套 button、link、form control、menu、可选文本与 scrollbar 两种 command
+都不触发。该合同在 lazy route mount 后以及 list/detail transition 中持续成立。Settings、
+Automations、Connectors、Inbox、Activity 与 persona surface 还必须把最顶部 44 CSS px 的未占用
+区域作为同一个拖拽/双击区域；其中的页面 action 保持可交互，不得被当成 window chrome。
+
+JavaScript delegation 与类型化 Rust command 是唯一 gesture owner。Surface 不得同时使用
+`data-tauri-drag-region` 或 `-webkit-app-region: drag` 启用 Tauri/WebKit 自动拖拽，否则 native
+handler 与显式 double-click command 会连续切换两次最大化状态。提交的 GUI 中 legacy 自动拖拽
+marker/style 数量必须为零。
 
 ## 7. 数据模型
 
@@ -423,6 +436,14 @@ Remote workspace 的 `canonicalKey` 是
   渲染固定高度的中性 project skeleton，不得显示 session-only legacy list。首次请求 settle 后，
   权威空结果才可使用适用的 non-project layout；后续后台刷新在新结果 settle 前保留上一份 projection，
   不重新回到 loading shell。
+- 有效的版本化 project shell 可以提升 unresolved state，但不声称权威：缓存的一级 row 立即按最终
+  key/order/height 渲染，设置 `aria-busy=true`，且不显示 child conversation、hover disclosure、menu
+  或 mutation。权威 hydration 必须原位替换相同 keyed row、启用交互并渐进补齐 child。Cache 缺失、
+  损坏、storage 被拒或版本不匹配时使用上述固定 skeleton。Shell 只是可丢弃的展示优化，绝不是
+  Project/WorkspaceBinding source of truth。
+- Health/session restore 进行中仍渲染 application chrome 与这套 canonical sidebar；启动状态属于
+  center pane，不得覆盖或替换 navigation。Cached order 表示最近一次权威 display rank；权威 sort
+  input 未变化时保持稳定，应用外真实的 pin/order/name/activity 变化只在权威 boundary 一次性应用。
 - Project 名称和 conversation 标题统一使用 12 CSS px、1.35 行高的共享 navigation role。
   活动项目字重上限为 500；相对时间继续使用 11 CSS px caption 和等宽数字。字体不得继承
   14 px 正文阅读 role，也不得用 600/700 字重作为主要选中信号。Project/conversation 行仍
@@ -742,14 +763,15 @@ project name、branch、path、command、output 或 endpoint URL。
 | MPW-030 | P0 | 深浅主题的 390/760/1440 px 下，project/conversation label computed size 均为 12 px、line-height 为 1.35，活动项目字重不超过 500，时间元信息为 11 px 等宽数字，并且每行仍保持至少 28 px hit target，中文和长英文标题均不裁切高度 |
 | MPW-031 | P0 | Pointer 在 mixed expanded/collapsed group 的 project/conversation anchor 间快速移动时，最多渲染一个 hover card；旧内容在下一次 dwell 前消失，menu 抑制 hover，离开当前 anchor/card 后在 corridor delay 内关闭 |
 | MPW-032 | P0 | Hover/focus/menu transition 不改变任何可见 project/conversation row bounding box 与 expansion state；section label 为 11 px/500，inactive conversation 为 12 px/400 secondary text，仅选中 conversation 提升为 12 px/500 primary text |
-| MPW-033 | P0 | Sessions 先返回、project projection 延迟时，初始导航只显示一套固定 project-loading skeleton 且 legacy conversation row 数为零；projection 完成后原子显示 project hierarchy，无中间 list 闪现，后续 refresh 保留已 settle 的 hierarchy |
+| MPW-033 | P0 | 不存在有效 project shell cache 且 sessions 先返回、project projection 延迟时，初始导航只显示一套固定 project-loading skeleton 且 legacy conversation row 数为零；projection 完成后原子显示 project hierarchy，无中间 list 闪现，后续 refresh 保留已 settle 的 hierarchy |
 | MPW-034 | P0 | 深浅主题的 320/390/760/1440 px 与 200% zoom 下，Project/Work location/Git branch 渲染为一个衔接在 Composer 背后的中性 shelf：同一 30 px 中心线、idle 无边框、Local 使用设备 icon、不换行/不越界、menu 语义真实、hover/focus/open 几何稳定，且 shelf 与 Composer 之间没有 canvas 色断层 |
 | MPW-035 | P0 | 点击 project row 或 project hover card 的铅笔会且仅会创建一个绑定到该 Project 的 fresh conversation，不打开 Edit Project，也不改变 expansion；Project `...` menu 保持唯一 Edit project 入口，并具备正确 accessible name 与 keyboard path |
-| MPW-036 | P0 | 每个 Manager full-page surface——Settings、AI助手、Inbox、Automations list/detail、Connectors、Audit 与 persona detail——都提供与 conversation surface 一致的 native drag affordance。空白/title 区启动 native drag，双击只执行一次 maximize/restore；button、link、input、menu、可选文本与 scrollbar 保持 no-drag。Browser overlay check 与 packaged macOS movement/maximize 覆盖全部 surface family |
+| MPW-036 | P0 | 每个 Manager full-page surface——Settings、AI助手、Inbox、Automations list/detail、Connectors、Audit 与 persona detail——都提供与 conversation surface 一致的 native drag affordance。最顶部 44 CSS px 未占用区域和显式 title region 只调用一次 native drag command，双击只调用一次 maximize/restore；button、link、input、menu、可选文本与 scrollbar 两种 command 都不触发。测试必须在代表性的顶部空白点断言 command call，并断言 legacy 自动拖拽 marker/style 为零。Browser Tauri-bridge check 与 packaged macOS movement/maximize 覆盖全部 surface family 及 list/detail transition |
 | MPW-037 | P0 | 每个折叠 TurnWork activity row，无论 command/read/search/file/tool kind，都严格使用一条不换行视觉行：icon/status/disclosure 固定在两端，primary safe summary 按可用宽度 ellipsis；category metadata 不生成第二行。点击后由唯一 inline detail owner 展示完整 safe summary/command 与 bounded evidence；mixed kind 在双主题 390/760/1440 px 下保持行高与对齐一致 |
 | MPW-038 | P0 | 选择 project 只改变 active 样式、expansion 与 conversation context，绝不改变 project row 顺序。Pinned project 仍优先；Manual/Recent/Name 在依次选择每个 project 前后均保持稳定，包括相同 sort key 的 tie 场景 |
 | MPW-039 | P0 | 选择任一 conversation 只改变 active 样式与 conversation context，并保持其所属 project 下所有 conversation 的 DOM 顺序。Pinned 是唯一优先层；Recent/Oldest/Name 与确定性 tie-breaker 不因 selection 或 liveness 装饰改变。点击前、点击后、reload 后，以及另一行显示 working 期间，只要所选排序字段本身未变化，顺序必须一致 |
 | MPW-040 | P0 | 用户显式展开的 project 在首次或后续点击其中 conversation 后保持展开。Project disclosure 的 `aria-expanded`、row geometry 与 sibling project expansion 均保持稳定；仅由搜索产生的临时展开不得改写保存的选择 |
+| MPW-041 | P0 | WebView 冷启动时，有效的版本化安全 project shell 在两个 animation frame 内渲染于 canonical sidebar；center pane 展示 startup state，child conversation/action 保持 busy 且不可交互。Health 成功后立即启动唯一去重的权威 project/session bootstrap；未变化 row 原位 hydration、width/height delta <=2 CSS px，权威 sort input 未变化时 cache order 保持稳定，完整可见 hierarchy 在 health 后 P95 <=400 ms。真实权威排序变化只允许一次性应用，不得出现中间 list。缺失/无效 cache 使用 MPW-033 skeleton。Shell cache 不得包含 path、remote ref、endpoint identity、session title/count、capability、prompt、tool data 或 credential |
 
 要求执行：
 
@@ -801,6 +823,10 @@ validation 与 capability guard 至少 95%。
 | 16 | Review 与 release gate | code-review、brooks-review、brooks-test manifest | 无 unresolved finding；full-check、preview、DMG/native 通过 |
 | 17 | Full-page native drag parity | Settings 等 route surface 缺少 conversation topbar drag owner | shared route-title drag region 覆盖全部 full-page family，interactive descendant 保持 no-drag；packaged movement/maximize 通过 |
 | 18 | 统一折叠 activity row | non-command activity 会换行并渲染 category subtitle，而 command 使用 ellipsis | 一个 row shell 对所有 activity kind 应用 nowrap/ellipsis/fixed trailing slot；inline detail 保持唯一完整内容 owner |
+| 19 | 两阶段 project 冷启动 | mount-time project fetch 在 sidecar health 前失败且当前 UI 等待 5 秒 poll | 版本化安全一级 shell、health 后 single-flight bootstrap、渐进 canonical hydration、稳定 geometry 与 FV-GUI-PERF-15 packaged gate |
 
 P0/P1 表示实现顺序，不代表可静默裁剪。任何未完成 acceptance case 必须保持 open，并阻止该
 change id 被宣称完成。
+
+会话 spec 的 MCX-064 负责目录缺失恢复：保留已接受的绑定，停止自动初始化重试，
+恢复原目录后主动检查，或选择新项目创建新会话。项目身份及归档语义保持不变。

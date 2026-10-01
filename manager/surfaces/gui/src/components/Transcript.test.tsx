@@ -98,7 +98,7 @@ describe("product conversation", () => {
     expect(screen.getByRole("button", { name: /Succeeded$/ })).toBeTruthy();
     expect(screen.getByTestId("activity-inspector").textContent).toContain("Working tree clean");
   });
-  it("MCX-029 presents eight calls as one work summary and one response", () => {
+  it("MCX-029 presents eight calls as bounded inference rows and one response", () => {
     const p = props({
       items: [
         ...items,
@@ -108,15 +108,18 @@ describe("product conversation", () => {
     });
     const view = render(<ConversationView {...p} />);
     expect(view.container.querySelectorAll("[data-turn-id]")).toHaveLength(1);
-    expect(screen.getAllByTestId("work-summary")).toHaveLength(1);
+    expect(screen.getAllByTestId("inference-round")).toHaveLength(8);
+    expect(screen.queryByTestId("work-summary")).toBeNull();
     expect(view.container.querySelectorAll("[data-response-id]")).toHaveLength(
       1,
     );
     expect(screen.queryByTestId("model-call-stage")).toBeNull();
-    expect(screen.queryByText("Internal reasoning 0")).toBeNull();
+    expect(screen.getByText("Internal reasoning 0")).toBeTruthy();
     expect(
-      screen.getByTestId("work-summary").getAttribute("aria-expanded"),
-    ).toBe("false");
+      screen
+        .getAllByTestId("inference-round")
+        .every((row) => row.getAttribute("aria-expanded") === "false"),
+    ).toBe(true);
   });
 
   it("MCX-030 preserves the answer DOM from first delta through tools and terminal sealing", () => {
@@ -191,7 +194,7 @@ describe("product conversation", () => {
     ).toBe("true");
   });
 
-  it("MCX-033 keeps internal prose and tool arguments out of activity names", () => {
+  it("MCX-033 shows safe round summaries but keeps native metadata out of activity names", () => {
     render(
       <ConversationView
         {...props({
@@ -202,16 +205,17 @@ describe("product conversation", () => {
         })}
       />,
     );
-    fireEvent.click(screen.getByTestId("work-summary"));
+    const rounds = screen.getAllByTestId("inference-round");
+    expect(rounds[rounds.length - 1].textContent).toContain("Working");
+    fireEvent.click(rounds[rounds.length - 2]);
     expect(
       screen.getByRole("button", { name: /Verify project Succeeded$/ }),
     ).toBeTruthy();
-    expect(
-      screen.queryByRole("button", { name: /Internal reasoning/ }),
-    ).toBeNull();
+    expect(screen.getByText("Internal reasoning 0")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("call-0");
   });
 
-  it("MCX-034 omits missing token usage and makes per-call accounting inspectable", () => {
+  it("MCX-034 keeps per-call accounting out of the conversation", () => {
     const evidence = [
       {
         ...stages[0],
@@ -233,12 +237,9 @@ describe("product conversation", () => {
       screen.queryByText(/tokens pending|tokens not reported/i),
     ).toBeNull();
     expect(screen.queryByText("120")).toBeNull();
-    fireEvent.click(screen.getByTestId("work-summary"));
-    fireEvent.click(screen.getByRole("button", { name: "Execution details" }));
-    expect(
-      screen.getByRole("complementary", { name: "Execution details" }),
-    ).toBeTruthy();
-    expect(screen.getByText("120")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("inference-round"));
+    expect(screen.queryByText("Execution details")).toBeNull();
+    expect(screen.queryByText("120")).toBeNull();
   });
 
   it("keeps an actionable failure reachable while successful work stays folded", async () => {

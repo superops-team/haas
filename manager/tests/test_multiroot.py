@@ -379,6 +379,33 @@ def test_gated_session_artifacts_list_scratch_not_repo(tmp_path):
     assert "report.html" in names and "README.md" not in names
 
 
+def test_spreadsheet_artifacts_include_xlsx_xlsm_and_xls(tmp_path):
+    mgr = _cowork_manager(tmp_path)
+    sid = "sessSheets"
+    assert mgr.get_engine(sid, agent="cowork") is not None
+    scratch = mgr.scratch_base() / sid
+    for name in ("report.xlsx", "forecast.xlsm", "legacy.xls"):
+        (scratch / name).write_bytes(b"synthetic workbook")
+
+    artifacts = {artifact["name"]: artifact for artifact in mgr.list_artifacts(sid)}
+    assert set(artifacts) >= {"report.xlsx", "forecast.xlsm", "legacy.xls"}
+    assert {artifacts[name]["kind"] for name in ("report.xlsx", "forecast.xlsm", "legacy.xls")} == {
+        "sheet"
+    }
+
+
+def test_remote_macro_enabled_spreadsheet_media_type_is_classified_as_sheet():
+    from coworker.server.manager import _artifact_kind_from_name_and_media_type
+
+    assert (
+        _artifact_kind_from_name_and_media_type(
+            "download",
+            "application/vnd.ms-excel.sheet.macroEnabled.12",
+        )
+        == "sheet"
+    )
+
+
 def test_artifact_chips_resolve_in_workspace_and_scratch(tmp_path):
     mgr = _cowork_manager(tmp_path)
     repo = _repo(tmp_path)

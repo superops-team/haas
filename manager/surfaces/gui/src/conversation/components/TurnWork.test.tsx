@@ -1,6 +1,8 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import i18n from "i18next";
 import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
+import zh from "../../locales/zh.json";
 import { selectConversationPresentation } from "../model/presentation";
 import type { ConversationTurn } from "../model/types";
 import { CLOSED_WORK, TurnWork } from "./TurnWork";
@@ -54,6 +56,7 @@ const turn: ConversationTurn = {
     ],
     reasoning: "Before\n\nAfter",
     evidence: [],
+    inferenceRounds: [],
     aggregate: { activityCount: 1 },
   },
   assistantResponse: null,
@@ -89,7 +92,7 @@ it("expands command details inline under the selected work row", () => {
   expect(within(work as HTMLElement).queryByRole("button", { name: "Reasoning" })).toBeNull();
 });
 
-it("replaces the running label with the latest action and restores the terminal label", () => {
+it("keeps tool actions out of the running reasoning summary and restores the terminal label", () => {
   const runningPresentation = selectConversationPresentation({ phase: "running" });
   const view = render(
     <TurnWork
@@ -120,7 +123,19 @@ it("replaces the running label with the latest action and restores the terminal 
       onDisclosure={() => {}}
     />,
   );
-  expect(summary.textContent).toContain("pwd");
+  expect(summary.textContent).toContain("Before");
+  expect(summary.textContent).not.toContain("pwd");
+
+  view.rerender(
+    <TurnWork
+      turn={{ ...turn, phase: "running" }}
+      presentation={runningPresentation}
+      disclosure={CLOSED_WORK}
+      onDisclosure={() => {}}
+    />,
+  );
+  expect(summary.textContent).toContain("After");
+  expect(summary.textContent).not.toContain("pwd");
 
   view.rerender(
     <TurnWork
@@ -170,6 +185,200 @@ it("shows only the latest reasoning sentence in the running action label", () =>
   );
 });
 
+it("renders one summary row per inference round and expands only the latest running round", () => {
+  const multiRoundTurn: ConversationTurn = {
+    ...turn,
+    phase: "running",
+    work: {
+      ...turn.work,
+      activities: [
+        turn.work.activities[0],
+        {
+          id: "read-current",
+          kind: "read",
+          status: "running",
+          title: "Read files",
+          summary: "Read a file",
+          preview: "",
+          omittedLineCount: 0,
+        },
+      ],
+      inferenceRounds: [
+        {
+          roundId: "turn-inline:round:0",
+          state: "succeeded",
+          safeSummary: "Inputs are consistent.",
+          activityRefs: [],
+        },
+        {
+          roundId: "turn-inline:round:1",
+          state: "succeeded",
+          safeSummary: "Checked the implementation.",
+          activityRefs: ["command-1"],
+        },
+        {
+          roundId: "turn-inline:round:2",
+          state: "running",
+          safeSummary: "Verifying the result.",
+          activityRefs: ["read-current"],
+        },
+      ],
+    },
+  };
+
+  render(
+    <TurnWork
+      turn={multiRoundTurn}
+      presentation={selectConversationPresentation({ phase: "running" })}
+      disclosure={CLOSED_WORK}
+      onDisclosure={() => {}}
+    />,
+  );
+
+  const rows = screen.getAllByTestId("inference-round");
+  expect(rows).toHaveLength(3);
+  expect(rows.map((row) => row.getAttribute("aria-expanded"))).toEqual([
+    "false",
+    "false",
+    "true",
+  ]);
+  expect(rows[0].textContent).toContain("Inputs are consistent.");
+  expect(rows[1].textContent).toContain("Checked the implementation.");
+  expect(rows[2].textContent).toContain("Verifying the result.");
+  expect(rows[2].querySelector(".inference-round-status")?.classList).toContain(
+    "is-running",
+  );
+  expect(screen.queryByText("pwd")).toBeNull();
+  expect(screen.getByRole("button", { name: /Read files/i })).toBeTruthy();
+});
+
+it("preserves explicit round disclosure while a newer running round takes ownership", () => {
+  const activities = [
+    turn.work.activities[0],
+    {
+      id: "read-current",
+      kind: "read" as const,
+      status: "succeeded" as const,
+      title: "Read files",
+      summary: "Read a file",
+      preview: "",
+      omittedLineCount: 0,
+    },
+    {
+      id: "search-latest",
+      kind: "search" as const,
+      status: "running" as const,
+      title: "Searched files",
+      summary: "Search the workspace",
+      preview: "",
+      omittedLineCount: 0,
+    },
+  ];
+  const first: ConversationTurn = {
+    ...turn,
+    phase: "running",
+    work: {
+      ...turn.work,
+      activities,
+      inferenceRounds: [
+        {
+          roundId: "round-1",
+          state: "succeeded",
+          safeSummary: "Reviewed the request.",
+          activityRefs: ["command-1"],
+        },
+        {
+          roundId: "round-2",
+          state: "succeeded",
+          safeSummary: "Inspected the code.",
+          activityRefs: ["read-current"],
+        },
+        {
+          roundId: "round-3",
+          state: "running",
+          safeSummary: "Checking behavior.",
+          activityRefs: ["search-latest"],
+        },
+      ],
+    },
+  };
+  const fourth = {
+    roundId: "round-4",
+    state: "running" as const,
+    safeSummary: "Verifying the final state.",
+    activityRefs: ["search-latest"],
+  };
+
+  function Subject({ value }: { value: ConversationTurn }) {
+    const [disclosure, setDisclosure] = useState(CLOSED_WORK);
+    return (
+      <TurnWork
+        turn={value}
+        presentation={selectConversationPresentation({
+          phase: value.phase === "completed" ? "completed" : "running",
+        })}
+        disclosure={disclosure}
+        onDisclosure={setDisclosure}
+      />
+    );
+  }
+
+  const view = render(<Subject value={first} />);
+  let rows = screen.getAllByTestId("inference-round");
+  fireEvent.click(rows[1]);
+  expect(rows[1].getAttribute("aria-expanded")).toBe("true");
+
+  view.rerender(
+    <Subject
+      value={{
+        ...first,
+        work: {
+          ...first.work,
+          inferenceRounds: [
+            ...first.work.inferenceRounds.map((round) => ({
+              ...round,
+              state: "succeeded" as const,
+            })),
+            fourth,
+          ],
+        },
+      }}
+    />,
+  );
+  rows = screen.getAllByTestId("inference-round");
+  expect(rows.map((row) => row.getAttribute("aria-expanded"))).toEqual([
+    "false",
+    "true",
+    "false",
+    "true",
+  ]);
+  expect(rows[3].querySelector(".inference-round-status")?.classList).toContain(
+    "is-running",
+  );
+
+  view.rerender(
+    <Subject
+      value={{
+        ...first,
+        phase: "completed",
+        work: {
+          ...first.work,
+          inferenceRounds: [
+            ...first.work.inferenceRounds.map((round) => ({
+              ...round,
+              state: "succeeded" as const,
+            })),
+            { ...fourth, state: "succeeded" },
+          ],
+        },
+      }}
+    />,
+  );
+  rows = screen.getAllByTestId("inference-round");
+  expect(rows[3].getAttribute("aria-expanded")).toBe("false");
+  expect(view.container.querySelectorAll(".inference-round-status.is-running")).toHaveLength(0);
+});
+
 it("uses the command as the only collapsed label and reveals its complete value inline", () => {
   const command =
     "git status --short --branch && git diff --stat && git diff --cached --stat";
@@ -201,6 +410,152 @@ it("uses the command as the only collapsed label and reveals its complete value 
   expect(screen.queryByText("Ran a command")).toBeNull();
   fireEvent.click(row);
   expect(screen.getByText(`$ ${command}`)).toBeTruthy();
+});
+
+it("uses semantic labels for non-command tools and hides model-call evidence", () => {
+  const semanticTurn: ConversationTurn = {
+    ...turn,
+    work: {
+      ...turn.work,
+      activities: [
+        {
+          ...turn.work.activities[0],
+          kind: "read",
+          summary: "Read a file",
+          commandPreview: "cat /private/repo/api.ts",
+        },
+      ],
+      evidence: [
+        {
+          modelCallId: "model-call-1",
+          status: "completed",
+          steps: [{ stepId: "tool-ref", kind: "tool", activityId: "command-1" }],
+        },
+      ],
+    },
+  };
+
+  render(
+    <TurnWork
+      turn={semanticTurn}
+      presentation={selectConversationPresentation({ phase: "completed" })}
+      disclosure={{ ...CLOSED_WORK, work: true }}
+      onDisclosure={() => {}}
+    />,
+  );
+
+  expect(screen.getByRole("button", { name: /Read files/i })).toBeTruthy();
+  expect(screen.queryByText("cat /private/repo/api.ts")).toBeNull();
+  expect(screen.queryByText("Execution details")).toBeNull();
+  expect(screen.queryByText("Model call 1")).toBeNull();
+});
+
+it("does not expose an English tool-like reasoning line for a Chinese request", () => {
+  const activeTurn: ConversationTurn = {
+    ...turn,
+    phase: "running",
+    userRows: [{ kind: "user", text: "检查最新代码" }],
+    work: {
+      ...turn.work,
+      inferenceRounds: [
+        {
+          roundId: "reason-current",
+          state: "running",
+          safeSummary: "Use ls/status.",
+          activityRefs: [],
+        },
+      ],
+      segments: [
+        {
+          segmentId: "reason-current",
+          kind: "reasoning",
+          state: "running",
+          safeTitle: "conversation.reasoning",
+          activityRefs: [],
+          text: "Use ls/status.",
+        },
+      ],
+    },
+  };
+
+  render(
+    <TurnWork
+      turn={activeTurn}
+      presentation={selectConversationPresentation({ phase: "running" })}
+      disclosure={CLOSED_WORK}
+      onDisclosure={() => {}}
+    />,
+  );
+
+  expect(screen.queryByText("Use ls/status.")).toBeNull();
+  expect(screen.getByText("Working")).toBeTruthy();
+});
+
+it("shows a Chinese reasoning summary for a Chinese request", () => {
+  const activeTurn: ConversationTurn = {
+    ...turn,
+    phase: "running",
+    userRows: [{ kind: "user", text: "检查最新代码" }],
+    work: {
+      ...turn.work,
+      inferenceRounds: [
+        {
+          roundId: "reason-current",
+          state: "running",
+          safeSummary: "正在检查仓库状态。",
+          activityRefs: [],
+        },
+      ],
+      segments: [
+        {
+          segmentId: "reason-current",
+          kind: "reasoning",
+          state: "running",
+          safeTitle: "conversation.reasoning",
+          activityRefs: [],
+          text: "正在检查仓库状态。",
+        },
+      ],
+    },
+  };
+
+  render(
+    <TurnWork
+      turn={activeTurn}
+      presentation={selectConversationPresentation({ phase: "running" })}
+      disclosure={CLOSED_WORK}
+      onDisclosure={() => {}}
+    />,
+  );
+
+  expect(screen.getByText("正在检查仓库状态。")).toBeTruthy();
+});
+
+it("replaces historical transport-only MCP copy with the localized tool fallback", () => {
+  render(
+    <TurnWork
+      turn={{
+        ...turn,
+        work: {
+          ...turn.work,
+          activities: [
+            {
+              ...turn.work.activities[0],
+              kind: "tool",
+              summary: "Call MCP tool",
+              commandPreview: undefined,
+            },
+          ],
+        },
+      }}
+      presentation={selectConversationPresentation({ phase: "completed" })}
+      disclosure={{ ...CLOSED_WORK, work: true }}
+      onDisclosure={() => {}}
+    />,
+  );
+
+  expect(screen.getByRole("button", { name: /Used a tool/i })).toBeTruthy();
+  expect(screen.queryByText("Call MCP tool")).toBeNull();
 });
 
 it("does not move a terminal transcript when inline activity detail opens", async () => {
@@ -351,4 +706,79 @@ it("renders non-command activity with one primary label and no category subtitle
   const row = screen.getByRole("button", { name: /sed -n/ });
   expect(row.querySelectorAll(".work-tool-primary")).toHaveLength(1);
   expect(row.querySelector(".work-tool-category")).toBeNull();
+});
+
+it("uses localized semantic activity kinds for no-summary round titles", async () => {
+  const recallTurn: ConversationTurn = {
+    ...turn,
+    work: {
+      ...turn.work,
+      activities: [
+        {
+          id: "command-fallback",
+          kind: "command",
+          status: "succeeded",
+          title: "Ran a command",
+          summary: "Run command",
+          commandPreview: "pwd",
+          preview: "",
+          omittedLineCount: 0,
+        },
+        {
+          id: "recall-1",
+          kind: "tool",
+          status: "succeeded",
+          title: "Used a tool",
+          summary: "Recall context",
+          preview: "",
+          omittedLineCount: 0,
+        },
+      ],
+      inferenceRounds: [
+        {
+          roundId: "round-command",
+          state: "succeeded",
+          safeSummary: null,
+          activityRefs: ["command-fallback"],
+        },
+        {
+          roundId: "round-recall",
+          state: "succeeded",
+          safeSummary: null,
+          activityRefs: ["recall-1"],
+        },
+      ],
+    },
+  };
+
+  i18n.addResourceBundle("zh", "translation", zh, true, true);
+  await i18n.changeLanguage("zh");
+  try {
+    const view = render(
+      <TurnWork
+        turn={recallTurn}
+        presentation={selectConversationPresentation({ phase: "completed" })}
+        disclosure={{
+          work: false,
+          rounds: { "round-command": true, "round-recall": true },
+        }}
+        onDisclosure={() => {}}
+      />,
+    );
+
+    expect(
+      [...view.container.querySelectorAll(".inference-round-label")].map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(["运行命令", "检索上下文"]);
+    expect(
+      [...view.container.querySelectorAll(".work-tool-primary")].map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(["pwd", "检索上下文"]);
+    expect(screen.queryByText("transcript.activity.recall")).toBeNull();
+  } finally {
+    await i18n.changeLanguage("en");
+    i18n.removeResourceBundle("zh", "translation");
+  }
 });

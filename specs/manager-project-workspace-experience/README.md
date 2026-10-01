@@ -2,8 +2,8 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Status: MPW-022 through MPW-040 implemented; owner visual acceptance pending
-Last reviewed: 2026-09-29
+Status: MPW-022 through MPW-041 implemented; owner visual acceptance pending
+Last reviewed: 2026-09-30
 Change ID: `manager-project-workspace-experience`
 Related specs: [Manager Conversation Experience](../manager-conversation-experience/README.md), [Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.md), [Manager Product Identity](../manager-product-identity/README.md), [Manager Delegation](../manager-delegation/README.md), [Stores](../stores/README.md), [Security Boundary](../security-boundary/README.md)
 
@@ -340,10 +340,26 @@ React renderer.
 
 ### 6.4 Window commands
 
-The Tauri bridge exposes typed commands for `startDragging`, `toggleMaximize`, `isMaximized`,
-`minimize`, `closeToTray`, and `showMain`. Commands return structured success/failure and never
+The Tauri bridge exposes typed wrappers including `startWindowDrag` and `toggleWindowMaximize`
+over the native `start_window_drag` and `toggle_window_maximize` commands. Window commands return
+structured success/failure and never
 swallow an unsupported-platform error as success. Capability permissions are explicitly listed in
 `src-tauri/capabilities/default.json`.
+
+All Manager full-page title/empty regions use one shared pointer and double-click delegation path.
+`data-tauri-drag-region` is a semantic target marker, not sufficient execution evidence: a primary
+pointer down on a non-interactive marked descendant invokes `startWindowDrag` exactly once, and a
+double click invokes `toggleWindowMaximize` exactly once. Nested buttons, links, form controls, menus,
+selectable text and scrollbars invoke neither command. The contract applies after lazy route mount
+and across list/detail transitions. Settings, Automations, Connectors, Inbox, Activity, and persona
+surfaces additionally expose the unoccupied portion of their topmost 44 CSS px as the same drag/
+double-click region; a page-local action in that strip remains interactive and is never treated as
+window chrome.
+
+The JavaScript delegation plus typed Rust commands are the sole gesture owner. A surface MUST NOT
+also opt into Tauri/WebKit automatic drag regions through `data-tauri-drag-region` or
+`-webkit-app-region: drag`, because the native handler and explicit double-click command otherwise
+toggle maximize twice. The checked-in GUI has zero legacy automatic-drag markers/styles.
 
 ## 7. Data Model
 
@@ -453,6 +469,17 @@ For a remote workspace, `canonicalKey` is an opaque digest of
   render the session-only legacy list. Once the first request settles, an authoritative empty result
   may use the applicable non-project layout. Background refreshes retain the last settled projection
   instead of returning to the loading shell.
+- A valid versioned project shell upgrades the unresolved state without claiming authority: cached
+  first-level rows render immediately with their final keys/order/height, `aria-busy=true`, and no
+  child conversations, hover disclosure, menu, or mutation. Authoritative hydration replaces those
+  same keyed rows in place, enables interaction, and adds children progressively. Cache absence,
+  corruption, storage denial, or version mismatch uses the fixed skeleton above. The shell is a
+  disposable presentation optimization and never a Project/WorkspaceBinding source of truth.
+- Application chrome and this canonical sidebar remain rendered while health/session restore is in
+  progress; startup status belongs to the center pane and cannot cover or replace the navigation.
+  Cached order means the last authoritative display rank. It remains stable when authoritative sort
+  inputs are unchanged; a real out-of-band pin/order/name/activity change is applied once at the
+  authoritative boundary.
 - Project names and conversation titles use the shared 12 CSS px navigation role with a 1.35 line
   height. Active project emphasis is capped at weight 500; relative age remains the 11 CSS px
   caption role with tabular numerals. Typography MUST NOT inherit the 14 px reading-body role or
@@ -814,14 +841,15 @@ They do not include project names, branch names, paths, commands, output, or end
 | MPW-030 | P0 | At 390/760/1440 px in light and dark themes, computed project and conversation labels are 12 px with line-height 1.35, active project weight is at most 500, age metadata is 11 px with tabular numerals, and every row keeps a minimum 28 px hit target without clipping CJK or long Latin titles |
 | MPW-031 | P0 | Rapid pointer movement across project and conversation anchors in mixed expanded/collapsed groups renders at most one hover card; old content disappears before the next dwell, menus suppress hover, and leaving the current anchor/card closes it within the corridor delay |
 | MPW-032 | P0 | Hover/focus/menu transitions preserve every visible project/conversation row bounding box and expansion state; section labels are 11 px/500, inactive conversations are 12 px/400 secondary text, and only the selected conversation rises to 12 px/500 primary text |
-| MPW-033 | P0 | With sessions resolving before a delayed project projection, initial navigation renders one fixed project-loading skeleton and zero legacy conversation rows; after resolution it atomically shows the project hierarchy without an intermediate list flash, and later refreshes preserve the settled hierarchy |
+| MPW-033 | P0 | With no valid project shell cache and sessions resolving before a delayed project projection, initial navigation renders one fixed project-loading skeleton and zero legacy conversation rows; after resolution it atomically shows the project hierarchy without an intermediate list flash, and later refreshes preserve the settled hierarchy |
 | MPW-034 | P0 | In light/dark at 320/390/760/1440 px and 200% zoom, Project/Work location/Git branch render as one neutral shelf attached behind the Composer: equal 30 px centerline, borderless idle controls, device glyph for Local, no wrap/overflow, truthful menu semantics, stable geometry through hover/focus/open, and no canvas gap between shelf and Composer |
 | MPW-035 | P0 | Clicking the project-row or project-hover-card pencil creates exactly one fresh conversation bound to that Project and never opens Edit Project or toggles expansion; the Project `...` menu remains the only Edit project entry, with correct accessible names and keyboard paths |
-| MPW-036 | P0 | Every full-page Manager surface—Settings, AI Assistants, Inbox, Automations list/detail, Connectors, Audit, and persona detail—provides the same native drag affordance as the conversation surface. Empty/title regions start native drag and double-click maximize/restore exactly once; buttons, links, inputs, menus, selectable content, and scrollbars remain no-drag. Browser overlay checks plus packaged macOS movement/maximize cover every surface family |
+| MPW-036 | P0 | Every full-page Manager surface—Settings, AI Assistants, Inbox, Automations list/detail, Connectors, Audit, and persona detail—provides the same native drag affordance as the conversation surface. The unoccupied topmost 44 CSS px and explicit title regions invoke the native drag command exactly once, and double-click invokes maximize/restore exactly once; buttons, links, inputs, menus, selectable content, and scrollbars invoke neither command. Tests must assert command calls at a representative top-strip point and zero legacy automatic-drag markers/styles. Browser Tauri-bridge checks plus packaged macOS movement/maximize cover every surface family and list/detail transitions |
 | MPW-037 | P0 | Every collapsed TurnWork activity row, regardless of command/read/search/file/tool kind, uses one non-wrapping visual line with icon/status/disclosure fixed at the edges and the primary safe summary ellipsized by available width. Category metadata does not create a second line. Clicking expands one inline detail owner containing the complete safe summary/command and bounded evidence; mixed kinds preserve row height and alignment in both themes at 390/760/1440 px |
 | MPW-038 | P0 | Selecting a project changes only active styling, expansion, and conversation context. It never changes project row order. Pinned projects remain first; Manual/Recent/Name ordering remains stable before and after selecting each project, including equal-key tie cases |
 | MPW-039 | P0 | Selecting any conversation changes only active styling and conversation context and preserves the DOM order of every conversation in its project. Pinned remains the only priority tier; Recent/Oldest/Name and deterministic tie-breakers are unchanged by selection or liveness decoration. The order is identical before click, after click, after reload, and while another row reports working unless its selected ordering field itself changes |
 | MPW-040 | P0 | A project expanded explicitly by the user remains expanded after the first or any later conversation selection inside it. The project disclosure `aria-expanded`, row geometry and sibling project expansion remain stable; search-only expansion does not mutate the stored choice |
+| MPW-041 | P0 | On WebView cold start, a valid versioned safe project shell renders the cached first-level project rows inside the canonical sidebar within two animation frames while the center pane shows startup state and child conversations/actions remain busy and non-interactive. Health success immediately starts one deduplicated authoritative project/session bootstrap; unchanged rows hydrate in place with <=2 CSS px width/height delta, cached order stays stable when authoritative sort inputs are unchanged, and full visible hierarchy reaches P95 <=400 ms after health. A real authoritative ordering change is applied once without an intermediate list. Missing/invalid cache uses the MPW-033 skeleton. No path, remote ref, endpoint identity, session title/count, capability, prompt, tool data, or credential enters the shell cache |
 
 Required evidence:
 
@@ -874,6 +902,11 @@ cannot substitute for native window evidence. New project mutation/ordering modu
 | 16 | Review and release gates | code-review, brooks-review, brooks-test manifests | no unresolved finding; full-check, preview, DMG and native evidence pass |
 | 17 | Full-page native drag parity | Settings and other route surfaces lack the conversation topbar drag owner | shared route-title drag regions cover every full-page family while interactive descendants remain no-drag; packaged movement/maximize passes |
 | 18 | Uniform collapsed activity rows | non-command activities wrap and render category subtitles while commands ellipsize | one row shell applies nowrap/ellipsis/fixed trailing slots to every activity kind; inline detail remains the only complete-content owner |
+| 19 | Two-phase project cold start | mount-time project fetch fails before sidecar health and current UI waits for the five-second poll | versioned safe first-level shell, post-health single-flight bootstrap, progressive canonical hydration, stable geometry and FV-GUI-PERF-15 packaged gate |
 
 P0/P1 is implementation order, not permission to silently drop scope. Any unimplemented acceptance
 case remains explicitly open and prevents this change id from being declared complete.
+
+MCX-064 in the conversation spec owns missing-workspace recovery: preserve accepted bindings,
+stop automatic setup retries, explicitly recheck the restored folder or choose a new project
+for a new conversation. Project identity and archival semantics remain unchanged.

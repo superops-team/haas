@@ -2186,3 +2186,26 @@ def test_accepted_command_runs_when_ack_transport_write_fails(tmp_path, monkeypa
             assert ws.receive_json()["type"] == "ready"
             ws.send_json(_user_message("Synthetic request"))
             assert completed.wait(timeout=2), "Accepted task must run even if its ACK socket closes"
+
+
+def test_missing_workspace_reports_non_retryable_setup_failure(tmp_path):
+    from starlette.websockets import WebSocketDisconnect
+
+    client = _client(tmp_path, [])
+    with client.websocket_connect(
+        f"/ws/session/missing-folder?agent=code&workspace={tmp_path / 'missing'}"
+    ) as ws:
+        event = ws.receive_json()
+        assert event["type"] == "error"
+        assert event["data"]["code"] == "workspace_unavailable"
+        assert event["data"]["retryable"] is False
+        assert event["data"]["recoveryAction"] == "restore_workspace"
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_json()
+        assert closed.value.code == 1008
+
+    (tmp_path / "missing").mkdir()
+    with client.websocket_connect(
+        f"/ws/session/missing-folder?agent=code&workspace={tmp_path / 'missing'}"
+    ) as ws:
+        assert ws.receive_json()["type"] == "ready"

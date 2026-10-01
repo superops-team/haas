@@ -6,6 +6,7 @@ import {
 
 describe("conversation transport boundary", () => {
   it.each([
+    { type: "error", data: { error: "Workspace unavailable", code: "workspace_unavailable", retryable: false, recoveryAction: "restore_workspace" } },
     { type: "tool_proposed", data: { name: "exec_command", toolCallId: "tool-1", commandPreview: "git status --short", delegated: { backend: "haas", session: "session-1", haas_session_id: "haas-1", execution_mode: "local_api" } } },
     { type: "ready", data: { haas_task_outcome: null, running: false } },
     { type: "queue_restored", data: { payload: { text: "synthetic task", skill: null, display: null, model: null } } },

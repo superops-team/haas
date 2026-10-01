@@ -8,7 +8,16 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { App } from "./App";
-import { getSessionMessages } from "./api";
+import {
+  getHaasEndpoints,
+  getHealth,
+  getProjectProjection,
+  getRecentWorkspaces,
+  getSessionMessages,
+  getSessions,
+  PERSONAS_CHANGED,
+} from "./api";
+import { PROJECT_SIDEBAR_SHELL_KEY } from "./projectSidebarShell";
 import type { WsEvent } from "./types";
 
 const mockState = vi.hoisted(() => {
@@ -98,6 +107,8 @@ const mockState = vi.hoisted(() => {
 
   return {
     commits: { sidebar: 0, composer: 0 },
+    sidebarMounts: 0,
+    sidebarUnmounts: 0,
     FakeSession,
     lastSession: null as FakeSession | null,
     get livenessOnly() {
@@ -119,20 +130,30 @@ vi.mock("./components/Sidebar", async () => {
   const actual = await vi.importActual<typeof import("./components/Sidebar")>(
     "./components/Sidebar",
   );
-  const { createElement, Profiler } = await import("react");
+  const { createElement, Profiler, useEffect } = await import("react");
+  const ProfiledSidebar = (
+    props: React.ComponentProps<typeof actual.Sidebar>,
+  ) => {
+    useEffect(() => {
+      mockState.sidebarMounts += 1;
+      return () => {
+        mockState.sidebarUnmounts += 1;
+      };
+    }, []);
+    return createElement(
+      Profiler,
+      {
+        id: "sidebar",
+        onRender: () => {
+          mockState.commits.sidebar += 1;
+        },
+      },
+      createElement(actual.Sidebar, props),
+    );
+  };
   return {
     ...actual,
-    Sidebar: (props: React.ComponentProps<typeof actual.Sidebar>) =>
-      createElement(
-        Profiler,
-        {
-          id: "sidebar",
-          onRender: () => {
-            mockState.commits.sidebar += 1;
-          },
-        },
-        createElement(actual.Sidebar, props),
-      ),
+    Sidebar: ProfiledSidebar,
   };
 });
 
@@ -241,6 +262,7 @@ vi.mock("./api", async () => {
       orderRevision: 0,
     })),
     getRecentWorkspaces: vi.fn(async () => []),
+    getHaasEndpoints: vi.fn(async () => []),
     getSessionMessages: vi.fn(async (sessionId: string) =>
       mockState.withHistorySessions
         ? [
@@ -279,8 +301,143 @@ afterEach(() => {
   mockState.lastSession = null;
   mockState.livenessOnly = false;
   mockState.withHistorySessions = false;
+  mockState.sidebarMounts = 0;
+  mockState.sidebarUnmounts = 0;
   vi.clearAllMocks();
   resetGetSessionMessagesMock();
+  localStorage.removeItem(PROJECT_SIDEBAR_SHELL_KEY);
+});
+
+describe("App two-phase project bootstrap", () => {
+  it("uses the fixed project skeleton when the shell cache is invalid", async () => {
+    let resolveHealth!: (value: {
+      status: string;
+      default_workspace: null;
+      model: string;
+    }) => void;
+    vi.mocked(getHealth).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHealth = resolve;
+        }),
+    );
+    localStorage.setItem(
+      PROJECT_SIDEBAR_SHELL_KEY,
+      JSON.stringify({ version: 999, projects: [{ name: "Unsafe stale row" }] }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByTestId("project-navigation-loading")).toBeTruthy();
+    expect(screen.queryByText("Unsafe stale row")).toBeNull();
+    expect(getProjectProjection).not.toHaveBeenCalled();
+
+    resolveHealth({ status: "ok", default_workspace: null, model: "gpt-5.6-sol" });
+    await waitFor(() => expect(getProjectProjection).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows the cached canonical sidebar before health and hydrates each resource once", async () => {
+    let resolveHealth!: (value: {
+      status: string;
+      default_workspace: null;
+      model: string;
+    }) => void;
+    vi.mocked(getHealth).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHealth = resolve;
+        }),
+    );
+    let resolveProjects!: (value: {
+      projects: [];
+      orderRevision: number;
+    }) => void;
+    vi.mocked(getProjectProjection).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveProjects = resolve;
+        }),
+    );
+    localStorage.setItem(
+      PROJECT_SIDEBAR_SHELL_KEY,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {
+            projectId: "prj_cached",
+            name: "Cached project",
+            pinned: false,
+            order: 0,
+          },
+        ],
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("Cached project")).toBeTruthy();
+    expect(screen.getByTestId("project-navigation-shell")).toBeTruthy();
+    expect(screen.getByTestId("startup-center-pane")).toBeTruthy();
+    expect(getProjectProjection).not.toHaveBeenCalled();
+    expect(getSessions).not.toHaveBeenCalled();
+    expect(getRecentWorkspaces).not.toHaveBeenCalled();
+    expect(getHaasEndpoints).not.toHaveBeenCalled();
+
+    resolveHealth({ status: "ok", default_workspace: null, model: "gpt-5.6-sol" });
+
+    await waitFor(() => expect(getProjectProjection).toHaveBeenCalledTimes(1));
+    expect(getSessions).toHaveBeenCalledTimes(1);
+    expect(getRecentWorkspaces).toHaveBeenCalledTimes(1);
+    expect(getHaasEndpoints).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event(PERSONAS_CHANGED));
+    await act(async () => Promise.resolve());
+    expect(getProjectProjection).toHaveBeenCalledTimes(1);
+    expect(getSessions).toHaveBeenCalledTimes(1);
+
+    resolveProjects({ projects: [], orderRevision: 0 });
+    await waitFor(() =>
+      expect(screen.queryByTestId("project-navigation-shell")).toBeNull(),
+    );
+    await waitFor(() => expect(screen.queryByTestId("startup-center-pane")).toBeNull());
+    expect(mockState.sidebarMounts).toBe(1);
+    expect(mockState.sidebarUnmounts).toBe(0);
+  });
+
+  it("retries an authoritative projection failure without waiting for polling", async () => {
+    vi.mocked(getProjectProjection)
+      .mockRejectedValueOnce(new TypeError("sidecar startup race"))
+      .mockResolvedValueOnce({
+        orderRevision: 1,
+        projects: [
+          {
+            projectId: "prj_recovered",
+            canonicalKey: "/repos/recovered",
+            name: "Recovered project",
+            primaryWorkspaceBindingId: null,
+            defaultEndpointId: "hep_local_managed",
+            pinned: false,
+            order: 0,
+            archived: false,
+            workspaceCount: 0,
+            sessionCount: 0,
+            workspaces: [],
+            sessions: [],
+          },
+        ],
+      });
+
+    render(<App />);
+
+    expect(await screen.findByText("Recovered project", {}, { timeout: 1000 })).toBeTruthy();
+    expect(getProjectProjection).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      const cached = localStorage.getItem(PROJECT_SIDEBAR_SHELL_KEY) || "";
+      expect(cached).toContain("Recovered project");
+      expect(cached).not.toContain("/repos/recovered");
+      expect(cached).not.toContain("hep_local_managed");
+    });
+  });
 });
 
 describe("App execution lifecycle controls", () => {
@@ -295,6 +452,52 @@ describe("App execution lifecycle controls", () => {
         removeEventListener: vi.fn(),
       })),
     });
+  });
+
+  it("blocks repeated workspace setup errors without retrying or fabricating a result", async () => {
+    render(<App />);
+    const input = await findReadyComposer();
+    fireEvent.change(input, { target: { value: "keep this draft" } });
+    const session = mockState.lastSession!;
+    vi.useFakeTimers();
+    await act(async () => {
+      for (let i = 0; i < 3; i += 1) session.handlers.onEvent({
+        type: "error",
+        data: { error: "no valid workspace", code: "workspace_unavailable", retryable: false, recoveryAction: "restore_workspace" },
+      });
+      session.handlers.onClose?.();
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(21_000); });
+    expect(mockState.lastSession).toBe(session);
+    expect(screen.getAllByRole("alert").filter(el => el.textContent?.includes("workspace"))).toHaveLength(1);
+    expect(screen.queryByText("Completed", { exact: true })).toBeNull();
+    expect((input as HTMLTextAreaElement).value).toBe("keep this draft");
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(mockState.lastSession).not.toBe(session);
+    expect(screen.queryByRole("button", { name: "Check again" })).toBeNull();
+  });
+
+  it("reconnects ordinary transport failures and does not turn rejected tasks into success", async () => {
+    render(<App />);
+    await findReadyComposer();
+    const session = mockState.lastSession!;
+    vi.useFakeTimers();
+    await act(async () => { session.handlers.onClose?.(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3001); });
+    expect(mockState.lastSession).not.toBe(session);
+    vi.useRealTimers();
+    const input = await findReadyComposer();
+    fireEvent.change(input, { target: { value: "rejected task" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await expectStopOnly();
+    await act(async () => {
+      mockState.lastSession!.handlers.onEvent({ type: "error", data: { error: "Cannot execute", retryable: false } });
+      mockState.lastSession!.handlers.onEvent({ type: "turn_done", data: {} });
+    });
+    expect(screen.queryByText("Completed", { exact: true })).toBeNull();
+    expect(screen.getByText(/Cannot execute/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
   it("shows Stop immediately after sending before the server sends turn_start", async () => {

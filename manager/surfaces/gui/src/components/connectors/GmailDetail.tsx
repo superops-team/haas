@@ -177,7 +177,7 @@ function ChipListRow({
     await onSave([...values, v]);
   };
   return (
-    <div className={ROW} data-testid={testid}>
+    <div className={`${ROW} field-input-shell-embedded`} data-testid={testid}>
       <span className={LABEL}>{label}</span>
       <span className="min-w-0 flex-1 flex flex-wrap items-center gap-1.5">
         {values.map((v) => (

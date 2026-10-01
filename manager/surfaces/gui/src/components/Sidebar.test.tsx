@@ -43,7 +43,8 @@ const baseProps = {
   surfaces: { cowork: true, chat: false, code: false },
   sessions: SESSIONS,
   projects: [],
-  projectProjectionReady: true,
+  projectBootstrapPhase: "authoritative" as const,
+  sidecarReady: true,
   activeSession: "s-cowork-1",
   onSwitchAgent: vi.fn(),
   onNewSession: vi.fn(),
@@ -216,7 +217,7 @@ describe("New session button", () => {
   });
 });
 
-describe("Project navigation management (MPW-022 through MPW-040)", () => {
+describe("Project navigation management (MPW-022 through MPW-041)", () => {
   const project: ProjectSummary = {
     projectId: "prj-haas",
     canonicalKey: "/repos/haas",
@@ -293,6 +294,35 @@ describe("Project navigation management (MPW-022 through MPW-040)", () => {
       />,
     );
   };
+
+  it("renders cached projects in the canonical busy row without interactions", async () => {
+    stubFetch([
+      { match: "/v1/personas", method: "GET", json: PERSONAS },
+      { match: "/v1/settings", method: "GET", json: { nav_layout: "flat" } },
+    ]);
+    render(
+      <Sidebar
+        {...baseProps}
+        agent="ops"
+        projects={[project]}
+        sessions={SESSIONS}
+        projectBootstrapPhase="shell"
+      />,
+    );
+
+    const navigation = await screen.findByTestId("project-navigation-shell");
+    expect(navigation.getAttribute("aria-busy")).toBe("true");
+    const row = screen.getByTestId("project-row-prj-haas");
+    expect(
+      (row.querySelector(".project-sidebar-disclosure") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(screen.queryByTestId("project-menu-prj-haas")).toBeNull();
+    expect(row.querySelector(".project-row-shell-actions")).toBeTruthy();
+    expect(screen.queryByText("No conversations yet")).toBeNull();
+    expect(screen.getAllByTestId(/^project-row-/)).toHaveLength(1);
+    expect(screen.queryByText("w")).toBeNull();
+  });
 
   it("uses a plain plus and separates the organization menu", async () => {
     renderProjectSidebar();

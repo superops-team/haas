@@ -263,10 +263,6 @@
       "cancelled": "已停止"
     },
     "reasoning": "思考过程",
-    "evidence": "执行详情",
-    "model_call": "模型调用 {{number}}",
-    "input_tokens": "输入 token",
-    "output_tokens": "输出 token",
     "end_task": "结束任务",
     "activities_one": "{{count}} 项操作",
     "activities_other": "{{count}} 项操作",
@@ -343,6 +339,7 @@
         "read": "读取文件",
         "search": "搜索",
         "edit": "编辑文件",
+        "recall": "检索上下文",
         "tool": "使用工具"
       },
       "status": {
@@ -429,9 +426,10 @@
     "office_no_preview": "此 {{type}} 文件无法在此预览。",
     "pdf_error": "无法渲染 PDF：{{error}}",
     "pdf_rendering": "正在渲染 PDF…",
-    "sheet_error": "无法解析表格：{{error}}",
     "sheet_parsing": "正在解析表格…",
-    "sheet_empty": "空表格。",
+    "sheet_unavailable": "此电子表格无法在这里预览。",
+    "sheet_too_large": "电子表格超过 25 MB，无法预览。",
+    "sheet_tabs": "工作表",
     "open_in_default": "用默认应用打开",
     "show_in_folder": "在文件夹中显示",
     "show_folder": "显示这些文件的保存位置",
@@ -458,6 +456,10 @@
     "download": "下载",
     "download_only": "此产物无法在这里预览，请下载后打开。",
     "preview_unavailable": "产物预览不可用。",
+    "file_preview_read_only": "{{name}} — 只读文件预览",
+    "file_preview_large": "文件较大，已关闭语法高亮。",
+    "file_preview_truncated": "当前仅展示部分文件内容，已关闭语法高亮。",
+    "file_preview_load_failed": "增强预览无法加载，已切换为纯文本。",
     "open_in_browser": "在浏览器中打开",
     "reveal_in_finder": "在访达中显示",
     "folder_empty": "此文件夹为空。",
@@ -633,6 +635,10 @@
     "automation_fallback": "自动化"
   },
   "app": {
+    "workspace_unavailable": "工作目录不可用。恢复原目录后重新检查，或选择其他目录新建会话。",
+    "project_binding_unavailable": "项目绑定不可用。请恢复项目或选择新的工作目录。",
+    "workspace_recheck": "重新检查",
+    "workspace_new_project": "选择新项目目录",
     "client_upgrade_required": "当前 OpenHarness 客户端版本过旧，请重新加载后继续。",
     "reload": "重新加载",
     "server_restarting": "执行服务正在恢复。重试前将核对已有任务。",

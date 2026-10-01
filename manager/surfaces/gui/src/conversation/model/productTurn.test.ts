@@ -123,6 +123,187 @@ describe("MCX-029 product turn projection", () => {
     ]);
   });
 
+  it("projects one safe summary row per canonical inference round", () => {
+    const modelStages: ModelCallStage[] = [
+      {
+        modelCallId: "native-call-a",
+        status: "completed",
+        steps: [
+          { stepId: "reason-a1", kind: "reasoning_summary", text: "Inspecting inputs." },
+          { stepId: "reason-a2", kind: "reasoning_summary", text: "Inputs are consistent." },
+        ],
+      },
+      {
+        modelCallId: "native-call-b",
+        status: "completed",
+        steps: [
+          { stepId: "reason-b", kind: "reasoning_summary", text: "Checking the implementation." },
+          { stepId: "tool-b", kind: "tool", activityId: "tool-b" },
+        ],
+      },
+      {
+        modelCallId: "native-call-c",
+        status: "running",
+        steps: [
+          { stepId: "reason-c", kind: "reasoning_summary", text: "Verifying the result." },
+          { stepId: "tool-c", kind: "tool", activityId: "tool-c" },
+        ],
+      },
+    ];
+    const projected = projectConversationTurns(
+      [
+        { kind: "user", text: "Verify it", turnId: "turn-rounds" },
+        { kind: "tool", id: "tool-b", name: "read_file", args: {}, status: "ok", turnId: "turn-rounds" },
+        { kind: "tool", id: "tool-c", name: "run_shell", args: {}, status: "running", turnId: "turn-rounds" },
+      ],
+      {
+        phase: "running",
+        activeTurnId: "turn-rounds",
+        modelStages,
+      },
+    )[0];
+
+    expect(projected.work.inferenceRounds).toEqual([
+      {
+        roundId: "turn-rounds:round:0",
+        state: "succeeded",
+        safeSummary: "Inputs are consistent.",
+        activityRefs: [],
+      },
+      {
+        roundId: "turn-rounds:round:1",
+        state: "succeeded",
+        safeSummary: "Checking the implementation.",
+        activityRefs: ["tool-b"],
+      },
+      {
+        roundId: "turn-rounds:round:2",
+        state: "running",
+        safeSummary: "Verifying the result.",
+        activityRefs: ["tool-c"],
+      },
+    ]);
+    expect(JSON.stringify(projected.work.inferenceRounds)).not.toContain(
+      "native-call",
+    );
+  });
+
+  it("uses model commentary as a round summary and keeps a provisional running round", () => {
+    const projected = projectConversationTurns(
+      [
+        { kind: "user", text: "继续检查", turnId: "turn-commentary" },
+        {
+          kind: "tool",
+          id: "tool-1",
+          name: "run_shell",
+          args: {},
+          status: "ok",
+          turnId: "turn-commentary",
+        },
+      ],
+      {
+        phase: "running",
+        activeTurnId: "turn-commentary",
+        modelStages: [
+          {
+            modelCallId: "native-call-a",
+            status: "completed",
+            steps: [
+              { stepId: "commentary-a", kind: "commentary", text: "正在检查布局约束。" },
+              { stepId: "tool-a", kind: "tool", activityId: "tool-1" },
+            ],
+          },
+        ],
+      },
+    )[0];
+
+    expect(projected.work.inferenceRounds).toEqual([
+      {
+        roundId: "turn-commentary:round:0",
+        state: "succeeded",
+        safeSummary: "正在检查布局约束。",
+        activityRefs: ["tool-1"],
+      },
+      {
+        roundId: "turn-commentary:round:1",
+        state: "running",
+        safeSummary: null,
+        activityRefs: [],
+        provisional: true,
+      },
+    ]);
+  });
+
+  it("does not invent inference rounds when a backend has no canonical model stages", () => {
+    const projected = projectConversationTurns(
+      [{ kind: "user", text: "Continue", turnId: "turn-no-stages" }],
+      {
+        phase: "running",
+        activeTurnId: "turn-no-stages",
+        reasoning: "Checking the next step.",
+      },
+    )[0];
+
+    expect(projected.work.inferenceRounds).toEqual([]);
+    expect(projected.work.segments.some((segment) => segment.kind === "reasoning")).toBe(true);
+  });
+
+  it("omits a terminal final-output stage with no summary or activity", () => {
+    const projected = projectConversationTurns(
+      [
+        { kind: "user", text: "Finish it", turnId: "turn-final-only" },
+        {
+          kind: "tool",
+          id: "tool-check",
+          name: "run_shell",
+          args: {},
+          status: "ok",
+          turnId: "turn-final-only",
+        },
+        {
+          kind: "assistant",
+          text: "Final result",
+          turnId: "turn-final-only",
+          modelStages: [
+            {
+              modelCallId: "work-call",
+              status: "completed",
+              steps: [
+                {
+                  stepId: "work-tool",
+                  kind: "tool",
+                  activityId: "tool-check",
+                },
+              ],
+            },
+            {
+              modelCallId: "final-call",
+              status: "completed",
+              steps: [
+                {
+                  stepId: "final-result",
+                  kind: "result",
+                  text: "Final result",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      { phase: "completed" },
+    )[0];
+
+    expect(projected.work.inferenceRounds).toEqual([
+      {
+        roundId: "turn-final-only:round:0",
+        state: "succeeded",
+        safeSummary: null,
+        activityRefs: ["tool-check"],
+      },
+    ]);
+    expect(projected.assistantResponse?.text).toBe("Final result");
+  });
+
   it("keeps pending interactions inside their turn", () => {
     const turns = projectConversationTurns(
       [

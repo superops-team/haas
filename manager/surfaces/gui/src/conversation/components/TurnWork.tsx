@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Icon } from "../../components/Icon";
 import type { ExecutionEvidence } from "../../api";
@@ -7,8 +7,8 @@ import type {
   ConversationPresentation,
   ConversationTurn,
 } from "../model/types";
-import { ActivityInspector } from "./ActivityInspector";
-import { ModelEvidenceInspector } from "./ModelEvidenceInspector";
+import { InferenceRoundList } from "./InferenceRoundList";
+import { WorkActivityRows } from "./WorkActivityRows";
 
 const latestReasoningAction = (value: string): string => {
   const compact = value.replace(/\s+/g, " ").trim();
@@ -17,9 +17,11 @@ const latestReasoningAction = (value: string): string => {
 
 export interface WorkDisclosureState {
   work: boolean;
+  rounds: Record<string, boolean>;
 }
 export const CLOSED_WORK: WorkDisclosureState = {
   work: false,
+  rounds: {},
 };
 
 export function TurnWork({
@@ -46,68 +48,54 @@ export function TurnWork({
   const { t } = useTranslation();
   const { work, outcome } = turn;
   const [overrides, setOverrides] = useState<Set<string>>(() => new Set());
-  const [expandedActivityId, setExpandedActivityId] = useState<string | null>(
-    null,
-  );
-  const [evidenceOpen, setEvidenceOpen] = useState(false);
-  const activitySource = useRef<HTMLButtonElement | null>(null);
-  const evidenceSource = useRef<HTMLButtonElement | null>(null);
-  const hasDetails = Boolean(
-    work.activities.length || work.evidence.length,
-  );
+  const hasInferenceRounds = work.inferenceRounds.length > 0;
+  const hasDetails = work.activities.length > 0;
   const activityById = useMemo(
     () => new Map(work.activities.map((activity) => [activity.id, activity])),
     [work.activities],
   );
-  const visibleSegments = disclosure.work
-    ? work.segments.filter((segment) => segment.kind !== "reasoning")
-    : [];
+  const visibleSegments = useMemo(
+    () =>
+      !hasInferenceRounds && disclosure.work
+        ? work.segments.filter((segment) => segment.kind !== "reasoning")
+        : [],
+    [disclosure.work, hasInferenceRounds, work.segments],
+  );
+  const visibleActivities = useMemo(
+    () =>
+      visibleSegments
+        .flatMap((segment) => segment.activityRefs)
+        .map((id) => activityById.get(id))
+        .filter((activity): activity is ToolActivity => Boolean(activity)),
+    [activityById, visibleSegments],
+  );
+  const latestUserText = useMemo(() => {
+    for (let index = turn.userRows.length - 1; index >= 0; index -= 1) {
+      const row = turn.userRows[index];
+      if (row.kind === "user") return row.text;
+      if (row.kind === "connector") return row.source.text;
+    }
+    return "";
+  }, [turn.userRows]);
+  const expectsChineseSummary = /[\u3400-\u9fff]/u.test(latestUserText);
   const nonSuccess = ["failed", "cancelled", "paused"].includes(
     presentation.phase,
   );
-  useEffect(() => {
-    if (
-      expandedActivityId &&
-      !work.activities.some((activity) => activity.id === expandedActivityId)
-    )
-      setExpandedActivityId(null);
-  }, [expandedActivityId, work.activities]);
   const currentAction = useMemo(() => {
     if (!presentation.showWorkingIndicator) return null;
     for (let index = work.segments.length - 1; index >= 0; index -= 1) {
       const segment = work.segments[index];
-      let label =
-        segment.kind === "reasoning"
-          ? latestReasoningAction(segment.text || "")
-          : segment.text || "";
-      if (segment.kind === "tool") {
-        const activity = segment.activityRefs
-          .map((id) => activityById.get(id))
-          .find((candidate): candidate is ToolActivity => Boolean(candidate));
-        label =
-          activity?.commandPreview ||
-          activity?.summary ||
-          activity?.title ||
-          t(segment.safeTitle);
-      } else if (!label) {
-        label = t(segment.safeTitle);
-      }
+      if (segment.kind !== "reasoning") continue;
+      const label = latestReasoningAction(segment.text || "");
       const compact = label.replace(/\s+/g, " ").trim();
+      if (expectsChineseSummary && !/[\u3400-\u9fff]/u.test(compact)) return null;
       if (compact) return compact;
     }
     return null;
-  }, [activityById, presentation.showWorkingIndicator, t, work.segments]);
-  const closeActivity = () => {
-    setExpandedActivityId(null);
-    requestAnimationFrame(() => activitySource.current?.focus({ preventScroll: true }));
-  };
-  const closeEvidence = () => {
-    setEvidenceOpen(false);
-    requestAnimationFrame(() => evidenceSource.current?.focus({ preventScroll: true }));
-  };
+  }, [expectsChineseSummary, presentation.showWorkingIndicator, work.segments]);
   return (
     <section className="turn-work" data-testid="turn-work">
-      <button
+      {!hasInferenceRounds && <button
         type="button"
         className="work-summary"
         data-testid="work-summary"
@@ -143,72 +131,24 @@ export function TurnWork({
             className={disclosure.work ? "is-open" : ""}
           />
         )}
-      </button>
+      </button>}
+      {hasInferenceRounds && (
+        <InferenceRoundList
+          rounds={work.inferenceRounds}
+          activities={work.activities}
+          active={presentation.showWorkingIndicator}
+          expectsChineseSummary={expectsChineseSummary}
+          disclosure={disclosure.rounds}
+          onDisclosure={(rounds) => onDisclosure({ ...disclosure, rounds })}
+          loadExecutionEvidence={loadExecutionEvidence}
+        />
+      )}
       {visibleSegments.length > 0 && (
         <div className="work-segments">
-          {visibleSegments.map((segment) => {
-            const activity = segment.activityRefs
-              .map((id) => activityById.get(id))
-              .find((candidate): candidate is ToolActivity => Boolean(candidate));
-            if (!activity) return null;
-            const expanded = expandedActivityId === activity.id;
-            return (
-              <Fragment key={segment.segmentId}>
-                <button
-                  className={`work-tool work-segment is-${activity.status}`}
-                  data-work-segment="tool"
-                  aria-expanded={expanded}
-                  aria-controls={`activity-detail-${activity.id}`}
-                  onClick={(event) => {
-                    activitySource.current = event.currentTarget;
-                    setEvidenceOpen(false);
-                    setExpandedActivityId(expanded ? null : activity.id);
-                  }}
-                >
-                  <span className="work-tool-mark" aria-hidden="true">
-                    {activity.status === "succeeded"
-                      ? "✓"
-                      : activity.status === "failed"
-                        ? "!"
-                        : "○"}
-                  </span>
-                  <span className="work-tool-title">
-                    {activity.commandPreview || activity.summary ? (
-                      <>
-                        <span className="work-tool-primary">
-                          {activity.commandPreview || activity.summary}
-                        </span>
-                      </>
-                    ) : (
-                      t(`transcript.activity.kind.${activity.kind}`)
-                    )}
-                  </span>
-                  <span className="work-tool-meta">
-                    {t(`transcript.activity.status.${activity.status}`)}
-                  </span>
-                  <Icon
-                    name="chevronRight"
-                    size={13}
-                    className={expanded ? "is-open" : ""}
-                  />
-                </button>
-                {expanded && (
-                  <div
-                    className="work-segment-detail"
-                    id={`activity-detail-${activity.id}`}
-                  >
-                    <ActivityInspector
-                      activity={activity}
-                      loadExecutionEvidence={loadExecutionEvidence}
-                      focusHeading={false}
-                      inline
-                      onClose={closeActivity}
-                    />
-                  </div>
-                )}
-              </Fragment>
-            );
-          })}
+          <WorkActivityRows
+            activities={visibleActivities}
+            loadExecutionEvidence={loadExecutionEvidence}
+          />
         </div>
       )}
       {work.activities
@@ -243,35 +183,6 @@ export function TurnWork({
             )}
           </div>
         ))}
-      {disclosure.work && work.evidence.length > 0 && (
-        <>
-          <button
-            className="work-evidence"
-            aria-expanded={evidenceOpen}
-            aria-controls={`model-evidence-${turn.turnId}`}
-            onClick={(event) => {
-              evidenceSource.current = event.currentTarget;
-              setExpandedActivityId(null);
-              setEvidenceOpen((open) => !open);
-            }}
-          >
-            {t("conversation.evidence")}
-          </button>
-          {evidenceOpen && (
-            <div
-              className="work-segment-detail"
-              id={`model-evidence-${turn.turnId}`}
-            >
-              <ModelEvidenceInspector
-                evidence={work.evidence}
-                focusHeading={false}
-                inline
-                onClose={closeEvidence}
-              />
-            </div>
-          )}
-        </>
-      )}
       {nonSuccess && (outcome?.safeReason || outcome?.code) && (
         <div className="activity-task-error" data-testid="activity-task-error">
           <p>{outcome.safeReason || outcome.code}</p>

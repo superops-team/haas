@@ -323,7 +323,7 @@ def test_nonzero_command_exit_is_a_failed_tool_even_when_status_says_completed()
     assert event.actions["artifactDelta"]["exitCode"] == 7
 
 
-def test_file_change_and_mcp_have_presentation_neutral_activity_kinds() -> None:
+def test_file_change_and_mcp_have_semantic_activity_kinds() -> None:
     changed = normalize_notification(
         _notification(
             "item/started",
@@ -361,8 +361,12 @@ def test_file_change_and_mcp_have_presentation_neutral_activity_kinds() -> None:
         "safeSummary": "Apply 1 file change",
         "activityKind": "edit",
     }
-    assert mcp.actions["artifactDelta"]["activityKind"] == "tool"
-    assert "calendar" not in mcp.actions["artifactDelta"]["safeSummary"]
+    assert mcp.actions["artifactDelta"] == {
+        "toolCallId": "call_mcp",
+        "toolName": "calendar.list_events",
+        "safeSummary": "List events",
+        "activityKind": "read",
+    }
 
 
 def test_agent_message_completion_supplies_authoritative_phase_without_text() -> None:

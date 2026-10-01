@@ -103,7 +103,7 @@ for (const theme of ["light", "dark"] as const) {
       };
       return {
         actual: getComputedStyle(element).borderColor,
-        expected: resolve("--color-composer-focus-border"),
+        expected: resolve("--color-field-focus-border"),
         accent: resolve("--color-accent"),
       };
     });

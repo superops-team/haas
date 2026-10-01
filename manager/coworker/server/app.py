@@ -24,7 +24,7 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, Header, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 # Origins allowed to talk to the local sidecar. It binds to 127.0.0.1, but a page in the
 # user's own browser can still reach loopback — so without an origin gate, any website they
@@ -254,8 +254,23 @@ def create_app(manager: SessionManager) -> FastAPI:
             "model": manager.model,
         }
 
+    @app.post("/v1/lifecycle/prepare-restart")
+    async def prepare_restart(
+        body: dict[str, Any] | None = None,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        requested = (body or {}).get("timeoutSeconds", 8.0)
+        try:
+            timeout_seconds = min(10.0, max(0.05, float(requested)))
+        except (TypeError, ValueError):
+            timeout_seconds = 8.0
+        return await manager.prepare_restart(
+            idempotency_key=idempotency_key,
+            timeout_seconds=timeout_seconds,
+        )
+
     @app.post("/mcp/cowork-recall")
-    async def cowork_recall_mcp(request: Request) -> JSONResponse:
+    async def cowork_recall_mcp(request: Request) -> Response:
         body = await request.json()
         if not isinstance(body, dict):
             return JSONResponse(
@@ -266,6 +281,8 @@ def create_app(manager: SessionManager) -> FastAPI:
             )
         request_id = body.get("id")
         method = body.get("method")
+        if method == "notifications/initialized" and request_id is None:
+            return Response(status_code=202)
         if method == "initialize":
             result = {
                 "protocolVersion": "2025-06-18",
@@ -2764,6 +2781,9 @@ def create_app(manager: SessionManager) -> FastAPI:
                     "data": {
                         "error": str(exc),
                         "error_type": "ProjectBindingError",
+                        "code": "project_binding_unavailable",
+                        "retryable": False,
+                        "recoveryAction": "restore_workspace",
                     },
                 }
             )
@@ -2787,10 +2807,15 @@ def create_app(manager: SessionManager) -> FastAPI:
             await ws.send_json(
                 {
                     "type": "error",
-                    "data": {"error": "no valid workspace — choose a project folder first"},
+                    "data": {
+                        "error": "no valid workspace — choose a project folder first",
+                        "code": "workspace_unavailable",
+                        "retryable": False,
+                        "recoveryAction": "restore_workspace",
+                    },
                 }
             )
-            await ws.close()
+            await ws.close(code=1008)
             return
         # MCP servers that failed to start while preparing this session's tools:
         # leave a quiet, persistent notice instead of the session silently lacking
@@ -2964,7 +2989,23 @@ def create_app(manager: SessionManager) -> FastAPI:
                     if event.type.value in _CHECKPOINTS:
                         manager.save(session_id, engine)
                         if event.type.value == "turn_start" and turn_id:
-                            manager.conversation_commands.mark_checkpointed(session_id, turn_id)
+                            delegated = event.data.get("delegated")
+                            invocation_id = (
+                                delegated.get("invocation")
+                                if isinstance(delegated, dict)
+                                else None
+                            )
+                            if isinstance(invocation_id, str) and invocation_id.startswith("inv_"):
+                                manager.conversation_commands.checkpoint_execution(
+                                    session_id,
+                                    turn_id,
+                                    execution_ref=invocation_id,
+                                    allow_rebind=True,
+                                )
+                            else:
+                                manager.conversation_commands.mark_checkpointed(
+                                    session_id, turn_id
+                                )
                     if event.type.value == "turn_start" and not event.data.get("delegated"):
                         # Title on the user's words the moment they land — never behind
                         # a long agentic turn (owner catch 2026-08-24).

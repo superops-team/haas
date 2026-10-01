@@ -11,6 +11,13 @@ from .task_completion import TaskCompletionState
 
 Projection = Literal["adk", "native", "session"]
 REASONING_PREVIEW_LIMIT = 240
+_GENERIC_TOOL_PROGRESS = {
+    "Command output",
+    "File change output",
+    "Search progress",
+    "Tool progress",
+    "Tool produced output",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +349,16 @@ class StreamBridgeState:
                 return True
         return False
 
+    @staticmethod
+    def _classify_pending_output_before_tool(stage: dict[str, Any]) -> bool:
+        """A message followed by a tool is progress commentary, never the final answer."""
+        changed = False
+        for step in stage.get("steps", []):
+            if step.get("kind") == "output_pending":
+                step["kind"] = "commentary"
+                changed = True
+        return changed
+
     def _meter_stage(self, data: dict[str, Any]) -> bool:
         if data.get("scope") != "model_call" or not isinstance(data.get("usage"), Mapping):
             return False
@@ -357,6 +374,7 @@ class StreamBridgeState:
         if not tool_call_id:
             return False
         stage = self._stage(str(data.get("modelCallId") or "") or None)
+        self._classify_pending_output_before_tool(stage)
         if not any(step.get("stepId") == tool_call_id for step in stage["steps"]):
             self._freeze_reasoning_previews(stage)
             stage["steps"].append(
@@ -384,6 +402,24 @@ class StreamBridgeState:
                 for stage in self.model_stages
             ]
         )
+
+    def final_response_text(self) -> str:
+        """Return phase-classified final output, with ADK text as legacy fallback."""
+
+        result_parts = [
+            str(step.get("text") or "")
+            for stage in self.model_stages
+            for step in stage.get("steps", [])
+            if step.get("kind") == "result" and step.get("text")
+        ]
+        if result_parts:
+            return "\n\n".join(result_parts)
+        has_native_output = any(
+            step.get("kind") in {"output_pending", "commentary", "result"}
+            for stage in self.model_stages
+            for step in stage.get("steps", [])
+        )
+        return "" if has_native_output else self.assistant_text
 
     def _stage_action(self) -> BridgeAction:
         return BridgeAction("model_stage_updated", {"modelStages": self.public_model_stages()})
@@ -418,13 +454,22 @@ class StreamBridgeState:
         if not tool_call_id:
             return
         existing = self.activities.get(tool_call_id, {})
+        incoming_kind = str(payload.get("activityKind") or "")
+        existing_kind = str(existing.get("kind") or "")
+        kind = incoming_kind or existing_kind or "tool"
+        if existing_kind and existing_kind != "tool" and incoming_kind == "tool":
+            kind = existing_kind
+        incoming_summary = str(payload.get("safeSummary") or "")
+        summary = incoming_summary or str(existing.get("summary") or "")
+        if existing.get("summary") and incoming_summary in _GENERIC_TOOL_PROGRESS:
+            summary = str(existing["summary"])
         activity: dict[str, Any] = {
             **existing,
             "id": tool_call_id,
-            "kind": str(payload.get("activityKind") or existing.get("kind") or "tool"),
+            "kind": kind,
             "status": status,
             "title": "",
-            "summary": str(payload.get("safeSummary") or existing.get("summary") or ""),
+            "summary": summary,
             "preview": str(payload.get("outputPreview") or existing.get("preview") or ""),
             "omittedLineCount": int(
                 payload.get("omittedLineCount") or existing.get("omittedLineCount") or 0
@@ -494,9 +539,15 @@ class StreamBridgeState:
             return []
         self.completed = True
         if self.terminal_status == "completed" and self.model_stages:
-            for step in self.model_stages[-1].get("steps", []):
-                if step.get("kind") == "output_pending":
-                    step["kind"] = "result"
+            pending = [
+                step
+                for step in self.model_stages[-1].get("steps", [])
+                if step.get("kind") == "output_pending"
+            ]
+            for step in pending[:-1]:
+                step["kind"] = "commentary"
+            if pending:
+                pending[-1]["kind"] = "result"
         for stage in self.model_stages:
             self._freeze_reasoning_previews(stage)
             if (
@@ -514,6 +565,12 @@ class StreamBridgeState:
             outcome["safeReason"] = self.terminal_safe_reason
         if self.terminal_retryable is not None:
             outcome["retryable"] = self.terminal_retryable
+        if any(
+            step.get("kind") in {"output_pending", "commentary", "result"}
+            for stage in self.model_stages
+            for step in stage.get("steps", [])
+        ):
+            self.assistant_text = self.final_response_text()
         actions: list[BridgeAction] = []
         for activity in self.activities.values():
             if activity.get("status") not in {"running", "pending", "waiting"}:
@@ -551,6 +608,14 @@ class StreamBridgeState:
         return actions
 
     def to_dict(self) -> dict[str, Any]:
+        # Dedupe claims are transport-recovery state, not conversation history. A
+        # terminal bridge never consumes another event, so retaining a long turn's
+        # claims only inflates the Manager session record and slows every readback.
+        seen = [] if self.completed else [list(item) for item in sorted(self._seen)]
+        tool_seen = [] if self.completed else [list(item) for item in sorted(self._tool_seen)]
+        content_seen = (
+            [] if self.completed else [list(item) for item in sorted(self._content_seen)]
+        )
         return {
             "endpointId": self.endpoint_id,
             "session": self.session.to_dict(),
@@ -571,9 +636,9 @@ class StreamBridgeState:
             "modelStages": self.public_model_stages(),
             "completed": self.completed,
             "task": self.task.to_dict(),
-            "seen": [list(item) for item in sorted(self._seen)],
-            "toolSeen": [list(item) for item in sorted(self._tool_seen)],
-            "contentSeen": [list(item) for item in sorted(self._content_seen)],
+            "seen": seen,
+            "toolSeen": tool_seen,
+            "contentSeen": content_seen,
         }
 
     @classmethod
@@ -604,7 +669,11 @@ class StreamBridgeState:
         state.model_stages = [
             dict(stage) for stage in value.get("modelStages", []) if isinstance(stage, Mapping)
         ]
-        state._seen = {tuple(item) for item in value.get("seen", [])}  # type: ignore[misc]
-        state._tool_seen = {tuple(item) for item in value.get("toolSeen", [])}  # type: ignore[misc]
-        state._content_seen = {tuple(item) for item in value.get("contentSeen", [])}  # type: ignore[misc]
+        # Older releases could persist tens of thousands of claims even after a
+        # bridge became terminal. Do not rebuild those sets during historical
+        # session load; to_dict() will compact the legacy record on readback.
+        if not state.completed:
+            state._seen = {tuple(item) for item in value.get("seen", [])}  # type: ignore[misc]
+            state._tool_seen = {tuple(item) for item in value.get("toolSeen", [])}  # type: ignore[misc]
+            state._content_seen = {tuple(item) for item in value.get("contentSeen", [])}  # type: ignore[misc]
         return state

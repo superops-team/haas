@@ -782,6 +782,15 @@ global memory、workspace memory，以及近期脱敏 session transcript facts�
 turn 可以继续，但 Manager 必须通过 HaaS profile 和普通 task outcome 路径记录降级。
 Local Codex 路径在完整 MCP runtime contract 实现前仍不支持任意外部 MCP materialization。
 
+内置 source 必须实现 pinned Codex client 所需的 stateless Streamable HTTP lifecycle。
+`initialize`、`tools/list` 与 `tools/call` 返回 JSON-RPC response；`notifications/initialized`
+notification 返回 HTTP 202 空 body，绝不得转换成 `-32601 Method not found`。带 `id` 的未知请求仍
+返回结构化 JSON-RPC error。测试必须执行完整 initialize-notification-list-call 顺序，不能只孤立调用
+`tools/call`。
+由于 `recall` 由 Manager 管理、只读、仅 loopback、绑定 session 且独立鉴权，其生成的 Codex MCP
+配置必须设置 `default_tools_approval_mode="approve"`，避免调用卡在未投影的通用 MCP 审批上。任何
+外部 MCP server 都不得继承该例外。
+
 Retry 与恢复场景的 recall 必须在过滤前合并已持久化 transcript 与最新 HaaS
 `stream_bridge` checkpoint。这覆盖一种窗口：失败或中断的 HaaS turn 已持久化可见
 user message、终态 notice 和 bridge state，但由于 Manager 进程、浏览器连接或 stream
@@ -852,3 +861,158 @@ Manager 历史可携带 `_managerTurnId` 与 `_managerRowId` sidecar；内部 We
 workspace binding、harness/profile/policy revision 与 remote workspace ref。Remote selection 不得
 序列化 Manager local path 或 host mount。Remote endpoint 失败时保持结构化 blocked target，绝不
 fallback 到 `local_managed`。Project default 变化只影响 draft/new session，accepted session 保留原 binding。
+
+## 桌面重启与重装任务恢复（`manager-restart-task-recovery-v1`）
+
+### 背景与产品边界
+
+当前桌面进程退出时会立即终止其拥有的 Manager 子进程。重启或本地重装后，HaaS 已能把
+持久化但失去 live adapter owner 的本地 `running` invocation 收敛为
+`incomplete(sidecar_restart_execution_lost)`，但 Manager 只修复从未到达 transcript
+checkpoint 的 command。已经 checkpoint 的 command 仍可能停留在 `accepted/running`，即使
+对应 HaaS invocation 已终态且没有 Codex app-server 继续执行。最终表现为会话虚假“执行中”，
+同时 Stop 无法终止任何真实任务。
+
+本设计提供两种边界清晰的保证：
+
+1. 由本桌面发起的更新/重启属于优雅恢复路径。Manager 对每个支持 Pause 的 HaaS invocation
+   发起暂停，等待权威 `interrupted` 终态，并在桌面终止子进程前持久化 restart-owned
+   continuation 标记。下次启动通过 HaaS 原生 resume 语义自动继续同一个逻辑任务。
+2. Crash、强杀、断电或未完成暂停屏障的外部覆盖安装属于 fail-closed 路径。启动时只对账精确的
+   accepted invocation 与持久事件；绝不重放 prompt，也不创建新的 idempotency key。无法证明
+   live owner/native continuation 时，任务显示为可安全重试/继续的 `incomplete`，不再虚假运行。
+
+P0 目标是：owned HaaS endpoint ready 后扫描全部已 checkpoint 且 disposition 为 `running` 的
+会话命令；权威 readback 证明 live owner 时重新挂接同一 invocation；把 terminal event、task
+outcome、binding control 与 command receipt 幂等收敛；桌面主动 restart/update/reinstall 时自动
+暂停并继续支持 Pause 的本地 HaaS 工作；仅在 Manager 当前绑定 active invocation owner 时展示 Stop。
+
+非目标包括：Crash 或 `sidecar_restart_execution_lost` 后自动重放 prompt；当 harness 仅支持从
+durable session/thread 边界继续时宣称精确恢复到指令指针；本切片恢复非 HaaS 进程内 provider。
+ADK、HaaS invocation/canonical event、container、model-proxy、MCP 与 credential schema 不变。
+
+### 持久状态与启动对账
+
+Manager 只在现有 HaaS binding 中保存 additive、secretless 的恢复事实：
+
+```json
+{
+  "restartRecovery": {
+    "generation": "restart_<opaque>",
+    "state": "preparing|paused|reattaching|continued|recovery_required",
+    "sourceInvocationId": "inv_...",
+    "requestedAtMs": 1786400000000,
+    "reasonCode": "desktop_restart|sidecar_restart_execution_lost|backend_unavailable"
+  }
+}
+```
+
+generation 是每次 desktop restart request 唯一的本机 opaque 幂等身份，不是 credential。该对象
+不得包含 prompt、完整 tool argument/output、bearer token、provider credential、signed URL 或
+host path。
+
+`conversation_commands` 增加一个 nullable additive `execution_ref`。普通 turn 路径观测到已 accepted
+的 delegated `turn_start` 时，必须在同一个 command-store transaction 中 checkpoint Manager
+`turn_id` 并绑定最新的精确 HaaS `invocationId`。同一 Manager turn 的 structured-plan continuation
+只能按实际 acceptance 顺序推进该 reference；其他调用方不得覆盖。启动对账优先按
+该 reference 连接 receipt 与 bridge。旧记录没有该字段时，只能在 session single-writer 顺序能够证明
+唯一 current bridge 且没有更新 accepted command 时对账；当前权威 terminal 持久化后，更旧 running
+row 才可作为 stale predecessor 终结。无法消歧的旧 row 必须进入 `recovery_required`，不得猜测或重放。
+
+`running` 是 owner 事实，不是历史 receipt。进程启动后，Manager 不得仅根据持久化的
+`control_state=running` 推断任务仍在运行。只有精确 invocation readback 与
+`_bind_active_haas_turn` 建立 live recovery pump 后，会话才可作为可操作的 running 展示。
+证明完成前使用 additive 的 Manager-local `recovering` 投影且不提供 Stop；它不扩展六值 HaaS
+execution-control 合同，也不改变 ADK state。
+Queue recovery 遵循同一边界：没有 checkpoint 的 `dispatching` item 回到 paused queue；已经
+checkpoint 的 item 必须继续关联已 accepted invocation，绝不能重新入队。Terminal reconciliation
+只删除一次对应 queue item。
+
+Owned HaaS endpoint 通过 execution readiness 后，Manager 扫描全部已 checkpoint 且 disposition
+为 `running` 的 command receipt。每个 Manager session 只有一个 single-flight 对账，跨 session
+采用有界并发，避免单个 remote endpoint 延迟 first paint 或 project hydration。
+
+| 权威 readback | Manager 必须执行的动作 |
+|---|---|
+| Invocation 已终态 | 从持久 cursor 后消费 canonical event，对齐 terminal barrier，合并或追加唯一 assistant/task-outcome 投影，持久化 `idle` 或权威 `paused`，并终结匹配的 stale running receipt。 |
+| Invocation 未终态且 HaaS 证明仍有 live owner | 为同一 invocation 启动唯一 background recovery pump，注册 Manager busy/control owner，从持久 cursor 继续，绝不再次 POST `/run_sse`。 |
+| 本地 invocation 已无 live owner | 由 HaaS fencing 唯一收敛为 retryable `incomplete`，`code=safeReason=sidecar_restart_execution_lost`；Manager 消费 terminal 并清除虚假 running/Stop。 |
+| Backend 不可用或 owner 无法判定 | 持久化 `restartRecovery.state=recovery_required` 与安全 `backend_unavailable`；展示可重试恢复态，不宣称 running/completed/failed execution，也不创建新工作。 |
+| Binding、attempt、bridge、session 或 invocation identity 不一致 | Fail closed 为 `recovery_required`，记录安全诊断，不读取或修改其他 invocation。 |
+
+重复进程启动、invocation GET 或 WebSocket 打开不得复制 assistant row、task outcome、tool
+activity、terminal event、`turn_done` 或 command terminalization。稳定的 Manager turn/row identity
+与 bridge invocation/cursor 是 merge key。恢复出的 invocation 已终态后，只能终结不可能代表更新
+active invocation 的 receipt；旧恢复结果不得覆盖更新 accepted invocation。
+
+### 优雅重启与自动继续
+
+受认证的 Manager-local mutation `POST /v1/lifecycle/prepare-restart` 支持可选
+`Idempotency-Key`，只返回聚合后的安全结果：
+
+```json
+{"state":"ready|partial|blocked","generation":"restart_<opaque>","paused":1,"recoveryRequired":0}
+```
+
+接口先阻止新的前台 send 与 queue dispatch，再以每项有界 deadline 并发 Pause 由 Manager 拥有且
+支持 Pause 的 HaaS invocation。只有 HaaS 已把 source invocation 持久化为 `interrupted`，并返回
+`sessionControl.controlState=paused`、`supportsResume=true` 与精确
+`resumableInvocationId` 后，才允许自动继续；Manager 随即持久化该 source 对应的
+`restartRecovery.state=paused`。Pause timeout、不支持 pause、pre-acceptance turn、进程内 provider
+turn、identity mismatch 或持久化失败必须保持 `partial|blocked`，不得升级为 auto-resumable。
+
+Tauri updater 与明确的桌面 Quit 路径必须在终止 Manager child 前调用该接口，只等待有界响应。
+即使 partial 后继续退出，也不得把未暂停工作标成可恢复。Crash 不属于该优雅合同。
+
+下次启动先进行 terminal/readback 权威对账。只有 `paused` restart marker 仍与 HaaS 权威 resumable
+source invocation 匹配时，Manager 才原子 claim session，把 marker 改为 `reattaching`，并且只调用
+一次现有 HaaS Continue。Continue 在同一个 durable native session/thread 上创建一个 linked
+invocation；不追加 synthetic user message，也不重放原请求。它必须携带一条固定的 Manager-owned
+continuation instruction，要求先检查当前状态、避免重复已完成
+副作用、完成剩余工作并返回最终结果。事件继续走普通 bridge。终态后 marker 变为 `continued`；
+acceptance 前失败则恢复 `paused`，保留手动恢复能力。重复启动必须复用已 accepted
+linked attempt，不能创建第二个 invocation。
+
+### UX、兼容性、测试与验收
+
+- Project/session shell 立即渲染。Readback 期间可显示弱化的本地化“正在恢复任务状态…”。进入
+  `recovery_required` 后不再展示 active spinner；没有 owner 就没有 Stop。
+- 优雅续接仍属于同一会话和同一逻辑 user turn；可以增加 inference round，但不得复制 user message。
+- Crash orphan 以本地化中断说明和 retryable action 结束；partial reasoning/tool/final evidence 保留，
+  terminal activity 停止动画。
+- 不含 `restartRecovery` 的历史数据惰性对账；不做 bulk rewrite，也不引入 legacy renderer。
+- ADK REST/SSE 与 `/v1/haas/*` 不变。Lifecycle endpoint 与 recovery projection 是受认证的
+  Manager-local additive contract；routing、artifact、policy、container 与 secretless credential
+  合同不变。
+
+TDD 分七个纵向切片推进：（1）additive `execution_ref`、确定性的 `checkpointed_running`
+command-store 扫描与幂等 session
+terminalization；（2）orphan 启动对账到唯一持久化 `incomplete` outcome、`idle` 与 terminal receipt；
+（3）可证明 live owner 的 same-invocation pump，且无 profile sync 或 `/run_sse`；（4）有界幂等
+prepare-restart，覆盖混合 Pause capability 与 queue freeze；（5）paused marker 到唯一 linked Continue
+invocation，acceptance 前失败仍为 paused；（6）Tauri updater/Quit 在 kill child 前 preparation，Manager
+不可用时不无限阻止退出；（7）packaged restart 与 force-kill 验收。
+
+打包验收启动一个长时间、支持 Pause 的本地 Codex turn，触发 desktop restart，启动新安装的
+`.app`，证明同一会话自动继续到唯一 canonical terminal 且无重复 user row。Force-kill 变体则必须
+收敛为唯一安全 `incomplete`、不自动重放，也不暴露虚假 running/Stop。
+
+组件影响：Manager command store、session/binding projection、startup lifecycle、desktop shutdown、
+transcript recovery 与 packaged smoke 受影响。Session Runtime 已拥有本设计依赖的 fenced orphan 与
+Pause/Continue 语义，因此无需修改 ADK 或 HaaS native schema。Harness adapter、model proxy、MCP、
+artifact store、policy、container runtime 与 credential schema 不受影响；现有 secretless/native
+resume 合同仍是前置条件。
+
+### 重启审查修正
+
+安装提交前更新失败必须保持 Manager 新任务准入。macOS/Linux 在安装成功后、重启前
+才准备退出；Windows 使用更新器 before-exit 回调，保证下载验证/解包完成后才 drain。
+主动退出仍保留原有有界 drain。
+
+产品任务可能跨越两个以上 invocation。合并所有 assistant 快照，保留首行/任务/时间
+身份与最新答复/结果，保留前序 activity/model-stage 事实。当前 invocation 回读替换
+本轮事实集合，删除过期项但不清除前序事实。跨 invocation 重用 id 保持独立，回读幂等。
+
+任务/验收：三次续接后当前 bridge 回读、过期替换及身份稳定失败测试；更新成功/失败
+顺序验证；实现及二轮复审。仅影响 Manager 投影与桌面退出顺序，不改 ADK/HaaS 接口、
+容器、权限和 secret 合同。

@@ -154,7 +154,7 @@ export function InboxView({
   const routingLabel = routingName ? `#${routingName}` : routing;
 
   return (
-    <main className="flex-1 min-w-0 flex bg-paper">
+    <main className="flex-1 min-w-0 flex bg-paper" data-page-window-surface>
       <div className="flex-1 min-w-0 overflow-y-auto hairline-scroll">
         <div className="max-w-4xl mx-auto px-7 py-6">
           <PanelHead

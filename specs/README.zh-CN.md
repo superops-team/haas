@@ -140,6 +140,8 @@ Sandbox Runtime 把同一 policy 合同投影到 Lite Docker 或 OpenSandbox AIO
 | P0 | Manager Conversation Experience | `specs/manager-conversation-experience/README.md` | Product-turn-first Agent 对话投影、稳定首 delta 流式正文、统一生命周期控制、带 ACK 输入、持久草稿/队列、克制 work disclosure、可复用 React AI 组件、双主题、无障碍与无 legacy 迁移 |
 | P0 | Manager Project Workbench Experience | `specs/manager-project-workspace-experience/README.md` | 项目分组会话、workspace/HaaS endpoint binding、Git context、Codex 风格 command disclosure 与原生桌面窗口行为 |
 | P1 | Manager GUI Performance | `specs/manager-gui-performance/README.md` | OpenHarness React/Vite bundle 预算、live render 隔离、对账与刷新归属 |
+| P1 | Manager File Preview | `specs/manager-file-preview/README.md` | lazy 只读 CodeMirror 文件查看、确定性语言映射、主题集成、生命周期安全与大文件降级 |
+| P1 | Manager Office Preview | `specs/manager-office-preview/README.md` | 安全 lazy Worker/WASM spreadsheet 预览、只读控件、文档信任边界与 SheetJS 移除 |
 | P0 | Manager Product Identity | `specs/manager-product-identity/README.md` | OpenHarness 产品身份、无登录桌面行为和本地账号/连接器边界 |
 | P0 | Stores | `specs/stores/README.md` | 持久化事实源：registry/session/event/idempotency/admission 接口、schema 与迁移 |
 | P0 | Identity | `specs/identity/README.md` | bearer -> principal、tenant/workspace/userId scope、`IdentityProvider` 接口 |

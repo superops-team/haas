@@ -88,6 +88,17 @@ class CommandReceipt:
     turn_id: str | None
     queue_item_id: str | None
     outcome_ref: str | None = None
+    execution_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class RunningCommand:
+    """A checkpointed command that still claims an active execution."""
+
+    session_id: str
+    client_command_id: str
+    turn_id: str
+    execution_ref: str | None
 
 
 class ConversationCommandStore:
@@ -118,6 +129,7 @@ class ConversationCommandStore:
                 turn_id TEXT,
                 queue_item_id TEXT,
                 outcome_ref TEXT,
+                execution_ref TEXT,
                 payload_json TEXT NOT NULL,
                 checkpointed_at_ms INTEGER,
                 created_at_ms INTEGER NOT NULL,
@@ -161,11 +173,25 @@ class ConversationCommandStore:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
+        try:
+            self._conn.execute(
+                "ALTER TABLE conversation_commands ADD COLUMN execution_ref TEXT"
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
         # A process can stop after atomically claiming an item but before its task is
         # observably running. Never replay that uncertain work on startup. Put it back
         # at the head and require an explicit resume from the user.
         uncertain = self._conn.execute(
-            "SELECT DISTINCT session_id FROM conversation_queue WHERE state = 'dispatching'"
+            """
+            SELECT DISTINCT q.session_id
+            FROM conversation_queue AS q
+            JOIN conversation_commands AS c
+              ON c.session_id = q.session_id
+             AND c.client_command_id = q.client_command_id
+            WHERE q.state = 'dispatching' AND c.checkpointed_at_ms IS NULL
+            """
         ).fetchall()
         now_ms = int(time.time() * 1000)
         for row in uncertain:
@@ -175,8 +201,12 @@ class ConversationCommandStore:
                 UPDATE conversation_queue
                 SET state = 'queued', revision = revision + 1
                 WHERE session_id = ? AND state = 'dispatching'
+                  AND client_command_id IN (
+                    SELECT client_command_id FROM conversation_commands
+                    WHERE session_id = ? AND checkpointed_at_ms IS NULL
+                  )
                 """,
-                (session_id,),
+                (session_id, session_id),
             )
             self._conn.execute(
                 """
@@ -184,7 +214,7 @@ class ConversationCommandStore:
                 SET disposition = 'queued', turn_id = NULL, updated_at_ms = ?
                 WHERE session_id = ? AND queue_item_id IN (
                     SELECT queue_item_id FROM conversation_queue WHERE session_id = ?
-                )
+                ) AND checkpointed_at_ms IS NULL
                 """,
                 (now_ms, session_id, session_id),
             )
@@ -200,6 +230,7 @@ class ConversationCommandStore:
             turn_id=row["turn_id"],
             queue_item_id=row["queue_item_id"],
             outcome_ref=row["outcome_ref"],
+            execution_ref=row["execution_ref"],
         )
 
     def find_by_idempotency(self, session_id: str, idempotency_key: str) -> CommandReceipt | None:
@@ -346,19 +377,137 @@ class ConversationCommandStore:
     def mark_checkpointed(self, session_id: str, turn_id: str) -> bool:
         """Record that the matching turn_start is durably present in the transcript."""
 
+        return self.checkpoint_execution(session_id, turn_id, execution_ref=None)
+
+    def checkpoint_execution(
+        self,
+        session_id: str,
+        turn_id: str,
+        *,
+        execution_ref: str | None,
+        allow_rebind: bool = False,
+    ) -> bool:
+        """Checkpoint a turn and bind its latest accepted HaaS invocation."""
+
         with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT execution_ref
+                FROM conversation_commands
+                WHERE session_id = ? AND turn_id = ? AND disposition = 'running'
+                """,
+                (session_id, turn_id),
+            ).fetchone()
+            if row is None:
+                return False
+            current_ref = row["execution_ref"]
+            if current_ref and execution_ref and current_ref != execution_ref and not allow_rebind:
+                raise ConversationCommandConflict(
+                    "conversation command is already bound to another execution"
+                )
+            resolved_ref = (
+                execution_ref
+                if allow_rebind and execution_ref
+                else current_ref or execution_ref
+            )
             result = self._conn.execute(
                 """
                 UPDATE conversation_commands
-                SET checkpointed_at_ms = ?, updated_at_ms = ?
+                SET checkpointed_at_ms = COALESCE(checkpointed_at_ms, ?),
+                    execution_ref = ?,
+                    updated_at_ms = ?
                 WHERE session_id = ? AND turn_id = ?
                   AND disposition = 'running'
-                  AND checkpointed_at_ms IS NULL
+                  AND (checkpointed_at_ms IS NULL OR execution_ref IS NOT ?)
                 """,
-                (int(time.time() * 1000), int(time.time() * 1000), session_id, turn_id),
+                (
+                    int(time.time() * 1000),
+                    resolved_ref,
+                    int(time.time() * 1000),
+                    session_id,
+                    turn_id,
+                    resolved_ref,
+                ),
             )
             self._conn.commit()
         return result.rowcount > 0
+
+    def checkpointed_running(self, session_id: str | None = None) -> list[RunningCommand]:
+        """List durable running claims in stable acceptance order for startup recovery."""
+
+        with self._lock:
+            if session_id is None:
+                rows = self._conn.execute(
+                    """
+                SELECT session_id, client_command_id, turn_id, execution_ref
+                FROM conversation_commands
+                WHERE disposition = 'running'
+                  AND turn_id IS NOT NULL
+                  AND checkpointed_at_ms IS NOT NULL
+                ORDER BY created_at_ms, session_id, client_command_id
+                """
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT session_id, client_command_id, turn_id, execution_ref
+                    FROM conversation_commands
+                    WHERE session_id = ?
+                      AND disposition = 'running'
+                      AND turn_id IS NOT NULL
+                      AND checkpointed_at_ms IS NOT NULL
+                    ORDER BY created_at_ms, client_command_id
+                    """,
+                    (session_id,),
+                ).fetchall()
+        return [
+            RunningCommand(
+                session_id=str(row["session_id"]),
+                client_command_id=str(row["client_command_id"]),
+                turn_id=str(row["turn_id"]),
+                execution_ref=(
+                    str(row["execution_ref"]) if row["execution_ref"] is not None else None
+                ),
+            )
+            for row in rows
+        ]
+
+    def resolve_startup_execution(
+        self, session_id: str, execution_ref: str
+    ) -> tuple[RunningCommand, list[RunningCommand]] | None:
+        """Resolve one current execution and any legacy stale predecessors atomically."""
+
+        with self._lock:
+            commands = self.checkpointed_running(session_id)
+            exact = [item for item in commands if item.execution_ref == execution_ref]
+            if len(exact) == 1 and all(
+                item.execution_ref in {None, execution_ref} for item in commands
+            ):
+                return exact[0], [item for item in commands if item != exact[0]]
+            if not commands or any(item.execution_ref is not None for item in commands):
+                return None
+            current = commands[-1]
+            result = self._conn.execute(
+                """
+                UPDATE conversation_commands
+                SET execution_ref = ?, updated_at_ms = ?
+                WHERE session_id = ? AND turn_id = ?
+                  AND disposition = 'running' AND execution_ref IS NULL
+                """,
+                (execution_ref, int(time.time() * 1000), session_id, current.turn_id),
+            )
+            self._conn.commit()
+            if result.rowcount != 1:
+                return None
+            return (
+                RunningCommand(
+                    session_id=current.session_id,
+                    client_command_id=current.client_command_id,
+                    turn_id=current.turn_id,
+                    execution_ref=execution_ref,
+                ),
+                commands[:-1],
+            )
 
     def recover_uncheckpointed(self, session_id: str, turn_id: str) -> bool:
         """Move uncertain accepted input to a paused queue without replaying it."""
@@ -442,6 +591,36 @@ class ConversationCommandStore:
                 )
                 """,
                 (session_id, session_id, turn_id),
+            )
+            self._normalize_queue_positions(session_id)
+            self._clear_queue_pause_if_empty(session_id)
+            self._conn.commit()
+        return result.rowcount > 0
+
+    def mark_execution_terminal(
+        self, session_id: str, execution_ref: str, *, outcome_ref: str
+    ) -> bool:
+        """Finish only the running command bound to an authoritative execution."""
+
+        now_ms = int(time.time() * 1000)
+        with self._lock:
+            result = self._conn.execute(
+                """
+                UPDATE conversation_commands
+                SET disposition = 'terminal', outcome_ref = ?, updated_at_ms = ?
+                WHERE session_id = ? AND execution_ref = ? AND disposition = 'running'
+                """,
+                (outcome_ref, now_ms, session_id, execution_ref),
+            )
+            self._conn.execute(
+                """
+                DELETE FROM conversation_queue
+                WHERE session_id = ? AND client_command_id IN (
+                    SELECT client_command_id FROM conversation_commands
+                    WHERE session_id = ? AND execution_ref = ?
+                )
+                """,
+                (session_id, session_id, execution_ref),
             )
             self._normalize_queue_positions(session_id)
             self._clear_queue_pause_if_empty(session_id)

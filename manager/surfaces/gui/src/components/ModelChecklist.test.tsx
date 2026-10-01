@@ -27,7 +27,7 @@ function renderList(provider: string) {
       provider={provider}
       knownProviders={KNOWN}
       suggested={[]}
-      curated={[]}
+      enabledModels={[]}
       defaultModel=""
       onChanged={() => {}}
     />,
@@ -42,6 +42,26 @@ function addTyped(id: string) {
 }
 
 describe("ModelChecklist add-model family dropdown", () => {
+  it("checks only explicitly enabled suggestions", () => {
+    render(
+      <ModelChecklist
+        provider="openai"
+        knownProviders={KNOWN}
+        suggested={["gpt-5.6-sol", "gpt-5.6-terra"]}
+        enabledModels={["gpt-5.6-sol"]}
+        defaultModel="gpt-5.6-sol"
+        onChanged={() => {}}
+      />,
+    );
+
+    expect(
+      (screen.getByRole("checkbox", { name: "gpt-5.6-sol" }) as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("checkbox", { name: "gpt-5.6-terra" }) as HTMLInputElement).checked,
+    ).toBe(false);
+  });
+
   it("folds the selected vertex family into the id", async () => {
     renderList("vertex");
     fireEvent.change(screen.getByTestId("mlist-family"), {

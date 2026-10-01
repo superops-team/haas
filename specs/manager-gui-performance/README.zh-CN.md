@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-状态：已评审；阻塞项已清零；冷 session activation delta 已实施
+状态：已评审；阻塞项已清零；project-shell 冷启动 delta 已实施
 最近评审：2026-09-29
 Change ID：manager-gui-performance-convergence
 相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager Conversation Experience](../manager-conversation-experience/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)
@@ -255,6 +255,72 @@ session/path switch -> cancelled -> loading(new_request)
   response end 到首个内容 43.7 ms；10,000 条为 43.1 ms；观测到的 long task 为零。Client path
   已满足预算，因此 pagination 继续延后。
 
+### P0-6：lazy syntax-aware 文件预览
+
+- 普通 code/text viewer 遵循
+  [Manager File Preview](../manager-file-preview/README.zh-CN.md) 合同。CodeMirror core 与每个
+  language parser 必须保持在 initial synchronous entry graph 之外。
+- 有界且语言已知的文件在 core ready 后立即挂载 plain read-only viewport，再在唯一选中
+  parser 到达时 reconfigure 同一个 view。Parser 加载不得替换 document、selection、scroll
+  position、artifact header 或 session shell。
+- UTF-8 content 达到 256 KiB 或标记 truncated 时跳过 syntax parser。低于该上限的 10,000 行
+  fixture 与跳过 parser 的 512 KiB fixture 在打开/初始滚动时不得产生超过 100 ms 的 long
+  task；production-preview fixture 中 cold content-ready-to-viewport <=200 ms，warm <=100 ms。
+
+### P0-7：安全 lazy spreadsheet 预览
+
+- Spreadsheet rendering 遵循 [Manager Office Preview](../manager-office-preview/README.zh-CN.md)。
+  `@extend-ai/react-xlsx`、worker 与本地 WASM 不进入 initial synchronous graph；有漏洞的
+  `xlsx` package 必须删除，不能通过 audit exception 隐藏。
+- Worker/WASM parser 只接收既有有界 `ArrayBuffer`，不得接收 URL。小 workbook 首个 grid
+  <=1.5 秒，sheet 切换不得产生超过 200 ms 的 main-thread long task，emitted WASM raw <=5 MiB。
+- Rich rendering 不得以安全副作用换性能：禁用 workbook image 与 external navigation，同时
+  保持 HaaS 自有 sheet tab 的键盘可访问性。
+
+### P0-8：两阶段 project navigation 冷启动
+
+- 当前 mount 会在 packaged sidecar 健康前启动 `getProjectProjection()`。首次请求失败后
+  `projectProjectionReady=false` 保持不变，health 恢复也不会刷新 project 数据，导致普通 5 秒
+  polling 意外成为首次成功加载。启动正确性不得依赖该 polling interval。
+- React state 初始化阶段同步读取版本化 `ProjectSidebarShell` cache。可用 cache 包含 1-50 个 active
+  project row，只包含 `projectId`、展示 `name`、`pinned` 与确定性的最近一次渲染 `order`（展示
+  rank，而不是 server 可变 project position）；不得保存 workspace
+  path、remote ref、endpoint identity、session title/count、capability、prompt/content、credential 或
+  任意 server field。
+- Sidecar health 与 last-session restore 未完成时，project sidebar 和 application chrome 仍保持可见。
+  原来的全窗口 boot splash 改为 center-pane startup state；不得遮住有效 shell，也不得引入第二套
+  sidebar renderer。
+- 有效 cache 必须在最初两个 animation frame 内渲染 project 一级目录。Shell row 复用 canonical
+  project-row primitive、预留最终 row geometry、暴露 `aria-busy=true`，并在权威 hydration 前禁用
+  expand、hover card、menu 与 mutation。这是同一 renderer 的 state variant，不是第二套 legacy list。
+- Mount 只启动 health probe 和本地 shell read；health ready 前不得发送 project projection、sessions、
+  recent workspaces 或 endpoint 请求。Health 成功后，一个 bootstrap owner 立即并发启动这些读取，
+  并按 resource 去重 restore、mutation refresh、persona event 与 5 秒 baseline poll。
+- Last-session restore 复用同一个 sessions promise；确定目标 session 后，active history/socket 与
+  project projection 并行。Project hydration 不阻塞中间 session shell，transcript hydration 也不
+  阻塞缓存 project row。普通 5 秒 refresh timer 只能在首次权威 bootstrap settle 后启动。
+- 权威 project data 按 `projectId` 原位替换 shell field；权威 sort input 未变化的 row 不改变顺序与
+  width/height。若 pin/order/name/activity 在应用外发生变化，权威 commit 可以一次性切换到新的确定
+  顺序，但 UI 不得经过中间 flat、empty 或部分 resorted list。Conversation child 与 capability action
+  原位出现。权威 response 不包含的 project 只在该 boundary 删除，过期异步 response 不得恢复它。
+- 成功的权威 projection 在 React 权威 commit 后、render 与首绘测量路径之外改写 shell cache。
+  Project create、rename、pin、reorder、archive/remove
+  与 restore 只在权威 mutation 成功后更新或失效 shell。Cache parse/version/storage failure 静默
+  退回既有固定 skeleton，不得阻塞应用。Payload 超过 32 KiB、version/shape 错误、列表为空或超过
+  50 行、id 为空/重复、name 为空/超过 256 UTF-16 code unit、rank 非有限值/重复时，reader 必须拒绝
+  整个 shell。
+- Cache 命中时一级 project row 在 React mount 后 <=32 ms 可见；无 cache 时 health ready 到一级
+  目录 P95 <=100 ms；完整可见 project hierarchy 在 health ready 后 P95 <=400 ms，且无 >50 ms
+  main-thread task。Health 后 bootstrap transport 失败时保留 shell/skeleton，并在普通 poll 前按
+  100/250/500 ms 有界 backoff 重试，首次 retry 不得等待 5 秒。Project hydration 最多触发两次有意义 sidebar commit（`shell`、`authoritative`），
+  Composer、transcript、inactive route 与 right rail 的 Profiler commit 均为零。
+- Production-preview 与 packaged macOS 冷启动门禁至少执行 10 次，输出不含内容的 app shell、一级
+  project 与可见 hierarchy P50/P95；同时断言每个 resource 只有一个 request owner、restore/sidebar
+  共享一个 sessions request、无 flat/empty list flash、权威 sort input 未变化时无 row order 变化，
+  且未变化可见 project row 的 width/height delta <=2 CSS px。新 hydration 的 conversation child
+  插入导致的预期纵向位移单独度量，不算 row-size instability。同一次运行继续用 FV-GUI-PERF-12
+  约束 active-session content。
+
 ### P1-3：session 与 artifact surface 复杂度预算
 
 - 重构必须以小的、行为保持的切片降低风险。触碰顶层 session streaming、transcript replay、
@@ -291,6 +357,24 @@ interface RefreshState<T> {
   lastSuccessAt: number | null;
   consecutiveFailures: number;
 }
+
+interface ProjectSidebarShell {
+  version: 1;
+  projects: Array<{
+    projectId: string;
+    name: string;
+    pinned: boolean;
+    order: number; // 最近一次权威 display rank；不是 ProjectSummary.order
+  }>;
+}
+
+type ProjectBootstrapPhase = "unresolved" | "shell" | "authoritative" | "degraded";
+type ProjectBootstrapRequestState =
+  | "awaiting-health"
+  | "hydrating"
+  | "backoff"
+  | "baseline"
+  | "cancelled";
 ```
 
 协调器仅是 GUI 内部机制，归属于一个内存 API-client 生命周期，不持久化，也不跨 WebView
@@ -298,7 +382,9 @@ interface RefreshState<T> {
 ownership、清空 snapshot，再允许新 consumer 订阅；应用/WebView reload 同样得到全新
 coordinator。本合同不要求新增 credential-generation API。session id 等有效参数以确定顺序编码
 进 `canonicalParameters`。协调器不持久化 response body、credential、authorization URL 或 raw
-prompt；现有浏览器存储 key 不变。
+prompt。P0-8 project shell 是 query data 仅内存规则的唯一例外：它使用一个新的版本化
+browser-storage key，且只包含上述有界 `ProjectSidebarShell` allowlist。它不是 coordinator
+snapshot，也不能恢复权威 project/session state。
 
 ## 7. 运行模型与状态机
 
@@ -314,6 +400,23 @@ relevant event/focus      -> active
 
 一个 query key 最多有一个 `request` 状态。active 快速 interval 替换基础 timer，不创建第二个
 timer。unmount 必须安全 abort 或忽略完成结果。
+
+Project bootstrap view/request 状态迁移：
+
+```text
+mount + 有效非空 shell -> phase=shell，request=awaiting-health
+mount + shell 缺失/无效 -> phase=unresolved，request=awaiting-health
+health ready -> request=hydrating（每个 resource 一个共享 request；保留当前 view）
+hydration success -> phase=authoritative，request=baseline（commit 后持久化下一份 shell）
+hydration failure -> phase=degraded，request=backoff（保留此前 shell/skeleton view）
+degraded success -> phase=authoritative，request=baseline
+authoritative refresh failure -> phase=authoritative（保留最近一次 settled projection）
+unmount/new generation -> request=cancelled（忽略过期 completion）
+```
+
+`hydrating` 是 request ownership，不是第三套 visual tree：它在权威 boundary 前保留 `shell` 或
+`unresolved`。普通 5 秒 poll 只能在初始 bootstrap 成功或耗尽有界 backoff 后启动，绝不能成为
+首次 retry。
 
 终态对账按 session 独立：
 
@@ -331,10 +434,14 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 ## 8. 安全与权限
 
 - 现有认证、session scope、脱敏与 no-store 行为不变。
-- 共享 cache 只存在于内存，绑定一个 API-client/WebView 生命周期，并以 endpoint 和 canonical
+- Query coordinator cache 只存在于内存，绑定一个 API-client/WebView 生命周期，并以 endpoint 和 canonical
   effective parameters 为 key。API-client 重建、endpoint 变化或 WebView reload 时，必须先销毁
   coordinator，再允许新 consumer 订阅；connector/account mutation 精确失效受影响的 key。数据
   不得跨 session 或 endpoint。
+- 版本化 project-shell cache 只包含显式一级 allowlist，绝不包含 path、remote ref、endpoint/server
+  identity、session data、capability、credential、prompt、tool argument 或任意 response field。Parse 或
+  validation/storage failure 等价于 cache miss；React text escaping 仍是硬约束。它是 Manager 聚合本地
+  project catalog 的 projection，不是 remote-endpoint response cache。
 - 性能观测只记录 count、timing 和 component label，不记录 prompt、transcript 内容、工具参数、
   credential 或 signed URL。
 - lazy loading 不得创建未认证的旁路路由，也不得在用户打开所属页面前获取受保护数据。
@@ -418,6 +525,10 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
   稳定命令；GUI 相关变更必须执行该命令，或明确报告为 `not_run` 并说明残余风险。
 - artifact viewer 读取失败与过期异步完成必须进入确定性的 unavailable 或当前内容状态；旧读取
   不得覆盖新的选择。
+- 普通 code/text preview 保持 CodeMirror core/language parser 不进入 synchronous entry graph，
+  对 large/truncated content 跳过 parser，并通过 FV-GUI-PERF-13。
+- Spreadsheet preview 保持 JS/worker/WASM 不进入 synchronous graph，删除 SheetJS，并在无
+  external request/navigation 的前提下通过 FV-GUI-PERF-14。
 - 复杂度治理必须在接收大组件抽取前，为 session streaming、transcript replay 与 artifact
   viewer 行为补聚焦测试。
 - `npm test -- --run`、`npm run build`、专项 Playwright、`make pre-commit`，以及最终集成时
@@ -441,6 +552,9 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 | FV-GUI-PERF-10 | P0 | P0-4 artifact viewer 状态韧性 | Vitest 渲染 `RightRail`，打开一个 artifact，延迟读取，切换到另一 artifact/session，再分别 resolve 成功与失败路径 | 过期完成被忽略；当前读取失败展示明确 unavailable/download-only 状态；remote HaaS artifact 不执行本地 reveal/open | Vitest 输出与 mocked API 调用断言 |
 | FV-GUI-PERF-11 | P1 | P1-3 复杂度边界预算 | 对触碰的抽取边界运行 Fallow health 与聚焦测试 | 不新增无具名边界和测试的大型 session/artifact owner；抽取边界保持可观测行为 | Fallow summary、聚焦测试输出和 changed-file review |
 | FV-GUI-PERF-12 | P0 | P0-5 冷 session 首屏 | Production-preview Playwright 驱动 uncached、prefetched、cached、快速切换与 10,000-message fixture，并分别记录 transport 与 response 后 render 时间、请求并发、long task 与 mounted row | packaged-local 500 条以内 <=120 ms；preview response 后 500 条 <=102 ms、10,000 条 <=232 ms；cache hit <=32 ms；请求并发 <=2；mounted row <=200；过期 response 被忽略；新会话 Hero frame 为零 | 不含 transcript 内容的 Playwright timing/counter 输出 |
+| FV-GUI-PERF-13 | P0 | P0-6 lazy syntax-aware file preview | Build 后遍历 manifest，再用 production-preview Playwright 打开有界 10,000 行 source file 与跳过 parser 的 512 KiB text fixture | CodeMirror 不在 synchronous graph；cold <=200 ms、warm <=100 ms；无 >100 ms long task；large/truncated 不加载 parser 且可滚动 | Manifest graph 与不含内容的 timing/chunk/long-task counter |
+| FV-GUI-PERF-14 | P0 | P0-7 safe lazy spreadsheet preview | Build 后遍历 manifest、audit dependency，并在 production preview 打开 synthetic 双 sheet workbook | 无 `xlsx` dependency/advisory；viewer/worker/WASM 为本地 async asset；首 grid <=1.5 秒；无 >200 ms long task 或 workbook-originated network/navigation | Audit、manifest 与不含内容的 Playwright counter |
+| FV-GUI-PERF-15 | P0 | P0-8 两阶段 project 冷启动 | Vitest 注入有效、空、超限、malformed、重复 id/rank 与版本不匹配 shell cache，延迟 health/project/session response，强制一次 health 后失败，并验证 startup chrome 与 single-flight ownership；production-preview 与 packaged 各执行 10 次冷启动，采集 request、Profiler、paint、bounding-box 与 long-task | 有效 cache 在 center startup state 可见时渲染 canonical sidebar 且全部 action disabled；无效 cache 只用一套 skeleton；health 前不发送 data request；首次失败按 100/250/500 ms retry；cache hit 一级目录 <=32 ms；无 cache health-to-first-level P95 <=100 ms；可见 hierarchy P95 <=400 ms；每个 resource 最大一个在途请求；restore 共享 sessions request；sidebar meaningful commits <=2；无关 Profiler commit 为 0；long task <=50 ms；未变化 row width/height delta <=2 CSS px；sort input 未变化时无 empty/flat-list flash 或 reorder | Vitest 与不含内容的 preview/packaged P50/P95 证据 |
 
 功能验证只记录 count、timing、route label 与 component label 证据，不记录 prompt、transcript
 内容、工具参数、credential 或 signed URL。
@@ -461,7 +575,10 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 | 10 | P0 | 加固 artifact viewer read state | Request guard、明确 unavailable state、remote action 约束 | FV-GUI-PERF-10 |
 | 11 | P1 | 建立复杂度边界重构预算 | 为具名 session/transcript/artifact 边界补测试 | FV-GUI-PERF-11 |
 | 12 | P0 | 优化冷 session activation | Intent prefetch、single-flight request reuse、canonical normalization 与 immutable projection reuse | FV-GUI-PERF-12 |
-| 13 | P0 | 回归与发布审查 | browser/package 证据及强制 review | 任务 2-12；全部 FV-GUI-PERF case |
+| 13 | P0 | 增加 lazy syntax-aware file viewer | CodeMirror boundary、parser registry、大文件降级与 runtime 证据 | FV-GUI-PERF-13；FV-MFP-01 至 FV-MFP-10 |
+| 14 | P0 | 用安全 lazy spreadsheet viewer 替换 SheetJS | Worker/WASM viewer、只读 tabs、trust boundary 与 audit 证据 | FV-GUI-PERF-14；FV-MOP-01 至 FV-MOP-08 |
+| 15 | P0 | 增加两阶段 project startup | 版本化安全 shell cache、health 后 single-flight bootstrap、canonical shell-row state、渐进 child hydration 与 cold-start counter | FV-GUI-PERF-15；MPW-041 |
+| 16 | P0 | 回归与发布审查 | browser/package 证据及强制 review | 任务 2-15；全部 FV-GUI-PERF case |
 
 对齐复核结论：每个 P0/P1 需求至少有一个可执行 Case 覆盖，每个任务都有验收引用，且没有
 任务要求修改 public API/schema。第一段实施选择 S1 有界对账，因为它在保留 FV-33 正确性的
@@ -481,17 +598,26 @@ event 静默本身不会让健康 transport 离开 `dormant`。只有符合条�
 7. 当重构触碰列出的 surface 时，运行 Fallow health 与聚焦边界测试覆盖 FV-GUI-PERF-11。
 8. import graph、`npm test -- --run`、`npm run build`、`make pre-commit` 与最终
    `make full-check` 覆盖 FV-GUI-PERF-07 与准出。
+9. Manifest traversal 与 focused file-preview Playwright timing/long-task 证据覆盖
+   FV-GUI-PERF-13。
+10. Dependency audit、manifest traversal 与 focused spreadsheet Playwright 证据覆盖
+    FV-GUI-PERF-14。
+11. 聚焦 shell-cache/App lifecycle 测试，加 10 次 production-preview 与 packaged 冷启动测量，
+    覆盖 FV-GUI-PERF-15。
 
 ## 13. 组件影响分析
 
 | 组件 | 影响 | 必要动作 | 兼容结论 |
 |---|---|---|---|
 | Manager HaaS Sidecar Backend | 终态 readback 调度与 GUI 投影 owner 改变；FV-33 语义不变 | 复用现有完整消息接口与 intent-occurrence guard | 不修改 API、事件、session 或持久 binding |
+| Manager Project Workbench | Sidebar 在既有权威 hierarchy 前增加 transient shell phase | 只缓存安全一级展示字段，project mutation authority 继续留在既有 API | 不修改 Project/WorkspaceBinding/session schema；cache 可丢弃且有版本 |
 | Manager Product Identity | 无；GUI 继续 local-first、no-login | coordinator 只存在于当前 WebView/API-client 生命周期 | 不引入 cloud identity 或 login 依赖 |
 | ADK 与 `/v1/haas/*` | 无 | 第一阶段不新增 route 或 schema | 完全不变 |
 | Session/event projection | live React owner 移动，canonical event 顺序不变 | 保留 canonical ref、terminal flush 与 replay parity | 仅内部加法式重构 |
 | Session history activation | Intent prefetch 与 immutable projection reuse 降低冷切换延迟 | 保持 history 权威、最多缓存五个 projection、prefetch 并发最多二，并只记录无内容 timing | 仅 Manager 本地实现；不修改 public API 或持久 schema |
 | Artifact viewer | 可选页面加载方式可能变化，artifact 协议不变 | 保留 PDF/XLSX 按需加载与 artifact 首次点击行为 | artifact URL、metadata、安全 header 不变 |
+| File preview | CodeMirror 引入可选 viewport/parser chunk | core/language 保持 dynamic import；256 KiB 以上或 truncated 时跳过 parser；unmount destroy view | 仅 GUI；artifact API 与 stored content 不变 |
+| Spreadsheet preview | SheetJS 替换为更大的 optional JS/worker/WASM viewer | 全部 asset 保持 lazy/local；强制 25 MiB 与 document trust boundary；测量首 grid/long-task budget | 仅 GUI 实现与 `.xlsm` classification；public artifact schema 不变 |
 | 根目录研发门禁 | GUI 证据纳入根 release readiness | 增加 GUI Makefile target，并对齐 README/skills | 无运行时兼容影响；release 信号更严格 |
 | Production preview 自动化 | 临时性能脚本沉淀为稳定仓库命令 | 增加带 fresh-build guard 与清理逻辑的 preview config/command | 不改变 shipped code path |
 | 前端可维护性 | 大型 session/artifact owner 增加抽取预算 | 仅在聚焦测试与具名边界下重构 | 仅行为保持的内部变更 |

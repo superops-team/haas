@@ -466,6 +466,54 @@ test("holds one project loading surface until the initial projection resolves", 
   await expect(page.getByTestId("conversation-row-project-main")).toBeVisible();
 });
 
+test("hydrates cached project rows in place without changing row geometry or order", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("coworker:nav-collapsed:v1", "0");
+    localStorage.setItem(
+      "openharness:project-sidebar-shell:v1",
+      JSON.stringify({
+        version: 1,
+        projects: [
+          { projectId: "prj_haas", name: "HaaS", pinned: false, order: 0 },
+          { projectId: "prj_mpa", name: "mpa-agent", pinned: false, order: 1 },
+        ],
+      }),
+    );
+  });
+  let releaseProjects!: () => void;
+  const projectGate = new Promise<void>((resolve) => {
+    releaseProjects = resolve;
+  });
+  await page.route(/\/v1\/projects$/, async (route) => {
+    if (route.request().method() === "GET") await projectGate;
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  const shell = page.getByTestId("project-navigation-shell");
+  await expect(shell).toBeVisible();
+  const rows = page.locator('[data-testid^="project-row-"]');
+  await expect(rows).toHaveCount(2);
+  const beforeIds = await rows.evaluateAll((elements) =>
+    elements.map((element) => element.getAttribute("data-testid")),
+  );
+  const before = await page.getByTestId("project-row-prj_haas").boundingBox();
+
+  releaseProjects();
+  await expect(shell).toHaveCount(0);
+  const afterRows = page.locator('[data-testid^="project-row-"]');
+  const afterIds = await afterRows.evaluateAll((elements) =>
+    elements.map((element) => element.getAttribute("data-testid")),
+  );
+  const after = await page.getByTestId("project-row-prj_haas").boundingBox();
+
+  expect(afterIds).toEqual(beforeIds);
+  expect(Math.abs((after?.width || 0) - (before?.width || 0))).toBeLessThanOrEqual(2);
+  expect(Math.abs((after?.height || 0) - (before?.height || 0))).toBeLessThanOrEqual(2);
+});
+
 for (const theme of ["light", "dark"] as const) {
   for (const width of [390, 760, 1440]) {
     test(`project navigation typography stays compact at ${width}px in ${theme}`, async ({
@@ -480,6 +528,7 @@ for (const theme of ["light", "dark"] as const) {
       );
       await page.setViewportSize({ width, height: 844 });
       await page.goto("/");
+      await expect(page.getByTestId("startup-center-pane")).toHaveCount(0);
 
       const projectRow = page.getByTestId("project-row-prj_haas");
       const sectionLabel = page.locator(".project-section-header > span").first();
@@ -675,6 +724,7 @@ test("project section separates create from ordering controls", async ({ page })
 test("project pin and edit flow update the authoritative projection", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
+  await expect(page.getByTestId("startup-center-pane")).toHaveCount(0);
   const row = page.getByTestId("project-row-prj_haas");
   await row.hover();
   await page.getByTestId("project-menu-prj_haas").click();
@@ -708,6 +758,7 @@ test("moving hover between project and conversation keeps one overlay and stable
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
+  await expect(page.getByTestId("startup-center-pane")).toHaveCount(0);
   const projectRow = page.getByTestId("project-row-prj_haas");
   const collapsedProjectRow = page.getByTestId("project-row-prj_mpa");
   const conversationRow = page.getByTestId("conversation-row-project-main");

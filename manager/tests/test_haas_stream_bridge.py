@@ -407,6 +407,34 @@ def test_correlated_native_facts_build_ordered_model_call_stages() -> None:
     ]
 
 
+def test_tool_start_reclassifies_preceding_unphased_output_as_commentary() -> None:
+    bridge = _bridge()
+    bridge.consume_native(
+        event_id="evt_text",
+        cursor="evt_text",
+        event_type="haas.output.text.delta",
+        payload={"itemId": "msg_1", "modelCallId": "mcall_0001"},
+        content={"parts": [{"text": "Inspecting the layout"}]},
+    )
+
+    bridge.consume_native(
+        event_id="evt_tool",
+        cursor="evt_tool",
+        event_type="haas.tool.started",
+        payload={
+            "toolCallId": "call_1",
+            "toolName": "exec_command",
+            "modelCallId": "mcall_0001",
+        },
+    )
+
+    assert [step["kind"] for step in bridge.model_stages[0]["steps"]] == [
+        "commentary",
+        "tool",
+    ]
+    assert bridge.final_response_text() == ""
+
+
 def test_reasoning_preview_is_bounded_while_full_summary_keeps_streaming() -> None:
     bridge = _bridge()
     first = "a" * 200
@@ -662,6 +690,113 @@ def test_successful_terminal_reclassifies_unphased_final_output_as_result() -> N
     assert bridge.model_stages[0]["steps"][0]["kind"] == "result"
 
 
+def test_final_response_excludes_commentary_when_native_phase_is_available() -> None:
+    bridge = _bridge()
+    bridge.consume_adk(event_id="adk_commentary", cursor="adk_commentary", text="Process note")
+    bridge.consume_native(
+        event_id="native_commentary",
+        cursor="native_commentary",
+        event_type="haas.output.text.delta",
+        payload={"itemId": "msg_commentary", "modelCallId": "model_1"},
+        content={"parts": [{"text": "Process note"}]},
+    )
+    bridge.consume_native(
+        event_id="native_commentary_done",
+        cursor="native_commentary_done",
+        event_type="haas.output.item.completed",
+        payload={
+            "itemId": "msg_commentary",
+            "modelCallId": "model_1",
+            "messagePhase": "commentary",
+        },
+    )
+    bridge.consume_adk(event_id="adk_final", cursor="adk_final", text="Final answer")
+    bridge.consume_native(
+        event_id="native_final",
+        cursor="native_final",
+        event_type="haas.output.text.delta",
+        payload={"itemId": "msg_final", "modelCallId": "model_2"},
+        content={"parts": [{"text": "Final answer"}]},
+    )
+    bridge.consume_native(
+        event_id="native_final_done",
+        cursor="native_final_done",
+        event_type="haas.output.item.completed",
+        payload={
+            "itemId": "msg_final",
+            "modelCallId": "model_2",
+            "messagePhase": "final_answer",
+        },
+    )
+    bridge.consume_native(
+        event_id="terminal", cursor="terminal", event_type="invocation.completed"
+    )
+
+    actions = bridge.consume_adk(event_id="terminal", cursor="terminal", terminal=True)
+    message = next(action for action in actions if action.kind == "assistant_message")
+
+    assert message.payload["text"] == "Final answer"
+    assert bridge.final_response_text() == "Final answer"
+
+
+def test_failed_commentary_only_turn_has_no_fabricated_assistant_response() -> None:
+    bridge = _bridge()
+    bridge.consume_adk(event_id="adk_commentary", cursor="adk_commentary", text="Process note")
+    bridge.consume_native(
+        event_id="native_commentary",
+        cursor="native_commentary",
+        event_type="haas.output.text.delta",
+        payload={"itemId": "msg_commentary", "modelCallId": "model_1"},
+        content={"parts": [{"text": "Process note"}]},
+    )
+    bridge.consume_native(
+        event_id="native_commentary_done",
+        cursor="native_commentary_done",
+        event_type="haas.output.item.completed",
+        payload={
+            "itemId": "msg_commentary",
+            "modelCallId": "model_1",
+            "messagePhase": "commentary",
+        },
+    )
+    bridge.consume_native(
+        event_id="terminal", cursor="terminal", event_type="invocation.failed"
+    )
+
+    actions = bridge.consume_adk(event_id="terminal", cursor="terminal", terminal=True)
+    message = next(action for action in actions if action.kind == "assistant_message")
+
+    assert message.payload["text"] == ""
+    assert bridge.final_response_text() == ""
+
+
+def test_successful_unphased_output_promotes_only_the_last_item() -> None:
+    bridge = _bridge()
+    for event_id, item_id, text in (
+        ("native_first", "msg_first", "Process note"),
+        ("native_last", "msg_last", "Final answer"),
+    ):
+        bridge.consume_native(
+            event_id=event_id,
+            cursor=event_id,
+            event_type="haas.output.text.delta",
+            payload={"itemId": item_id, "modelCallId": "model_1"},
+            content={"parts": [{"text": text}]},
+        )
+    bridge.consume_native(
+        event_id="terminal", cursor="terminal", event_type="invocation.completed"
+    )
+
+    actions = bridge.consume_adk(event_id="terminal", cursor="terminal", terminal=True)
+    message = next(action for action in actions if action.kind == "assistant_message")
+
+    assert [step["kind"] for step in bridge.model_stages[0]["steps"]] == [
+        "commentary",
+        "result",
+    ]
+    assert message.payload["text"] == "Final answer"
+
+
 def test_public_stages_are_detached_snapshots() -> None:
     bridge = _bridge()
     bridge.consume_native(
@@ -681,6 +816,62 @@ def test_public_stages_are_detached_snapshots() -> None:
     )
 
     assert len(snapshot[0]["steps"]) == 1
+
+
+def test_activity_preserves_specific_summary_without_private_tool_identity() -> None:
+    bridge = _bridge()
+    bridge.consume_native(
+        event_id="evt_started",
+        cursor="evt_started",
+        event_type="haas.tool.started",
+        payload={
+            "toolCallId": "call_1",
+            "toolName": "codex.list_mcp_resources",
+            "activityKind": "read",
+            "safeSummary": "List MCP resources",
+        },
+    )
+    bridge.consume_native(
+        event_id="evt_progress",
+        cursor="evt_progress",
+        event_type="haas.tool.output.delta",
+        payload={
+            "toolCallId": "call_1",
+            "toolName": "mcp_tool",
+            "activityKind": "tool",
+            "safeSummary": "Tool progress",
+            "outputPreview": "progress",
+        },
+    )
+
+    assert "toolName" not in bridge.activities["call_1"]
+    assert bridge.activities["call_1"]["kind"] == "read"
+    assert bridge.activities["call_1"]["summary"] == "List MCP resources"
+
+
+def test_legacy_activity_without_kind_accepts_generic_terminal_update() -> None:
+    bridge = _bridge()
+    bridge.activities["call_legacy"] = {
+        "id": "call_legacy",
+        "status": "running",
+        "summary": "Legacy activity",
+    }
+
+    bridge.consume_native(
+        event_id="evt_completed",
+        cursor="evt_completed",
+        event_type="haas.tool.completed",
+        payload={
+            "toolCallId": "call_legacy",
+            "activityKind": "tool",
+            "safeSummary": "Tool progress",
+            "status": "completed",
+        },
+    )
+
+    assert bridge.activities["call_legacy"]["kind"] == "tool"
+    assert bridge.activities["call_legacy"]["summary"] == "Legacy activity"
+    assert bridge.activities["call_legacy"]["status"] == "completed"
 
 
 def test_dedup_sets_are_truncated_after_invocation_completion() -> None:
@@ -706,6 +897,56 @@ def test_dedup_sets_are_truncated_after_invocation_completion() -> None:
     assert bridge._seen == set()
     assert bridge._tool_seen == set()
     assert bridge._content_seen == set()
+
+
+def test_completed_bridge_serialization_discards_legacy_dedupe_windows() -> None:
+    bridge = _bridge()
+    bridge.assistant_text = "completed answer"
+    bridge.activities["call_1"] = {
+        "id": "call_1",
+        "kind": "command",
+        "status": "completed",
+        "evidenceRef": "evidence_1",
+    }
+    bridge.model_stages = [
+        {
+            "modelCallId": "model_call_1",
+            "status": "completed",
+            "steps": [{"stepId": "result_1", "kind": "result", "text": "done"}],
+        }
+    ]
+    bridge.terminal_status = "completed"
+    bridge.completed = True
+    bridge._seen.add(bridge._dedupe_key("evt_1", "native"))
+    bridge._tool_seen.add(("call_1", "finished"))
+    bridge._content_seen.add(("evt_1", "tool_output"))
+
+    serialized = bridge.to_dict()
+
+    assert serialized["seen"] == []
+    assert serialized["toolSeen"] == []
+    assert serialized["contentSeen"] == []
+    assert serialized["assistantText"] == "completed answer"
+    assert serialized["activities"][0]["evidenceRef"] == "evidence_1"
+    assert serialized["modelStages"][0]["steps"][0]["text"] == "done"
+
+    # Existing releases may already have persisted large terminal dedupe arrays.
+    # Loading such a record must compact it rather than rebuilding those sets.
+    serialized["seen"] = [
+        ["endpoint_local", "chrn_codex\u001fuser_1\u001fhsess_1", "inv_1", f"evt_{index}", "native"]
+        for index in range(25_000)
+    ]
+    serialized["toolSeen"] = [[f"call_{index}", "finished"] for index in range(1_000)]
+    serialized["contentSeen"] = [[f"evt_{index}", "reasoning"] for index in range(25_000)]
+
+    restored = StreamBridgeState.from_dict(serialized)
+
+    assert restored._seen == set()
+    assert restored._tool_seen == set()
+    assert restored._content_seen == set()
+    assert restored.assistant_text == "completed answer"
+    assert restored.activities["call_1"]["evidenceRef"] == "evidence_1"
+    assert restored.model_stages[0]["steps"][0]["text"] == "done"
 
 
 def test_model_call_stages_survive_restart_and_terminal_message() -> None:

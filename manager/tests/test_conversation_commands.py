@@ -139,6 +139,41 @@ def test_restart_pauses_an_uncertain_claim_until_explicit_resume(tmp_path):
     assert resumed[0].client_command_id == "cmd-1"
 
 
+def test_restart_does_not_requeue_a_checkpointed_dispatched_execution(tmp_path):
+    path = tmp_path / "conversation-commands.db"
+    store = ConversationCommandStore(path)
+    accepted = store.accept(
+        session_id="session-1",
+        client_command_id="cmd-accepted",
+        idempotency_key="idem-accepted",
+        delivery="enqueue",
+        payload={"text": "already accepted by HaaS"},
+        busy=True,
+    )
+    claimed = store.claim_next("session-1")
+    assert claimed is not None
+    running, _ = claimed
+    assert running.turn_id is not None
+    assert store.checkpoint_execution(
+        "session-1", running.turn_id, execution_ref="inv_accepted"
+    )
+    store.close()
+
+    reopened = ConversationCommandStore(path)
+    pending = reopened.checkpointed_running()
+    assert len(pending) == 1
+    assert pending[0].execution_ref == "inv_accepted"
+    assert reopened.queue_snapshot("session-1")[0]["state"] == "dispatching"
+    assert reopened.claim_next("session-1") is None
+
+    assert reopened.mark_execution_terminal(
+        "session-1", "inv_accepted", outcome_ref="inv_accepted"
+    )
+    assert reopened.queue_snapshot("session-1") == []
+    receipt = reopened.find_by_idempotency("session-1", "idem-accepted")
+    assert receipt is not None and receipt.disposition == "terminal"
+
+
 def test_uncheckpointed_immediate_command_recovers_as_one_paused_queue_item(tmp_path):
     store = ConversationCommandStore(tmp_path / "conversation-commands.db")
     accepted = store.accept(
@@ -196,6 +231,127 @@ def test_checkpointed_immediate_command_is_not_converted_to_new_work(tmp_path):
     assert receipt.disposition == "running"
     assert receipt.turn_id == accepted.turn_id
     assert store.queue_snapshot("session-1") == []
+
+
+def test_checkpointed_running_command_binds_exact_execution_and_survives_restart(tmp_path):
+    path = tmp_path / "conversation-commands.db"
+    store = ConversationCommandStore(path)
+    accepted = store.accept(
+        session_id="session-1",
+        client_command_id="cmd-started",
+        idempotency_key="idem-started",
+        delivery="start_now",
+        payload={"text": "continue after a safe restart"},
+        busy=False,
+    )
+    assert accepted.turn_id is not None
+
+    assert store.checkpoint_execution(
+        "session-1", accepted.turn_id, execution_ref="inv_exact"
+    ) is True
+    assert store.checkpoint_execution(
+        "session-1", accepted.turn_id, execution_ref="inv_exact"
+    ) is False
+    with pytest.raises(ConversationCommandConflict):
+        store.checkpoint_execution(
+            "session-1", accepted.turn_id, execution_ref="inv_other"
+        )
+    store.close()
+
+    reopened = ConversationCommandStore(path)
+    running = reopened.checkpointed_running()
+    assert len(running) == 1
+    assert running[0].session_id == "session-1"
+    assert running[0].turn_id == accepted.turn_id
+    assert running[0].execution_ref == "inv_exact"
+
+
+def test_existing_command_database_adds_nullable_execution_reference(tmp_path):
+    path = tmp_path / "conversation-commands.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE conversation_commands (
+            session_id TEXT NOT NULL,
+            client_command_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            disposition TEXT NOT NULL,
+            turn_id TEXT,
+            queue_item_id TEXT,
+            outcome_ref TEXT,
+            payload_json TEXT NOT NULL,
+            checkpointed_at_ms INTEGER,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (session_id, client_command_id),
+            UNIQUE (session_id, idempotency_key)
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO conversation_commands VALUES (
+            'session-1', 'cmd-legacy', 'idem-legacy', 'accepted', 'running',
+            'turn-legacy', NULL, NULL, '{}', 100, 90, 100
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = ConversationCommandStore(path)
+
+    assert store.checkpointed_running()[0].execution_ref is None
+    assert store.checkpoint_execution(
+        "session-1", "turn-legacy", execution_ref="inv_migrated"
+    )
+    assert store.checkpointed_running()[0].execution_ref == "inv_migrated"
+
+
+def test_reconcile_checkpointed_execution_is_idempotent_and_exact(tmp_path):
+    store = ConversationCommandStore(tmp_path / "conversation-commands.db")
+    first = store.accept(
+        session_id="session-1",
+        client_command_id="cmd-first",
+        idempotency_key="idem-first",
+        delivery="start_now",
+        payload={"text": "first"},
+        busy=False,
+    )
+    assert first.turn_id is not None
+    assert store.checkpoint_execution(
+        "session-1", first.turn_id, execution_ref="inv_first"
+    )
+    assert store.mark_terminal(
+        "session-1", first.turn_id, outcome_ref="outcome-first"
+    )
+
+    second = store.accept(
+        session_id="session-1",
+        client_command_id="cmd-second",
+        idempotency_key="idem-second",
+        delivery="start_now",
+        payload={"text": "second"},
+        busy=False,
+    )
+    assert second.turn_id is not None
+    assert store.checkpoint_execution(
+        "session-1", second.turn_id, execution_ref="inv_second"
+    )
+
+    assert store.mark_execution_terminal(
+        "session-1", "inv_second", outcome_ref="outcome-inv-second"
+    ) is True
+    assert store.mark_execution_terminal(
+        "session-1", "inv_second", outcome_ref="outcome-inv-second"
+    ) is False
+    receipt = store.find_by_idempotency("session-1", "idem-second")
+    assert receipt is not None
+    assert receipt.disposition == "terminal"
+    assert receipt.outcome_ref == "outcome-inv-second"
+    assert receipt.execution_ref == "inv_second"
+    assert store.find_by_idempotency("session-1", "idem-first").outcome_ref == "outcome-first"
 
 
 def test_queue_mutations_require_the_current_revision(tmp_path):

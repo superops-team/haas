@@ -9,12 +9,24 @@
     "preview": "vite preview",
     "test": "vitest run",
     "e2e": "playwright test",
-    "e2e:preview": "npm run build && playwright test -c playwright.preview.config.ts e2e/preview-observability.spec.ts e2e/rail-default.spec.ts e2e/artifacts.spec.ts e2e/files-explorer.spec.ts e2e/inbox.spec.ts e2e/connectors-list.spec.ts",
+    "e2e:preview": "npm run build && playwright test -c playwright.preview.config.ts e2e/preview-observability.spec.ts e2e/conversation-product-turn.spec.ts e2e/rail-default.spec.ts e2e/artifacts.spec.ts e2e/files-explorer.spec.ts e2e/file-preview.spec.ts e2e/spreadsheet-preview.spec.ts e2e/inbox.spec.ts e2e/connectors-list.spec.ts e2e/input-focus.spec.ts e2e/workspace-recovery.spec.ts",
     "e2e:ui": "playwright test --ui",
     "e2e:live": "playwright test -c playwright.live.config.ts",
     "tauri": "tauri"
   },
   "dependencies": {
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-html": "^6.4.12",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/legacy-modes": "^6.5.4",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.13",
+    "@extend-ai/react-xlsx": "0.16.6",
+    "@lezer/highlight": "^1.2.5",
     "@tanstack/react-virtual": "^3.14.13",
     "i18next": "^26.3.6",
     "pdfjs-dist": "^4.10.38",
@@ -23,8 +35,7 @@
     "react-i18next": "^17.0.11",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "simple-icons": "^16.26.0",
-    "xlsx": "^0.18.5"
+    "simple-icons": "^16.26.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
@@ -36,6 +47,7 @@
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.5.2",
     "fake-indexeddb": "^6.2.5",
+    "fflate": "0.8.3",
     "jsdom": "^25.0.1",
     "postcss": "^8.5.16",
     "tailwindcss": "^3.4.19",

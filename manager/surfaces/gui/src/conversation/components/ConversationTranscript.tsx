@@ -70,8 +70,8 @@ const ProductTurn = memo(function ProductTurn({
   ...actions
 }: TurnProps) {
   const showWork =
-    turn.work.segments.length > 0 ||
-    turn.work.evidence.length > 0 ||
+    turn.work.activities.length > 0 ||
+    turn.work.inferenceRounds.length > 0 ||
     turn.phase !== "completed";
   return (
     <section className="conversation-turn" data-turn-id={turn.turnId}>

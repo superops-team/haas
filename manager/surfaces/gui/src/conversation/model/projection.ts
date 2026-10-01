@@ -9,6 +9,7 @@ import { normalizeRunState } from "./presentation";
 import type {
   ConversationRunState,
   ConversationTurn,
+  InferenceRoundProjection,
   WorkSegment,
 } from "./types";
 
@@ -25,6 +26,13 @@ const cachedHistoryProjections = new WeakMap<
   Item[],
   Map<string, ConversationTurn[]>
 >();
+
+const compactRoundSummary = (value: string): string | null => {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return null;
+  const latest = compact.match(/[^.!?。！？]+[.!?。！？]?\s*$/)?.[0].trim() || compact;
+  return latest.slice(0, 320);
+};
 
 export function projectCachedConversationTurns(
   items: Item[],
@@ -137,6 +145,71 @@ export function projectConversationTurns(
               : ("failed" as const),
       };
     });
+    const claimedRoundActivities = new Set<string>();
+    const inferenceRounds: InferenceRoundProjection[] = evidence.map((stage, index) => {
+      const reasoningSummary = [...stage.steps]
+        .reverse()
+        .find(
+          (step) =>
+            step.kind === "reasoning_summary" && step.text.trim().length > 0,
+        );
+      const commentarySummary = [...stage.steps]
+        .reverse()
+        .find(
+          (step) => step.kind === "commentary" && step.text.trim().length > 0,
+        );
+      const safeSummary = reasoningSummary || commentarySummary;
+      const activityRefs: string[] = [];
+      for (const step of stage.steps) {
+        if (
+          step.kind !== "tool" ||
+          !activityById.has(step.activityId) ||
+          claimedRoundActivities.has(step.activityId)
+        )
+          continue;
+        claimedRoundActivities.add(step.activityId);
+        activityRefs.push(step.activityId);
+      }
+      return {
+        roundId: `${turnId}:round:${index}`,
+        state:
+          stage.status === "running"
+            ? ("running" as const)
+            : stage.status === "completed"
+              ? ("succeeded" as const)
+              : stage.status === "cancelled"
+                ? ("cancelled" as const)
+                : ("failed" as const),
+        safeSummary:
+          safeSummary?.kind === "reasoning_summary"
+            ? compactRoundSummary(safeSummary.previewText || safeSummary.text)
+            : safeSummary?.kind === "commentary"
+              ? compactRoundSummary(safeSummary.text)
+              : null,
+        activityRefs,
+      };
+    }).filter(
+      (round) =>
+        round.state === "running" ||
+        Boolean(round.safeSummary) ||
+        round.activityRefs.length > 0,
+    );
+    const phaseNeedsActiveRound = ["running", "pausing", "resuming", "stopping"].includes(
+      phase,
+    );
+    if (
+      evidence.length > 0 &&
+      phaseNeedsActiveRound &&
+      !inferenceRounds.some((round) => round.state === "running")
+    ) {
+      inferenceRounds.push({
+        roundId: `${turnId}:round:${evidence.length}`,
+        state: "running",
+        safeSummary: null,
+        activityRefs: [],
+        provisional: true,
+      });
+    }
     const authoritativeAssistant = assistants[assistants.length - 1];
     const reasoning = [
       authoritativeAssistant?.reasoning || "",
@@ -264,6 +337,7 @@ export function projectConversationTurns(
         activities,
         reasoning,
         evidence,
+        inferenceRounds,
         segments: orderedSegments,
         aggregate: {
           activityCount: activities.length,

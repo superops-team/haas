@@ -52,6 +52,14 @@ export interface WorkSegment {
   text?: string;
 }
 
+export interface InferenceRoundProjection {
+  roundId: string;
+  state: "running" | "succeeded" | "failed" | "cancelled";
+  safeSummary: string | null;
+  activityRefs: string[];
+  provisional?: boolean;
+}
+
 export interface ConversationTurn {
   turnId: string;
   invocationId: string | null;
@@ -64,6 +72,7 @@ export interface ConversationTurn {
     activities: import("../../activity").ToolActivity[];
     reasoning: string;
     evidence: import("../../types").ModelCallStage[];
+    inferenceRounds: InferenceRoundProjection[];
     aggregate: {
       activityCount: number;
       durationMs?: number;

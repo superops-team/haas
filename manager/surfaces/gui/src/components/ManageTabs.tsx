@@ -114,7 +114,7 @@ export function ModelsTab() {
             provider={ps.sel}
             knownProviders={knownNames}
             suggested={info?.suggested_models || []}
-            curated={settings.models}
+            enabledModels={settings.models}
             defaultModel={settings.model}
             labels={settings.model_labels}
             onChanged={(next) => setSettings((s) => (s ? { ...s, models: next.models, model: next.model } : s))}
@@ -150,7 +150,7 @@ export function ModelsTab() {
   );
 }
 
-// The gallery view's "In the composer's picker" card: every curated model across providers,
+// The gallery view's "In the composer's picker" card: every enabled model across providers,
 // with its provider tag. Unticking removes it from the picker; adding happens from a
 // provider's card (the ModelChecklist there has the suggested list + free-type add).
 function ComposerPickerCard({

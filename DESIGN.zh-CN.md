@@ -30,8 +30,9 @@ OpenHarness 是安静、紧凑、适合长时间 Agent 任务的工作台。用�
 | 对象 | 职责 | 展示规则 |
 |---|---|---|
 | Session / 任务上下文 | 工作区、configured harness、模型、策略、历史 | 稳定上下文；切换面板不停止执行 |
-| Product turn | 一次已接受请求及其工作和结果 | 一个顶层单元；model call 是内部证据 |
-| Work segment | 已接受引导或决策前后的有序工作 | 紧凑展开区；不得按 provider call 虚构阶段 |
+| Product turn | 一次已接受请求及其工作和结果 | 一个顶层单元；model round 有界地留在其 work region 内 |
+| Inference round | 一次 canonical model stage 及其安全进度摘要 | 一条紧凑 row；绝不暴露 model-call id、ordinal、provider label 或 raw reasoning |
+| Work segment | 已接受引导或决策前后的有序工具动作 | Inline detail 归属 inference round；不得按 prose 虚构阶段 |
 | Assistant response | 从首段 delta 到封存的用户可见答复 | 稳定 identity 和 DOM owner；不按长度阈值迁移文本 |
 | Activity / tool | 类型化动作、安全摘要、状态、证据引用 | 先摘要；详情与模型证据按需 inline 展开 |
 | Pending interaction | 需要用户处理的审批或结构化输入 | 一个稳定 dock、明确决策标识、作用范围和结果 |
@@ -46,7 +47,7 @@ steering、暂停或投递成功。
 
 | 规则 | 必须满足的行为 | 现有验收合同 |
 |---|---|---|
-| AI-01 以产品回合为中心 | 八次 model call 仍只生成一个 turn、工作摘要与稳定答复 | MCX-029/030/032 |
+| AI-01 以产品回合为中心 | 八次 model call 仍只生成一个 turn 与稳定答复；八条摘要只作为 work 内有界 row，不成为同级 card | MCX-029/030/032/059 |
 | AI-02 分离事实、命令与本地状态 | ACK 只代表已接受；终态事实才能确认完成。准入未知时先核对原 identity 再重试 | MCX-001/002/003/009/010 |
 | AI-03 保全用户意图 | 草稿按 session 隔离；只清理被接受版本；队列变更不丢上下文、不重复执行 | MCX-004/005/006/007/008/028 |
 | AI-04 决策只有一个 owner | 冲突动作启用前先恢复待决策项；已处理后保留结果，不复制活动表单 | MCX-011/014/015 |
@@ -89,7 +90,7 @@ HaaS 公共 API 暴露。遵循现有 Manager transport 边界。
 | 组件 / 当前落点 | 接收 | 负责 | 不得负责 |
 |---|---|---|---|
 | ConversationTimeline / ConversationView | 已投影 turn、live tail | 阅读顺序、锚点、有界历史 | transport 或 runtime 生命周期 |
-| TurnWork | 工作事实、presentation、展开状态 | 一条当前动作摘要；类型化工具/evidence 展开 | model-call 卡片、持久 reasoning row 或独立猜运行状态 |
+| TurnWork | 工作事实、inference round、presentation、展开状态 | 每轮一条安全摘要、latest-running 动效、类型化 tool/evidence 展开 | native model-call label、raw reasoning transcript 或独立猜运行状态 |
 | AssistantResponse / MessageContent | 稳定 response 与内容 | 渐进可读答复 | 答复文本迁移 |
 | PendingInteractionDock | 类型化 interaction 与回调 | 单一决策区和焦点 | 影子审批状态 |
 | ConversationComposer / ContextChips | 草稿 scope、availability、context | 编辑、准入反馈、克制控件 | 将 ACK 当成完成 |
@@ -175,10 +176,11 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
 - 终态历史 disclosure 不得抢占滚动所有权。展开 work、reasoning、activity 或 evidence 时不调用
   `scrollIntoView`；用户滚动有界 work 区域或 transcript 后，延迟详情渲染必须保持当前位置。
   只有显式 Jump to latest、session 切换或新的前台 turn 才可恢复 transcript following。
-- 活跃 work 使用一条单行 ellipsis 的“当前动作”标签。最新的安全 reasoning 或 tool summary
-  在原位替换上一条，可使用一个克制的渐变文字动画；spinner 不再同时动画。
-  Reduced motion 使用静态颜色；终态历史恢复 completed/failed/cancelled 标签，且不保留 reasoning row。
-  Work 展开时，终态 failure/outcome summary 放在 activity list 之后，让语义结论成为用户最后读到的内容。
+- 活跃 work 为每个 canonical inference round 渲染一条单行 ellipsis 的安全摘要 row。同一 round 的
+  多段 reasoning chunk 只更新所属 row；tool lifecycle 不得提供该 label。历史终态 row 默认折叠，
+  最新 running row 默认展开并拥有唯一旋转状态 indicator；Reduced motion 下 indicator 静止。Native
+  model id/ordinal 与 raw reasoning 继续隐藏。终态 failure/outcome summary 位于有界 round/activity list
+  之后，assistant response 仍是最后一段实质内容。
 - Document 根节点固定且不可滚动。在空白 chrome 上的双指/wheel 手势不得移动或 rubber-band
   整个 WebView；只有明确的滚动容器消费手势，并在自身边界阻断 overscroll chaining。
 - 所有 full-page route 共用原生 title drag 合同：route title 与非交互 top chrome 可拖拽；button、
@@ -213,7 +215,7 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
 | 间距 | `--space-1` 至 `--space-6` | 4 px 节奏；组间距至少为组内间距两倍 |
 | 圆角 | `--radius-surface/control/compact` | 12/8/6 px；内部可见容器圆角不应更大 |
 | 强调 / 反馈 | `--color-accent`、success/warning/danger 角色 | 少量强调或真实语义状态 |
-| 焦点 | `--color-focus-ring`、`--color-composer-focus-border` | Composer 中性边框，无光晕、染色或阴影 |
+| 焦点 | `--color-focus-ring`、`--color-field-focus-border` | 文本字段与 Composer 共用单层中性边框，无外圈、光晕、染色或阴影；离散控件保留可访问 focus ring |
 | 动效 | `--motion-fast`、`--motion-work` | 短反馈；适用时仅一个紧凑工作指示 |
 
 新增或已迁移对话组件不得添加 raw color、任意字号/圆角/阴影或新 alias 家族。共享 primitive 已要求的 alias
@@ -222,6 +224,11 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
 
 先用字体和间距建立层级，再考虑边框与填充。普通控件保持中性，品牌色只用于有意义的强调。
 避免渐变、输入框光晕、巨型处理按钮、重复 badge 和普通活动的状态色整卡染色。
+
+对话与 full-page route 的可编辑文本控件共用一种 focus 处理。带边框的 input、textarea 或
+select 聚焦时只把 idle border 替换为 `--color-field-focus-border`，不增加 outline 或 shadow；
+无边框控件通过 `:focus-within` 把同一反馈交给所属 shell。品牌蓝 focus ring 只用于 button、
+link、checkbox、radio 与自定义 interactive widget 等离散控件的键盘焦点。
 
 项目导航属于高密度控制面，不是正文阅读区。项目名和会话标题统一使用 12 px、1.35 行高的
 `--text-navigation`；相对时间继续使用 11 px caption 与等宽数字。活动项目最多提升到 500

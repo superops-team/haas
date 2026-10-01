@@ -231,7 +231,7 @@ const EXAMPLE = `{
 }`;
 
 const INPUT =
-  "w-full text-[13px] px-3 py-2 rounded-lg border border-line bg-paper text-ink outline-none focus:border-accent";
+  "w-full text-[13px] px-3 py-2 rounded-lg border border-line bg-paper text-ink outline-none";
 
 // A friendly default server name from its URL: walk the hostname's labels left to
 // right, skip the generic ones (mcp/api/data/www…), take the first distinctive label
@@ -378,7 +378,7 @@ export function AddMcpModal({
               onChange={(e) => setText(e.target.value)}
               spellCheck={false}
               rows={9}
-              className="w-full font-mono text-[12px] px-3 py-2.5 rounded-lg border border-line bg-paper text-ink outline-none focus:border-accent resize-y"
+              className="w-full font-mono text-[12px] px-3 py-2.5 rounded-lg border border-line bg-paper text-ink outline-none resize-y"
             />
           </>
         )}

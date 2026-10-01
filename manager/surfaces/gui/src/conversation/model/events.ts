@@ -190,7 +190,7 @@ export interface EventPayloads {
     safeReason?: string;
     retryable?: boolean;
   };
-  error: { error?: string };
+  error: { error?: string; code?: string; retryable?: boolean; recoveryAction?: string };
   input_rejected: { error?: string };
   interrupted: Record<string, never>;
   model_changed: { model?: string; text?: string };
@@ -592,7 +592,7 @@ const shapes: Record<EventType, Shape> = {
     safeReason: str,
     retryable: bool,
   },
-  error: { error: str },
+  error: { error: str, code: str, retryable: bool, recoveryAction: str },
   input_rejected: { error: str },
   interrupted: {},
   model_changed: { model: str, text: str },

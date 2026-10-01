@@ -159,7 +159,7 @@ function UserRulesCard({
         rows={4}
         placeholder={t("memory.rules_placeholder")}
         data-testid="user-rules-input"
-        className="w-full mt-2.5 px-3 py-2.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none focus:border-accent resize-y leading-relaxed"
+        className="w-full mt-2.5 px-3 py-2.5 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none resize-y leading-relaxed"
       />
       <div className="flex items-center gap-3 mt-2">
         <button
@@ -202,7 +202,7 @@ function MemoryRow({ entry, onChanged }: { entry: MemoryEntry; onChanged: () => 
           onChange={(e) => setDraft(e.target.value)}
           rows={2}
           autoFocus
-          className="w-full px-3 py-2 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none focus:border-accent resize-y leading-relaxed"
+          className="w-full px-3 py-2 rounded-lg border border-line bg-paper text-[13px] text-ink outline-none resize-y leading-relaxed"
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();

@@ -35,6 +35,13 @@ _ALLOWED_AUDIT_FIELDS = frozenset(
 )
 
 
+def _stream_timeout(route: ModelRoute) -> httpx.Timeout:
+    return httpx.Timeout(
+        route.timeoutMs / 1000,
+        read=route.streamIdleTimeoutMs / 1000,
+    )
+
+
 def _elapsed_ms(started: float) -> float:
     return round((time.monotonic() - started) * 1000.0, 3)
 
@@ -337,10 +344,7 @@ class ModelProxy:
                     "Authorization": f"Bearer {credential}",
                     "Accept": "text/event-stream",
                 },
-                timeout=httpx.Timeout(
-                    route.timeoutMs / 1000,
-                    read=route.streamIdleTimeoutMs / 1000,
-                ),
+                timeout=_stream_timeout(route),
             )
         except ValueError as exc:
             raise ModelProxyError(str(exc)) from exc
@@ -400,7 +404,7 @@ class ModelProxy:
                 f"{route.baseUrl.rstrip('/')}/responses",
                 content=request.content,
                 headers=request.headers,
-                timeout=request.extensions.get("timeout"),
+                timeout=_stream_timeout(route),
             )
             await asyncio.sleep(
                 model_proxy_retry_delay_seconds(response, retry_index=retry_index)

@@ -2,8 +2,8 @@
 
 [English](README.md) | **简体中文**
 
-状态：MCX-001 至 MCX-053 已实施；等待 owner 视觉验收
-最近评审：2026-09-29
+状态：MCX-001 至 MCX-063 已实施；等待 owner 视觉验收
+最近评审：2026-09-30
 Change ID：`manager-conversation-interaction-v2`
 相关规格：[Manager HaaS Sidecar Backend](../manager-haas-sidecar-backend/README.zh-CN.md)、[Manager 项目工作台体验](../manager-project-workspace-experience/README.zh-CN.md)、[Manager Delegation](../manager-delegation/README.zh-CN.md)、[Manager GUI Performance](../manager-gui-performance/README.zh-CN.md)、[Event Log & SSE](../event-log-sse/README.zh-CN.md)、[Session Runtime](../session-runtime/README.zh-CN.md)、[Manager Product Identity](../manager-product-identity/README.zh-CN.md)、[Security Boundary](../security-boundary/README.zh-CN.md)
 
@@ -179,7 +179,7 @@ P0、P1、P2 表示实现顺序，不表示可选范围。
 | MCX-R14 Product-turn projection | P0 | Model call 只保留为 evidence metadata；一个 product turn 只拥有一个 work summary 与一个 assistant response |
 | MCX-R15 稳定 assistant stream | P0 | 第一段用户可见 delta 挂载最终 response owner；任何 heuristic 都不得隐藏或迁移内容 |
 | MCX-R16 Canonical lifecycle presentation | P0 | Timeline、header、loading、interaction dock 与 Composer action 使用同一 selector，不能互相矛盾 |
-| MCX-R17 安全 work disclosure | P0 | Work 默认紧凑；最新 reasoning/tool action 使用一条安全短暂文案，tool detail 与 telemetry 使用有界语义 disclosure |
+| MCX-R17 安全 work disclosure | P0 | 每个 model inference round 拥有一条安全摘要 row；历史终态 round 默认折叠，最新 running round 默认展开，tool detail 有界地留在所属 round 内 |
 | MCX-R18 动效与密度纪律 | P1 | 每个状态只有一个动画 owner；稳定几何、semantic token 与可度量信息密度共同约束页面 |
 | MCX-R19 Session activation 完整性 | P0 | 选择已有 session 时原子激活其 identity 与有界缓存 projection，再与权威 history 对账；绝不能展示新会话 empty state，也不能让过期 response 覆盖当前 session |
 
@@ -308,6 +308,7 @@ interface TurnWorkProjection {
   safeSummary: string;
   startedAtMs: number | null;
   completedAtMs: number | null;
+  inferenceRounds: InferenceRoundProjection[];
   segments: WorkSegment[];
   aggregate: {
     activityCount: number;
@@ -315,6 +316,13 @@ interface TurnWorkProjection {
     usage?: AuthoritativeUsage;
     artifactCount?: number;
   };
+}
+
+interface InferenceRoundProjection {
+  roundId: string;
+  state: "running" | "succeeded" | "failed" | "cancelled";
+  safeSummary: string | null;
+  activityRefs: string[];
 }
 
 interface WorkSegment {
@@ -335,7 +343,11 @@ interface AssistantResponseProjection {
 }
 ```
 
-`segmentId` 是 Manager 产品 identity。一个 segment 可以关联一个或多个 model call 或 tool call，但 `modelCallId`、provider request id、native reasoning item id 与 token-usage arrival boundary 绝不是 display identity，只作为 evidence adapter 背后的私有 correlation metadata。拆分或合并 model call 不得改变主 timeline 结构。
+`segmentId` 与 `roundId` 是 Manager 产品 identity。`roundId` 将一次 canonical model-stage occurrence
+映射为一条 inference-summary row，但 native `modelCallId`、provider request id、native reasoning item
+id 与 token-usage arrival boundary 绝不进入可见 label 或 accessible name，只作为 projection boundary
+后的私有 correlation metadata。Model round 可以改变有界 work-detail row 数量，但不得创建同级
+assistant message 或改变主 turn 顺序。
 
 其余持久 Manager record 必须显式且带版本：
 
@@ -387,6 +399,13 @@ Manager 将 `_managerTurnId` 与 `_managerRowId` 持久化为仅供展示的消�
 ### 6.3 投影更新规则
 
 - 初次加载先应用一个有界 snapshot，再 replay `lastEventId` 之后的 event，最后进入 live。
+- 已完成的 HaaS-backed turn 只能通过持久化 `/messages` 投影恢复。打开或重连该历史会话时
+  不得重新获取或发送其 process-event 历史。非终态恢复继续服从本节与 MCX-010 的既有 cursor
+  规则；MCX-054 不改变其 live ordering 或 retry 语义。
+- Bridge 进入终态后，持久化必须删除临时 event/content/tool 去重窗口。这些窗口属于 transport
+  recovery state，不是会话历史，终态收敛后不得继续膨胀 Manager session binding。既有终态记录
+  在 readback 时原位压缩，但不得删除 assistant text、activity、model-stage summary、evidence
+  reference、task outcome 或 canonical id。
 - 已按 `eventId` 应用的 event 为 no-op。
 - 低 revision 不得覆盖高 revision。
 - 文本 delta 按 sequence 只追加一次；final text 封存 live row，不创建第二份回答。
@@ -559,13 +578,19 @@ queued -> dispatching -> running -> terminal
 默认 running Turn 有严格视觉预算：
 
 - 一个 user-intent block；
-- 一行 work summary，包含状态文字与可选 disclosure control；
+- 一组有界 inference-round list，每个 canonical model round 严格对应一条单行安全摘要 row；
 - 仅当需要用户立即感知或操作时，最多展示一个当前相关 tool 或第一个可操作 failure；以及
 - 一块从第一段可见 delta 起出现的 assistant-response block。
 
-Completed model call、provider round、reasoning chunk、usage arrival 与 cache accounting 不得作为同级卡片占用默认 flow。展开 work 时，detail 位于 work summary 下、answer 上，且不替换两者。Live update 不得自动重新打开用户关闭的 disclosure，也不得关闭用户已展开的 disclosure。Completed 状态只可自动收起用户从未操作过的 disclosure。
+Reasoning chunk、usage arrival 与 cache accounting 不占用同级卡片。Model round 只在有界 work region
+内使用紧凑 row，不成为 card。Row label 使用该 round 最后一条非空安全 reasoning summary；同一
+round 内多段 summary 只原位更新这一 row。Tool lifecycle 永远不拥有 row label。Running round 尚未
+收到 summary 时使用本地化通用“处理中”。
 
-展开 work 只按 canonical 发生顺序保留用户相关的 tool activity。Reasoning summary 不得累积为历史 disclosure row。Turn 运行时，只有最新的安全 reasoning 或 tool summary 可替换 work header 中的单行当前动作；下一步在原位替换它。主 timeline 继续不展示 model-call card 或 ordinal。
+最新 running round 默认展开，并且是唯一拥有持续动效的 row。更新的 round 开始时，上一条未被
+用户操作的终态 round 自动折叠，新 round 展开。Completed、failed、cancelled 历史 round 保持可见
+但默认折叠；用户显式 toggle 优先于后续 live update。展开 round 只在该 row 下显示其 canonical tool
+activity。主 timeline 继续不展示 model-call ordinal/id、provider label、raw reasoning 或 per-call token panel。
 
 ### 8.2 Activity summary 与 evidence
 
@@ -586,7 +611,10 @@ Completed model call、provider round、reasoning chunk、usage arrival 与 cach
 
 Public activity preview 不暴露绝对 host path。当 command output 包含该命令已授权 working directory 时，adapter 先替换为 `workspace/` 加安全相对后缀，再执行 credential/URL/path 脱敏。因此在 workspace root 执行 `pwd` 时显示 `workspace/`；workspace 外 host path 继续显示 `[REDACTED_PATH]`。精确路径只通过有 scope 且未过期的 execution evidence 提供。
 
-Reasoning 是短暂进度，不是持久 transcript chrome。Turn 运行时，最新的安全 reasoning summary 可占用单行当前动作标签，并被下一个 reasoning 或 tool step 原位替换。Completed、failed、cancelled 或 paused 历史不渲染 reasoning row 及其 disclosure state；最终 assistant response 保持为该 turn 最后一段实质内容。
+Reasoning summary 是持久、有界的进度 label，不是 raw reasoning transcript。每个 canonical model
+round 在 live 与 restored history 中最多贡献一条 row；row 只保留该 round 最新安全 summary。Raw
+chain-of-thought、commentary、provider prose、prompt、tool text 与 model-call metadata 绝不进入 label。
+最终 assistant response 仍是该 turn 最后一段实质内容。
 
 Tool work 使用统一 `ToolActivity` 合同，包含 header、安全 input summary、有界 result、status、duration 与 evidence action。只有 active tool 或第一个可操作 failure 可默认展开；成功完成的 tool 默认收起。Tool input/output 与 evidence 不得嵌套在 model-call card 中。
 
@@ -821,7 +849,7 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 |---|---|---|---|
 | C0 Projection contract | Product-turn/work/answer model 与 canonical presentation selector | 当前 fixture 产生同级 model-stage card 与矛盾 action | Selector/invariant test 证明一个 turn、一个 response owner、一个合法 primary action |
 | C1 Stable live answer | 删除 word-count gate，把第一段 delta 绑定到 `AssistantResponse` | 测试证明短 response 被隐藏或迁移 | 短/长/tool-interleaved stream 保持同一 row 与 semantic node |
-| C2 Calm work disclosure | 用当前动作 summary、tool disclosure 与 evidence correlation 替换 stage timeline | 八次调用 fixture 占满主视口 | 默认只渲染一个 work summary、零 stage/reasoning history row，且只展开可操作 detail |
+| C2 Calm work disclosure | 用有界 per-round 安全摘要 row 与所属 tool disclosure 替换 raw stage/evidence chrome | 八次调用 fixture 占满主视口 | 默认在 320 px region 内每个 inference round 一条紧凑 row，历史折叠，只展开最新 running/actionable detail |
 | C3 Hierarchy and motion | 移动 persistent mode context，删除 token warning/raw color，统一 type/layout/motion | 成对截图复现密集卡片与竞争动画 | 双主题及所有目标宽度通过 visual、motion、contrast 与 reading-anchor review |
 | C4 Legacy correction | 删除 `streamGate`、stage-card UI/CSS/copy、独立 lifecycle selector 与过时测试 | Grep/import inventory 找到每个旧 owner | 不保留旧 heuristic、component、style、translation key、selector 或 dual projection |
 
@@ -874,26 +902,87 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-031 | P0 | Lifecycle action matrix | 每种 phase/receipt/interaction 组合最多一个 primary action；running 不显示 Continue，paused 不把 Stop 作为同级 primary action |
 | MCX-032 | P0 | Work disclosure ownership | Running/completed multi-call work 默认只有一个 summary；用户 disclosure 选择经受所有 live update 与 completion rule |
 | MCX-033 | P0 | 安全 activity copy | Raw reasoning/commentary/provider prose 与注入的类 secret argument 不进入 title、summary、status、notification 或 accessible name |
-| MCX-034 | P0 | Usage hierarchy | Missing/pending usage 不产生 warning；权威 aggregate 只在 completion 出现一次；per-call usage 只在 Inspector |
+| MCX-034 | P0 | Usage hierarchy | Missing/pending usage 不产生 warning；权威 aggregate 只在 completion 出现一次；per-call usage 保留为内部 diagnostic data，不在会话中渲染 |
 | MCX-035 | P1 | Motion ownership | 每个状态最多一个允许动画 owner；token update 不动画 layout；transition 不使用 `all`；theme swap 无拖影；reduced-motion 截图与行为保持完整 |
 | MCX-036 | P1 | Persistent mode context | Bypass/policy/runtime mode 在 header/Composer context 只渲染一次，不产生重复或强势 timeline notice |
 | MCX-037 | P1 | Narrow work layout | 320/390 px 与 200% zoom 下，长及 pseudo-localized command/title/metadata 在 72ch conversation measure 内换行，不出现 fixed metadata column、action 裁切或 card 高度爆炸 |
 | MCX-038 | P0 | Live-tail geometry | 阅读旧内容期间经过 100 次 delta、tool update 与 completion，semantic anchor 偏移不超过 2 CSS px，直到 Jump to latest |
 | MCX-039 | P0 | Dynamic accessibility owner | 一个 polite live region 只播报有意义 phase change；token、usage、stage 与 timer update 不产生重复播报 |
 | MCX-040 | P0 | Assistant response 幂等 | 同一 turn 的两条 assistant-message fact（包括不同 transport row id 或 replay）只渲染一个 response owner 和一份权威文本；reload 与 live 输出一致 |
-| MCX-041 | P0 | Chronological tool activity | Tool activity 按 canonical 发生顺序仅渲染一次，不出现 model-call 或 reasoning-parent container。Reasoning 仍可作为短暂进度进入 projection，但不成为持久 disclosure row |
+| MCX-041 | P0 | Chronological tool activity | Tool activity 按 canonical 发生顺序仅在所属 Manager-owned inference round 下渲染一次。Round 只展示最新安全 summary，不出现 raw reasoning-parent container、native model-call metadata 或重复 tool row |
 | MCX-042 | P0 | Inline 安全 activity detail | 点击 command row 后详情直接在其下方展开，不打开侧边/底部 Inspector；workspace 内路径使用 `workspace/`，外部 host path 继续脱敏，evidence 过期时仍保留安全 command/preview |
 | MCX-043 | P1 | Search overlay focus | 全局搜索在双主题使用带语义圆角的 input shell 与中性 focus border；不出现内部矩形品牌色 outline 或品牌色整行 active fill |
 | MCX-044 | P1 | macOS titlebar 对齐 | overlay 模式下，原生 traffic light 与 sidebar/panel 展开、折叠控件共用 packaged AppKit button frame 的实测中心，sidebar 展开/折叠前后中心偏差均不超过 1 CSS px。当前 pin 的 `traffic_light_position(..., y=24)` 组合实测 WebView 相对中心为 22 CSS px，12 px browser simulator 使用 `top:16px`；任何推算 geometry 都不得覆盖 packaged 证据。文字块保持自身排版 baseline，不作为 control center 的对齐参考。Browser 与 packaged screenshot 必须覆盖 expanded、collapsed、maximize 与 restore 状态 |
 | MCX-045 | P0 | Composer 尾部 cluster | 双主题 320/390/760/1440 px 下，model、microphone、Send/Stop 按该顺序保持可见，以 peer gap <=8 CSS px 组成不换行的尾部 cluster；mic/action hit target 固定，仅长 model label 显示 ellipsis，idle、running 与 recording fixture 保持同一 ownership |
 | MCX-046 | P0 | Terminal child-state convergence | Live sealing 与历史 replay 的 completed/failed/cancelled turn 不得继续把 child activity 或 model stage 显示为 running/pending/waiting；dangling tool 除 cancelled 外归一为 failed，stale model stage 跟随 parent terminal state，且不修改持久化 evidence |
-| MCX-047 | P0 | Reconnect terminal monotonicity | `ready -> history` 与 `history -> ready` 两种顺序下，`running=false` 加 idle/cancelled control 不得用 stale non-terminal task outcome 覆盖 terminal transcript；UI 不显示 working indicator/Stop，同时真实 running snapshot 仍能恢复这些状态 |
-| MCX-048 | P0 | 可选模型可用性 | Composer 模型菜单只包含 routed provider 当前可用的模型：凭证型 provider 必须已配置 credential，OAuth provider 必须有已登录 profile，keyless local provider 必须通过 live discovery。不可用的当前/default model 可作为 immutable session fact 继续显示，但不得被注入 selectable option。无可用模型时 Composer 显示连接模型；存在其他可用模型时只提供该列表。Settings 保留完整目录用于配置。Response 与 GUI 不包含 credential material |
+| MCX-047 | P0 | Reconnect terminal monotonicity | `ready -> history` 与 `history -> ready` 两种顺序下，`running=false` 加 idle/cancelled control 不得用 stale non-terminal task outcome 覆盖 terminal transcript；UI 不显示 working indicator/Stop，同时真实 running snapshot 仍能恢复这些状态。权威 invocation readback 已终态但缺少 `terminalEventId` 时，Manager 必须立即收敛为安全 `incomplete`，不得扫描完整事件历史，也不得留下无法生效的 Stop action |
+| MCX-048 | P0 | 可选模型可用性 | Composer 模型菜单只包含已显式启用且 routed provider 当前可用的模型：凭证型 provider 必须已配置 credential，OAuth provider 必须有已登录 profile，keyless local provider 必须通过 live discovery。配置 provider 不得隐式启用其整个静态模型矩阵；setup 只能显式启用该 provider 的 recommended model，其他 catalog model 必须经过用户勾选或添加。不可用或未启用的当前/default model 可作为 immutable session fact 继续显示，但不得被注入 selectable option。无 selectable model 时 Composer 显示连接模型；存在其他 selectable model 时只提供该列表。Settings 保留完整 suggested catalog 用于配置。Response 与 GUI 不包含 credential material |
 | MCX-049 | P0 | 聚焦运行时展示 | User message 使用右对齐中性填充 surface，assistant response 在 canvas 左对齐；不显示 `你`/`助手` heading，但保留 accessible response name。Model-switch 与 lifecycle marker 使用统一克制 divider。Work 收起时只显示 canonical summary，即使 child failed 也不泄漏；展开 work 最大高度 320 CSS px，内部滚动。移除会话内 Find/上一条/下一条 toolbar 及 Cmd/Ctrl+F 拦截，保留浏览器原生查找 |
 | MCX-050 | P0 | 终态 disclosure 滚动所有权 | 在 completed、failed、cancelled 或 paused turn 中展开 activity、evidence 或 work disclosure 时，不得调度 `scrollIntoView`，也不得重新开启 transcript auto-follow。用户将有界 work 区域滚到任意位置后，延迟详情渲染与父级重渲染在至少 1 秒内必须使 work 区域与 transcript 滚动偏移都保持在 2 CSS px 内。只有新的前台 turn、session 切换或用户显式点击 Jump to latest 才可恢复 transcript following |
-| MCX-051 | P0 | 单行当前动作 | Work 活跃时，work header 用最新的安全 reasoning/tool action 替换通用的“执行中”，严格保持一行 ellipsis；step 切换时在原位更新。克制的渐变文字是唯一持续 motion owner，reduced-motion 下禁用动画。Work 进入终态后停止渐变，恢复 terminal label，不显示 reasoning row，失败/outcome summary 放在展开 activity 详情之后，并让最终 assistant summary 成为 turn 最后一段实质内容 |
+| MCX-051 | P0 | Per-round 推理进度 | 每个 canonical model inference round 严格渲染一条 ellipsis 安全摘要 row。同一 round 的多段 reasoning chunk 只更新该 row；tool start/output/completion 不得提供 label。最新 running round 默认展开，在首条安全 summary 前使用本地化“处理中”，并拥有唯一克制的旋转状态 indicator。历史 completed/failed/cancelled round 保持可见且默认折叠；用户 disclosure override 在后续 update 中保持。Reduced motion 停止旋转，但保留 running label 与状态形状。最终 assistant summary 仍是 turn 最后一段实质内容 |
 | MCX-052 | P0 | Desktop 根滚动隔离 | `html`、`body`、`#root` 与 application shell 不得成为滚动容器，也不得出现 WebView rubber-band 位移。在非滚动空白 chrome 上使用双指/wheel 时 document 偏移始终为零。Transcript、sidebar、settings 与有界 work-detail 区域仍各自可滚动，并在边界停止 overscroll chaining |
 | MCX-053 | P0 | 原子 session 内容激活 | 选择已有 session 时，如存在缓存，必须同步激活该 session 的 canonical transcript，再通过 `GET /v1/sessions/{id}/messages` 刷新。Cache miss 只渲染一个有界的“正在加载会话”状态，且新会话 Hero/Setup surface 数量为零。目标 history 与 socket 未 ready 前 Composer 不得提交。快速 `A -> B -> A` 切换必须忽略过期 response，并从最多保留五个 session projection 的有界 MRU cache 立即恢复 A；refresh 失败时保留缓存内容，或展示唯一安全 retry state，且不得清空其他 session |
+| MCX-054 | P0 | 有界终态会话恢复 | 选择或重新打开一个所在 session 至少包含 25,000 个 process event 的已完成 HaaS 会话时，必须直接渲染持久化 canonical transcript，不调用 HaaS event-page replay，不发送 replayed reasoning/model-stage delta，也不得阻塞 Manager `/v1/health`。在 packaged local fixture 中，history request 与 conversation socket 必须在 2 秒内 ready，首次加载后 Manager sidecar CPU 回落到 20% 以下；终态 bridge 持久化的临时 dedupe window 为空，同时保留 assistant text、activity、model stage、task outcome、evidence reference 与 canonical id。重启 packaged App 后再次选择同一会话，在不清理用户数据的条件下必须通过相同断言 |
+| MCX-055 | P0 | Codex 对齐的 activity timeline | 展开 inference round 后，其所属的每个 canonical tool activity 严格按发生顺序渲染一个单行 row。Read/search/edit/command 使用语义 kind；MCP/dynamic tool 在可安全识别时保留 safe tool identity 与具体 normalized action，不得显示 `Call MCP tool` 等 transport 通用文案。Command row 可使用有界 command preview；非 command row 优先显示语义 action text，底层 command 只允许进入该 row 的 inline detail。Model stage 只提供私有 round correlation、排序、终态收敛与 aggregate usage；会话内不得渲染“执行详情”“模型调用 N”、model-call id、provider label、raw reasoning transcript 或 per-call token panel。点击 activity 只在当前 row 下直接展开，不出现侧栏或额外 evidence hierarchy。Raw MCP argument、host path、credential 与 provider-native payload 继续隐藏。缺少 safe tool identity 的历史记录使用本地化 kind fallback，不得恢复 transport 通用文案 |
+| MCX-059 | P0 | 多轮 inference disclosure | 含三个 canonical model stage（completed summary、completed summary/tool、running summary/tool）的 fixture 按发生顺序渲染三条 inference row。前两条历史 row 默认折叠；只有最新 running row 展开并有动效。其 label 来自自己的 reasoning summary，绝不来自 tool summary。第四个 round 开始时，未被用户操作的上一 round 折叠、第四个展开，且更早 row identity 不变。Turn 完成后全部 motion 停止，live 与 REST replay 都保留折叠历史摘要 row，最终 assistant response 保持最后。无 summary 的 round 使用本地化 processing/completed fallback；中文请求不得暴露非中文或 tool-like fallback |
+| MCX-056 | P0 | Final-answer 所有权 | HaaS phase-aware output 必须让 commentary 与 reasoning 保持在 assistant response 之外。ADK text 仅可作为“不提供 native phase fact”的 adapter fallback；当 native model-stage stream 负责分类时，不得直接发布为可见 assistant delta。`messagePhase=commentary` 只更新进度，`messagePhase=final_answer` 才进入回答正文。成功终态遇到 legacy 无 phase output 时，只把最后一次 model call 的最后一个 output item 提升为 `result`，更早内容继续视为 commentary。Failed/cancelled/incomplete turn 没有 `result` 时不得伪造 assistant response。Live completion、REST rehydration 与 restart 必须选出同一 final result，不得拼接步骤摘要。同一 invocation 已持久化的 assistant row 如果仍含 commentary 或非终态 outcome，权威 rehydration 必须原位替换其 response/activity/outcome 字段，同时保留 `ts`、`_managerRowId` 与 `_managerTurnId`；不得保留 stale text、追加重复 row 或改变 transcript 顺序 |
+| MCX-057 | P0 | 语言对齐的 reasoning 进度 | 每条 inference row 只能消费 provider 提供的安全 reasoning summary。Codex turn instruction 必须要求 summary 跟随最新用户消息语言；中文输入因此产生简洁的简体中文意图/进展描述。Summary 描述操作目标或已观察到的进展，不得复述 literal tool name、command fragment、path、transport label 或 tool lifecycle 文案。GUI 不翻译 prose，也不从文本猜 subtype；若中文 turn 仍收到非中文 summary，该 row 回退到本地化 processing/completed 状态，不得暴露语言不匹配文本。Tool fact 只保留在所属 round 展开后的 chronological activity row |
+| MCX-058 | P0 | 可执行的本地 turn 依赖 | 本地 HaaS turn 必须能跨过输出前的可重试 provider response，并完成内置 recall MCP 握手。重建 streaming retry 时必须保留 scalar connect/read/write/pool timeout，不能嵌套 httpx extension dictionary。Stateless recall endpoint 必须用 HTTP 202 且不带 JSON-RPC error 响应 `notifications/initialized`，随后 `tools/list`/`tools/call` 可继续执行。唯一的内置、只读、session-scoped `recall` tool 在 Codex 配置中显式 auto-approve；该例外不得扩展到任意 MCP server/tool。这些路径不得产生虚假的 MCP failure、未捕获 proxy exception 或缺失 canonical terminal event |
+| MCX-060 | P0 | 无摘要 round 的语义标题 | Terminal model inference round 没有安全 reasoning summary 时，必须使用其最后一个 canonical activity 的语义 kind label 作为标题：command/read/search/edit/已识别 recall/通用 tool 分别映射为本地化产品文案。只要 terminal round 拥有 activity，就不得使用原始命令、任意 tool summary、transport 文案或通用终态 `Completed` / `已完成`。Terminal stage 同时没有安全摘要与 activity 时必须整体省略；若它只承载 final output，则 assistant response 是唯一可见 owner。Running 且无摘要时继续使用 MCX-051/057 规定的本地化“处理中”。Manager-owned recall activity 的安全摘要为 `Recall context` 或 `Recalled context` 时必须渲染 `Recall context` / `检索上下文`，不得把未翻译的 i18n key 输出到 DOM。该 fallback 使用语义 kind 而非 tool summary，因此继续遵守 MCX-059 的 reasoning 所有权。Running/failed/cancelled status 继续单独播报，展开后的 activity row 保留更丰富的安全标题与 status metadata。Live projection、持久 replay、双主题及 320/390/1440 宽度使用同一规则。 |
+| MCX-061 | P0 | 有界 work 滚动样式 | 320 px 有界 inference/activity 区域在展开内容溢出时仍可独立使用滚轮、触控板与触摸滚动，但不得渲染持续可见的 scrollbar track、thumb 或预留 gutter。折叠到不再溢出时，内部滚动样式必须立即消失并收敛 offset，且不得改变 transcript scroll 或布局宽度。Round disclosure chevron 必须保持可见，不能与 scrollbar chrome 重叠。同一隐藏 scrollbar 规则同时适用于没有 round 的旧 work list，以及 macOS、Windows、Linux、浅色和深色主题。 |
+| MCX-062 | P0 | 真实连续的运行中推理轮次 | 每次完成 tool batch 后发生的 native model inference 都必须拥有新的稳定 round；即使模型没有发送 reasoning-summary event、而是直接发起下一次 tool call，也不能继续合并到旧 round。当 parent turn 仍 active 但已观察到的 stage 都已终态时，projection 必须追加一个 stable provisional next round，在下一 canonical stage 到来时原位替换，并保持克制的 running 动效；活动任务不能只显示终态对勾。Provider 产生的 `reasoning_summary` 是首选单行标题；同一 round 中位于 tool 前的 agent message 必须归类为安全 commentary，并可作为该 round 标题。存在模型摘要时，tool name、command 或 tool lifecycle 文案不得覆盖摘要。没有安全摘要/commentary 时，仅最新 active round 使用本地化“处理中”；terminal round 继续使用 MCX-060 的语义 kind fallback。Live、持久 replay 与 restart 必须产生相同的 round 边界、顺序及 final-answer ownership。 |
+| MCX-063 | P0 | 统一可编辑字段焦点 | 对话与 full-page route 中所有带边框的文本 input、textarea 和 select，都必须通过 `--color-field-focus-border` 使用与 Composer 一致的中性 focus border；不得渲染外部 outline、glow、tint 或 shadow。无边框可编辑控件通过 `:focus-within` 把 focus 指示交给所属 shell。Button、link、checkbox/radio/range 与自定义 interactive widget 继续使用可访问的 `--color-focus-ring`。Activity filter、Settings field、Connectors、Inbox、search、Composer、双主题、键盘/指针 focus、390/1440 px 与 200% zoom 使用同一 ownership 规则，且不得改变 geometry。 |
+
+MCX-054 刻意限定为小范围 recovery 修复：
+
+1. 先增加失败的 bridge serialization 测试，证明 completed projection 会删除临时 dedupe
+   window，同时不丢失持久化展示字段。
+2. 增加失败的 Manager reconnect 测试：completed bridge 包含至少 25,000 个 synthetic process
+   event/dedupe claim；断言不调用 HaaS event-page client，且不产生 replay frame。
+3. 对终态 process replay 做短路，并通过既有持久化 readback 路径压缩 bridge；非终态 cursor
+   recovery 与 live broadcast 行为保持不变。
+4. 重新构建、打包并覆盖安装现有应用；重新打开同一个真实会话，以不记录消息正文的方式采集
+   history/socket ready、health latency、sidecar CPU、保留的 transcript/tool 数量及重启后行为。
+
+该变更只影响 Manager 内部 reconnect projection。ADK REST/SSE、`/v1/haas/*`、持久化 canonical
+event、evidence authorization、session id 与 live turn 顺序均不改变。回滚只需撤销 terminal replay
+guard 与 serialization compaction；旧 reader 已能接受空 dedupe array，因此不需要 store migration。
+
+MCX-048 纠偏复用现有 `prefs.models` 作为显式 enabled-model 集合。`add_model` 对 matrix 与 custom id
+都进行持久化，`remove_model` 删除任意一种；`get_settings.models` 返回该集合与 provider
+executability 的交集。既有显式/custom 条目继续启用；静态 matrix 与 active default 不再隐式成为
+成员。Settings 继续渲染 provider `suggested_models`，因此 disabled model 仍可发现。聚焦测试覆盖：
+配置了多个 suggested model 的 provider、add/remove 持久化、不可用历史 default，以及本机现有
+preference shape。Settings 加载不新增实时 provider 调用，API key 值不离开 SecretStore。
+
+MCX-055 只在 adapter normalizer 内使用 native `toolName` 生成安全语义 `activityKind` 与有界 human
+action，随后在 bridge persistence 与 REST rehydration 前丢弃 raw MCP server/tool identity。Normalizer
+根据 allowlist 内的 MCP tool-name verb 归类到既有 `read`、`search`、`edit`、`command` 或 `tool`
+kind；未知名称退化为本地化 kind label，不暴露 argument。`TurnWork` 删除 model-evidence disclosure
+及其专用组件/CSS/文案。Model stage 继续作为私有 projection input，并生成 Manager-owned MCX-059
+round row，不暴露 native id、ordinal、provider label、reasoning transcript 或 usage；同时保证
+chronological tool ownership、terminal child-state convergence 与 aggregate usage 不回归。测试覆盖
+混合 chronological activity、MCP list-resource normalization、非 command 的 command
+preview 抑制、历史 generic-summary fallback，以及 unit/production-preview 中不存在任何 model-call UI。
+缺少 `kind` 的历史 activity 必须能安全接收后续 generic terminal update，不得抛异常，并保留其安全
+summary、以 `tool` 作为 kind fallback。
+
+MCX-056 在 `StreamBridgeState` 增加唯一 final-response selector，并同时供 terminal event publication
+与 Manager REST rehydration 使用。既有 ADK text accumulator 只作为没有 phase-aware model stage 的
+adapter fallback。Manager 不再发布中间 HaaS `assistant_delta`；reasoning summary 继续更新所属
+MCX-051 inference row，
+terminal `assistant_message` 只发布选中的 result。测试覆盖 `commentary -> tool -> final_answer`、成功的
+legacy 无 phase output，以及失败且只有 commentary 的 turn，并验证 live completion 与 restart 一致。
+Reconnect 用例还必须从同一 invocation 的已持久化 stale assistant row 开始，证明 REST history 会替换其
+权威 content/activity/outcome 字段，同时保留稳定 row identity 与 timestamp。
+
+MCX-059 是基于既有持久化 `modelStages` 的 GUI projection delta；不新增 HaaS/ADK route、event、
+credential 或 storage schema。Projector 对每个 stage 生成一个 Manager-owned round，只选择该 stage
+最后一条非空 `reasoning_summary`，并关联既有 tool reference。`TurnWork` 对 live publication 与 REST
+history 使用同一 round model，列表限制为 320 px、保留 per-round disclosure override，并且只有一个
+running motion owner。聚焦 projection/component test 覆盖同一 stage 多段 summary、多 stage、summary
+缺失或语言不匹配、tool label 隔离、terminal convergence 与 replay parity；production-preview fixture
+在不采集 summary 内容的前提下验证 row count/order、默认展开、animation/reduced-motion 与最终回答顺序。
 
 ### 14.3 需求到用例追溯
 
@@ -903,8 +992,8 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-R02 | MCX-001、MCX-002、MCX-003 |
 | MCX-R03 | MCX-002、MCX-004、MCX-017 |
 | MCX-R04 | MCX-005、MCX-006、MCX-007、MCX-008 |
-| MCX-R05 | MCX-003、MCX-008、MCX-009、MCX-010、MCX-011、MCX-013、MCX-046、MCX-047 |
-| MCX-R06 | MCX-014、MCX-015、MCX-016、MCX-018、MCX-019 |
+| MCX-R05 | MCX-003、MCX-008、MCX-009、MCX-010、MCX-011、MCX-013、MCX-046、MCX-047、MCX-054 |
+| MCX-R06 | MCX-014、MCX-015、MCX-016、MCX-018、MCX-019、MCX-063 |
 | MCX-R07 | MCX-024、MCX-025、MCX-026 |
 | MCX-R08 | MCX-011、MCX-012、MCX-018、MCX-024 |
 | MCX-R09 | MCX-020、MCX-021、MCX-022 |
@@ -915,7 +1004,7 @@ W6 明确删除或替换当前 `WsEvent.data: any`、transcript `Item` adjacency
 | MCX-R14 | MCX-009、MCX-029、MCX-032、MCX-038 |
 | MCX-R15 | MCX-022、MCX-030、MCX-038 |
 | MCX-R16 | MCX-011、MCX-012、MCX-031、MCX-039、MCX-047 |
-| MCX-R17 | MCX-023、MCX-029、MCX-032、MCX-033、MCX-034、MCX-046 |
+| MCX-R17 | MCX-023、MCX-029、MCX-032、MCX-033、MCX-034、MCX-046、MCX-051、MCX-059、MCX-060、MCX-061、MCX-062 |
 | MCX-R18 | MCX-016、MCX-018、MCX-019、MCX-035、MCX-036、MCX-037、MCX-045 |
 | MCX-R19 | MCX-004、MCX-009、MCX-010、MCX-012、MCX-020、MCX-053 |
 
@@ -963,8 +1052,9 @@ Packaged desktop 证据使用 `manager/packaging/build_dmg.sh` 与 `manager/pack
 | 11a | 增加原子 session activation | 有界 per-session MRU projection cache、显式 loading/error state、stale-request guard 与 cached refresh | MCX-004/010/020/053 | 3,11 |
 | 12 | 增加 conversation navigation 与 semantic context | Search/turn navigation 与 typed context chip | MCX-027/028 | 10-11 |
 | 13 | Responsive、hierarchy 与 motion polish | 全目标宽度/主题的 Focused Workbench | MCX-016/018/019/024/035-037/039/045 | 9-12 |
-| 14 | 删除 legacy | 移除旧 owner、stream heuristic、model-stage UI/CSS/copy、过时 test 与 migration flag | MCX-026/030/031 | 2-13 |
-| 15 | Release review | 必需 review 与完整 gate | 全部用例 | 14 |
+| 14 | 删除 legacy | 移除旧 owner、stream heuristic、native model-stage/evidence UI、过时 test 与 migration flag | MCX-026/030/031 | 2-13 |
+| 14a | 增加 per-round inference disclosure | Manager-owned round projection、无摘要语义标题、仅摘要 row、current-round motion、隐藏内部 scrollbar 与历史默认折叠 | MCX-051/055/059/060/061 | 14 |
+| 15 | Release review | 必需 review 与完整 gate | 全部用例 | 14a |
 
 每个实现任务必须先编写映射到上表的失败 unit、contract 或 E2E assertion，再实现最小行为，最后在命名组件边界内重构。
 
@@ -1024,7 +1114,7 @@ Task 1 完成后，Task 2-4 可拆成小提交。Task 5 是完成的必要条件
 | 删除 legacy 破坏旧持久历史 | 只在旧 durable record 仍需要时保留一个 data migration adapter；旧 renderer 必须删除 |
 | 不同 harness 的 answer/reasoning 分类不同 | 在 transport/projection boundary 归一化；未知安全 assistant text 归入 answer，不从内容猜测 |
 | 折叠 work 隐藏可操作 failure | Active interaction 与第一个可操作 failure 保持在默认折叠的成功详情之外 |
-| 删除 stage UI 降低诊断能力 | Model-call correlation、per-call usage 与有界原始 evidence 保留在 Inspector/diagnostics，不进入主 timeline |
+| 删除 stage UI 降低诊断能力 | Model-call correlation 与 per-call usage 保留在内部 diagnostics；有界 raw tool evidence 仅进入 inline activity detail，不得进入 model-call 会话面板 |
 | Stable answer DOM 与 virtualization 冲突 | Active turn 留在非虚拟 live tail，完成时原子封存进 history |
 | 缓存 history 过期或内存无界增长 | Cache 只负责即时展示，始终向权威 history 刷新；最多保留五个 session projection，并继续使用 request generation 丢弃过期 response |
 
@@ -1112,3 +1202,19 @@ IndexedDB 与重启；打包检查覆盖可见且可交互的窗口、已有历�
 继续持有唯一 chronological tool-activity projection、短暂 current-action summary 与 inline ActivityInspector。Project surface
 可打开该 owner，但不得再渲染第二个 command detail surface。Accepted project/workspace/endpoint
 identity 是 conversation 输入，不能从 transcript 内容推断。
+
+### MCX-064：工作目录初始化失败恢复
+
+必需目录无效是会话初始化失败，不是任务已完成。Manager 在 error.data 上增加
+`code=workspace_unavailable`、`retryable=false`、`recoveryAction=restore_workspace`，
+以 1008 关闭连接。项目绑定失败同样携带结构化不可自动重试的初始化错误。GUI 停止
+该会话自动重连，正文之外只显示一条本地化提示，保留草稿和历史，不生成成功状态或
+重复重试消息。普通网络故障保留有界重连。提示提供恢复原目录后的主动重新检查、
+新项目目录选择器两个入口。不同目录创建新会话，不重定向已接受绑定。ready 或导航
+清除初始化阻塞，阻塞期间防止发送和执行重试。普通任务错误在乐观清理/turn_done 后
+仍保持失败。
+
+任务及验收：生产端/解码器增量协议、会话重连门禁及提示；验证重复失败经过重连周期后
+只有一条提示且不新增连接/成功页脚、主动检查只连接一次、导航和普通网络故障恢复。
+双主题、键盘及窄屏复用中性提示/按钮 token。仅 Manager 本地增量变更，不改 ADK/HaaS
+API、事件、adapter、model/MCP 策略、容器和 secret 边界，错误无需携带原始路径。

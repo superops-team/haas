@@ -265,10 +265,6 @@
       "cancelled": "Stopped"
     },
     "reasoning": "Reasoning",
-    "evidence": "Execution details",
-    "model_call": "Model call {{number}}",
-    "input_tokens": "Input tokens",
-    "output_tokens": "Output tokens",
     "end_task": "End task",
     "activities_one": "{{count}} action",
     "activities_other": "{{count}} actions",
@@ -345,6 +341,7 @@
         "read": "Read files",
         "search": "Searched",
         "edit": "Edited files",
+        "recall": "Recall context",
         "tool": "Used a tool"
       },
       "status": {
@@ -432,9 +429,10 @@
     "office_no_preview": "This {{type}} file can't be previewed here.",
     "pdf_error": "Could not render PDF: {{error}}",
     "pdf_rendering": "Rendering PDF…",
-    "sheet_error": "Could not parse spreadsheet: {{error}}",
     "sheet_parsing": "Parsing spreadsheet…",
-    "sheet_empty": "Empty sheet.",
+    "sheet_unavailable": "This spreadsheet can't be previewed here.",
+    "sheet_too_large": "This spreadsheet is too large to preview (maximum 25 MB).",
+    "sheet_tabs": "Workbook sheets",
     "open_in_default": "Open in default app",
     "show_in_folder": "Show in folder",
     "show_folder": "Show the folder where these files are saved",
@@ -462,6 +460,10 @@
     "download": "Download",
     "download_only": "This artifact can't be previewed here. Download it to open it.",
     "preview_unavailable": "Artifact preview is unavailable.",
+    "file_preview_read_only": "{{name}} — read-only file preview",
+    "file_preview_large": "Syntax highlighting is off for large files.",
+    "file_preview_truncated": "Only part of this file is shown. Syntax highlighting is off.",
+    "file_preview_load_failed": "The enhanced preview could not load. Showing plain text.",
     "open_in_browser": "Open in browser",
     "reveal_in_finder": "Reveal in Finder",
     "folder_empty": "This folder is empty.",
@@ -641,6 +643,10 @@
     "automation_fallback": "Automation"
   },
   "app": {
+    "workspace_unavailable": "This workspace is unavailable. Restore the folder and check again, or choose a folder for a new conversation.",
+    "project_binding_unavailable": "This project binding is unavailable. Restore the project or choose a new workspace.",
+    "workspace_recheck": "Check again",
+    "workspace_new_project": "Choose new project folder",
     "client_upgrade_required": "This OpenHarness client is out of date. Reload to continue.",
     "reload": "Reload",
     "server_restarting": "Execution service is restarting. Existing work will be checked before any retry.",

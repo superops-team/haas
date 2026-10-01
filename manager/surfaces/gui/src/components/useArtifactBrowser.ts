@@ -7,15 +7,18 @@ import {
   type ArtifactInfo,
   type RootInfo,
 } from "../api";
+import { resolveFileLanguage } from "./codeFilePreviewModel";
 
-function kindFromPath(path: string): string {
+export function kindFromPath(path: string): string {
   const ext = (path.split(".").pop() || "").toLowerCase();
   if (["png", "jpg", "jpeg", "gif", "svg", "webp"].includes(ext)) return "image";
-  if (["html", "htm"].includes(ext)) return "html";
+  if (["html", "htm", "xhtml"].includes(ext)) return "html";
   if (ext === "md") return "markdown";
   if (ext === "csv") return "csv";
   if (ext === "pdf") return "pdf";
-  if (["py", "js", "ts", "tsx", "jsx", "json", "sh", "css"].includes(ext)) return "code";
+  if (["xlsx", "xlsm", "xls"].includes(ext)) return "sheet";
+  if (["pptx", "ppt", "pptm", "docx", "doc", "docm"].includes(ext)) return "office";
+  if (resolveFileLanguage(path) !== "plaintext") return "code";
   return "text";
 }
 

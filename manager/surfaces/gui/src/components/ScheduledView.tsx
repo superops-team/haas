@@ -43,7 +43,7 @@ function toCron(time: string, freq: string): string {
 // The §28 page shell: full-bleed main, centered ≤4xl column — same as Connectors/Activity/Inbox.
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <main className="flex-1 min-w-0 flex bg-paper">
+    <main className="flex-1 min-w-0 flex bg-paper" data-page-window-surface>
       <div className="flex-1 min-w-0 overflow-y-auto hairline-scroll">
         <div className="max-w-4xl mx-auto px-7 py-6">{children}</div>
       </div>
@@ -382,7 +382,7 @@ function TaskDetail({
               placeholder={tt("automations.title_label")}
             />
           ) : (
-            <h2 className="text-[20px] font-semibold tracking-tight" data-page-drag-region data-tauri-drag-region>{task.title}</h2>
+            <h2 className="text-[20px] font-semibold tracking-tight" data-page-drag-region>{task.title}</h2>
           )}
           <div className="sched-actions">
             {editing ? (

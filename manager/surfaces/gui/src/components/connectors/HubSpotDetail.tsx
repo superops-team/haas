@@ -154,7 +154,7 @@ function PrivacyGroup({ c, onChanged }: Pick<DetailProps, "c" | "onChanged">) {
     <>
       <div className={GRP_H}>{t("hubspot.access_privacy")}</div>
       <div className={GRP}>
-        <div className={ROW} data-testid="hubspot-hidden-fields">
+        <div className={`${ROW} field-input-shell-embedded`} data-testid="hubspot-hidden-fields">
           <span className={LABEL}>{t("hubspot.hidden_fields")}</span>
           <span className="min-w-0 flex-1 flex flex-wrap items-center gap-1.5">
             {fields.map((f) => (

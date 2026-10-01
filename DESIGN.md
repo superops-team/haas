@@ -35,8 +35,9 @@ noun. Reuse existing typed model and component boundaries.
 | Object | Responsibility | Presentation rule |
 |---|---|---|
 | Session / task context | Workspace, configured harness, model, policy, history | Stable context; switching panes does not stop execution |
-| Product turn | One accepted request and its work/result | One top-level unit; model calls are evidence inside it |
-| Work segment | Ordered work before/after accepted guidance or a decision | Compact disclosure; do not manufacture phases from provider calls |
+| Product turn | One accepted request and its work/result | One top-level unit; model rounds stay bounded inside its work region |
+| Inference round | One canonical model stage and its safe progress summary | One compact row; never expose model-call id, ordinal, provider label, or raw reasoning |
+| Work segment | Ordered tools before/after accepted guidance or a decision | Inline detail owned by its inference round; do not manufacture phases from prose |
 | Assistant response | User-visible answer from first delta through sealing | Stable identity and DOM owner; never move text after a length threshold |
 | Activity / tool | Typed action, safe summary, status, evidence reference | Summary first; detail and model evidence expand inline on demand |
 | Pending interaction | Approval or structured input needing the user | One stable dock, identified decision, explicit scope and outcome |
@@ -52,7 +53,7 @@ must not simulate steering, pause, or successful delivery.
 
 | Rule | Required behavior | Existing acceptance contract |
 |---|---|---|
-| AI-01 Product turn first | Eight model calls still produce one turn, work summary, and stable answer | MCX-029/030/032 |
+| AI-01 Product turn first | Eight model calls still produce one turn and stable answer, with eight bounded summary rows inside work rather than peer cards | MCX-029/030/032/059 |
 | AI-02 Separate facts, commands, and local state | ACK means accepted; terminal facts establish completion. Unknown acceptance reconciles identity before retry | MCX-001/002/003/009/010 |
 | AI-03 Preserve user intent | Session-scoped drafts; clear only accepted revision; queue changes cannot lose context or duplicate work | MCX-004/005/006/007/008/028 |
 | AI-04 One decision owner | Restore interaction before conflicting actions; retain resolved outcome without duplicating active form | MCX-011/014/015 |
@@ -103,7 +104,7 @@ These contracts apply to existing components; they do not mandate additional wra
 | Component / current home | Receives | Owns | Must not own |
 |---|---|---|---|
 | ConversationTimeline / ConversationView | Projected turns, live tail | Reading order, anchor, bounded history | Transport or runtime lifecycle |
-| TurnWork | Work facts, presentation, disclosure | One current-action summary; typed tool/evidence disclosures | Model-call cards, durable reasoning rows, or independent run-state inference |
+| TurnWork | Work facts, inference rounds, presentation, disclosure | One safe summary row per round; latest-running motion; typed tool/evidence disclosures | Native model-call labels, raw reasoning transcript, or independent run-state inference |
 | AssistantResponse / MessageContent | Stable response and content | Incremental readable answer | Relocation of answer text |
 | PendingInteractionDock | Typed interaction and callbacks | Single decision surface and focus | Shadow approval state |
 | ConversationComposer / ContextChips | Draft scope, availability, context | Editing, acceptance feedback, quiet controls | Treating ACK as completion |
@@ -213,12 +214,12 @@ when it removes a demonstrated duplicate responsibility.
   or evidence does not call `scrollIntoView`; after the user scrolls either the bounded work region
   or the transcript, late detail rendering preserves that position. Only explicit Jump to latest,
   a session switch, or a new foreground turn may resume transcript following.
-- Active work uses one single-line, ellipsized current-action label. The latest safe reasoning or
-  tool summary replaces the previous label in place and may use one restrained gradient text
-  animation; the spinner does not animate at the same time. Reduced motion uses a static color.
-  Terminal history uses its completed/failed/cancelled label and never retains reasoning rows.
-  When work is expanded, a terminal failure/outcome summary follows the activity list instead of
-  preceding it, so the semantic conclusion remains the last item the user reads.
+- Active work renders one single-line, ellipsized safe-summary row per canonical inference round.
+  Multiple reasoning chunks update only their owning row; tool lifecycle never supplies that label.
+  Historical terminal rows default collapsed, while the newest running row defaults expanded and
+  owns the only rotating status indicator. Reduced motion keeps the indicator static. Native model
+  ids/ordinals and raw reasoning stay hidden. A terminal failure/outcome summary follows the bounded
+  round/activity list, and the assistant response remains the last substantive content.
 - The document root is fixed and non-scrollable. Trackpad/wheel gestures over blank chrome never
   move or rubber-band the whole WebView; only explicit scroll containers consume the gesture and
   they contain overscroll at their boundaries.
@@ -258,7 +259,7 @@ these roles constrain usage.
 | Spacing | `--space-1` through `--space-6` | 4 px scale; group spacing at least twice item spacing |
 | Radius | `--radius-surface/control/compact` | 12/8/6 px; inner visible containers should not have larger radii |
 | Accent / feedback | `--color-accent`, success/warning/danger roles | Sparse emphasis or actual semantic state |
-| Focus | `--color-focus-ring`, `--color-composer-focus-border` | Composer uses neutral border; no glow, tint, or shadow |
+| Focus | `--color-focus-ring`, `--color-field-focus-border` | Text fields and Composer use one neutral border with no outer ring, glow, tint, or shadow; discrete controls retain the accessible focus ring |
 | Motion | `--motion-fast`, `--motion-work` | Brief feedback; one compact work indicator when appropriate |
 
 New/migrated conversation components must not add raw colors, arbitrary font sizes, radii,
@@ -270,6 +271,12 @@ update. Do not change root font size to shrink the UI. Mobile editable text uses
 Typography and spacing establish hierarchy before borders/fills. Default controls are neutral;
 brand color is reserved for meaningful emphasis. Avoid gradients, glowing input rings, giant
 processing buttons, repeated badges, and state-colored cards for ordinary activity.
+
+Editable text controls across conversation and full-page routes share one focus treatment. A
+bordered input, textarea, or select replaces its idle border with `--color-field-focus-border` and
+adds no outline or shadow. Borderless controls delegate the same treatment to their owning shell
+through `:focus-within`. Brand-blue rings remain reserved for keyboard focus on discrete controls
+such as buttons, links, checkboxes, and custom interactive widgets.
 
 Project navigation is a dense control surface, not reading copy. Project names and conversation
 titles use `--text-navigation` at 12 px with a 1.35 line height; relative time remains the 11 px

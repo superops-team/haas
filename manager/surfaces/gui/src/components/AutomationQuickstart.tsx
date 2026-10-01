@@ -240,7 +240,7 @@ export function AutomationQuickstart({
 
   const label = "block text-[12px] text-muted mt-3 mb-1";
   const input =
-    "w-full px-3 py-2 rounded-lg border border-line bg-panel text-[13px] outline-none focus:border-accent";
+    "w-full px-3 py-2 rounded-lg border border-line bg-panel text-[13px] outline-none";
 
   return (
     <div className="mb-4">
@@ -372,7 +372,7 @@ export function AutomationQuickstart({
                   />
                 </div>
                 <input
-                  className="w-28 px-3 py-2 rounded-lg border border-line bg-panel text-[13px] outline-none focus:border-accent"
+                  className="w-28 px-3 py-2 rounded-lg border border-line bg-panel text-[13px] outline-none"
                   type="time"
                   aria-label={t("automations.time_aria")}
                   value={time}

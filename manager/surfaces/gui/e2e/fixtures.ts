@@ -1,4 +1,5 @@
 import { test as base, expect, type Page } from "@playwright/test";
+import { spreadsheetFixture } from "./spreadsheet-fixture";
 
 export const HAAS_ACTIVITY_COMMAND =
   "git status --short --branch && git diff --stat && git diff --cached --stat && git log --oneline --decorate --max-count=20 && git worktree list --porcelain";
@@ -376,6 +377,11 @@ const AUTOMATION_RUNS = [
 ];
 
 const PRIMARY_ROOT = { path: "/Users/test/OpenWorker/launch-note", writable: true, label: "scratch", primary: true, exists: true };
+const FILE_PREVIEW_SOURCE = Array.from(
+  { length: 10_000 },
+  (_, index) => `const value${index} = ${index};`,
+).join("\n");
+const FILE_PREVIEW_LARGE_TEXT = "x".repeat(512 * 1024);
 const baseName = (p: string) => p.split("/").filter(Boolean).pop() || p;
 
 const PROVIDERS = [
@@ -1392,6 +1398,10 @@ export async function mockApi(page: import("@playwright/test").Page) {
           entries: [
             { name: "reports", dir: true, size: 0 },
             { name: "notes.md", dir: false, size: 128 },
+            { name: "example.ts", dir: false, size: 76 },
+            { name: "performance.ts", dir: false, size: FILE_PREVIEW_SOURCE.length },
+            { name: "large.txt", dir: false, size: FILE_PREVIEW_LARGE_TEXT.length },
+            { name: "workbook.xlsx", dir: false, size: spreadsheetFixture.byteLength },
           ],
         });
       }
@@ -1405,6 +1415,28 @@ export async function mockApi(page: import("@playwright/test").Page) {
       }
       if (reqPath.endsWith("notes.md")) {
         return json({ ok: true, path: reqPath, kind: "markdown", content: "# Notes\n\nhello from the explorer" });
+      }
+      if (reqPath.endsWith("example.ts")) {
+        return json({
+          ok: true,
+          path: reqPath,
+          kind: "code",
+          content: "export const answer: number = 42;\nconsole.log(answer);",
+        });
+      }
+      if (reqPath.endsWith("performance.ts")) {
+        return json({ ok: true, path: reqPath, kind: "code", content: FILE_PREVIEW_SOURCE });
+      }
+      if (reqPath.endsWith("large.txt")) {
+        return json({ ok: true, path: reqPath, kind: "text", content: FILE_PREVIEW_LARGE_TEXT });
+      }
+      if (reqPath.endsWith("workbook.xlsx")) {
+        return json({
+          ok: true,
+          path: reqPath,
+          kind: "sheet",
+          data_url: `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${spreadsheetFixture.base64}`,
+        });
       }
       return json({
         ok: true,

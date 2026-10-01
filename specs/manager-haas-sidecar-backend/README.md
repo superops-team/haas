@@ -1015,6 +1015,17 @@ the turn may continue, but Manager records the degraded capability through the H
 and ordinary task outcome path. External arbitrary MCP materialization remains unsupported
 for the local Codex path until the full MCP runtime contract is implemented.
 
+The built-in source implements the stateless Streamable HTTP lifecycle needed by the pinned Codex
+client. `initialize`, `tools/list`, and `tools/call` return JSON-RPC responses; the
+`notifications/initialized` notification returns HTTP 202 with an empty body and MUST NOT be
+converted into `-32601 Method not found`. Unknown requests with an `id` still return a structured
+JSON-RPC error. Tests execute the complete initialize-notification-list-call sequence rather than
+calling `tools/call` in isolation.
+Because `recall` is Manager-owned, read-only, loopback-only, session-scoped, and independently
+authenticated, its generated Codex MCP config sets `default_tools_approval_mode="approve"` so the
+call cannot stall behind an unprojected generic MCP approval. No external MCP server inherits this
+exception.
+
 Retry and recovery recall MUST merge the persisted transcript with the latest HaaS
 `stream_bridge` checkpoint before filtering. This covers the window where a failed or
 interrupted HaaS turn has persisted its visible user message, terminal notice, and bridge
@@ -1093,3 +1104,178 @@ fingerprint, workspace binding, harness/profile/policy revisions, and remote wor
 at first acceptance. Remote selection never serializes a Manager local path or host mount. A failed
 remote endpoint remains a structured blocked target and MUST NOT fall back to `local_managed`.
 Changing project defaults affects drafts/new sessions only; accepted sessions retain their binding.
+
+## Desktop Restart and Reinstall Task Recovery (`manager-restart-task-recovery-v1`)
+
+### Background and product boundary
+
+The desktop currently terminates its owned Manager child immediately on exit. After a restart or
+local reinstall, HaaS can reconcile a persisted local `running` invocation that no longer has a
+live adapter owner to `incomplete(sidecar_restart_execution_lost)`, but Manager only repairs
+commands that never reached a transcript checkpoint. A checkpointed command can therefore remain
+`accepted/running` while its HaaS invocation is terminal and no Codex app-server owns the work. The
+session then renders a false running state and a Stop action that cannot stop anything.
+
+This design has two distinct guarantees:
+
+1. A desktop-owned update/restart is a graceful recovery path. Manager pauses each pause-capable
+   HaaS invocation, waits for the authoritative `interrupted` terminal, and persists a
+   restart-owned continuation marker before the desktop terminates its children. The next launch
+   automatically continues the same logical task through HaaS native resume semantics.
+2. A crash, force kill, power loss, or external replacement that did not complete the pause barrier
+   is fail closed. Startup reconciles the exact accepted invocation and persisted events; it never
+   resubmits the prompt or invents a new idempotency key. If live ownership or native continuation
+   cannot be proven, the task becomes visible `incomplete` with a safe retry/continue action rather
+   than remaining falsely running.
+
+P0 goals are to reconcile every checkpointed `accepted/running` conversation command after the
+owned HaaS endpoint is ready; reattach the same invocation when authoritative readback proves a
+live owner; atomically converge terminal events, task outcome, binding control and command receipt;
+gracefully pause and automatically continue pause-capable local HaaS work across desktop-driven
+restart/update/reinstall; and expose Stop only for a currently bound active invocation owner.
+
+Non-goals are automatic prompt replay after a crash or `sidecar_restart_execution_lost`, claiming
+instruction-pointer continuation when a harness only supports durable session/thread continuation,
+and recovering non-HaaS in-process providers in this slice. ADK, HaaS invocation/canonical-event,
+container, model-proxy, MCP and credential schemas do not change.
+
+### Durable state and startup reconciliation
+
+Manager stores only additive secretless facts in the existing HaaS binding:
+
+```json
+{
+  "restartRecovery": {
+    "generation": "restart_<opaque>",
+    "state": "preparing|paused|reattaching|continued|recovery_required",
+    "sourceInvocationId": "inv_...",
+    "requestedAtMs": 1786400000000,
+    "reasonCode": "desktop_restart|sidecar_restart_execution_lost|backend_unavailable"
+  }
+}
+```
+
+The generation is one opaque local idempotency identity per desktop restart request, not a
+credential. This object MUST NOT contain the prompt, complete tool arguments or output, bearer
+token, provider credential, signed URL, or host path.
+
+`conversation_commands` gains one nullable additive `execution_ref`. When the normal turn path
+observes an accepted delegated `turn_start`, it checkpoints the Manager `turn_id` and binds the
+latest exact HaaS `invocationId` in the same command-store transaction. A structured-plan
+continuation within that same Manager turn may advance the reference only in observed acceptance
+order; unrelated callers cannot replace it. Startup primarily joins receipt to bridge by this
+reference. For
+legacy rows without it, Manager may reconcile only when the session single-writer ordering proves
+there is one current bridge and no newer accepted command; older running rows are then terminalized
+as stale predecessors after the current authoritative terminal is persisted. Ambiguous legacy rows
+become `recovery_required` rather than being guessed or replayed.
+
+`running` is an ownership fact, not a historical receipt. After process start, Manager MUST NOT
+derive running state from persisted `control_state=running` alone. A session is actionable as
+running only after exact invocation readback and `_bind_active_haas_turn` establish a live recovery
+pump. While proof is pending, Manager projects additive local recovery state `recovering` with no
+Stop action. This does not extend the six-value HaaS execution-control contract or ADK state.
+Queue recovery follows the same boundary: a `dispatching` item with no checkpoint returns to a
+paused queue, while a checkpointed item remains attached to its accepted invocation and MUST NOT be
+requeued. Terminal reconciliation removes that queue item exactly once.
+
+After the owned HaaS endpoint passes execution readiness, Manager scans all checkpointed command
+receipts whose disposition is `running`. Reconciliation is single-flight per Manager session and
+bounded across sessions so one remote endpoint cannot delay first paint or project hydration.
+
+| Authoritative readback | Required Manager action |
+|---|---|
+| Invocation is terminal | Consume canonical events after the saved cursor, reconcile the terminal barrier, merge or append one assistant/task-outcome projection, persist `idle` or authoritative `paused`, and terminalize matching stale running receipts. |
+| Invocation is non-terminal and HaaS proves a live owner | Start one background recovery pump for the same invocation, register Manager busy/control ownership, continue from saved cursors, and never POST `/run_sse` again. |
+| Local invocation has no live owner | Let HaaS fencing reconcile it once to retryable `incomplete` with `code=safeReason=sidecar_restart_execution_lost`; consume that terminal and clear false running/Stop state. |
+| Backend is unavailable or ownership is indeterminate | Persist `restartRecovery.state=recovery_required` with safe `backend_unavailable`; expose retryable recovery, not running/completed/failed execution; create no work. |
+| Binding, attempt, bridge, session, or invocation identities disagree | Fail closed as `recovery_required`, emit a safe diagnostic, and do not read or mutate another invocation. |
+
+Repeated process starts, invocation GETs, and WebSocket opens MUST NOT duplicate an assistant row,
+task outcome, tool activity, terminal event, `turn_done`, or command terminalization. Stable Manager
+turn/row identities and bridge invocation/cursors are merge keys. Once the recovered invocation is
+terminal, only receipts that cannot represent a newer active invocation may be terminalized; an
+older recovery result never overwrites a newer accepted invocation.
+
+### Graceful restart and automatic continuation
+
+The authenticated Manager-local mutation `POST /v1/lifecycle/prepare-restart` supports an optional
+`Idempotency-Key` and returns only aggregate safe results:
+
+```json
+{"state":"ready|partial|blocked","generation":"restart_<opaque>","paused":1,"recoveryRequired":0}
+```
+
+It first blocks new foreground sends and queue dispatch, then concurrently requests Pause for each
+Manager-owned pause-capable HaaS invocation with a bounded per-item deadline. Automatic continuation
+is allowed only after HaaS persists the source invocation as `interrupted` and returns
+`sessionControl.controlState=paused`, `supportsResume=true`, and the exact
+`resumableInvocationId`. Manager then persists `restartRecovery.state=paused` for that source.
+Pause timeout, unsupported pause, a pre-acceptance turn, an in-process provider turn, identity
+mismatch, or persistence failure remains `partial|blocked` and is never promoted to auto-resumable.
+
+The Tauri updater and explicit desktop Quit path call this endpoint before child termination and
+wait only for its bounded response. They may still exit after a partial result, but MUST NOT label
+unpaused work recoverable. A crash remains outside this graceful contract.
+
+On the next launch, terminal/readback reconciliation runs first. If a `paused` restart marker still
+matches the authoritative resumable source invocation, Manager atomically claims the session,
+changes the marker to `reattaching`, and invokes existing HaaS Continue once. Continue creates one
+linked invocation on the same durable native session/thread; it does not append a synthetic user
+message or replay the original request. It supplies one fixed Manager-owned continuation instruction
+to inspect current state, avoid repeating completed side effects, finish remaining work, and return
+the final result. Events use the normal bridge. Terminal completion sets the
+marker to `continued`; pre-acceptance failure restores `paused` for manual resume. Repeated startup
+reuses an already accepted linked attempt instead of creating another invocation.
+
+### UX, compatibility, tests, and acceptance
+
+- Project/session shells remain immediate. During readback, the conversation may show a muted
+  localized “Recovering task state…” row. `recovery_required` has no active spinner; no owner means
+  no Stop.
+- A graceful continuation remains in the same conversation and logical user turn. It may add an
+  inference round but never duplicates the user message.
+- A crash orphan ends with a localized interruption explanation and retryable action. Partial
+  reasoning/tool/final evidence remains, and terminal activities stop animating.
+- History without `restartRecovery` is lazily reconciled. No bulk rewrite or legacy renderer is
+  introduced.
+- ADK REST/SSE and `/v1/haas/*` are unchanged. The lifecycle endpoint and recovery projection are
+  authenticated Manager-local additive contracts. Routing, artifact, policy, container and
+  secretless credential contracts are unchanged.
+
+TDD proceeds in seven vertical slices: (1) additive `execution_ref`, deterministic
+`checkpointed_running` command-store scan and idempotent session terminalization; (2) orphan startup reconciliation to one persisted
+`incomplete` outcome, `idle`, and terminal receipt; (3) proven live-owner same-invocation pump with
+no profile sync or `/run_sse`; (4) bounded idempotent prepare-restart with mixed pause capability and
+queue freeze; (5) paused marker to exactly one linked Continue invocation, with pre-acceptance
+failure remaining paused; (6) Tauri updater/Quit preparation before child kill without indefinite
+exit blocking; and (7) packaged restart plus force-kill acceptance.
+
+Packaged acceptance starts a long pause-capable local Codex turn, triggers desktop restart, launches
+the newly installed `.app`, and proves automatic continuation to one canonical terminal result in
+the same conversation with no duplicate user row. A force-kill variant must instead converge to one
+safe `incomplete`, perform no automatic replay, and expose no false running/Stop.
+
+Component impact: Manager command store, session/binding projection, startup lifecycle, desktop
+shutdown, transcript recovery, and packaged smoke are affected. Session Runtime already owns the
+required fenced-orphan and Pause/Continue semantics, so no ADK or HaaS native schema delta is
+required. Harness adapter, model proxy, MCP, artifact store, policy, container runtime, and
+credential schemas are unaffected; their existing secretless/native-resume contracts remain
+prerequisites.
+
+### Restart review corrections
+
+Updater failure before installation commits must leave Manager admission open. macOS/Linux
+prepare only after successful installation immediately before restart; Windows uses the updater
+before-exit hook after verified download/extraction. Explicit Quit retains bounded drain.
+
+Continued product turns may span more than two invocations. Merge all assistant snapshots,
+retain first row/turn/timestamp identity and latest answer/outcome, and preserve predecessor
+activity/model-stage facts. Current invocation readback replaces its fact collection, removing
+stale entries without erasing predecessor facts. Reused ids across invocations stay distinct;
+repeated readback is idempotent.
+
+Tasks/acceptance: failing tests for three continuations followed by current bridge readback,
+stale replacement and stable identity; updater error/success ordering; implement and second-round
+review. Only Manager projection and desktop shutdown ordering change; ADK/HaaS endpoints,
+container, permissions and secret contracts are unaffected.

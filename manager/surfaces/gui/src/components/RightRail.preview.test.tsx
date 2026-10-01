@@ -20,6 +20,12 @@ vi.mock("../api", async () => {
   };
 });
 
+vi.mock("./SpreadsheetPreviewBoundary", () => ({
+  SpreadsheetPreviewBoundary: ({ filename }: { filename: string }) => (
+    <div data-testid="spreadsheet-preview-boundary">{filename}</div>
+  ),
+}));
+
 function rail(
   onPreviewChange: (open: boolean) => void,
   artifactOpenRequest?: { path: string; nonce: number } | null,
@@ -177,6 +183,60 @@ describe("RightRail preview notification", () => {
 
     expect(await view.findByText("Direct read")).toBeTruthy();
     expect(readArtifact).toHaveBeenCalledWith("s1", "output/report.md");
+  });
+
+  it("opens ordinary source files in the single lazy read-only CodeMirror viewer", async () => {
+    vi.mocked(getArtifacts).mockResolvedValue([
+      {
+        path: "src/example.ts",
+        name: "example.ts",
+        kind: "code",
+        size: 25,
+        modified_at: 1,
+      },
+    ]);
+    vi.mocked(readArtifact).mockResolvedValue({
+      ok: true,
+      path: "src/example.ts",
+      kind: "code",
+      content: "const answer: number = 42;",
+    });
+
+    const view = render(rail(vi.fn()));
+    await waitFor(() => expect(getArtifacts).toHaveBeenCalledWith("s1"));
+    fireEvent.click(view.getByTestId("rail-toggle-artifacts"));
+    fireEvent.click(await view.findByRole("button", { name: /example.ts/ }));
+
+    const preview = await view.findByTestId("code-file-preview");
+    expect(preview.getAttribute("data-preview-language")).toBe("typescript");
+    expect(preview.querySelector(".cm-editor")).toBeTruthy();
+    expect(preview.querySelector(".cm-content")?.getAttribute("contenteditable")).toBe("false");
+    expect(view.container.querySelector(".artifact-code")).toBeNull();
+  });
+
+  it("opens spreadsheet artifacts through the lazy safe spreadsheet boundary", async () => {
+    vi.mocked(getArtifacts).mockResolvedValue([
+      {
+        path: "output/report.xlsx",
+        name: "report.xlsx",
+        kind: "sheet",
+        size: 4,
+        modified_at: 1,
+      },
+    ]);
+    vi.mocked(readArtifact).mockResolvedValue({
+      ok: true,
+      path: "output/report.xlsx",
+      kind: "sheet",
+      data_url: "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,AQIDBA==",
+    });
+
+    const view = render(rail(vi.fn()));
+    await waitFor(() => expect(getArtifacts).toHaveBeenCalledWith("s1"));
+    fireEvent.click(view.getByTestId("rail-toggle-artifacts"));
+    fireEvent.click(await view.findByRole("button", { name: /report.xlsx/ }));
+
+    expect((await view.findByTestId("spreadsheet-preview-boundary")).textContent).toBe("report.xlsx");
   });
 
   it("shows an unavailable state when the current artifact read rejects", async () => {

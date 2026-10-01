@@ -15,8 +15,10 @@ import {
 import type { SessionInfo, TodoItem } from "../types";
 import { AccessSection } from "./AccessSection";
 import { BoardSection } from "./BoardPanel";
+import { CodeFilePreviewBoundary } from "./CodeFilePreviewBoundary";
 import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
+import { SpreadsheetPreviewBoundary } from "./SpreadsheetPreviewBoundary";
 import { useArtifactBrowser } from "./useArtifactBrowser";
 
 type Panel = "progress" | "artifacts" | "board" | "journal" | "team" | "files";
@@ -660,7 +662,10 @@ function ArtifactViewer({
         ) : content.kind === "csv" ? (
           <CsvTable text={content.content || ""} />
         ) : content.kind === "sheet" ? (
-          <SheetViewer dataUrl={content.data_url || ""} />
+          <SpreadsheetPreviewBoundary
+            dataUrl={content.data_url || ""}
+            filename={artifact.name}
+          />
         ) : content.kind === "folder" ? (
           // A linked directory (e.g. a skill package): render the listing, click through.
           <div className="artifact-folderlist" data-testid="artifact-folder">
@@ -686,7 +691,12 @@ function ArtifactViewer({
             </button>
           </div>
         ) : (
-          <pre className="artifact-code">{content.content}</pre>
+          <CodeFilePreviewBoundary
+            path={content.path || artifact.path}
+            kind={content.kind}
+            content={content.content || ""}
+            truncated={content.truncated}
+          />
         )}
       </div>
     </div>
@@ -764,10 +774,9 @@ function CsvTable({ text }: { text: string }) {
   return <GridTable rows={rows} />;
 }
 
-// xlsx/xls preview via SheetJS (loaded on demand — it's a heavy module): sheet tabs + a capped
-// grid. Real spreadsheet work belongs in Numbers/Excel via "Open in default app".
 // WKWebView has no inline PDF plugin (<embed> shows a gray pane in the Tauri shell), so we
-// rasterize pages with pdf.js onto stacked canvases — same lazy-chunk pattern as SheetViewer.
+// rasterize pages with pdf.js onto stacked canvases. Spreadsheet preview lives behind its own
+// lazy Worker/WASM boundary above and does not enter this module's synchronous dependency graph.
 function PdfViewer({ dataUrl }: { dataUrl: string }) {
   const { t } = useTranslation();
   const [error, setError] = useState("");
@@ -814,54 +823,6 @@ function PdfViewer({ dataUrl }: { dataUrl: string }) {
     <div className="artifact-pdfjs">
       {loading && <div className="rail-muted artifact-table-note">{t("rail.pdf_rendering")}</div>}
       <div ref={holder} />
-    </div>
-  );
-}
-
-function SheetViewer({ dataUrl }: { dataUrl: string }) {
-  const { t } = useTranslation();
-  const [sheets, setSheets] = useState<{ name: string; rows: unknown[][] }[] | null>(null);
-  const [error, setError] = useState("");
-  const [active, setActive] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    setSheets(null);
-    setError("");
-    setActive(0);
-    const base64 = dataUrl.split(",")[1] || "";
-    import("xlsx")
-      .then((XLSX) => {
-        if (cancelled) return;
-        const wb = XLSX.read(base64, { type: "base64" });
-        setSheets(
-          wb.SheetNames.map((name) => ({
-            name,
-            rows: XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: "" }) as unknown[][],
-          })),
-        );
-      })
-      .catch((e) => !cancelled && setError(String(e?.message || e)));
-    return () => {
-      cancelled = true;
-    };
-  }, [dataUrl]);
-
-  if (error) return <div className="rail-error artifact-table-note">{t("rail.sheet_error", { error })}</div>;
-  if (!sheets) return <div className="rail-muted artifact-table-note">{t("rail.sheet_parsing")}</div>;
-  const sheet = sheets[active];
-  return (
-    <div className="sheet-viewer">
-      {sheets.length > 1 && (
-        <div className="sheet-tabs">
-          {sheets.map((s, i) => (
-            <button key={s.name} className={"sheet-tab" + (i === active ? " active" : "")} onClick={() => setActive(i)}>
-              {s.name}
-            </button>
-          ))}
-        </div>
-      )}
-      {sheet.rows.length ? <GridTable rows={sheet.rows} /> : <div className="rail-muted artifact-table-note">{t("rail.sheet_empty")}</div>}
     </div>
   );
 }

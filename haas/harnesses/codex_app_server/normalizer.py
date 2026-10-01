@@ -271,6 +271,8 @@ def normalize_notification(
             "status": "failed" if failed else "completed",
             "activityKind": _activity_kind(item_type, item),
         }
+        if item_type == "mcpToolCall":
+            completed_artifact["safeSummary"] = _mcp_tool_summary(item, completed=not failed)
         if model_call_id:
             completed_artifact["modelCallId"] = model_call_id
         if item_type == "commandExecution":
@@ -436,6 +438,8 @@ def _activity_kind(item_type: str, item: JsonObject) -> str:
         return "edit"
     if item_type == "webSearch":
         return "search"
+    if item_type == "mcpToolCall":
+        return _mcp_tool_presentation(item)[0]
     if item_type != "commandExecution":
         return "tool"
     actions = item.get("commandActions")
@@ -473,10 +477,63 @@ def _safe_tool_summary(item_type: str, item: JsonObject) -> str:
         count = len(item.get("changes") or [])
         return f"Apply {count} file change{'s' if count != 1 else ''}"
     if item_type == "mcpToolCall":
-        return "Call MCP tool"
+        return _mcp_tool_summary(item, completed=False)
     if item_type == "webSearch":
         return "Search the web"
     return "Call tool"
+
+
+_MCP_ACTION_VERBS: dict[str, tuple[str, str, str]] = {
+    "list": ("read", "List", "Listed"),
+    "read": ("read", "Read", "Read"),
+    "get": ("read", "Get", "Got"),
+    "fetch": ("read", "Fetch", "Fetched"),
+    "view": ("read", "View", "Viewed"),
+    "inspect": ("read", "Inspect", "Inspected"),
+    "search": ("search", "Search", "Searched"),
+    "find": ("search", "Find", "Found"),
+    "query": ("search", "Query", "Queried"),
+    "grep": ("search", "Search", "Searched"),
+    "create": ("edit", "Create", "Created"),
+    "write": ("edit", "Write", "Wrote"),
+    "edit": ("edit", "Edit", "Edited"),
+    "update": ("edit", "Update", "Updated"),
+    "patch": ("edit", "Patch", "Patched"),
+    "apply": ("edit", "Apply", "Applied"),
+    "delete": ("edit", "Delete", "Deleted"),
+    "remove": ("edit", "Remove", "Removed"),
+    "exec": ("command", "Run", "Ran"),
+    "run": ("command", "Run", "Ran"),
+    "shell": ("command", "Run", "Ran"),
+    "command": ("command", "Run", "Ran"),
+    "send": ("tool", "Send", "Sent"),
+    "post": ("tool", "Post", "Posted"),
+}
+_TOOL_NAME_ACRONYMS = {"api", "http", "https", "mcp", "sql", "url"}
+
+
+def _mcp_tool_presentation(item: JsonObject, *, completed: bool = False) -> tuple[str, str]:
+    """Derive a bounded action from a schema-owned MCP tool identifier only."""
+
+    raw = str(item.get("tool") or "").strip()
+    safe = re.sub(r"[^A-Za-z0-9_.:/-]+", " ", raw)[:96]
+    words = [part for part in re.split(r"[_./:-]+", safe) if part]
+    if not words:
+        return "tool", "Used a tool" if completed else "Use a tool"
+    verb = words[0].lower()
+    if verb == "recall":
+        return "read", "Recalled context" if completed else "Recall context"
+    kind, present, past = _MCP_ACTION_VERBS.get(verb, ("tool", "Use", "Used"))
+    remainder = " ".join(
+        word.upper() if word.lower() in _TOOL_NAME_ACRONYMS else word
+        for word in words[1:]
+    )
+    action = past if completed else present
+    return kind, f"{action} {remainder}".strip()
+
+
+def _mcp_tool_summary(item: JsonObject, *, completed: bool) -> str:
+    return _mcp_tool_presentation(item, completed=completed)[1]
 
 
 def _safe_output_summary(tool_name: str) -> str:

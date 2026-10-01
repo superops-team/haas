@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -28,6 +29,7 @@ import { Icon, type IconName } from "./Icon";
 import { personaGlyph } from "./personaIcon";
 import { SearchModal } from "./SearchModal";
 import { baseName } from "../paths";
+import type { ProjectBootstrapPhase } from "../projectBootstrap";
 import {
   sortProjectSessions,
   sortProjects,
@@ -129,7 +131,8 @@ interface Props {
   surfaces: SurfaceVisibility;
   sessions: SessionInfo[];
   projects: ProjectSummary[];
-  projectProjectionReady: boolean;
+  projectBootstrapPhase: ProjectBootstrapPhase;
+  sidecarReady?: boolean;
   activeSession: string;
   onSwitchAgent: (agent: string) => void;
   onNewSession: (agent: string) => void;
@@ -202,6 +205,7 @@ const compactAge = (iso?: string | null): string => {
 
 export function Sidebar(props: Props) {
   const { t } = useTranslation();
+  const sidecarReady = props.sidecarReady !== false;
   const [searchModalOpen, setSearchModalOpen] = useState(false);
   const [appMenuOpen, setAppMenuOpen] = useState(false);
   // Inbox chip sticky unlock (§26): absent until the product first parks an item (or a
@@ -224,6 +228,7 @@ export function Sidebar(props: Props) {
   // (mark-seen must clear the badge the moment the detail opens).
   const [automations, setAutomations] = useState<Automation[]>([]);
   useEffect(() => {
+    if (!sidecarReady) return;
     const load = () => getAutomations().then(setAutomations).catch(() => {});
     load();
     const t = setInterval(load, 15_000);
@@ -232,7 +237,7 @@ export function Sidebar(props: Props) {
       clearInterval(t);
       window.removeEventListener(AUTOMATIONS_CHANGED, load);
     };
-  }, []);
+  }, [sidecarReady]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   // Two-step delete inside the row's ⋮ menu: Delete arms ("Delete?"), a second click deletes.
@@ -452,6 +457,7 @@ export function Sidebar(props: Props) {
   // shows up here immediately (no page refresh).
   const [personas, setPersonas] = useState<Persona[] | null>(null);
   useEffect(() => {
+    if (!sidecarReady) return;
     const load = () =>
       getPersonas()
         .then(setPersonas)
@@ -459,9 +465,19 @@ export function Sidebar(props: Props) {
     load();
     window.addEventListener(PERSONAS_CHANGED, load);
     return () => window.removeEventListener(PERSONAS_CHANGED, load);
-  }, []);
+  }, [sidecarReady]);
   const personaOf = (id: string) => personas?.find((p) => p.id === id);
   const projectFirst = props.projects.length > 0;
+  const projectShell =
+    props.projectBootstrapPhase === "shell" ||
+    (props.projectBootstrapPhase === "degraded" && projectFirst);
+  const projectProjectionReady = props.projectBootstrapPhase === "authoritative";
+  useLayoutEffect(() => {
+    if (typeof performance.mark !== "function") return;
+    if ((projectShell && projectFirst) || projectProjectionReady)
+      performance.mark("haas:project-level-visible");
+    if (projectProjectionReady) performance.mark("haas:project-hierarchy-visible");
+  }, [projectFirst, projectProjectionReady, projectShell]);
 
   // Sidebar layout (§7): "grouped" = the per-coworker accordion; "flat" = a single
   // ungrouped list (Pinned + Recent). Flat stays the default even with Coworkers shipped
@@ -472,6 +488,7 @@ export function Sidebar(props: Props) {
   // Sessions shown per group before "Show more" — Settings ▸ Appearance ▸ Sidebar.
   const [peek, setPeek] = useState(5);
   useEffect(() => {
+    if (!sidecarReady) return;
     getSettings()
       .then((s) => {
         setLayout(
@@ -481,7 +498,7 @@ export function Sidebar(props: Props) {
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [sidecarReady]);
   const setGroupBy = (next: "flat" | "grouped") => {
     setLayout(next);
     setNavLayout(next).catch(() => {});
@@ -1080,23 +1097,27 @@ export function Sidebar(props: Props) {
   const activeProjectId = props.sessions.find(
     (session) => session.session_id === props.activeSession,
   )?.projectId;
-  const orderedProjects = sortProjects(
-    props.projects.filter((project) => !project.archived),
-    props.sessions,
-    props.projectOrder || "manual",
-  );
+  const orderedProjects = projectShell
+    ? props.projects.filter((project) => !project.archived)
+    : sortProjects(
+        props.projects.filter((project) => !project.archived),
+        props.sessions,
+        props.projectOrder || "manual",
+      );
   for (const project of orderedProjects) {
     if (!seen.has(project.projectId)) {
       seen.add(project.projectId);
       projectOrder.push(project.projectId);
     }
   }
-  for (const session of mine) {
-    if (session.projectId && projectById.get(session.projectId)?.archived) continue;
-    const key = session.projectId || session.workspace || "prj_personal";
-    if (!seen.has(key)) {
-      seen.add(key);
-      projectOrder.push(key);
+  if (!projectShell) {
+    for (const session of mine) {
+      if (session.projectId && projectById.get(session.projectId)?.archived) continue;
+      const key = session.projectId || session.workspace || "prj_personal";
+      if (!seen.has(key)) {
+        seen.add(key);
+        projectOrder.push(key);
+      }
     }
   }
 
@@ -1507,7 +1528,7 @@ export function Sidebar(props: Props) {
   // The expanded body for the active surface: a "New session" action, then the project-grouped
   // (or flat) session list, then the archived disclosure.
   const surfaceBody = () => {
-    if (!props.projectProjectionReady) {
+    if (!projectProjectionReady && !projectShell) {
       return (
         <div
           className="project-navigation-loading"
@@ -1530,7 +1551,11 @@ export function Sidebar(props: Props) {
       );
     }
     return (
-      <div className="space-y-1 px-1.5 pb-2 pt-0.5">
+      <div
+        className="space-y-1 px-1.5 pb-2 pt-0.5"
+        data-testid={projectShell ? "project-navigation-shell" : undefined}
+        aria-busy={projectShell ? "true" : undefined}
+      >
         {/* Body is flush inside the expanded group's fill (provided by the wrapper) so the header +
             its sessions read as one connected block — clear where a group ends and the next begins. */}
         {/* No per-persona "New session" here — the top split button's ▾ already starts a session
@@ -1549,6 +1574,7 @@ export function Sidebar(props: Props) {
                   data-testid="project-create-button"
                   title={t("sidebar.new_project")}
                   aria-label={t("sidebar.new_project")}
+                  disabled={projectShell}
                   onClick={() => props.onNewProject(browseKey)}
                 >
                   <Icon name="plus" size={14} />
@@ -1560,6 +1586,7 @@ export function Sidebar(props: Props) {
                   aria-label={t("sidebar.organize_projects")}
                   aria-haspopup="menu"
                   aria-expanded={Boolean(organizeMenu)}
+                  disabled={projectShell}
                   onClick={(event) => {
                     closeProjectOverlays();
                     const position = overlayPosition(event.currentTarget, 248, 360);
@@ -1587,35 +1614,43 @@ export function Sidebar(props: Props) {
                 const activeInOrder = !!activeProjectId && projectOrder.includes(activeProjectId);
                 const defaultOpen = isActive || (!activeInOrder && proj === projectOrder[0]);
                 const persistedOpen = projectOpenOverrides.get(proj) ?? defaultOpen;
-                const open = !!normalizedQuery || persistedOpen;
+                const open = !projectShell && (!!normalizedQuery || persistedOpen);
                 const showAll = !!normalizedQuery || projShowAll.has(proj);
                 const shown = showAll ? list : list.slice(0, peek);
                 return (
                   <div key={proj}>
                     <div
                       className={
-                        "project-sidebar-row group flex items-center rounded-lg select-none hover:bg-panel " +
+                        "project-sidebar-row group flex items-center rounded-lg select-none " +
+                        (projectShell ? "is-shell " : "hover:bg-panel ") +
                         (isActive ? "text-ink" : "text-muted hover:text-ink")
                       }
                       data-testid={`project-row-${proj}`}
-                      onMouseEnter={(event) =>
-                        project && scheduleProjectHover(project.projectId, event.currentTarget)
+                      onMouseEnter={(event) => {
+                        if (!projectShell && project)
+                          scheduleProjectHover(project.projectId, event.currentTarget);
+                      }}
+                      onMouseLeave={projectShell ? undefined : scheduleHoverClose}
+                      onBlur={
+                        projectShell
+                          ? undefined
+                          : (event) => keepOrCloseHover(event.relatedTarget)
                       }
-                      onMouseLeave={scheduleHoverClose}
-                      onBlur={(event) => keepOrCloseHover(event.relatedTarget)}
                     >
                       <button
                         type="button"
                         className="project-sidebar-disclosure"
-                        aria-expanded={open}
+                        aria-expanded={projectShell ? false : open}
+                        disabled={projectShell}
                         aria-describedby={
                           project && projectHover?.projectId === project.projectId
                             ? `project-hover-${project.projectId}`
                             : undefined
                         }
-                        onFocus={(event) =>
-                          project && showProjectHover(project.projectId, event.currentTarget)
-                        }
+                        onFocus={(event) => {
+                          if (!projectShell && project)
+                            showProjectHover(project.projectId, event.currentTarget);
+                        }}
                         onClick={() => {
                           if (normalizedQuery) return;
                           setProjectOpenOverrides((current) => {
@@ -1641,7 +1676,7 @@ export function Sidebar(props: Props) {
                           className="text-faint shrink-0"
                         />
                       </button>
-                      {project && project.projectId !== "prj_personal" && (
+                      {!projectShell && project && project.projectId !== "prj_personal" && (
                         <>
                           <button
                             type="button"
@@ -1680,6 +1715,9 @@ export function Sidebar(props: Props) {
                             <Icon name="moreHorizontal" size={15} />
                           </button>
                         </>
+                      )}
+                      {projectShell && project?.projectId !== "prj_personal" && (
+                        <span className="project-row-shell-actions" aria-hidden="true" />
                       )}
                     </div>
                     {open &&
@@ -1760,8 +1798,8 @@ export function Sidebar(props: Props) {
       {/* Header: collapse/pin control FIRST + wordmark. The pin sits at the same screen position
           as the collapsed reveal button (see .nav-pin-btn / .nav-reveal-btn in styles.css), so
           hovering the reveal peeks the nav and the pin lands right under the cursor — no travel.
-          data-tauri-drag-region drags the window; on desktop the row clears the traffic lights. */}
-      <div className="brand px-3.5 pt-2.5 pb-2 flex items-center gap-2" data-tauri-drag-region>
+          data-page-drag-region delegates one native drag; on desktop the row clears the traffic lights. */}
+      <div className="brand px-3.5 pt-2.5 pb-2 flex items-center gap-2" data-page-drag-region>
         {/* Collapse (dock) / pin the sidebar. ⌘B mirrors this. */}
         {props.onCollapse && (
           <button
@@ -1820,11 +1858,11 @@ export function Sidebar(props: Props) {
       {/* UX-040 rhythm: clear air between the fixed nav block and the content bands. */}
       <div className="flex-1 overflow-y-auto px-2.5 mt-[22px] pb-2">
         <div className="space-y-5">
-          {props.projectProjectionReady && !projectFirst && pinnedBand()}
+          {projectProjectionReady && !projectFirst && pinnedBand()}
           {scheduledBand()}
           <div>
-            {props.projectProjectionReady && !projectFirst && recentHeader()}
-            {!props.projectProjectionReady ? (
+            {projectProjectionReady && !projectFirst && recentHeader()}
+            {!projectProjectionReady && !projectFirst ? (
               surfaceBody()
             ) : projectFirst ? (
               surfaceBody()

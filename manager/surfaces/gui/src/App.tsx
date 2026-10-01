@@ -1,5 +1,5 @@
 import { normalizeUserContext, type ContextReference } from "./conversation/model/context";
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   announceInboxUnlock,
@@ -71,6 +71,16 @@ import type {
 } from "./types";
 import { fullPersonaName, isProjectScoped } from "./personaScope";
 import { baseName } from "./paths";
+import { sortProjects } from "./components/projectNavigation";
+import {
+  projectSummariesFromShell,
+  readProjectSidebarShell,
+  writeProjectSidebarShell,
+} from "./projectSidebarShell";
+import {
+  runWithBootstrapBackoff,
+  type ProjectBootstrapPhase,
+} from "./projectBootstrap";
 import { itemsFromMessages } from "./itemsFromMessages";
 import { addTurnUsage, emptyUsage, usageFromMessages } from "./usage";
 import { normalizeHistory } from "./conversation/model/normalizeHistory";
@@ -154,6 +164,13 @@ const InboxView = lazy(() =>
 interface LoadedSessionHistory {
   items: Item[];
   usage: SessionUsage;
+}
+
+interface ProjectBootstrapRun {
+  sessions: Promise<SessionInfo[]>;
+  recents: Promise<RecentWorkspace[]>;
+  settled: Promise<void>;
+  abort: AbortController;
 }
 const RightRail = lazy(() =>
   import("./components/RightRail").then((module) => ({ default: module.RightRail })),
@@ -292,6 +309,7 @@ export function App() {
   // Bumped to force a socket rebuild on the SAME session id (Save as project… moves the
   // folder server-side; the engine rebinds on reconnect).
   const [connectNonce, setConnectNonce] = useState(0);
+  const [setupFailure, setSetupFailure] = useState<{ sessionId: string; code: string } | null>(null);
   const [showGate, setShowGate] = useState(false);
   const [workspaceTrustRequest, setWorkspaceTrustRequest] =
     useState<WorkspaceCommandTrust | null>(null);
@@ -344,6 +362,7 @@ export function App() {
   const [taskPhase, setTaskPhase] = useState<string | undefined>();
   const [taskOutcome, setTaskOutcome] = useState<TaskOutcome | undefined>();
   const [sessionId, setSessionId] = useState<string>(newId());
+  const setupBlocked = setupFailure?.sessionId === sessionId;
   const [sessionHistory, setSessionHistory] = useState<{
     sessionId: string;
     phase: SessionHistoryPhase;
@@ -399,14 +418,22 @@ export function App() {
   const [todo, setTodo] = useState<TodoItem[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [projects, setProjects] = useState<RecentWorkspace[]>([]);
-  const [projectGroups, setProjectGroups] = useState<ProjectSummary[]>([]);
-  const [projectProjectionReady, setProjectProjectionReady] = useState(false);
+  const [initialProjectShell] = useState(() => readProjectSidebarShell());
+  const [projectGroups, setProjectGroups] = useState<ProjectSummary[]>(() =>
+    projectSummariesFromShell(initialProjectShell),
+  );
+  const [projectBootstrapPhase, setProjectBootstrapPhase] =
+    useState<ProjectBootstrapPhase>(() =>
+      initialProjectShell ? "shell" : "unresolved",
+    );
   const [projectOrderRevision, setProjectOrderRevision] = useState(0);
   const [sidebarOrder, setSidebarOrderState] = useState<SidebarOrderPreferences>({
     projectOrder: "manual",
     conversationOrder: "recent",
   });
   const [haasEndpoints, setHaasEndpoints] = useState<HaasEndpointSummary[]>([]);
+  const [sidecarReady, setSidecarReady] = useState(false);
+  const [projectBootstrapSettled, setProjectBootstrapSettled] = useState(false);
   const [gitWorkspace, setGitWorkspace] = useState<GitWorkspaceSummary | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<ProjectSummary | null>(null);
@@ -618,12 +645,13 @@ export function App() {
     getPersonas().then(setPersonas).catch(() => {});
   }, []);
   useEffect(() => {
+    if (!sidecarReady) return;
     loadPersonas();
     // The composer's coworker picker is always mounted on a fresh session — refetch on
     // mutations (enable/install from Settings) instead of going stale.
     window.addEventListener(PERSONAS_CHANGED, loadPersonas);
     return () => window.removeEventListener(PERSONAS_CHANGED, loadPersonas);
-  }, [loadPersonas]);
+  }, [loadPersonas, sidecarReady]);
   const personaOf = (a: string) => personas?.find((p) => p.id === a);
 
   // Pending Inbox items for the ACTIVE session — surfaced inline above the composer so an
@@ -691,10 +719,32 @@ export function App() {
   // The in-flight manual run to finalize after its first turn ({taskId, runId, sessionId}).
   const activeRunRef = useRef<{ taskId: string; runId: string; sessionId: string } | null>(null);
 
-  // Fetch ALL sessions + known projects so the sidebar can group them.
-  const refreshSessions = useCallback(() => {
-    getSessions()
-      .then((loaded) => {
+  const sidecarReadyRef = useRef(false);
+  const projectBootstrapGenerationRef = useRef(0);
+  const projectBootstrapRunRef = useRef<ProjectBootstrapRun | null>(null);
+  const projectOrderSettingsReadyRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  // One post-health owner starts every project-navigation resource together. Callers such as
+  // restore, mutation refresh, persona events and polling reuse the same run while it is in flight.
+  const startProjectBootstrap = useCallback((): ProjectBootstrapRun | null => {
+    if (!sidecarReadyRef.current) return null;
+    if (projectBootstrapRunRef.current) return projectBootstrapRunRef.current;
+
+    const generation = projectBootstrapGenerationRef.current;
+    const isCurrent = () => generation === projectBootstrapGenerationRef.current;
+    const abort = new AbortController();
+    const sessionsRequest = runWithBootstrapBackoff(getSessions, abort.signal);
+    const recentsRequest = runWithBootstrapBackoff(getRecentWorkspaces, abort.signal);
+    const projectsRequest = runWithBootstrapBackoff(getProjectProjection, abort.signal);
+    const endpointsRequest = runWithBootstrapBackoff(getHaasEndpoints, abort.signal);
+    const projectCommitRequest = Promise.all([
+      projectsRequest,
+      projectOrderSettingsReadyRef.current,
+    ]).then(([projection]) => projection);
+
+    void sessionsRequest.then(
+      (loaded) => {
+        if (!isCurrent()) return;
         setSessions(loaded);
         if (!draftPruneStartedRef.current) {
           draftPruneStartedRef.current = true;
@@ -708,20 +758,76 @@ export function App() {
             draftPruneStartedRef.current = false;
           });
         }
-      })
-      .catch(() => setSessions([]));
-    getRecentWorkspaces().then(setProjects).catch(() => setProjects([]));
-    getProjectProjection()
-      .then((projection) => {
+      },
+      () => {},
+    );
+    void recentsRequest.then((loaded) => isCurrent() && setProjects(loaded), () => {});
+    void projectCommitRequest.then(
+      (projection) => {
+        if (!isCurrent()) return;
         setProjectGroups(projection.projects);
         setProjectOrderRevision(projection.orderRevision);
-        setProjectProjectionReady(true);
-      })
-      // A background refresh failure must not collapse an already-settled project
-      // hierarchy back into the legacy flat-list shape.
-      .catch(() => {});
-    getHaasEndpoints().then(setHaasEndpoints).catch(() => setHaasEndpoints([]));
+        setProjectBootstrapPhase("authoritative");
+      },
+      () => {
+        if (!isCurrent()) return;
+        setProjectBootstrapPhase((current) =>
+          current === "authoritative" ? current : "degraded",
+        );
+      },
+    );
+    void endpointsRequest.then(
+      (loaded) => isCurrent() && setHaasEndpoints(loaded),
+      () => {},
+    );
+
+    const run = {} as ProjectBootstrapRun;
+    run.sessions = sessionsRequest;
+    run.recents = recentsRequest;
+    run.abort = abort;
+    run.settled = Promise.allSettled([
+      sessionsRequest,
+      recentsRequest,
+      projectCommitRequest,
+      endpointsRequest,
+    ]).then(() => {
+      if (projectBootstrapRunRef.current === run) {
+        projectBootstrapRunRef.current = null;
+        if (isCurrent()) setProjectBootstrapSettled(true);
+      }
+    });
+    projectBootstrapRunRef.current = run;
+    return run;
   }, []);
+
+  const refreshSessions = useCallback(() => {
+    void startProjectBootstrap()?.settled;
+  }, [startProjectBootstrap]);
+
+  useEffect(
+    () => () => {
+      projectBootstrapGenerationRef.current += 1;
+      projectBootstrapRunRef.current?.abort.abort();
+      projectBootstrapRunRef.current = null;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (projectBootstrapPhase !== "authoritative") return;
+    const ordered = sortProjects(
+      projectGroups.filter((project) => !project.archived),
+      sessions,
+      sidebarOrder.projectOrder,
+    );
+    const persist = () => writeProjectSidebarShell(ordered);
+    if (window.requestIdleCallback) {
+      const handle = window.requestIdleCallback(persist, { timeout: 1000 });
+      return () => window.cancelIdleCallback(handle);
+    }
+    const handle = window.setTimeout(persist, 0);
+    return () => window.clearTimeout(handle);
+  }, [projectBootstrapPhase, projectGroups, sessions, sidebarOrder.projectOrder]);
 
   useEffect(() => {
     if (!workspaceBindingId) {
@@ -748,7 +854,7 @@ export function App() {
   // until `booting` clears), so an early click can't land on a session that's still settling.
   const [uiReady, setUiReady] = useState(false);
   useEffect(() => {
-    if (!uiReady || connected || serverStatus === "failed") return;
+    if (!uiReady || connected || setupBlocked || serverStatus === "failed") return;
     let attempts = 0;
     const timer = window.setInterval(() => {
       if (++attempts > 6) {
@@ -759,16 +865,21 @@ export function App() {
       setConnectNonce((value) => value + 1);
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [uiReady, connected, serverStatus]);
+  }, [uiReady, connected, setupBlocked, serverStatus]);
 
 
   // On boot with no seeded workspace, reopen the last thing the user had — most recent
   // conversation (restores its folder + agent + transcript), else the most recent project
   // folder. Only a true first run (nothing to resume) falls through to the folder gate.
-  const resumeLastOrGate = async () => {
+  const resumeLastOrGate = async (
+    sessionsRequest?: Promise<SessionInfo[]>,
+    recentsRequest?: Promise<RecentWorkspace[]>,
+  ) => {
     let loadedSessions: SessionInfo[] = [];
     try {
-      loadedSessions = (await getSessions()).filter((s) => s.session_id && !s.session_id.startsWith("__"));
+      loadedSessions = (await (sessionsRequest ?? getSessions())).filter(
+        (s) => s.session_id && !s.session_id.startsWith("__"),
+      );
       setSessions(loadedSessions);
       const sess = loadedSessions;
       const ts = (s: SessionInfo) => Date.parse(s.updated_at || "") || Number(s.updated_at) || 0;
@@ -802,7 +913,7 @@ export function App() {
       /* fall through */
     }
     try {
-      const recents = await getRecentWorkspaces();
+      const recents = await (recentsRequest ?? getRecentWorkspaces());
       setProjects(recents);
       // Only auto-adopt a recent folder for gated surfaces (Code). Cowork starts orphan.
       if (gatesWorkspace(agent)) {
@@ -825,7 +936,13 @@ export function App() {
       getHealth()
         .then(async (h) => {
           if (cancelled) return;
+          if (typeof performance.mark === "function")
+            performance.mark("haas:sidecar-health-ready");
+          sidecarReadyRef.current = true;
+          setSidecarReady(true);
           setModel(h.model);
+          projectOrderSettingsReadyRef.current = loadSettings();
+          const bootstrap = startProjectBootstrap();
           // First-run setup wizard (desktop): show until the user completes/dismisses it.
           if (isTauri()) {
             getSettings()
@@ -838,16 +955,7 @@ export function App() {
           // would provision a junk per-conversation scratch dir for it before resume could
           // flip to the real session. Cowork ignores default_workspace (a Code concept).
           if (h.default_workspace && gatesWorkspace(agent)) setWorkspace(h.default_workspace);
-          else await resumeLastOrGate();
-          // The mount-time loadSettings races the sidecar boot and swallows its failure —
-          // on a cold start that left "Loading models…" stuck until the user visited
-          // Settings (owner-hit 2026-07-23). Health just answered, so this one lands.
-          loadSettings();
-          // Same race, same fix: the mount-time persona fetch loses to the sidecar boot in
-          // the packaged app, and its only other trigger is PERSONAS_CHANGED — so the
-          // composer's coworker picker stayed empty for the whole session while Settings
-          // (mounted later) looked fine (owner-hit 2026-08-13).
-          loadPersonas();
+          else await resumeLastOrGate(bootstrap?.sessions, bootstrap?.recents);
           if (!cancelled) setBooting(false);
         })
         .catch(() => {
@@ -864,7 +972,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [applyTerminalOutcomeFromTranscript]);
+  }, [applyTerminalOutcomeFromTranscript, startProjectBootstrap]);
 
   // Reveal the UI once boot has settled AND the restored session is connected (or we're showing
   // the folder gate). Latched, so later reconnects never flash the splash again.
@@ -881,8 +989,10 @@ export function App() {
     return () => clearTimeout(t);
   }, [uiReady, booting]);
 
-  const loadSettings = () =>
-    getSettings()
+  const settingsRequestRef = useRef<Promise<void> | null>(null);
+  const loadSettings = useCallback(() => {
+    if (settingsRequestRef.current) return settingsRequestRef.current;
+    const request = getSettings()
       .then((s) => {
         setModels(s.models || []);
         setModelLabels(s.model_labels || {});
@@ -894,7 +1004,13 @@ export function App() {
         });
         if (s.surfaces) setSurfaces(s.surfaces);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (settingsRequestRef.current === request) settingsRequestRef.current = null;
+      });
+    settingsRequestRef.current = request;
+    return request;
+  }, []);
 
   // Open Settings → Configure Models (from the composer's "No model connected" chip).
   const openModelSetup = () => openSettings("models");
@@ -902,20 +1018,16 @@ export function App() {
   // Leaving the Settings page: pick up any model/surface changes for the composer (the modal used to
   // do this on close).
   useEffect(() => {
-    if (surface !== "settings") loadSettings();
-  }, [surface]);
-
-  useEffect(() => {
-    refreshSessions();
-    loadSettings(); // selectable models + which session surfaces are visible
-  }, [refreshSessions]);
+    if (sidecarReady && surface !== "settings") loadSettings();
+  }, [sidecarReady, surface]);
 
   // Poll the session list so the attention/liveness badges stay live and sessions created
   // out-of-band (unattended work, messaging, automations) appear without a manual refresh.
   useEffect(() => {
+    if (!projectBootstrapSettled) return;
     const t = setInterval(refreshSessions, 5000);
     return () => clearInterval(t);
-  }, [refreshSessions]);
+  }, [projectBootstrapSettled, refreshSessions]);
 
   // Persona toggles can archive sessions server-side (disable-archives, §18): refetch on the
   // personas-changed event so the sidebar section disappears immediately, not on the next poll.
@@ -1017,7 +1129,7 @@ export function App() {
 
   // (re)connect when workspace, session, or agent changes
   useEffect(() => {
-    if (booting) return; // wait until boot/resume settles the session before connecting
+    if (booting || setupBlocked) return; // setup failures require explicit recovery
     if (
       sessionHistory.sessionId === sessionId &&
       sessionHistory.phase === "loading"
@@ -1079,6 +1191,7 @@ export function App() {
           }
           break;
         case "ready":
+          setSetupFailure(null);
           setConnected(true);
           setServerStatus("");
           if (d.model) setModel(d.model);
@@ -1621,13 +1734,20 @@ export function App() {
           ]);
           break;
         case "error":
-          setTaskPhase("failed");
-          setTaskOutcome({ phase: "failed", retryable: true });
+          if (d.retryable === false && d.recoveryAction === "restore_workspace") {
+            setSetupFailure({ sessionId, code: d.code || "workspace_unavailable" });
+            clearSubmittedTurnIfPending();
+            setRunning(false);
+            setExecutionState("idle");
+            break;
+          }
           clearSubmittedTurnIfPending();
+          setTaskPhase("failed");
+          setTaskOutcome({ phase: "failed", retryable: d.retryable ?? true });
           flushPartialStream();
           setItems((p) => [
             ...p,
-            { kind: "notice", tone: "warn", text: t("app.notice.error") + (d.error || t("app.notice.unknown")), retriable: true },
+            { kind: "notice", tone: "warn", text: t("app.notice.error") + (d.error || t("app.notice.unknown")), retriable: d.retryable ?? true },
           ]);
           break;
         case "input_rejected":
@@ -1735,6 +1855,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     booting,
+    setupBlocked,
     sessionId,
     agent,
     refreshSessions,
@@ -1830,7 +1951,7 @@ export function App() {
       if (
         target instanceof Element &&
         target.closest(
-          ".work-summary, .work-tool, .work-evidence",
+          ".work-summary, .work-tool",
         )
       )
         disableFollowing();
@@ -1942,6 +2063,7 @@ export function App() {
       context?: ContextReference[];
     },
   ) => {
+    if (setupBlocked) throw new Error(t("app.workspace_unavailable"));
     const submissionSessionId = sessionId;
     // UX-029: folder enforcement AT SEND. A code-family session with no folder has no
     // socket yet (the connect effect waits) — stash the message and ask where to work;
@@ -2092,6 +2214,7 @@ export function App() {
     sessionRef.current?.continue();
   };
   const retry = () => {
+    if (setupBlocked) return;
     // Optimistic running: turn_start confirms; a rejected retry still ends in turn_done.
     setRunning(true);
     sessionRef.current?.retry();
@@ -2342,6 +2465,7 @@ export function App() {
     [conversationStore, sessionHistoryLoader],
   );
   const beginSessionHistoryLoad = (id: string): number => {
+    setSetupFailure(null);
     const loadGeneration = ++sessionLoadGenerationRef.current;
     conversationStore.activateSession(id);
     setUsage(emptyUsage());
@@ -2755,67 +2879,136 @@ export function App() {
   // they rendered as misalignments under Windows' native bar (caught 2026-07-21).
   const overlay = (desktop && platformOS() === "macos") || simOverlay;
   const lastInteractiveTitlebarPointerRef = useRef(Number.NEGATIVE_INFINITY);
-  const isInteractiveTitlebarTarget = (target: Element | null) =>
-    Boolean(
-      target?.closest(
-        "button, a, input, textarea, select, [role='button'], [data-no-window-drag]",
-      ),
-    );
-  const beginWindowDrag = (event: PointerEvent) => {
-    if (!desktop || event.button !== 0) return;
-    const target = event.target instanceof Element ? event.target : null;
-    if (isInteractiveTitlebarTarget(target)) {
-      lastInteractiveTitlebarPointerRef.current = performance.now();
-      return;
-    }
-    if (window.getSelection()?.toString()) return;
-    startWindowDrag();
-  };
   useEffect(() => {
     if (!desktop) return;
+    const isWindowDragTarget = (target: Element | null, clientY: number) => {
+      if (!target) return false;
+      if (target.closest("[data-page-drag-region]")) return true;
+      const surface = target.closest<HTMLElement>("[data-page-window-surface]");
+      if (!surface) return false;
+      const bounds = surface.getBoundingClientRect();
+      return clientY >= bounds.top && clientY <= bounds.top + 44;
+    };
+    const isInteractiveTitlebarTarget = (target: Element | null) =>
+      Boolean(
+        target?.closest(
+          "button, a, input, textarea, select, [role='button'], [data-no-window-drag]",
+        ),
+      );
+    const onPointerDown = (event: globalThis.PointerEvent) => {
+      if (event.button !== 0) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!isWindowDragTarget(target, event.clientY)) return;
+      if (isInteractiveTitlebarTarget(target)) {
+        lastInteractiveTitlebarPointerRef.current = performance.now();
+        return;
+      }
+      void startWindowDrag();
+    };
     const onDoubleClick = (event: MouseEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (!target?.closest("[data-tauri-drag-region]")) return;
+      if (!isWindowDragTarget(target, event.clientY)) return;
       if (
         isInteractiveTitlebarTarget(target) ||
-        performance.now() - lastInteractiveTitlebarPointerRef.current < 500 ||
-        window.getSelection()?.toString()
+        performance.now() - lastInteractiveTitlebarPointerRef.current < 500
       )
         return;
       event.preventDefault();
       void toggleWindowMaximize();
     };
+    document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("dblclick", onDoubleClick);
-    return () => document.removeEventListener("dblclick", onDoubleClick);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("dblclick", onDoubleClick);
+    };
   }, [desktop]);
+
+  const sidebarNode = (
+    <Sidebar
+      key="primary-sidebar"
+      agent={agent}
+      workspace={workspace || ""}
+      surfaces={surfaces}
+      sessions={sessions}
+      projects={projectGroups}
+      projectBootstrapPhase={projectBootstrapPhase}
+      sidecarReady={sidecarReady}
+      activeSession={sessionId}
+      onSwitchAgent={switchAgent}
+      onNewSession={startNewSession}
+      onSelectSession={selectSession}
+      onPrefetchSession={prefetchSessionHistory}
+      onNewProject={newProject}
+      projectOrder={sidebarOrder.projectOrder}
+      conversationOrder={sidebarOrder.conversationOrder}
+      onUpdateProject={updateProjectNavigation}
+      onReorderProjects={reorderProjectNavigation}
+      onSidebarOrderChange={updateSidebarOrder}
+      onNewProjectSession={selectProjectContext}
+      onEditProject={setEditingProject}
+      onArchiveProjectSessions={archiveProjectNavigation}
+      onRevealProject={revealProjectNavigation}
+      onCreateProjectWorktree={(projectId) => {
+        const project = projectGroups.find((item) => item.projectId === projectId);
+        if (project) setWorktreeProject(project);
+      }}
+      onRenameSession={renameConversation}
+      onDeleteSession={deleteConversation}
+      onArchiveSession={toggleArchived}
+      onTogglePin={togglePinned}
+      onManage={() => openSettings("appearance")}
+      onOpenPersona={(id) => {
+        openPersona(id, "session");
+      }}
+      onOpenScheduled={() => setSurface("scheduled")}
+      onOpenAutomation={(id) => {
+        setScheduledOpenId(id);
+        setSurface("scheduled");
+      }}
+      onOpenIntegrations={() => setSurface("integrations")}
+      onOpenAudit={() => setSurface("audit")}
+      onOpenInbox={() => setSurface("inbox")}
+      scheduledActive={surface === "scheduled"}
+      integrationsActive={surface === "integrations"}
+      auditActive={surface === "audit"}
+      inboxActive={surface === "inbox"}
+      collapsed={navCollapsed}
+      onCollapse={toggleNav}
+      onPeekLeave={() => setNavPeek(false)}
+    />
+  );
 
   if (booting || !uiReady) {
     return (
-      <div className={"app boot-splash" + (overlay ? " tauri-overlay" : "")}>
-        {/* overlay (not desktop): ?overlay=1 previews the splash's top-left in the browser
-            too — the wordmark/traffic-light alignment is exactly what it exists to tune. */}
-        {overlay && (
-          <div className="titlebar-drag" data-tauri-drag-region>
-            <span className="titlebar-brand brand-wordmark">
-              <Icon name="logo" size={13} className="mark" /> OpenHarness<span className="beta-tag">BETA</span>
-            </span>
-          </div>
-        )}
+      <div
+        className={
+          "app startup-shell" +
+          (overlay ? " tauri-overlay" : "") +
+          (navCollapsed ? " nav-collapsed" : "")
+        }
+      >
         {simOverlay && (
           <div className="sim-traffic-lights" aria-hidden="true">
             <span /><span /><span />
           </div>
         )}
-        {/* The OpenHarness mark, shared with the app/tray icon. */}
-        <div className="boot-mark">
-          <Icon name="logo" size={38} />
-        </div>
-        <div className="boot-text">
-          {serverStatus === "failed" ? t("app.server_failed") :
-            serverStatus === "restarting" ? t("app.server_restarting") :
-            resumedExisting ? t("boot.restoring") : t("boot.starting")}
-          <span className="beta-tag">BETA</span>
-        </div>
+        {sidebarNode}
+        <main
+          className="main boot-splash"
+          data-testid="startup-center-pane"
+          data-page-drag-region
+        >
+          <div className="boot-mark">
+            <Icon name="logo" size={38} />
+          </div>
+          <div className="boot-text">
+            {serverStatus === "failed" ? t("app.server_failed") :
+              serverStatus === "restarting" ? t("app.server_restarting") :
+              resumedExisting ? t("boot.restoring") : t("boot.starting")}
+            <span className="beta-tag">BETA</span>
+          </div>
+        </main>
       </div>
     );
   }
@@ -2919,56 +3112,7 @@ export function App() {
           }}
         />
       )}
-      <Sidebar
-        agent={agent}
-        workspace={workspace || ""}
-        surfaces={surfaces}
-        sessions={sessions}
-        projects={projectGroups}
-        projectProjectionReady={projectProjectionReady}
-        activeSession={sessionId}
-        onSwitchAgent={switchAgent}
-        onNewSession={startNewSession}
-        onSelectSession={selectSession}
-        onPrefetchSession={prefetchSessionHistory}
-        onNewProject={newProject}
-        projectOrder={sidebarOrder.projectOrder}
-        conversationOrder={sidebarOrder.conversationOrder}
-        onUpdateProject={updateProjectNavigation}
-        onReorderProjects={reorderProjectNavigation}
-        onSidebarOrderChange={updateSidebarOrder}
-        onNewProjectSession={selectProjectContext}
-        onEditProject={setEditingProject}
-        onArchiveProjectSessions={archiveProjectNavigation}
-        onRevealProject={revealProjectNavigation}
-        onCreateProjectWorktree={(projectId) => {
-          const project = projectGroups.find((item) => item.projectId === projectId);
-          if (project) setWorktreeProject(project);
-        }}
-        onRenameSession={renameConversation}
-        onDeleteSession={deleteConversation}
-        onArchiveSession={toggleArchived}
-        onTogglePin={togglePinned}
-        onManage={() => openSettings("appearance")}
-        onOpenPersona={(id) => {
-          openPersona(id, "session");
-        }}
-        onOpenScheduled={() => setSurface("scheduled")}
-        onOpenAutomation={(id) => {
-          setScheduledOpenId(id);
-          setSurface("scheduled");
-        }}
-        onOpenIntegrations={() => setSurface("integrations")}
-        onOpenAudit={() => setSurface("audit")}
-        onOpenInbox={() => setSurface("inbox")}
-        scheduledActive={surface === "scheduled"}
-        integrationsActive={surface === "integrations"}
-        auditActive={surface === "audit"}
-        inboxActive={surface === "inbox"}
-        collapsed={navCollapsed}
-        onCollapse={toggleNav}
-        onPeekLeave={() => setNavPeek(false)}
-      />
+      {sidebarNode}
       {surface === "scheduled" ? (
         <Suspense fallback={<RouteLoading />}>
           <ScheduledView
@@ -3020,11 +3164,11 @@ export function App() {
         </Suspense>
       ) : (
       <div className={"main" + (rightRailActive ? " rail-open" : "")}>
-        <div className="main-topbar" data-tauri-drag-region>
+        <div className="main-topbar" data-page-drag-region>
           {/* Left: the contextual cluster — [sidebar] [+ new session] [search] — rendered ONLY
               while the sidebar is collapsed (§22; the expanded sidebar already owns those
               actions). Clicks must not start a window drag. */}
-          <div className="main-topbar-side" data-tauri-drag-region onPointerDown={beginWindowDrag}>
+          <div className="main-topbar-side">
             {navCollapsed && (
               <div
                 className="flex items-center gap-1"
@@ -3064,7 +3208,7 @@ export function App() {
           {/* Center: title + facts subtitle (§22, amended: the ⋯ menu removed — the nav row's
               hover cluster owns pin/rename/archive/delete). The title stays: with the sidebar
               collapsed it is the only session identifier, and it anchors the subtitle. */}
-          <div className="main-title" data-tauri-drag-region onPointerDown={beginWindowDrag}>
+          <div className="main-title">
             <span
               className={"main-title-text" + (activeInfo ? "" : " title-ghost")}
               title={activeTitle}
@@ -3094,7 +3238,7 @@ export function App() {
           </div>
           {/* Right: session-settings icon (§23) + panel toggle. Model/mode/persona chrome is
               gone — the facts live in the subtitle, the controls in the composer (§22). */}
-          <div className="main-topbar-side main-topbar-actions" data-tauri-drag-region onPointerDown={beginWindowDrag}>
+          <div className="main-topbar-side main-topbar-actions">
             {railHidden && artifactCount > 0 && (
               <button
                 className="topbar-artifacts-btn"
@@ -3172,6 +3316,20 @@ export function App() {
                 <button className="btn ml-2" onClick={() => window.location.reload()}>
                   {t("app.reload")}
                 </button>
+              </div>
+            )}
+            {setupBlocked && (
+              <div role="alert" className="notice notice-block conversation-setup-alert">
+                <span>{t(setupFailure.code === "project_binding_unavailable" ? "app.project_binding_unavailable" : "app.workspace_unavailable")}</span>
+                <div className="conversation-setup-actions">
+                <button className="btn" onClick={() => {
+                  setSetupFailure(null);
+                  setConnectNonce(value => value + 1);
+                }}>{t("app.workspace_recheck")}</button>
+                <button className="btn" onClick={() => setCreateProjectOpen(true)}>
+                  {t("app.workspace_new_project")}
+                </button>
+                </div>
               </div>
             )}
             <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{t(presentation.statusLabel)}</span>
@@ -3321,7 +3479,9 @@ export function App() {
                 activeWorkspaceBindingId={workspaceBindingId}
                 endpoints={haasEndpoints}
                 git={gitWorkspace}
-                disabled={displayRunning}
+                disabled={
+                  displayRunning || projectBootstrapPhase !== "authoritative"
+                }
                 onSelectProject={selectProjectContext}
                 onSelectWorkspace={selectWorkspaceContext}
                 onSelectBranch={selectGitBranch}
