@@ -146,6 +146,9 @@ when it removes a demonstrated duplicate responsibility.
   align optically inside the same 44 px strip but never redefine the interactive-control center.
   Browser geometry is only a fast regression gate; a packaged macOS screenshot is the final visual
   contract and overrides any inferred offset.
+- A manual sidebar collapse is stable. The explicit titlebar reveal button is click/keyboard-only;
+  keeping the pointer at the collapse-button coordinate must not immediately peek or reopen the
+  sidebar. Hover peek belongs only to the narrow left-edge discovery zone below the titlebar.
 - At most one filled primary action per local action group. The model's `primaryAction` expresses
   behavioral precedence, not a requirement for a colored button.
 - Composer trailing controls form one non-wrapping cluster in the invariant order `model ->

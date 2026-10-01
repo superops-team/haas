@@ -8,6 +8,37 @@ async function openAccountSurface(
   await page.getByTestId("account-menu").getByRole("button", { name, exact: true }).click();
 }
 
+test("full-page sidebar stays collapsed until an explicit reveal action", async ({
+  page,
+}) => {
+  await page.goto("/?overlay=1");
+  await openAccountSurface(page, "Settings");
+
+  const collapse = page.getByRole("button", { name: "Collapse sidebar" });
+  await expect(collapse).toBeVisible();
+  await collapse.click();
+
+  const app = page.locator(".app");
+  await expect(app).toHaveClass(/nav-collapsed/);
+  await page.waitForTimeout(300);
+  await expect(app).not.toHaveClass(/nav-peek/);
+  await expect(page.locator(".sidebar")).toHaveCSS(
+    "transform",
+    /matrix\(1, 0, 0, 1, -300, 0\)/,
+  );
+
+  const reveal = page.getByRole("button", { name: "Show sidebar" });
+  await expect(reveal).toBeVisible();
+  await reveal.focus();
+  await page.keyboard.press("Enter");
+  await expect(app).not.toHaveClass(/nav-collapsed/);
+
+  await page.keyboard.press("Meta+b");
+  await expect(app).toHaveClass(/nav-collapsed/);
+  await page.locator(".nav-hover-zone").hover({ position: { x: 2, y: 72 } });
+  await expect(app).toHaveClass(/nav-peek/);
+});
+
 test("every full-page surface exposes the shared native drag title region", async ({
   page,
 }) => {

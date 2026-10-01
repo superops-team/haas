@@ -122,6 +122,9 @@ kind/icon、主要摘要、可选次级详情、状态、展开入口。命令/�
   22 CSS px 的 control 中心，因此 12 px browser 模拟圆点使用 `top: 16px`。wordmark 与 title
   在同一个 44 px 条带内做光学对齐，但不能反向定义交互控件中心。浏览器几何只作为快速
   回归门禁；packaged macOS 截图是最终视觉合同，并覆盖任何推算 offset。
+- 用户主动折叠 sidebar 后，该状态必须稳定。titlebar 上的显式展开按钮只响应点击/键盘；
+  pointer 停留在原折叠按钮坐标时不得立即触发 peek 或重新展开。Hover peek 只归属于
+  titlebar 下方的窄左边缘发现区域。
 - 每个局部动作组最多一个填充式主按钮。模型中的 `primaryAction` 表示行为优先级，不代表必须着色。
 - Composer 尾部控件组成一个禁止换行的 cluster，顺序固定为 `model -> microphone ->
   Send/Stop`。它们在所有支持宽度以及 recording/running 状态下始终可见。只有 model control

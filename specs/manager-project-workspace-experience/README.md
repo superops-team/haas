@@ -657,6 +657,9 @@ For a remote workspace, `canonicalKey` is an opaque digest of
 - Drag from maximized state follows platform behavior and never starts from transcript selection.
 - Traffic lights/window controls remain aligned across sidebar expanded/collapsed states, zoom,
   maximize, restore, fullscreen, and theme changes.
+- Manual collapse remains collapsed while the pointer stays at the former collapse-control
+  coordinate. The fixed reveal control opens only on click/keyboard; hover peek is owned solely
+  by the left-edge discovery strip below the titlebar, preventing collapse/reveal feedback loops.
 - Close-to-tray, Dock reopen, single-instance activation, minimum size, restored bounds, and
   multi-display clamping remain intact.
 
@@ -838,6 +841,7 @@ They do not include project names, branch names, paths, commands, output, or end
 | MPW-027 | P1 | Reveal in Finder and persistent worktree actions are capability-scoped, path-safe, idempotent, and disabled with a reason for remote/browser/missing/busy projects |
 | MPW-028 | P0 | Light/dark at 320/390/760/1440 px keeps hover cards and both menus within the window, outside Composer, with zero unrelated project-header commits during streaming |
 | MPW-029 | P0 | Concurrent sidebar-order and unrelated settings writes preserve both values; an interrupted write leaves the previous valid preferences document readable |
+| MPW-034 | P0 | On every full-page surface, clicking Collapse sidebar remains collapsed after pointer settle; the explicit reveal button is click/keyboard-only, the edge strip alone owns hover peek, and click/keyboard reveal still works |
 | MPW-030 | P0 | At 390/760/1440 px in light and dark themes, computed project and conversation labels are 12 px with line-height 1.35, active project weight is at most 500, age metadata is 11 px with tabular numerals, and every row keeps a minimum 28 px hit target without clipping CJK or long Latin titles |
 | MPW-031 | P0 | Rapid pointer movement across project and conversation anchors in mixed expanded/collapsed groups renders at most one hover card; old content disappears before the next dwell, menus suppress hover, and leaving the current anchor/card closes it within the corridor delay |
 | MPW-032 | P0 | Hover/focus/menu transitions preserve every visible project/conversation row bounding box and expansion state; section labels are 11 px/500, inactive conversations are 12 px/400 secondary text, and only the selected conversation rises to 12 px/500 primary text |

@@ -296,8 +296,9 @@ body {
   width: 14px;
   z-index: 55;
 }
-/* Reveal button while collapsed. Positioned to land EXACTLY on the brand's pin button (.nav-pin-btn,
-   14px/14px inside the brand row) so peeking the nav puts the pin under the cursor — no travel. */
+/* Click/keyboard reveal button while collapsed. It deliberately has no hover-peek handler:
+   after a manual collapse it replaces the pin at the same coordinate, so entering the newly
+   mounted button would immediately reopen the sidebar without any user movement. */
 .nav-reveal-btn {
   position: fixed;
   top: 10px; /* center (10+14) aligns with the topbar title in the browser build */

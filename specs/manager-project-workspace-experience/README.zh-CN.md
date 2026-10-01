@@ -594,6 +594,8 @@ Remote workspace 的 `canonicalKey` 是
 - Maximized 状态拖拽遵循平台行为，不从 transcript selection 启动。
 - sidebar 展开/折叠、zoom、maximize、restore、fullscreen 与 theme change 后，traffic light/window
   control 均保持对齐。
+- 用户主动折叠后，即使 pointer 停留在原折叠控件坐标，sidebar 也保持折叠。固定展开按钮
+  只响应点击/键盘；hover peek 只由 titlebar 下方的左边缘发现条负责，避免折叠/展开反馈循环。
 - Close-to-tray、Dock reopen、single-instance、minimum size、restored bounds 与 multi-display clamp
   保持有效。
 
@@ -760,6 +762,7 @@ project name、branch、path、command、output 或 endpoint URL。
 | MPW-027 | P1 | Reveal in Finder 与 persistent worktree action 按 capability 限定、path-safe、幂等；remote/browser/missing/busy project disabled 且显示 reason |
 | MPW-028 | P0 | Light/dark 320/390/760/1440 px 下 hover card 与两类 menu 不越界、不覆盖 Composer；streaming 时无关 project header 零 commit |
 | MPW-029 | P0 | 并发 sidebar-order 与无关 settings write 同时保留两者；写入中断时上一份有效 preference document 仍可读 |
+| MPW-034 | P0 | 所有 full-page surface 点击折叠后，pointer 稳定时 sidebar 仍保持折叠；显式展开按钮只响应点击/键盘，只有左边缘发现条拥有 hover peek，点击和键盘展开仍可用 |
 | MPW-030 | P0 | 深浅主题的 390/760/1440 px 下，project/conversation label computed size 均为 12 px、line-height 为 1.35，活动项目字重不超过 500，时间元信息为 11 px 等宽数字，并且每行仍保持至少 28 px hit target，中文和长英文标题均不裁切高度 |
 | MPW-031 | P0 | Pointer 在 mixed expanded/collapsed group 的 project/conversation anchor 间快速移动时，最多渲染一个 hover card；旧内容在下一次 dwell 前消失，menu 抑制 hover，离开当前 anchor/card 后在 corridor delay 内关闭 |
 | MPW-032 | P0 | Hover/focus/menu transition 不改变任何可见 project/conversation row bounding box 与 expansion state；section label 为 11 px/500，inactive conversation 为 12 px/400 secondary text，仅选中 conversation 提升为 12 px/500 primary text |

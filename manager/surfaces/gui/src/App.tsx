@@ -3077,14 +3077,13 @@ export function App() {
           aria-hidden="true"
         />
       )}
-      {/* Explicit reveal affordance while collapsed (alongside hover-peek + ⌘B) — on every
+      {/* Explicit click/keyboard reveal affordance while collapsed (alongside edge hover-peek + ⌘B) — on every
           surface EXCEPT the session view, whose topbar carries the [sidebar][+][search] cluster
           instead (§22; no duplicate reveal buttons). */}
       {navCollapsed && !navPeek && surface !== "session" && (
         <button
           className="nav-reveal-btn"
           onClick={toggleNav}
-          onMouseEnter={() => setNavPeek(true)}
           title={t("topbar.show_sidebar")}
           aria-label={t("topbar.show_sidebar_short")}
         >
